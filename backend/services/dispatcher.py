@@ -199,6 +199,37 @@ class GlobalDispatcher:
                 await db.commit()
             logger.info(f"Created {needed} worker instances")
 
+    async def _ensure_instances_for_pending_tasks(self):
+        """Auto-create instances for pending tasks whose required model has no instance."""
+        async with self.db_factory() as db:
+            # Get distinct models required by pending tasks (excluding None/empty)
+            result = await db.execute(
+                select(Task.model).where(
+                    Task.status == "pending",
+                    Task.model.isnot(None),
+                    Task.model != "",
+                ).distinct()
+            )
+            required_models = [row[0] for row in result.all()]
+
+            if not required_models:
+                return
+
+            # Get existing instance models
+            result = await db.execute(select(Instance.model))
+            existing_models = {row[0] for row in result.all()}
+
+            # Create instances for models that have no instance at all
+            for model in required_models:
+                if model not in existing_models:
+                    name = f"worker-{model}-1"
+                    instance = Instance(name=name, model=model)
+                    db.add(instance)
+                    existing_models.add(model)
+                    logger.info(f"Auto-created instance '{name}' for model '{model}'")
+
+            await db.commit()
+
     async def _dispatch_loop(self):
         """Poll for idle instances + pending tasks and dispatch."""
         while self._running:
@@ -215,13 +246,13 @@ class GlobalDispatcher:
                     if instance.id in self._running_tasks and not self._running_tasks[instance.id].done():
                         continue
 
-                    # Dequeue a task
+                    # Dequeue a task matching this instance's model
                     async with self.db_factory() as db:
                         queue = TaskQueue(db)
-                        task = await queue.dequeue()
+                        task = await queue.dequeue(instance_model=instance.model)
 
                     if not task:
-                        break  # No more tasks
+                        continue  # No matching task for this instance, try next
 
                     # Resolve project -> target_repo + git config
                     merged: dict = {}
@@ -245,6 +276,9 @@ class GlobalDispatcher:
                     self._running_tasks[instance.id] = asyncio.create_task(
                         self._run_task_lifecycle(instance.id, task, git_env)
                     )
+
+                # Auto-create instances for pending tasks whose model has no instance
+                await self._ensure_instances_for_pending_tasks()
 
                 await asyncio.sleep(2)
 
@@ -316,7 +350,7 @@ class GlobalDispatcher:
                 prompt=full_prompt,
                 task_id=task.id,
                 cwd=cwd,
-                model=None,
+                model=task.model,
                 git_env=git_env or {},
             )
 

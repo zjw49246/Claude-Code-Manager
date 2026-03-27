@@ -77,14 +77,38 @@ class TaskQueue:
         await self.db.commit()
         return True
 
-    async def dequeue(self) -> Task | None:
-        """Get the highest-priority pending task and mark it as in_progress."""
-        stmt = (
-            select(Task)
-            .where(Task.status == "pending")
-            .order_by(Task.priority.asc(), Task.created_at.asc())
-            .limit(1)
-        )
+    async def dequeue(self, instance_model: str | None = None) -> Task | None:
+        """Get the highest-priority pending task matching the instance model.
+
+        Matching rules:
+        - Tasks with no model (None) can be picked by any instance.
+        - Tasks with a specific model are only picked by instances with that model.
+        - Prefer model-matching tasks over unspecified tasks.
+        """
+        base = select(Task).where(Task.status == "pending")
+
+        if instance_model and instance_model != "default":
+            # First try exact model match, then fall back to tasks with no model specified
+            stmt = (
+                base
+                .where((Task.model == instance_model) | (Task.model.is_(None)))
+                .order_by(
+                    # Prefer tasks that explicitly match this model
+                    (Task.model == instance_model).desc(),
+                    Task.priority.asc(),
+                    Task.created_at.asc(),
+                )
+                .limit(1)
+            )
+        else:
+            # Default instance: only pick tasks with no model specified
+            stmt = (
+                base
+                .where(Task.model.is_(None))
+                .order_by(Task.priority.asc(), Task.created_at.asc())
+                .limit(1)
+            )
+
         result = await self.db.execute(stmt)
         task = result.scalar_one_or_none()
         if task:

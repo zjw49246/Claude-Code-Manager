@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     max_concurrent_instances: int = 5
     claude_binary: str = "claude"
     default_model: str = "opus"
+    model_options: str = "default,opus[1m],opus,sonnet,haiku"  # comma-separated
     host: str = "0.0.0.0"
     port: int = 8000
     workspace_dir: str = "~/Projects"

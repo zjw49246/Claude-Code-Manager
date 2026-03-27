@@ -268,7 +268,7 @@ export const api = {
     request<Task>(`/api/tasks/${id}/read`, { method: 'POST' }),
   stopTaskSession: (id: number) =>
     request<{ ok: boolean }>(`/api/tasks/${id}/stop-session`, { method: 'POST' }),
-  createTask: (data: { title?: string; description?: string; project_id?: number; priority?: number; target_branch?: string; mode?: string; todo_file_path?: string; max_iterations?: number; image_paths?: string[]; secret_ids?: number[] }) =>
+  createTask: (data: { title?: string; description?: string; project_id?: number; priority?: number; target_branch?: string; mode?: string; todo_file_path?: string; max_iterations?: number; image_paths?: string[]; secret_ids?: number[]; model?: string }) =>
     request<Task>('/api/tasks', { method: 'POST', body: JSON.stringify(data) }),
   deleteTask: (id: number) =>
     request<{ ok: boolean }>(`/api/tasks/${id}`, { method: 'DELETE' }),
@@ -330,4 +330,5 @@ export const api = {
   // System
   health: () => request<{ status: string }>('/api/system/health'),
   stats: () => request<{ tasks: Record<string, number>; running_instances: number }>('/api/system/stats'),
+  config: () => request<{ default_model: string; model_options: string[] }>('/api/system/config'),
 };

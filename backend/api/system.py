@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.config import settings
 from backend.database import get_db
 from backend.models.task import Task
 from backend.models.instance import Instance
@@ -31,4 +32,12 @@ async def stats(db: AsyncSession = Depends(get_db)):
     return {
         "tasks": task_counts,
         "running_instances": running_instances,
+    }
+
+
+@router.get("/config")
+async def get_config():
+    return {
+        "default_model": settings.default_model,
+        "model_options": [m.strip() for m in settings.model_options.split(",") if m.strip()],
     }

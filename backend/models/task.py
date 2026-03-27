@@ -33,6 +33,7 @@ class Task(Base):
     session_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
     last_cwd: Mapped[str | None] = mapped_column(String(500), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    model: Mapped[str | None] = mapped_column(String(100), nullable=True)
     tags: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     metadata_: Mapped[dict | None] = mapped_column("metadata", JSON, nullable=True)
     context_window_usage: Mapped[dict | None] = mapped_column(JSON, nullable=True)

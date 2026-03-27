@@ -21,6 +21,9 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   const [newProjectUrl, setNewProjectUrl] = useState('');
   const [priority, setPriority] = useState(0);
   const [mode, setMode] = useState('auto');
+  const [model, setModel] = useState('');
+  const [defaultModel, setDefaultModel] = useState('opus');
+  const [modelOptions, setModelOptions] = useState<string[]>([]);
   const [todoFilePath, setTodoFilePath] = useState('');
   const [maxIterations, setMaxIterations] = useState(50);
   const [loading, setLoading] = useState(false);
@@ -39,6 +42,10 @@ export function TaskForm({ onCreated }: TaskFormProps) {
 
   useEffect(() => {
     loadProjects();
+    api.config().then((c) => {
+      setDefaultModel(c.default_model);
+      setModelOptions(c.model_options.filter((m) => m !== 'default'));
+    }).catch(() => {});
   }, []);
 
   const handleProjectChange = (val: string) => {
@@ -112,6 +119,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
         ...(mode === 'loop' ? { todo_file_path: todoFilePath, max_iterations: maxIterations } : {}),
         ...(uploadedPaths.length > 0 ? { image_paths: uploadedPaths } : {}),
         ...(selectedSecretIds.length > 0 ? { secret_ids: selectedSecretIds } : {}),
+        model: model || defaultModel,
       });
       setDescription('');
       setPriority(0);
@@ -119,6 +127,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
       setPendingImages([]);
       setImagePreviews([]);
       setSelectedSecretIds([]);
+      setModel('');
       onCreated();
     } finally {
       setLoading(false);
@@ -253,6 +262,19 @@ export function TaskForm({ onCreated }: TaskFormProps) {
           value={priority}
           onChange={(e) => setPriority(Number(e.target.value))}
         />
+        <label className="text-sm text-gray-400 ml-2">Model:</label>
+        <input
+          className="w-[130px] bg-gray-700 text-foreground rounded px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          placeholder={`${defaultModel} (default)`}
+          value={model}
+          onChange={(e) => setModel(e.target.value)}
+          list="task-model-options"
+        />
+        <datalist id="task-model-options">
+          {modelOptions.map((m) => (
+            <option key={m} value={m} />
+          ))}
+        </datalist>
         <label className="text-sm text-gray-400 ml-2">Mode:</label>
         <select
           className="bg-gray-700 text-foreground rounded px-2 py-1 text-sm"

@@ -14,6 +14,7 @@ class TaskCreate(BaseModel):
     mode: str = "auto"  # "auto", "plan", or "loop"
     todo_file_path: str | None = None  # required when mode="loop"
     max_iterations: int = 50  # loop only: max iterations before auto-abort
+    model: str | None = None
     tags: list[str] | None = None
     image_paths: list[str] | None = None  # absolute paths of uploaded images
     secret_ids: list[int] | None = None  # IDs of secrets to inject into prompt
@@ -62,6 +63,7 @@ class TaskResponse(BaseModel):
     plan_content: str | None
     plan_approved: bool | None
     session_id: str | None
+    model: str | None
     starred: bool
     archived: bool
     has_unread: bool
