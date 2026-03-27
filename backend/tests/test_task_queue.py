@@ -153,3 +153,93 @@ async def test_list_tasks_filter_status(queue):
     pending = await queue.list_tasks(status="pending")
     assert len(pending) == 1
     assert pending[0].title == "pending"
+
+
+# === Model-based dequeue tests ===
+
+
+@pytest.mark.asyncio
+async def test_dequeue_no_model_instance_only_picks_null_model_tasks(queue):
+    """instance_model=None/default only picks up tasks with model=None."""
+    await queue.create(title="has-model", description="d", target_repo="/tmp", model="opus")
+    await queue.create(title="no-model", description="d", target_repo="/tmp")
+
+    task = await queue.dequeue(instance_model=None)
+    assert task is not None
+    assert task.title == "no-model"
+    assert task.model is None
+
+
+@pytest.mark.asyncio
+async def test_dequeue_default_instance_skips_model_tasks(queue):
+    """instance_model='default' does not pick tasks that have a model set."""
+    await queue.create(title="opus-task", description="d", target_repo="/tmp", model="opus")
+
+    task = await queue.dequeue(instance_model="default")
+    assert task is None
+
+
+@pytest.mark.asyncio
+async def test_dequeue_specific_model_picks_exact_match(queue):
+    """Specific model instance picks tasks with the matching model."""
+    await queue.create(title="opus-task", description="d", target_repo="/tmp", model="opus")
+
+    task = await queue.dequeue(instance_model="opus")
+    assert task is not None
+    assert task.title == "opus-task"
+    assert task.model == "opus"
+    assert task.status == "in_progress"
+
+
+@pytest.mark.asyncio
+async def test_dequeue_specific_model_also_picks_null_model_tasks(queue):
+    """Specific model instance falls back to tasks with no model when nothing matches."""
+    await queue.create(title="null-model", description="d", target_repo="/tmp")
+
+    task = await queue.dequeue(instance_model="sonnet")
+    assert task is not None
+    assert task.title == "null-model"
+
+
+@pytest.mark.asyncio
+async def test_dequeue_specific_model_prefers_exact_over_null(queue):
+    """Exact model match is preferred over null-model tasks."""
+    await queue.create(title="null-model", description="d", target_repo="/tmp", priority=0)
+    await queue.create(title="opus-task", description="d", target_repo="/tmp", model="opus", priority=5)
+
+    task = await queue.dequeue(instance_model="opus")
+    assert task is not None
+    assert task.title == "opus-task"
+
+
+@pytest.mark.asyncio
+async def test_dequeue_does_not_steal_other_model_tasks(queue):
+    """Sonnet instance should not pick an opus-only task."""
+    await queue.create(title="opus-task", description="d", target_repo="/tmp", model="opus")
+
+    task = await queue.dequeue(instance_model="sonnet")
+    # No null-model task either, so returns None... wait, opus != sonnet but the rule
+    # is: pick exact OR null. opus-task has model="opus", not null, so sonnet can't pick it.
+    assert task is None
+
+
+@pytest.mark.asyncio
+async def test_dequeue_model_priority_order(queue):
+    """Among same model tasks, priority ordering is preserved."""
+    await queue.create(title="low", description="d", target_repo="/tmp", model="opus", priority=10)
+    await queue.create(title="high", description="d", target_repo="/tmp", model="opus", priority=0)
+
+    first = await queue.dequeue(instance_model="opus")
+    assert first.title == "high"
+
+    second = await queue.dequeue(instance_model="opus")
+    assert second.title == "low"
+
+
+@pytest.mark.asyncio
+async def test_dequeue_no_args_backward_compat(queue):
+    """Calling dequeue() with no args still works (backward compatibility)."""
+    await queue.create(title="null-task", description="d", target_repo="/tmp")
+    task = await queue.dequeue()
+    assert task is not None
+    assert task.title == "null-task"

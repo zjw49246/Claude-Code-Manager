@@ -48,3 +48,47 @@ async def test_stats_running_instances(client, session_factory):
     resp = await client.get("/api/system/stats")
     data = resp.json()
     assert data["running_instances"] >= 1
+
+
+# === /api/system/config tests ===
+
+
+@pytest.mark.asyncio
+async def test_config_returns_default_model(client):
+    resp = await client.get("/api/system/config")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "default_model" in data
+    assert isinstance(data["default_model"], str)
+    assert len(data["default_model"]) > 0
+
+
+@pytest.mark.asyncio
+async def test_config_returns_model_options_list(client):
+    resp = await client.get("/api/system/config")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "model_options" in data
+    assert isinstance(data["model_options"], list)
+    assert len(data["model_options"]) > 0
+
+
+@pytest.mark.asyncio
+async def test_config_model_options_no_empty_strings(client):
+    """model_options should not contain empty strings."""
+    resp = await client.get("/api/system/config")
+    for opt in resp.json()["model_options"]:
+        assert opt.strip() != ""
+
+
+@pytest.mark.asyncio
+async def test_config_reflects_settings(client):
+    from unittest.mock import patch
+    from backend.config import settings
+
+    with patch.object(settings, "default_model", "haiku"), \
+         patch.object(settings, "model_options", "haiku,sonnet"):
+        resp = await client.get("/api/system/config")
+    data = resp.json()
+    assert data["default_model"] == "haiku"
+    assert data["model_options"] == ["haiku", "sonnet"]

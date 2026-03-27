@@ -1198,3 +1198,101 @@ async def test_lifecycle_prompt_empty_image_paths(db_factory):
     call_kwargs = d.instance_manager.launch.call_args
     prompt_used = call_kwargs.kwargs.get("prompt") or call_kwargs[1].get("prompt")
     assert "参考图片" not in prompt_used
+
+
+# === _ensure_instances_for_pending_tasks tests ===
+
+
+@pytest.mark.asyncio
+async def test_ensure_instances_for_pending_tasks_creates_missing(db_factory):
+    """Auto-creates an instance when a pending task requires a model with no instance."""
+    from sqlalchemy import select as sa_select
+    d = _make_dispatcher(db_factory)
+
+    async with db_factory() as db:
+        db.add(Task(title="t", description="d", target_repo="/tmp", status="pending", model="haiku"))
+        await db.commit()
+
+    await d._ensure_instances_for_pending_tasks()
+
+    async with db_factory() as db:
+        result = await db.execute(sa_select(Instance).where(Instance.model == "haiku"))
+        instances = list(result.scalars().all())
+    assert len(instances) == 1
+    assert instances[0].name == "worker-haiku-1"
+
+
+@pytest.mark.asyncio
+async def test_ensure_instances_for_pending_tasks_skips_if_instance_exists(db_factory):
+    """Does not create a duplicate instance when one already exists for that model."""
+    from sqlalchemy import select as sa_select
+    d = _make_dispatcher(db_factory)
+
+    async with db_factory() as db:
+        db.add(Instance(name="existing-opus", model="opus"))
+        db.add(Task(title="t", description="d", target_repo="/tmp", status="pending", model="opus"))
+        await db.commit()
+
+    await d._ensure_instances_for_pending_tasks()
+
+    async with db_factory() as db:
+        result = await db.execute(sa_select(Instance).where(Instance.model == "opus"))
+        instances = list(result.scalars().all())
+    assert len(instances) == 1
+
+
+@pytest.mark.asyncio
+async def test_ensure_instances_for_pending_tasks_ignores_null_model(db_factory):
+    """Tasks with model=None do not trigger auto-instance creation."""
+    from sqlalchemy import select as sa_select
+    d = _make_dispatcher(db_factory)
+
+    async with db_factory() as db:
+        db.add(Task(title="t", description="d", target_repo="/tmp", status="pending"))
+        await db.commit()
+
+    await d._ensure_instances_for_pending_tasks()
+
+    async with db_factory() as db:
+        result = await db.execute(sa_select(Instance))
+        instances = list(result.scalars().all())
+    assert len(instances) == 0
+
+
+@pytest.mark.asyncio
+async def test_ensure_instances_for_pending_tasks_ignores_non_pending(db_factory):
+    """Completed/cancelled tasks do not trigger auto-instance creation."""
+    from sqlalchemy import select as sa_select
+    d = _make_dispatcher(db_factory)
+
+    async with db_factory() as db:
+        db.add(Task(title="done", description="d", target_repo="/tmp", status="completed", model="sonnet"))
+        db.add(Task(title="cancelled", description="d", target_repo="/tmp", status="cancelled", model="sonnet"))
+        await db.commit()
+
+    await d._ensure_instances_for_pending_tasks()
+
+    async with db_factory() as db:
+        result = await db.execute(sa_select(Instance))
+        instances = list(result.scalars().all())
+    assert len(instances) == 0
+
+
+@pytest.mark.asyncio
+async def test_ensure_instances_for_pending_tasks_multiple_models(db_factory):
+    """Creates one instance per missing model."""
+    from sqlalchemy import select as sa_select
+    d = _make_dispatcher(db_factory)
+
+    async with db_factory() as db:
+        db.add(Task(title="t1", description="d", target_repo="/tmp", status="pending", model="opus"))
+        db.add(Task(title="t2", description="d", target_repo="/tmp", status="pending", model="sonnet"))
+        await db.commit()
+
+    await d._ensure_instances_for_pending_tasks()
+
+    async with db_factory() as db:
+        result = await db.execute(sa_select(Instance))
+        instances = list(result.scalars().all())
+    models = {i.model for i in instances}
+    assert models == {"opus", "sonnet"}

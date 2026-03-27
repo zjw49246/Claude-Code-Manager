@@ -391,3 +391,52 @@ async def test_has_unread_persisted_in_db(client, session_factory):
     resp = await client.get(f"/api/tasks/{task_id}")
     assert resp.status_code == 200
     assert resp.json()["has_unread"] is True
+
+
+# === Model field tests ===
+
+
+@pytest.mark.asyncio
+async def test_create_task_with_model(client):
+    """Task created with model field stores and returns the model."""
+    resp = await client.post("/api/tasks", json={
+        "title": "Opus task", "description": "d", "target_repo": "/tmp", "model": "opus",
+    })
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["model"] == "opus"
+
+
+@pytest.mark.asyncio
+async def test_create_task_without_model_returns_null(client):
+    """Task created without model field has model=None."""
+    resp = await client.post("/api/tasks", json={
+        "title": "No model", "description": "d", "target_repo": "/tmp",
+    })
+    assert resp.status_code == 201
+    assert resp.json()["model"] is None
+
+
+@pytest.mark.asyncio
+async def test_create_task_model_persisted_in_get(client):
+    """Model value survives a round-trip through GET."""
+    create_resp = await client.post("/api/tasks", json={
+        "title": "T", "description": "d", "target_repo": "/tmp", "model": "sonnet",
+    })
+    task_id = create_resp.json()["id"]
+
+    resp = await client.get(f"/api/tasks/{task_id}")
+    assert resp.status_code == 200
+    assert resp.json()["model"] == "sonnet"
+
+
+@pytest.mark.asyncio
+async def test_create_task_model_in_list(client):
+    """model field is included when listing tasks."""
+    await client.post("/api/tasks", json={
+        "title": "A", "description": "d", "target_repo": "/tmp", "model": "haiku",
+    })
+    resp = await client.get("/api/tasks")
+    assert resp.status_code == 200
+    tasks = resp.json()
+    assert tasks[0]["model"] == "haiku"
