@@ -96,8 +96,8 @@ function TagEditor({
           className="w-16 bg-transparent text-xs text-gray-400 placeholder-gray-600 outline-none focus:placeholder-gray-500"
         />
         {showSuggestions && suggestions.length > 0 && (
-          <div className="absolute top-full left-0 mt-1 bg-gray-700 border border-gray-600 rounded shadow-lg z-20 min-w-[120px]">
-            {suggestions.slice(0, 6).map((s) => (
+          <div className="absolute top-full left-0 mt-1 bg-gray-700 border border-gray-600 rounded shadow-lg z-20 min-w-[120px] max-h-48 overflow-y-auto">
+            {suggestions.map((s) => (
               <button
                 key={s}
                 onMouseDown={() => addTag(s)}
