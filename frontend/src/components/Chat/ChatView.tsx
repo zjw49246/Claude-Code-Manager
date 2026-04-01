@@ -180,9 +180,18 @@ export function ChatView({ task, projects, onBack }: ChatViewProps) {
 
   const grouped = useMemo(() => groupMessages(messages), [messages]);
 
-  // Auto-scroll
+  // Reset scroll flag when switching tasks
+  const hasScrolledRef = useRef(false);
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    hasScrolledRef.current = false;
+  }, [task.id]);
+
+  // Auto-scroll only on initial history load
+  useEffect(() => {
+    if (messages.length > 0 && !hasScrolledRef.current) {
+      hasScrolledRef.current = true;
+      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }
   }, [messages]);
 
   const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
