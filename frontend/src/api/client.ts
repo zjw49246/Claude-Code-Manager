@@ -95,6 +95,7 @@ export interface Task {
   has_unread: boolean;
   session_id: string | null;
   error_message: string | null;
+  model: string | null;
   tags: string[] | null;
   context_window_usage: {
     input_tokens: number;

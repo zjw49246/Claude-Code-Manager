@@ -70,6 +70,9 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat }: TaskListPro
                 <span className="text-xs bg-indigo-600/30 text-indigo-300 px-1.5 rounded">P{t.priority}</span>
               )}
               <span className="text-xs text-gray-500 capitalize">{t.status.replace('_', ' ')}</span>
+              {t.model && (
+                <span className="text-xs bg-gray-700 text-gray-300 px-1.5 rounded">{t.model}</span>
+              )}
             </div>
             <p className="text-foreground text-sm mt-0.5 line-clamp-2">
               {t.mode === 'loop'
