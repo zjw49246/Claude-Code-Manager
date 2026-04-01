@@ -255,8 +255,17 @@ export const api = {
   },
 
   // Tasks
-  listTasks: (status?: string, includeArchived?: boolean, projectId?: number, starred?: boolean) =>
+  listTasks: (status?: string, includeArchived?: boolean, projectId?: number, starred?: boolean, limit?: number, offset?: number) =>
     request<Task[]>(`/api/tasks?${new URLSearchParams({
+      ...(status ? { status } : {}),
+      ...(includeArchived ? { include_archived: 'true' } : {}),
+      ...(projectId != null ? { project_id: String(projectId) } : {}),
+      ...(starred != null ? { starred: String(starred) } : {}),
+      ...(limit != null ? { limit: String(limit) } : {}),
+      ...(offset != null ? { offset: String(offset) } : {}),
+    })}`),
+  countTasks: (status?: string, includeArchived?: boolean, projectId?: number, starred?: boolean) =>
+    request<{ total: number }>(`/api/tasks/count?${new URLSearchParams({
       ...(status ? { status } : {}),
       ...(includeArchived ? { include_archived: 'true' } : {}),
       ...(projectId != null ? { project_id: String(projectId) } : {}),

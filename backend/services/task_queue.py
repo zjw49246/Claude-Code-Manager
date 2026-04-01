@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.task import Task
@@ -37,6 +37,22 @@ class TaskQueue:
         stmt = stmt.limit(limit).offset(offset)
         result = await self.db.execute(stmt)
         return list(result.scalars().all())
+
+    async def count_tasks(
+        self, status: str | None = None, include_archived: bool = False,
+        project_id: int | None = None, starred: bool | None = None,
+    ) -> int:
+        stmt = select(func.count(Task.id))
+        if not include_archived:
+            stmt = stmt.where(Task.archived == False)
+        if status:
+            stmt = stmt.where(Task.status == status)
+        if project_id is not None:
+            stmt = stmt.where(Task.project_id == project_id)
+        if starred is not None:
+            stmt = stmt.where(Task.starred == starred)
+        result = await self.db.execute(stmt)
+        return result.scalar() or 0
 
     async def star(self, task_id: int) -> Task | None:
         task = await self.get(task_id)

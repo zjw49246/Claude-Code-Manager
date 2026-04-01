@@ -8,10 +8,15 @@ import { ChatView } from '../components/Chat/ChatView';
 import { LoopChatView } from '../components/Chat/LoopChatView';
 import { ProjectSelect } from '../components/ProjectSelect';
 import { resolveTagColor } from '../components/TagColors';
+import { ChevronLeft, ChevronRight } from 'lucide-react';
+
+const PAGE_SIZE = 20;
 
 export function TasksPage() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [allTasks, setAllTasks] = useState<Task[]>([]);
+  const [totalCount, setTotalCount] = useState(0);
+  const [page, setPage] = useState(1);
   const [projects, setProjects] = useState<Project[]>([]);
   const [filter, setFilter] = useState<string>('');
   const [tagFilter, setTagFilter] = useState<string>('');
@@ -23,34 +28,49 @@ export function TasksPage() {
   const chatTaskRef = useRef<Task | null>(null);
   chatTaskRef.current = chatTask;
 
+  const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
+
   const refresh = useCallback(async () => {
     try {
-      const [filtered, all, projs, tags] = await Promise.all([
-        api.listTasks(filter || undefined, showArchived, projectFilter, starredFilter || undefined),
-        api.listTasks(undefined, showArchived),
+      const offset = (page - 1) * PAGE_SIZE;
+      const [filtered, count, all, projs, tags] = await Promise.all([
+        api.listTasks(filter || undefined, showArchived, projectFilter, starredFilter || undefined, PAGE_SIZE, offset),
+        api.countTasks(filter || undefined, showArchived, projectFilter, starredFilter || undefined),
+        api.listTasks(undefined, showArchived, undefined, undefined, PAGE_SIZE, 0),
         api.listProjects(),
         api.listTags(),
       ]);
       setTasks(filtered);
+      setTotalCount(count.total);
       setAllTasks(all);
       setProjects(projs);
       setTagItems(tags);
       // Update chatTask if it's open (to get latest session_id etc.)
       const current = chatTaskRef.current;
       if (current) {
-        const updated = all.find((t) => t.id === current.id);
+        const updated = [...filtered, ...all].find((t) => t.id === current.id);
         if (updated) setChatTask(updated);
       }
     } catch (e) {
       console.error('Failed to load tasks:', e);
     }
-  }, [filter, showArchived, projectFilter, starredFilter]);
+  }, [filter, showArchived, projectFilter, starredFilter, page]);
 
   useEffect(() => {
     refresh();
     const interval = setInterval(refresh, 5000);
     return () => clearInterval(interval);
   }, [refresh]);
+
+  // Reset to page 1 when filters change
+  const prevFilter = useRef({ filter, showArchived, projectFilter, starredFilter });
+  useEffect(() => {
+    const prev = prevFilter.current;
+    if (prev.filter !== filter || prev.showArchived !== showArchived || prev.projectFilter !== projectFilter || prev.starredFilter !== starredFilter) {
+      setPage(1);
+      prevFilter.current = { filter, showArchived, projectFilter, starredFilter };
+    }
+  }, [filter, showArchived, projectFilter, starredFilter]);
 
   const filters = ['', 'pending', 'in_progress', 'executing', 'plan_review', 'completed', 'failed'];
 
@@ -162,6 +182,29 @@ export function TasksPage() {
           }
         }}
       />
+
+      {totalPages > 1 && (
+        <div className="flex items-center justify-center gap-3 py-2">
+          <button
+            onClick={() => setPage((p) => Math.max(1, p - 1))}
+            disabled={page <= 1}
+            className="p-1.5 rounded text-gray-400 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed"
+          >
+            <ChevronLeft size={18} />
+          </button>
+          <span className="text-xs text-gray-400">
+            {page} / {totalPages}
+            <span className="ml-2 text-gray-600">({totalCount} tasks)</span>
+          </span>
+          <button
+            onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+            disabled={page >= totalPages}
+            className="p-1.5 rounded text-gray-400 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed"
+          >
+            <ChevronRight size={18} />
+          </button>
+        </div>
+      )}
 
       {chatTask && chatTask.mode === 'loop' && (
         <LoopChatView task={chatTask} onBack={() => setChatTask(null)} />

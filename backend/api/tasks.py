@@ -14,6 +14,21 @@ def _get_queue(db: AsyncSession = Depends(get_db)) -> TaskQueue:
     return TaskQueue(db)
 
 
+@router.get("/count")
+async def count_tasks(
+    status: str | None = None,
+    include_archived: bool = False,
+    project_id: int | None = None,
+    starred: bool | None = None,
+    queue: TaskQueue = Depends(_get_queue),
+):
+    total = await queue.count_tasks(
+        status=status, include_archived=include_archived,
+        project_id=project_id, starred=starred,
+    )
+    return {"total": total}
+
+
 @router.get("", response_model=list[TaskResponse])
 async def list_tasks(
     status: str | None = None,
