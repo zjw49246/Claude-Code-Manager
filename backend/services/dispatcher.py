@@ -307,10 +307,20 @@ class GlobalDispatcher:
             # === Step 2: Determine cwd and update task ===
             cwd = task.target_repo or "."
             async with self.db_factory() as db:
+                # Resolve actual model: task's own model, or fall back to instance's model
+                if not task.model:
+                    instance = await db.get(Instance, instance_id)
+                    if instance:
+                        resolved_model = instance.model if instance.model != "default" else None
+                        if resolved_model:
+                            task.model = resolved_model
+                update_values: dict = {"status": "executing", "instance_id": instance_id}
+                if task.model:
+                    update_values["model"] = task.model
                 await db.execute(
                     update(Task)
                     .where(Task.id == task.id)
-                    .values(status="executing", instance_id=instance_id)
+                    .values(**update_values)
                 )
                 await db.commit()
             await self.broadcaster.broadcast("tasks", {
