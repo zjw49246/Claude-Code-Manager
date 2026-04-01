@@ -262,6 +262,16 @@ export function TaskForm({ onCreated }: TaskFormProps) {
           value={priority}
           onChange={(e) => setPriority(Number(e.target.value))}
         />
+        <label className="text-sm text-gray-400 ml-2">Mode:</label>
+        <select
+          className="bg-gray-700 text-foreground rounded px-2 py-1 text-sm"
+          value={mode}
+          onChange={(e) => setMode(e.target.value)}
+        >
+          <option value="auto">Auto (direct execute)</option>
+          <option value="plan">Plan (review first)</option>
+          <option value="loop">Loop (todo list)</option>
+        </select>
         <label className="text-sm text-gray-400 ml-2">Model:</label>
         <input
           className="w-[130px] bg-gray-700 text-foreground rounded px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
@@ -275,16 +285,6 @@ export function TaskForm({ onCreated }: TaskFormProps) {
             <option key={m} value={m} />
           ))}
         </datalist>
-        <label className="text-sm text-gray-400 ml-2">Mode:</label>
-        <select
-          className="bg-gray-700 text-foreground rounded px-2 py-1 text-sm"
-          value={mode}
-          onChange={(e) => setMode(e.target.value)}
-        >
-          <option value="auto">Auto (direct execute)</option>
-          <option value="plan">Plan (review first)</option>
-          <option value="loop">Loop (todo list)</option>
-        </select>
         {mode === 'loop' && (
           <>
             <input
