@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '../api/client';
 import type { Project, GlobalSettings, TagItem } from '../api/client';
-import { Trash2, RotateCcw, FolderGit2, Globe, HardDrive, Plus, Settings, X, ChevronDown, ChevronUp, GripVertical, Tag, FileKey } from 'lucide-react';
-import { resolveTagColor } from '../components/TagColors';
+import { Trash2, RotateCcw, FolderGit2, Globe, HardDrive, Plus, Settings, X, ChevronDown, ChevronUp, GripVertical, Tag, FileKey, Palette } from 'lucide-react';
+import { resolveTagColor, TAG_COLOR_OPTIONS } from '../components/TagColors';
 import { TagManager } from '../components/TagManager';
 import { EnvFilesEditor } from '../components/EnvFilesEditor';
 
@@ -19,7 +19,58 @@ function IdentityWarning({ name, email }: { name: string; email: string }) {
   );
 }
 
-// ── Tag color (resolved from stored Tag or fallback hash) ────────────────────
+// ── Badge color picker ───────────────────────────────────────────────────────
+
+function BadgeColorPicker({ value, onChange }: { value: string | null; onChange: (color: string | null) => void }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [open]);
+
+  const current = TAG_COLOR_OPTIONS.find((c) => c.key === value);
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        className="flex items-center gap-1.5 px-2 py-1 text-xs text-gray-400 hover:text-gray-200 hover:bg-gray-700 rounded transition-colors"
+        title="Badge color"
+      >
+        {current ? (
+          <span className={`w-3 h-3 rounded-full ${current.dot}`} />
+        ) : (
+          <Palette size={14} />
+        )}
+        <span className="hidden sm:inline">{current ? current.label : 'Color'}</span>
+      </button>
+      {open && (
+        <div className="absolute top-full left-0 mt-1 bg-gray-700 border border-gray-600 rounded-lg shadow-lg z-20 p-2 flex flex-wrap gap-1.5 w-48">
+          <button
+            onClick={() => { onChange(null); setOpen(false); }}
+            className={`w-6 h-6 rounded-full border-2 bg-emerald-600/30 ${!value ? 'border-white' : 'border-transparent hover:border-gray-400'}`}
+            title="Default (emerald)"
+          />
+          {TAG_COLOR_OPTIONS.map((c) => (
+            <button
+              key={c.key}
+              onClick={() => { onChange(c.key); setOpen(false); }}
+              className={`w-6 h-6 rounded-full border-2 ${c.dot} ${value === c.key ? 'border-white' : 'border-transparent hover:border-gray-400'}`}
+              title={c.label}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 // ── Inline tag editor ─────────────────────────────────────────────────────────
 
@@ -658,6 +709,15 @@ export function ProjectsPage() {
     }
   };
 
+  const handleBadgeColor = async (project: Project, color: string | null) => {
+    try {
+      await api.updateProject(project.id, { badge_color: color });
+      setProjects((prev) => prev.map((p) => p.id === project.id ? { ...p, badge_color: color } : p));
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
   const handleTagSave = async (project: Project, tags: string[]) => {
     try {
       await api.updateProject(project.id, { tags });
@@ -837,6 +897,7 @@ export function ProjectsPage() {
                 <div className="flex-1 min-w-0 space-y-1">
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="text-foreground font-medium">{p.name}</span>
+                    <BadgeColorPicker value={p.badge_color} onChange={(c) => handleBadgeColor(p, c)} />
                     <span className={`inline-block w-2 h-2 rounded-full ${statusColor[p.status] || 'bg-gray-500'}`} title={p.status} />
                     <span className="text-xs text-gray-500 capitalize">{p.status}</span>
                     {p.has_remote ? (

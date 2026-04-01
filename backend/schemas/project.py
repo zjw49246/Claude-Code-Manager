@@ -10,6 +10,7 @@ class ProjectCreate(BaseModel):
     sort_order: int = 0
     tags: list[str] = []
     env_files: list[str] = []
+    badge_color: str | None = None
     git_author_name: str | None = None
     git_author_email: str | None = None
     git_credential_type: str | None = None  # "ssh" | "https" | None
@@ -27,6 +28,7 @@ class ProjectUpdate(BaseModel):
     sort_order: int | None = None
     tags: list[str] | None = None
     env_files: list[str] | None = None
+    badge_color: str | None = None
     git_author_name: str | None = None
     git_author_email: str | None = None
     git_credential_type: str | None = None
@@ -59,6 +61,7 @@ class ProjectResponse(BaseModel):
     git_ssh_key_path: str | None
     git_https_username: str | None
     git_https_token: str | None  # returned as-is; frontend should treat as sensitive
+    badge_color: str | None
     created_at: datetime
 
     model_config = {"from_attributes": True}

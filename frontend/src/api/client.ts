@@ -66,6 +66,7 @@ export interface Project {
   git_ssh_key_path: string | null;
   git_https_username: string | null;
   git_https_token: string | null;
+  badge_color: string | null;
   created_at: string;
 }
 
@@ -187,7 +188,7 @@ export const api = {
     git_https_token?: string;
   }) =>
     request<Project>('/api/projects', { method: 'POST', body: JSON.stringify(data) }),
-  updateProject: (id: number, data: Partial<Pick<Project, 'name' | 'show_in_selector' | 'sort_order' | 'tags' | 'env_files' | 'git_author_name' | 'git_author_email' | 'git_credential_type' | 'git_ssh_key_path' | 'git_https_username' | 'git_https_token'>>) =>
+  updateProject: (id: number, data: Partial<Pick<Project, 'name' | 'show_in_selector' | 'sort_order' | 'tags' | 'env_files' | 'badge_color' | 'git_author_name' | 'git_author_email' | 'git_credential_type' | 'git_ssh_key_path' | 'git_https_username' | 'git_https_token'>>) =>
     request<Project>(`/api/projects/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   reorderProjects: (orders: { id: number; sort_order: number }[]) =>
     request<Project[]>('/api/projects/reorder', { method: 'PUT', body: JSON.stringify(orders) }),

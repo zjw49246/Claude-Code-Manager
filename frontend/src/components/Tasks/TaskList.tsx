@@ -2,6 +2,7 @@ import { useMemo } from 'react';
 import { api } from '../../api/client';
 import type { Task, Project } from '../../api/client';
 import { Trash2, RotateCcw, XCircle, MessageCircle, Archive, ArchiveRestore, Star } from 'lucide-react';
+import { TAG_COLOR_OPTIONS } from '../TagColors';
 
 interface TaskListProps {
   tasks: Task[];
@@ -22,8 +23,8 @@ const statusColors: Record<string, string> = {
 
 export function TaskList({ tasks, projects, onRefresh, onOpenChat }: TaskListProps) {
   const projectMap = useMemo(() => {
-    const map: Record<number, string> = {};
-    for (const p of projects) map[p.id] = p.name;
+    const map: Record<number, { name: string; color: string | null }> = {};
+    for (const p of projects) map[p.id] = { name: p.name, color: p.badge_color };
     return map;
   }, [projects]);
   const handleDelete = async (id: number) => {
@@ -58,9 +59,13 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat }: TaskListPro
           <div className="flex-1 min-w-0">
             <div className="flex items-center gap-2">
               <span className="text-xs text-gray-500">#{t.id}</span>
-              {t.project_id && projectMap[t.project_id] && (
-                <span className="text-xs bg-emerald-600/30 text-emerald-300 px-1.5 rounded font-medium">{projectMap[t.project_id]}</span>
-              )}
+              {t.project_id && projectMap[t.project_id] && (() => {
+                const proj = projectMap[t.project_id!];
+                const colorDef = TAG_COLOR_OPTIONS.find((c) => c.key === proj.color);
+                const bg = colorDef ? colorDef.bg : 'bg-emerald-600/30';
+                const text = colorDef ? colorDef.text : 'text-emerald-300';
+                return <span className={`text-xs ${bg} ${text} px-1.5 rounded font-medium`}>{proj.name}</span>;
+              })()}
               {t.priority > 0 && (
                 <span className="text-xs bg-indigo-600/30 text-indigo-300 px-1.5 rounded">P{t.priority}</span>
               )}
