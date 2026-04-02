@@ -186,6 +186,14 @@ export function ChatView({ task, projects, onBack }: ChatViewProps) {
     hasScrolledRef.current = false;
   }, [task.id]);
 
+  // Lock body scroll while ChatView is open to prevent scroll bleed-through
+  useEffect(() => {
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = '';
+    };
+  }, []);
+
   // Auto-scroll only on initial history load
   useEffect(() => {
     if (messages.length > 0 && !hasScrolledRef.current) {
