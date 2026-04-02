@@ -69,18 +69,16 @@ export function InstanceGrid({ instances, onRefresh, onViewLogs }: InstanceGridP
           value={newName}
           onChange={(e) => setNewName(e.target.value)}
         />
-        <input
+        <select
           className="w-[180px] bg-gray-700 text-foreground rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          placeholder={defaultModel ? `Model (default: ${defaultModel})` : 'Model (default)'}
           value={newModel}
           onChange={(e) => setNewModel(e.target.value)}
-          list="model-options"
-        />
-        <datalist id="model-options">
+        >
+          <option value="">{defaultModel ? `Model (default: ${defaultModel})` : 'Model (default)'}</option>
           {modelOptions.map((m) => (
-            <option key={m} value={m} label={m === 'default' && defaultModel ? `default (${defaultModel})` : m} />
+            <option key={m} value={m}>{m === 'default' && defaultModel ? `default (${defaultModel})` : m}</option>
           ))}
-        </datalist>
+        </select>
         <button
           onClick={handleCreate}
           className="flex items-center gap-1 bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-2 rounded text-sm font-medium whitespace-nowrap"

@@ -273,18 +273,16 @@ export function TaskForm({ onCreated }: TaskFormProps) {
           <option value="loop">Loop (todo list)</option>
         </select>
         <label className="text-sm text-gray-400 ml-2">Model:</label>
-        <input
+        <select
           className="w-[130px] bg-gray-700 text-foreground rounded px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          placeholder={`${defaultModel} (default)`}
           value={model}
           onChange={(e) => setModel(e.target.value)}
-          list="task-model-options"
-        />
-        <datalist id="task-model-options">
+        >
+          <option value="">{defaultModel} (default)</option>
           {modelOptions.map((m) => (
-            <option key={m} value={m} />
+            <option key={m} value={m}>{m}</option>
           ))}
-        </datalist>
+        </select>
         {mode === 'loop' && (
           <>
             <input
