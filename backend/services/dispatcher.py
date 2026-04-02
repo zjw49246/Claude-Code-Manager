@@ -219,8 +219,15 @@ class GlobalDispatcher:
             result = await db.execute(select(Instance.model))
             existing_models = {row[0] for row in result.all()}
 
+            # Normalize: treat "default" and the actual default_model as equivalent
+            default_model = settings.default_model
+            has_default = "default" in existing_models or default_model in existing_models
+
             # Create instances for models that have no instance at all
             for model in required_models:
+                # "default" and the default_model (e.g. "opus") are equivalent
+                if model in ("default", default_model) and has_default:
+                    continue
                 if model not in existing_models:
                     name = f"worker-{model}-1"
                     instance = Instance(name=name, model=model)

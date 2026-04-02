@@ -171,9 +171,19 @@ async def test_dequeue_no_model_instance_only_picks_null_model_tasks(queue):
 
 
 @pytest.mark.asyncio
-async def test_dequeue_default_instance_skips_model_tasks(queue):
-    """instance_model='default' does not pick tasks that have a model set."""
+async def test_dequeue_default_instance_picks_default_model_tasks(queue):
+    """instance_model='default' picks tasks whose model matches the configured default_model."""
     await queue.create(title="opus-task", description="d", target_repo="/tmp", model="opus")
+
+    task = await queue.dequeue(instance_model="default")
+    assert task is not None
+    assert task.title == "opus-task"
+
+
+@pytest.mark.asyncio
+async def test_dequeue_default_instance_skips_non_default_model_tasks(queue):
+    """instance_model='default' does not pick tasks with a non-default model."""
+    await queue.create(title="sonnet-task", description="d", target_repo="/tmp", model="sonnet")
 
     task = await queue.dequeue(instance_model="default")
     assert task is None

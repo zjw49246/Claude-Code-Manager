@@ -3,6 +3,7 @@ from datetime import datetime
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.config import settings
 from backend.models.task import Task
 
 
@@ -100,24 +101,34 @@ class TaskQueue:
         - Tasks with no model (None) can be picked by any instance.
         - Tasks with a specific model are only picked by instances with that model.
         - Prefer model-matching tasks over unspecified tasks.
+        - "default" is treated as equivalent to the configured default_model.
         """
         base = select(Task).where(Task.status == "pending")
 
-        if instance_model and instance_model != "default":
+        # Normalize "default" to the actual default model name
+        effective_model = instance_model
+        if effective_model == "default":
+            effective_model = settings.default_model
+
+        if effective_model:
             # First try exact model match, then fall back to tasks with no model specified
+            # Also match tasks with "default" if this instance uses the default model
+            model_match = Task.model == effective_model
+            if effective_model == settings.default_model:
+                model_match = (Task.model == effective_model) | (Task.model == "default")
             stmt = (
                 base
-                .where((Task.model == instance_model) | (Task.model.is_(None)))
+                .where(model_match | (Task.model.is_(None)))
                 .order_by(
                     # Prefer tasks that explicitly match this model
-                    (Task.model == instance_model).desc(),
+                    model_match.desc(),
                     Task.priority.asc(),
                     Task.created_at.asc(),
                 )
                 .limit(1)
             )
         else:
-            # Default instance: only pick tasks with no model specified
+            # No model instance: only pick tasks with no model specified
             stmt = (
                 base
                 .where(Task.model.is_(None))
