@@ -6,6 +6,7 @@
 
 html {
   background-color: #030712;
+  touch-action: manipulation;
 }
 
 /* Light theme: reverse the gray scale + flip foreground */
