@@ -4,13 +4,14 @@ import remarkGfm from 'remark-gfm';
 import { api } from '../../api/client';
 import type { ChatMessage, Task, Project, UploadResult } from '../../api/client';
 import { useWebSocket } from '../../hooks/useWebSocket';
-import { Send, ArrowLeft, Loader2, ChevronDown, ChevronRight, Copy, Check, Paperclip, X, StopCircle } from 'lucide-react';
+import { Send, ArrowLeft, Loader2, ChevronDown, ChevronRight, Copy, Check, Paperclip, X, StopCircle, Pencil } from 'lucide-react';
 import { SecretPicker } from '../Secrets/SecretPicker';
 
 interface ChatViewProps {
   task: Task;
   projects: Project[];
   onBack: () => void;
+  onTaskUpdated?: () => void;
 }
 
 type MessageGroup =
@@ -87,7 +88,7 @@ function ContextUsageIndicator({ usage }: { usage: ContextUsage }) {
   );
 }
 
-export function ChatView({ task, projects, onBack }: ChatViewProps) {
+export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProps) {
   const projectName = useMemo(() => {
     if (!task.project_id) return null;
     const p = projects.find((p) => p.id === task.project_id);
@@ -103,6 +104,9 @@ export function ChatView({ task, projects, onBack }: ChatViewProps) {
   const [imagePreviews, setImagePreviews] = useState<string[]>([]);
   const [selectedSecretIds, setSelectedSecretIds] = useState<number[]>([]);
   const [contextUsage, setContextUsage] = useState<ContextUsage | null>(task.context_window_usage ?? null);
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState(task.title || '');
+  const titleInputRef = useRef<HTMLInputElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -217,6 +221,19 @@ export function ChatView({ task, projects, onBack }: ChatViewProps) {
     setImagePreviews((prev) => prev.filter((_, i) => i !== idx));
   };
 
+  const handleTitleSave = async () => {
+    const trimmed = titleDraft.trim();
+    if (trimmed === (task.title || '')) {
+      setEditingTitle(false);
+      return;
+    }
+    try {
+      await api.updateTask(task.id, { title: trimmed });
+      onTaskUpdated?.();
+    } catch { /* ignore */ }
+    setEditingTitle(false);
+  };
+
   const handleSend = async () => {
     const text = input.trim();
     if ((!text && pendingImages.length === 0) || sending) return;
@@ -289,8 +306,30 @@ export function ChatView({ task, projects, onBack }: ChatViewProps) {
             </p>
             {contextUsage && <><span className="flex-1" /><ContextUsageIndicator usage={contextUsage} /></>}
           </div>
-          {task.description && (
-            <p className="text-sm text-gray-400 truncate">{task.description}</p>
+          {editingTitle ? (
+            <input
+              ref={titleInputRef}
+              autoFocus
+              value={titleDraft}
+              onChange={(e) => setTitleDraft(e.target.value)}
+              onBlur={handleTitleSave}
+              onKeyDown={(e) => { if (e.key === 'Enter') handleTitleSave(); if (e.key === 'Escape') { setTitleDraft(task.title || ''); setEditingTitle(false); } }}
+              className="w-full bg-gray-800 text-foreground text-sm rounded px-2 py-0.5 mt-0.5 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+              placeholder="Enter title..."
+            />
+          ) : (
+            <div className="flex items-center gap-1.5 mt-0.5 group/title">
+              <p className="text-sm text-gray-400 truncate">
+                {task.title || task.description || 'Untitled'}
+              </p>
+              <button
+                onClick={() => { setTitleDraft(task.title || ''); setEditingTitle(true); }}
+                className="text-gray-600 hover:text-gray-400 opacity-0 group-hover/title:opacity-100 transition-opacity shrink-0"
+                title="Edit title"
+              >
+                <Pencil size={12} />
+              </button>
+            </div>
           )}
         </div>
         {(sending || stillRunning || ['in_progress', 'executing'].includes(task.status)) && (
@@ -324,7 +363,7 @@ export function ChatView({ task, projects, onBack }: ChatViewProps) {
       )}
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-3">
+      <div className="flex-1 overflow-y-auto p-4 space-y-3 min-h-0">
         {messages.length === 0 && (
           <div className="text-center text-gray-600 mt-20">
             <p className="text-lg mb-2">Chat with this task</p>
@@ -333,6 +372,17 @@ export function ChatView({ task, projects, onBack }: ChatViewProps) {
                 ? 'Send a follow-up message to continue the conversation'
                 : 'This task has no session yet. Run it first via Ralph Loop or manually.'}
             </p>
+          </div>
+        )}
+        {/* Initial prompt bubble */}
+        {task.description && (
+          <div>
+            <div className="text-center text-xs text-gray-600 py-1 mb-1">— Initial Prompt —</div>
+            <div className="flex justify-end">
+              <div className="max-w-[85%] rounded-2xl px-4 py-2.5 text-sm bg-indigo-600 text-white rounded-br-md whitespace-pre-wrap">
+                {task.description}
+              </div>
+            </div>
           </div>
         )}
         {grouped.map((group, i) =>
