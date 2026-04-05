@@ -440,3 +440,49 @@ async def test_create_task_model_in_list(client):
     assert resp.status_code == 200
     tasks = resp.json()
     assert tasks[0]["model"] == "haiku"
+
+
+# === Title update tests ===
+
+
+@pytest.mark.asyncio
+async def test_update_task_title_only(client):
+    """PUT /api/tasks/{id} with only title preserves other fields."""
+    create_resp = await client.post("/api/tasks", json={
+        "title": "Original Title", "description": "Keep this", "target_repo": "/tmp", "priority": 2,
+    })
+    task_id = create_resp.json()["id"]
+
+    resp = await client.put(f"/api/tasks/{task_id}", json={"title": "New Title"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["title"] == "New Title"
+    assert data["description"] == "Keep this"
+    assert data["priority"] == 2
+
+
+@pytest.mark.asyncio
+async def test_update_task_title_empty_string(client):
+    """PUT /api/tasks/{id} can set title to empty string."""
+    create_resp = await client.post("/api/tasks", json={
+        "title": "Has Title", "description": "d", "target_repo": "/tmp",
+    })
+    task_id = create_resp.json()["id"]
+
+    resp = await client.put(f"/api/tasks/{task_id}", json={"title": ""})
+    assert resp.status_code == 200
+    assert resp.json()["title"] == ""
+
+
+@pytest.mark.asyncio
+async def test_update_task_title_persisted_in_get(client):
+    """Updated title is returned on subsequent GET."""
+    create_resp = await client.post("/api/tasks", json={
+        "title": "Old", "description": "d", "target_repo": "/tmp",
+    })
+    task_id = create_resp.json()["id"]
+
+    await client.put(f"/api/tasks/{task_id}", json={"title": "Renamed"})
+    resp = await client.get(f"/api/tasks/{task_id}")
+    assert resp.status_code == 200
+    assert resp.json()["title"] == "Renamed"

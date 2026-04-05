@@ -210,7 +210,7 @@ export function TasksPage() {
         <LoopChatView task={chatTask} onBack={() => setChatTask(null)} />
       )}
       {chatTask && chatTask.mode !== 'loop' && (
-        <ChatView task={chatTask} projects={projects} onBack={() => setChatTask(null)} />
+        <ChatView task={chatTask} projects={projects} onBack={() => setChatTask(null)} onTaskUpdated={refresh} />
       )}
     </div>
   );

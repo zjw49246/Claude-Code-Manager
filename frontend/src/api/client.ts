@@ -281,6 +281,8 @@ export const api = {
     request<{ ok: boolean }>(`/api/tasks/${id}/stop-session`, { method: 'POST' }),
   createTask: (data: { title?: string; description?: string; project_id?: number; priority?: number; target_branch?: string; mode?: string; todo_file_path?: string; max_iterations?: number; image_paths?: string[]; secret_ids?: number[]; model?: string }) =>
     request<Task>('/api/tasks', { method: 'POST', body: JSON.stringify(data) }),
+  updateTask: (id: number, data: { title?: string; description?: string; priority?: number }) =>
+    request<Task>(`/api/tasks/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteTask: (id: number) =>
     request<{ ok: boolean }>(`/api/tasks/${id}`, { method: 'DELETE' }),
   cancelTask: (id: number) =>
