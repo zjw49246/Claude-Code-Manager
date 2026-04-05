@@ -15,8 +15,13 @@ vi.mock('../../api/client', () => ({
   },
 }));
 
+// Store the onReconnect callback so tests can trigger it
+let capturedOnReconnect: (() => void) | undefined;
 vi.mock('../../hooks/useWebSocket', () => ({
-  useWebSocket: vi.fn().mockReturnValue({ lastMessage: null, isConnected: true }),
+  useWebSocket: vi.fn((_channels: string[], _onMessage?: unknown, onReconnect?: () => void) => {
+    capturedOnReconnect = onReconnect;
+    return { lastMessage: null, isConnected: true };
+  }),
 }));
 
 vi.mock('../Secrets/SecretPicker', () => ({
@@ -169,6 +174,46 @@ describe('ChatView', () => {
       // First button is the back arrow
       await userEvent.click(backButtons[0]);
       expect(onBack).toHaveBeenCalled();
+    });
+  });
+
+  describe('Chat history loading', () => {
+    it('loads chat history on mount', async () => {
+      const task = makeTask({ id: 42 });
+      render(<ChatView task={task} projects={projects} onBack={onBack} />);
+
+      await waitFor(() => {
+        expect(api.getTaskChatHistory).toHaveBeenCalledWith(42);
+      });
+    });
+
+    it('re-fetches chat history on WebSocket reconnect', async () => {
+      const msgs: ChatMessage[] = [
+        { id: 1, role: 'assistant', event_type: 'message', content: 'Hello', tool_name: null, tool_input: null, tool_output: null, is_error: false, loop_iteration: null, timestamp: '2024-01-01T00:00:00Z' },
+      ];
+      (api.getTaskChatHistory as ReturnType<typeof vi.fn>).mockResolvedValue(msgs);
+      const task = makeTask({ id: 10 });
+      render(<ChatView task={task} projects={projects} onBack={onBack} />);
+
+      // Wait for initial load
+      await waitFor(() => {
+        expect(api.getTaskChatHistory).toHaveBeenCalledTimes(1);
+      });
+
+      // Simulate WebSocket reconnection
+      capturedOnReconnect?.();
+
+      await waitFor(() => {
+        expect(api.getTaskChatHistory).toHaveBeenCalledTimes(2);
+      });
+    });
+
+    it('passes onReconnect callback to useWebSocket', () => {
+      const task = makeTask();
+      render(<ChatView task={task} projects={projects} onBack={onBack} />);
+
+      expect(capturedOnReconnect).toBeDefined();
+      expect(typeof capturedOnReconnect).toBe('function');
     });
   });
 });
