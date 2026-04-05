@@ -162,7 +162,22 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
     setMessages((prev) => [...prev, entry]);
   }, [task.id]);
 
-  useWebSocket([`task:${task.id}`], handleWsMessage);
+  const fetchHistory = useCallback(() => {
+    api.getTaskChatHistory(task.id).then((msgs) => {
+      // Filter out empty text messages (partial streaming chunks), keep tool/thinking/system events
+      setMessages(msgs.filter((m) =>
+        !((m.event_type === 'message' || m.event_type === 'result') && !m.content)
+      ));
+    }).catch(() => {});
+  }, [task.id]);
+
+  // Re-fetch history when WebSocket reconnects to pick up any messages
+  // that arrived during the disconnection gap
+  const handleReconnect = useCallback(() => {
+    fetchHistory();
+  }, [fetchHistory]);
+
+  useWebSocket([`task:${task.id}`], handleWsMessage, handleReconnect);
 
   // Reset sending state when task reaches a terminal status
   // (catches cases where process_exit WebSocket event is missed)
@@ -174,13 +189,8 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
 
   // Load chat history
   useEffect(() => {
-    api.getTaskChatHistory(task.id).then((msgs) => {
-      // Filter out empty text messages (partial streaming chunks), keep tool/thinking/system events
-      setMessages(msgs.filter((m) =>
-        !((m.event_type === 'message' || m.event_type === 'result') && !m.content)
-      ));
-    }).catch(() => {});
-  }, [task.id]);
+    fetchHistory();
+  }, [fetchHistory]);
 
   const grouped = useMemo(() => groupMessages(messages), [messages]);
 

@@ -13,14 +13,20 @@ import { getWsUrl } from '../config/server';
 export function useWebSocket(
   channels: string[],
   onMessage?: (msg: Record<string, unknown>) => void,
+  onReconnect?: () => void,
 ) {
   const clientRef = useRef<WsClient | null>(null);
   const callbackRef = useRef(onMessage);
+  const reconnectRef = useRef(onReconnect);
   const [lastMessage, setLastMessage] = useState<Record<string, unknown> | null>(null);
   const [isConnected, setIsConnected] = useState(false);
 
-  // Keep callback ref in sync without triggering reconnect
+  // Keep callback refs in sync without triggering reconnect
   callbackRef.current = onMessage;
+  reconnectRef.current = onReconnect;
+
+  // Serialize channels to avoid re-running effect on every render
+  const channelsKey = channels.join(',');
 
   useEffect(() => {
     const wsUrl = getWsUrl();
@@ -35,15 +41,15 @@ export function useWebSocket(
       setIsConnected(true);
     });
 
+    client.onReconnect(() => {
+      reconnectRef.current?.();
+    });
+
     client.connect();
-    client.subscribe(channels);
+    client.subscribe(channelsKey.split(','));
 
     return () => client.close();
-  }, []);
-
-  useEffect(() => {
-    clientRef.current?.subscribe(channels);
-  }, [channels]);
+  }, [channelsKey]);
 
   return { lastMessage, isConnected };
 }

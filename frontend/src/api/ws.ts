@@ -1,24 +1,34 @@
 type WsHandler = (data: { channel: string; data: Record<string, unknown> }) => void;
+type ReconnectHandler = () => void;
 
 export class WsClient {
   private ws: WebSocket | null = null;
   private channels: string[] = [];
   private handlers: WsHandler[] = [];
+  private reconnectHandlers: ReconnectHandler[] = [];
   private retryDelay = 1000;
   private maxDelay = 30000;
   private url: string;
+  private destroyed = false;
+  private hasConnectedOnce = false;
 
   constructor(url: string) {
     this.url = url;
   }
 
   connect() {
+    if (this.destroyed) return;
     this.ws = new WebSocket(this.url);
     this.ws.onopen = () => {
       this.retryDelay = 1000;
       if (this.channels.length > 0) {
         this.ws?.send(JSON.stringify({ action: 'subscribe', channels: this.channels }));
       }
+      // Notify reconnect handlers (skip the very first connect)
+      if (this.hasConnectedOnce) {
+        this.reconnectHandlers.forEach((h) => h());
+      }
+      this.hasConnectedOnce = true;
     };
     this.ws.onmessage = (e) => {
       try {
@@ -29,6 +39,7 @@ export class WsClient {
       } catch { /* ignore */ }
     };
     this.ws.onclose = () => {
+      if (this.destroyed) return;
       setTimeout(() => this.connect(), this.retryDelay);
       this.retryDelay = Math.min(this.retryDelay * 2, this.maxDelay);
     };
@@ -48,7 +59,15 @@ export class WsClient {
     };
   }
 
+  onReconnect(handler: ReconnectHandler) {
+    this.reconnectHandlers.push(handler);
+    return () => {
+      this.reconnectHandlers = this.reconnectHandlers.filter((h) => h !== handler);
+    };
+  }
+
   close() {
+    this.destroyed = true;
     this.ws?.close();
     this.ws = null;
   }
