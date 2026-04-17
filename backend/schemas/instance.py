@@ -6,6 +6,7 @@ from pydantic import BaseModel
 class InstanceCreate(BaseModel):
     name: str
     model: str = "default"
+    thinking_budget: int | None = None
     config: dict | None = None
 
 
@@ -18,6 +19,7 @@ class InstanceResponse(BaseModel):
     worktree_path: str | None
     worktree_branch: str | None
     model: str
+    thinking_budget: int | None
     total_tasks_completed: int
     total_cost_usd: float
     config: dict | None

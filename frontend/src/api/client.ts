@@ -118,6 +118,7 @@ export interface Instance {
   current_task_id: number | null;
   worktree_path: string | null;
   model: string;
+  thinking_budget: number | null;
   total_tasks_completed: number;
   total_cost_usd: number;
   started_at: string | null;
@@ -295,7 +296,7 @@ export const api = {
     request<Task>(`/api/tasks/${id}/plan/reject`, { method: 'POST' }),
   // Instances
   listInstances: () => request<Instance[]>('/api/instances'),
-  createInstance: (data: { name: string; model?: string }) =>
+  createInstance: (data: { name: string; model?: string; thinking_budget?: number | null }) =>
     request<Instance>('/api/instances', { method: 'POST', body: JSON.stringify(data) }),
   deleteInstance: (id: number) =>
     request<{ ok: boolean }>(`/api/instances/${id}`, { method: 'DELETE' }),

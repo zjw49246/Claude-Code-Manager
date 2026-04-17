@@ -64,6 +64,11 @@ cd frontend && npx tsc --noEmit
 | `test_content_extraction_*` | 各种 content 格式（string, list, nested） |
 | `test_assistant_tool_use_block` | assistant 事件含 tool_use 块 → 正确提取 tool_name/tool_input |
 | `test_assistant_thinking_block` | assistant 事件含 thinking 块 → 提取为 thinking 事件 |
+| `test_thinking_with_text_field` | thinking 块用 `text` 字段（Opus 4.7+ 兼容） |
+| `test_thinking_with_nested_content_blocks` | thinking 块用嵌套 `content` 列表 |
+| `test_thinking_encrypted_block` | 仅 signature/data 的加密 thinking → `[encrypted thinking ...]` 标记 |
+| `test_thinking_completely_empty_block` | 空 thinking 块 → content 为空字符串 |
+| `test_thinking_legacy_field_still_works` | 原 `thinking` 字段仍是首选路径 |
 | `test_user_event_tool_result` | type=user 事件 → 映射为 tool_result，提取 tool_output |
 | `test_user_event_tool_result_error` | type=user 事件含 is_error → 正确设置错误标记 |
 | `test_system_non_init` | system 非 init 子类型 → 映射为 system_event |
@@ -152,6 +157,9 @@ cd frontend && npx tsc --noEmit
 |------|---------|
 | `test_list_instances_empty` | 空实例列表 |
 | `test_create_instance` / `test_create_instance_custom_model` | 创建实例 |
+| `test_create_instance_with_thinking_budget` | 创建时携带 `thinking_budget` 字段 |
+| `test_create_instance_default_thinking_budget_is_null` | 不传 `thinking_budget` → 响应为 null |
+| `test_run_instance_forwards_thinking_budget` | `/run` 把 instance 的 budget 传给 `launch()` |
 | `test_get_instance` / `test_get_instance_not_found` | 获取/404 |
 | `test_delete_instance` / `test_delete_instance_not_found` | 删除/404 |
 | `test_stop_instance_success` / `test_stop_instance_not_running` | 停止/非运行 |
@@ -190,6 +198,9 @@ cd frontend && npx tsc --noEmit
 | `test_launch_with_resume` / `test_launch_with_model` | resume/model 参数 |
 | `test_launch_updates_db` / `test_launch_saves_cwd` | DB 状态更新 |
 | `test_launch_unsets_claude_env` | 排除 CLAUDECODE 环境变量 |
+| `test_launch_with_thinking_budget_sets_env` | `thinking_budget>0` → 设置 `MAX_THINKING_TOKENS` env |
+| `test_launch_without_thinking_budget_omits_env` | 默认不设置 `MAX_THINKING_TOKENS` |
+| `test_launch_with_zero_thinking_budget_omits_env` | `thinking_budget=0` 视为无预算 |
 | `test_stop_terminates` / `test_stop_kills_on_timeout` | 正常停止/超时 kill |
 | `test_is_running` | 运行状态检测 |
 

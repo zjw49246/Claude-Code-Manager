@@ -92,7 +92,7 @@ class StreamParser:
                     events.append(evt)
                 elif block.get("type") == "thinking":
                     evt["event_type"] = "thinking"
-                    evt["content"] = block.get("thinking", "")
+                    evt["content"] = self._extract_thinking_text(block)
                     events.append(evt)
                 elif block.get("type") == "text":
                     evt["event_type"] = "message"
@@ -177,6 +177,32 @@ class StreamParser:
             return [event]
         else:
             return [_base_event()]
+
+    def _extract_thinking_text(self, block: dict) -> str:
+        """Extract thinking text from a thinking content block.
+
+        Newer Claude Code / API versions vary the field name and may return
+        encrypted thinking (no plaintext at all). Try the known field names in
+        order, and if only an encrypted payload is present, return a marker so
+        the UI can communicate the situation rather than rendering an empty box.
+        """
+        for key in ("thinking", "text", "content", "summary"):
+            value = block.get(key)
+            if isinstance(value, str) and value:
+                return value
+            if isinstance(value, list):
+                texts = [
+                    b.get("text", "")
+                    for b in value
+                    if isinstance(b, dict) and b.get("type") == "text"
+                ]
+                joined = "\n".join(t for t in texts if t)
+                if joined:
+                    return joined
+        # Encrypted thinking blocks carry only `signature` + `data` (no plaintext).
+        if block.get("signature") or block.get("data"):
+            return "[encrypted thinking — no plaintext returned by the API]"
+        return ""
 
     def _extract_content(self, data: dict) -> str | None:
         # Handle content blocks (list of {type, text})

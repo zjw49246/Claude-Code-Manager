@@ -20,7 +20,12 @@ async def list_instances(db: AsyncSession = Depends(get_db)):
 
 @router.post("", response_model=InstanceResponse, status_code=201)
 async def create_instance(body: InstanceCreate, db: AsyncSession = Depends(get_db)):
-    instance = Instance(name=body.name, model=body.model, config=body.config)
+    instance = Instance(
+        name=body.name,
+        model=body.model,
+        thinking_budget=body.thinking_budget,
+        config=body.config,
+    )
     db.add(instance)
     await db.commit()
     await db.refresh(instance)
@@ -93,6 +98,7 @@ async def run_task_on_instance(
         task_id=task_id,
         cwd=cwd,
         model=instance.model,
+        thinking_budget=instance.thinking_budget,
     )
     return {"ok": True, "pid": pid}
 

@@ -82,6 +82,15 @@ async def test_config_model_options_no_empty_strings(client):
 
 
 @pytest.mark.asyncio
+async def test_config_default_model_options_include_1m_variants(client):
+    """The shipped default model_options should include both opus[1m] and sonnet[1m]."""
+    resp = await client.get("/api/system/config")
+    options = resp.json()["model_options"]
+    assert "opus[1m]" in options
+    assert "sonnet[1m]" in options
+
+
+@pytest.mark.asyncio
 async def test_config_reflects_settings(client):
     from unittest.mock import patch
     from backend.config import settings

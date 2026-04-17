@@ -244,6 +244,17 @@
 - **预防**: 新增 35 个测试覆盖凭据注入全流程
 - **Commits**: fe5eb23, c347236, c727ac1, 54bd372
 
+### Opus 4.7 thinking 内容只显示 "💭 Thinking" 没有正文
+- **问题**: 用户切到 Opus 4.7 后，chat 里 thinking 气泡只剩一个标题，没有思考内容
+- **原因**: `stream_parser._extract_thinking_text` 只读 `block["thinking"]` 字段。新版 Claude Code / API 在某些场景里把内容放在 `block["text"]`、嵌套 `content` blocks，或者只输出加密 thinking（仅有 `signature` + `data`，无明文）。原代码遇到这些情况一律拿到空字符串，前端 `{message.content && ...}` 判断后整块不渲染
+- **解决**:
+  1. `stream_parser` 新增 `_extract_thinking_text` 帮助方法，按 `thinking → text → content → summary` 顺序兜底；遇到加密块返回 `[encrypted thinking ...]` 标记
+  2. `ChatView` thinking 气泡改为始终渲染内容区，空/加密时显示提示文案，普通文本 `maxLines` 从 3 提到 20
+  3. 同时把 `sonnet[1m]` 加入默认 `model_options`（Sonnet 4.5+ 也支持 1M context）
+  4. 新增 `Instance.thinking_budget` 字段（Alembic migration `bb102ab28888`），通过 `MAX_THINKING_TOKENS` env var 注入子进程，按需开启高预算 thinking
+- **预防**: 解析外部 stream 协议字段时永远写多字段 fallback；加密 / 缺失 / 空三种情况要在 UI 里显式区分，否则用户以为是前端 bug
+- **Commit**: (待填，本次提交)
+
 ### 同一台机器部署多个实例的 Git 配置
 - **问题**: 多个 Claude Code Manager 实例部署在同一台机器，不同实例需要推送到不同 GitHub 账号的仓库
 - **原因**: 本机 macOS Keychain（osxkeychain）只缓存一个 GitHub 账号的 HTTPS 凭据；默认 SSH key 也只绑定一个 GitHub 账号

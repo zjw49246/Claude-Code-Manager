@@ -19,6 +19,7 @@ const statusColors: Record<string, string> = {
 export function InstanceGrid({ instances, onRefresh, onViewLogs }: InstanceGridProps) {
   const [newName, setNewName] = useState('');
   const [newModel, setNewModel] = useState('');
+  const [newThinkingBudget, setNewThinkingBudget] = useState('');
   const [dispatcherRunning, setDispatcherRunning] = useState(false);
   const [modelOptions, setModelOptions] = useState<string[]>([]);
   const [defaultModel, setDefaultModel] = useState('');
@@ -34,9 +35,12 @@ export function InstanceGrid({ instances, onRefresh, onViewLogs }: InstanceGridP
 
   const handleCreate = async () => {
     const name = newName || `worker-${instances.length + 1}`;
-    await api.createInstance({ name, model: newModel || 'default' });
+    const parsedBudget = newThinkingBudget.trim() === '' ? null : Number(newThinkingBudget);
+    const thinking_budget = parsedBudget !== null && Number.isFinite(parsedBudget) && parsedBudget > 0 ? parsedBudget : null;
+    await api.createInstance({ name, model: newModel || 'default', thinking_budget });
     setNewName('');
     setNewModel('');
+    setNewThinkingBudget('');
     onRefresh();
   };
 
@@ -79,6 +83,16 @@ export function InstanceGrid({ instances, onRefresh, onViewLogs }: InstanceGridP
             <option key={m} value={m}>{m === 'default' && defaultModel ? `default (${defaultModel})` : m}</option>
           ))}
         </select>
+        <input
+          type="number"
+          inputMode="numeric"
+          min={0}
+          className="w-[140px] bg-gray-700 text-foreground rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          placeholder="Thinking tokens"
+          title="Optional Extended Thinking max tokens (MAX_THINKING_TOKENS). Leave empty for CLI default."
+          value={newThinkingBudget}
+          onChange={(e) => setNewThinkingBudget(e.target.value)}
+        />
         <button
           onClick={handleCreate}
           className="flex items-center gap-1 bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-2 rounded text-sm font-medium whitespace-nowrap"
@@ -112,6 +126,9 @@ export function InstanceGrid({ instances, onRefresh, onViewLogs }: InstanceGridP
             <div className="text-xs text-gray-400 space-y-0.5">
               <p>Status: <span className="text-gray-300">{inst.status}</span></p>
               <p>Model: <span className="text-gray-300">{inst.model}{inst.model === 'default' && defaultModel ? ` (${defaultModel})` : ''}</span></p>
+              {inst.thinking_budget && inst.thinking_budget > 0 && (
+                <p>Thinking: <span className="text-gray-300">{inst.thinking_budget.toLocaleString()} tok</span></p>
+              )}
               <p>Completed: <span className="text-gray-300">{inst.total_tasks_completed}</span></p>
               {inst.current_task_id && <p>Task: <span className="text-indigo-400">#{inst.current_task_id}</span></p>}
               {inst.pid && <p>PID: <span className="text-gray-300">{inst.pid}</span></p>}

@@ -75,13 +75,17 @@ class RalphLoop:
 
                 cwd = task.target_repo or "."
 
-                # Update task with instance assignment
+                # Update task with instance assignment, fetch instance budget
+                thinking_budget: int | None = None
                 async with self.db_factory() as db:
                     await db.execute(
                         update(Task)
                         .where(Task.id == task.id)
                         .values(instance_id=instance_id)
                     )
+                    inst = await db.get(Instance, instance_id)
+                    if inst:
+                        thinking_budget = inst.thinking_budget
                     await db.commit()
 
                 # Plan mode handling
@@ -94,6 +98,7 @@ class RalphLoop:
                         task_id=task.id,
                         cwd=cwd,
                         model=None,
+                        thinking_budget=thinking_budget,
                     )
                     process = self.instance_manager.processes.get(instance_id)
                     if process:
@@ -137,6 +142,7 @@ class RalphLoop:
                     task_id=task.id,
                     cwd=cwd,
                     model=None,
+                    thinking_budget=thinking_budget,
                 )
 
                 # Wait for process to finish (with timeout)
