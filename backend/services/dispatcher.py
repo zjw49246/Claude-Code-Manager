@@ -301,6 +301,12 @@ class GlobalDispatcher:
             inst = await db.get(Instance, instance_id)
             return inst.thinking_budget if inst else None
 
+    async def _get_effort_level(self, instance_id: int) -> str:
+        """Look up the configured effort level for an instance, with fallback."""
+        async with self.db_factory() as db:
+            inst = await db.get(Instance, instance_id)
+            return (inst.effort_level if inst else None) or settings.default_effort
+
     async def _run_task_lifecycle(self, instance_id: int, task: Task, git_env: dict | None = None):
         """Execute the task lifecycle: assign → Claude Code → judge result.
 
@@ -320,10 +326,13 @@ class GlobalDispatcher:
             # === Step 2: Determine cwd and update task ===
             cwd = task.target_repo or "."
             thinking_budget: int | None = None
+            effort_level: str | None = None
             async with self.db_factory() as db:
                 instance = await db.get(Instance, instance_id)
                 if instance:
                     thinking_budget = instance.thinking_budget
+                # Resolve effort: task.effort_level → instance.effort_level → settings.default_effort
+                effort_level = task.effort_level or (instance.effort_level if instance else None) or settings.default_effort
                 # Resolve actual model: task's own model, or fall back to instance's model
                 if not task.model and instance:
                     resolved_model = instance.model if instance.model != "default" else None
@@ -378,6 +387,7 @@ class GlobalDispatcher:
                 model=task.model,
                 git_env=git_env or {},
                 thinking_budget=thinking_budget,
+                effort_level=effort_level,
             )
 
             # Wait for process to finish (with timeout)
@@ -525,6 +535,7 @@ class GlobalDispatcher:
                 loop_iteration=iteration,
                 git_env=git_env or {},
                 thinking_budget=await self._get_thinking_budget(instance_id),
+                effort_level=await self._get_effort_level(instance_id),
             )
 
             process = self.instance_manager.processes.get(instance_id)
@@ -708,6 +719,7 @@ class GlobalDispatcher:
             loop_iteration=iteration,
             git_env=git_env,
             thinking_budget=await self._get_thinking_budget(instance_id),
+            effort_level=await self._get_effort_level(instance_id),
         )
 
         fix_proc = self.instance_manager.processes.get(instance_id)
@@ -735,6 +747,7 @@ class GlobalDispatcher:
             model=None,
             git_env=git_env or {},
             thinking_budget=await self._get_thinking_budget(instance_id),
+            effort_level=await self._get_effort_level(instance_id),
         )
         process = self.instance_manager.processes.get(instance_id)
         if process:

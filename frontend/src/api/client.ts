@@ -96,6 +96,7 @@ export interface Task {
   session_id: string | null;
   error_message: string | null;
   model: string | null;
+  effort_level: string | null;
   tags: string[] | null;
   context_window_usage: {
     input_tokens: number;
@@ -118,6 +119,7 @@ export interface Instance {
   current_task_id: number | null;
   worktree_path: string | null;
   model: string;
+  effort_level: string | null;
   thinking_budget: number | null;
   total_tasks_completed: number;
   total_cost_usd: number;
@@ -280,7 +282,7 @@ export const api = {
     request<Task>(`/api/tasks/${id}/read`, { method: 'POST' }),
   stopTaskSession: (id: number) =>
     request<{ ok: boolean }>(`/api/tasks/${id}/stop-session`, { method: 'POST' }),
-  createTask: (data: { title?: string; description?: string; project_id?: number; priority?: number; target_branch?: string; mode?: string; todo_file_path?: string; max_iterations?: number; image_paths?: string[]; secret_ids?: number[]; model?: string }) =>
+  createTask: (data: { title?: string; description?: string; project_id?: number; priority?: number; target_branch?: string; mode?: string; todo_file_path?: string; max_iterations?: number; image_paths?: string[]; secret_ids?: number[]; model?: string; effort_level?: string }) =>
     request<Task>('/api/tasks', { method: 'POST', body: JSON.stringify(data) }),
   updateTask: (id: number, data: { title?: string; description?: string; priority?: number }) =>
     request<Task>(`/api/tasks/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
@@ -296,7 +298,7 @@ export const api = {
     request<Task>(`/api/tasks/${id}/plan/reject`, { method: 'POST' }),
   // Instances
   listInstances: () => request<Instance[]>('/api/instances'),
-  createInstance: (data: { name: string; model?: string; thinking_budget?: number | null }) =>
+  createInstance: (data: { name: string; model?: string; effort_level?: string | null; thinking_budget?: number | null }) =>
     request<Instance>('/api/instances', { method: 'POST', body: JSON.stringify(data) }),
   deleteInstance: (id: number) =>
     request<{ ok: boolean }>(`/api/instances/${id}`, { method: 'DELETE' }),
@@ -344,5 +346,5 @@ export const api = {
   // System
   health: () => request<{ status: string }>('/api/system/health'),
   stats: () => request<{ tasks: Record<string, number>; running_instances: number }>('/api/system/stats'),
-  config: () => request<{ default_model: string; model_options: string[] }>('/api/system/config'),
+  config: () => request<{ default_model: string; model_options: string[]; default_effort: string; effort_options: string[] }>('/api/system/config'),
 };

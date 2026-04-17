@@ -83,11 +83,11 @@ async def test_config_model_options_no_empty_strings(client):
 
 @pytest.mark.asyncio
 async def test_config_default_model_options_include_1m_variants(client):
-    """The shipped default model_options should include both opus[1m] and sonnet[1m]."""
+    """The shipped default model_options should include 1m variants."""
     resp = await client.get("/api/system/config")
     options = resp.json()["model_options"]
-    assert "opus[1m]" in options
-    assert "sonnet[1m]" in options
+    assert "claude-opus-4-6[1m]" in options
+    assert "claude-sonnet-4-6[1m]" in options
 
 
 @pytest.mark.asyncio
@@ -101,3 +101,35 @@ async def test_config_reflects_settings(client):
     data = resp.json()
     assert data["default_model"] == "haiku"
     assert data["model_options"] == ["haiku", "sonnet"]
+
+
+# === Effort config tests ===
+
+
+@pytest.mark.asyncio
+async def test_config_returns_effort_fields(client):
+    """Config endpoint returns default_effort and effort_options."""
+    resp = await client.get("/api/system/config")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "default_effort" in data
+    assert data["default_effort"] == "medium"
+    assert "effort_options" in data
+    assert isinstance(data["effort_options"], list)
+    assert "low" in data["effort_options"]
+    assert "high" in data["effort_options"]
+    assert "max" in data["effort_options"]
+
+
+@pytest.mark.asyncio
+async def test_config_effort_reflects_settings(client):
+    """Effort config reflects overridden settings."""
+    from unittest.mock import patch
+    from backend.config import settings
+
+    with patch.object(settings, "default_effort", "high"), \
+         patch.object(settings, "effort_options", "low,high"):
+        resp = await client.get("/api/system/config")
+    data = resp.json()
+    assert data["default_effort"] == "high"
+    assert data["effort_options"] == ["low", "high"]

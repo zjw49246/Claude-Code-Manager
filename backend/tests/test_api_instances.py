@@ -95,6 +95,45 @@ async def test_run_instance_forwards_thinking_budget(client):
     assert kwargs["thinking_budget"] == 8000
 
 
+# === Effort level ===
+
+
+@pytest.mark.asyncio
+async def test_create_instance_with_effort_level(client):
+    """effort_level passed in POST is stored and returned."""
+    resp = await client.post(
+        "/api/instances",
+        json={"name": "effort-worker", "effort_level": "high"},
+    )
+    assert resp.status_code == 201
+    assert resp.json()["effort_level"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_create_instance_default_effort_level_is_null(client):
+    """Without effort_level, the response field is null."""
+    resp = await client.post("/api/instances", json={"name": "no-effort"})
+    assert resp.status_code == 201
+    assert resp.json()["effort_level"] is None
+
+
+@pytest.mark.asyncio
+async def test_run_instance_forwards_effort_level(client):
+    """POST /run forwards stored effort_level to instance_manager.launch()."""
+    inst_resp = await client.post(
+        "/api/instances",
+        json={"name": "effort-runner", "effort_level": "xhigh"},
+    )
+    inst_id = inst_resp.json()["id"]
+    mock_im = _make_mock_instance_manager(is_running_val=False, launch_pid=42)
+    with patch("backend.main.instance_manager", mock_im):
+        resp = await client.post(f"/api/instances/{inst_id}/run?prompt=hello")
+    assert resp.status_code == 200
+    mock_im.launch.assert_awaited_once()
+    kwargs = mock_im.launch.call_args.kwargs
+    assert kwargs["effort_level"] == "xhigh"
+
+
 @pytest.mark.asyncio
 async def test_get_instance(client):
     create_resp = await client.post("/api/instances", json={"name": "w"})
