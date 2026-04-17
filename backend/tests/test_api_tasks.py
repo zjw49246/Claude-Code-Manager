@@ -486,3 +486,51 @@ async def test_update_task_title_persisted_in_get(client):
     resp = await client.get(f"/api/tasks/{task_id}")
     assert resp.status_code == 200
     assert resp.json()["title"] == "Renamed"
+
+
+# === Effort level tests ===
+
+
+@pytest.mark.asyncio
+async def test_create_task_with_effort_level(client):
+    """Task created with effort_level field stores and returns it."""
+    resp = await client.post("/api/tasks", json={
+        "title": "Effort task", "description": "d", "target_repo": "/tmp", "effort_level": "high",
+    })
+    assert resp.status_code == 201
+    assert resp.json()["effort_level"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_create_task_without_effort_level_returns_null(client):
+    """Task created without effort_level has effort_level=None."""
+    resp = await client.post("/api/tasks", json={
+        "title": "No effort", "description": "d", "target_repo": "/tmp",
+    })
+    assert resp.status_code == 201
+    assert resp.json()["effort_level"] is None
+
+
+@pytest.mark.asyncio
+async def test_create_task_effort_level_persisted_in_get(client):
+    """effort_level survives a round-trip through GET."""
+    create_resp = await client.post("/api/tasks", json={
+        "title": "T", "description": "d", "target_repo": "/tmp", "effort_level": "max",
+    })
+    task_id = create_resp.json()["id"]
+
+    resp = await client.get(f"/api/tasks/{task_id}")
+    assert resp.status_code == 200
+    assert resp.json()["effort_level"] == "max"
+
+
+@pytest.mark.asyncio
+async def test_create_task_effort_level_in_list(client):
+    """effort_level is included when listing tasks."""
+    await client.post("/api/tasks", json={
+        "title": "A", "description": "d", "target_repo": "/tmp", "effort_level": "low",
+    })
+    resp = await client.get("/api/tasks")
+    assert resp.status_code == 200
+    tasks = resp.json()
+    assert tasks[0]["effort_level"] == "low"

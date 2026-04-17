@@ -265,6 +265,54 @@ async def test_launch_with_zero_thinking_budget_omits_env(db_factory):
 
 
 @pytest.mark.asyncio
+async def test_launch_with_effort_level(db_factory):
+    """launch(effort_level='high') includes --effort high in command."""
+    async with db_factory() as db:
+        inst = Instance(name="effort-inst")
+        db.add(inst)
+        await db.commit()
+        await db.refresh(inst)
+        inst_id = inst.id
+
+    mock_proc = _make_mock_process()
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    im = InstanceManager(db_factory, broadcaster)
+
+    with patch("backend.services.instance_manager.asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=mock_proc) as mock_exec:
+        await im.launch(instance_id=inst_id, prompt="hi", cwd="/tmp", effort_level="high")
+
+    cmd_args = mock_exec.call_args[0]
+    assert "--effort" in cmd_args
+    idx = cmd_args.index("--effort")
+    assert cmd_args[idx + 1] == "high"
+    await asyncio.sleep(0.1)
+
+
+@pytest.mark.asyncio
+async def test_launch_without_effort_level_omits_flag(db_factory):
+    """launch() without effort_level does not include --effort."""
+    async with db_factory() as db:
+        inst = Instance(name="no-effort-inst")
+        db.add(inst)
+        await db.commit()
+        await db.refresh(inst)
+        inst_id = inst.id
+
+    mock_proc = _make_mock_process()
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    im = InstanceManager(db_factory, broadcaster)
+
+    with patch("backend.services.instance_manager.asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=mock_proc) as mock_exec:
+        await im.launch(instance_id=inst_id, prompt="hi", cwd="/tmp")
+
+    cmd_args = mock_exec.call_args[0]
+    assert "--effort" not in cmd_args
+    await asyncio.sleep(0.1)
+
+
+@pytest.mark.asyncio
 async def test_stop_terminates(db_factory):
     """stop() sends terminate and updates DB status."""
     async with db_factory() as db:

@@ -107,6 +107,7 @@ async def send_chat_message(
         model=inst.model,
         resume_session_id=task.session_id,
         thinking_budget=inst.thinking_budget,
+        effort_level=inst.effort_level,
     )
     return {"ok": True, "pid": pid, "instance_id": inst.id, "session_id": task.session_id}
 

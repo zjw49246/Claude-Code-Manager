@@ -23,6 +23,7 @@ async def create_instance(body: InstanceCreate, db: AsyncSession = Depends(get_d
     instance = Instance(
         name=body.name,
         model=body.model,
+        effort_level=body.effort_level,
         thinking_budget=body.thinking_budget,
         config=body.config,
     )
@@ -99,6 +100,7 @@ async def run_task_on_instance(
         cwd=cwd,
         model=instance.model,
         thinking_budget=instance.thinking_budget,
+        effort_level=instance.effort_level,
     )
     return {"ok": True, "pid": pid}
 

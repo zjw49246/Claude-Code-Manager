@@ -1296,3 +1296,124 @@ async def test_ensure_instances_for_pending_tasks_multiple_models(db_factory):
         instances = list(result.scalars().all())
     models = {i.model for i in instances}
     assert models == {"opus", "sonnet"}
+
+
+# === Effort level tests ===
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_passes_effort_level_from_task(db_factory):
+    """Task-level effort_level is passed to instance_manager.launch()."""
+    d = _make_dispatcher(db_factory)
+
+    async with db_factory() as db:
+        inst = Instance(name="worker-1", effort_level="low")
+        db.add(inst)
+        task = Task(title="effort-task", description="d", target_repo="/repo", effort_level="max")
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_obj = task
+
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.wait = AsyncMock(return_value=0)
+    d.instance_manager.processes = {inst_id: mock_proc}
+
+    await d._run_task_lifecycle(inst_id, task_obj)
+
+    call_kwargs = d.instance_manager.launch.call_args.kwargs
+    # Task effort should take precedence over instance effort
+    assert call_kwargs["effort_level"] == "max"
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_falls_back_to_instance_effort(db_factory):
+    """When task has no effort_level, instance effort_level is used."""
+    d = _make_dispatcher(db_factory)
+
+    async with db_factory() as db:
+        inst = Instance(name="worker-effort", effort_level="xhigh")
+        db.add(inst)
+        task = Task(title="no-effort-task", description="d", target_repo="/repo")
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_obj = task
+
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.wait = AsyncMock(return_value=0)
+    d.instance_manager.processes = {inst_id: mock_proc}
+
+    await d._run_task_lifecycle(inst_id, task_obj)
+
+    call_kwargs = d.instance_manager.launch.call_args.kwargs
+    assert call_kwargs["effort_level"] == "xhigh"
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_falls_back_to_default_effort(db_factory):
+    """When neither task nor instance has effort_level, settings.default_effort is used."""
+    d = _make_dispatcher(db_factory)
+
+    async with db_factory() as db:
+        inst = Instance(name="worker-default-effort")
+        db.add(inst)
+        task = Task(title="default-effort-task", description="d", target_repo="/repo")
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_obj = task
+
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.wait = AsyncMock(return_value=0)
+    d.instance_manager.processes = {inst_id: mock_proc}
+
+    with patch("backend.services.dispatcher.settings") as mock_settings:
+        mock_settings.default_effort = "medium"
+        mock_settings.task_timeout_seconds = 1800
+        await d._run_task_lifecycle(inst_id, task_obj)
+
+    call_kwargs = d.instance_manager.launch.call_args.kwargs
+    assert call_kwargs["effort_level"] == "medium"
+
+
+@pytest.mark.asyncio
+async def test_get_effort_level_from_instance(db_factory):
+    """_get_effort_level returns instance's effort_level when set."""
+    d = _make_dispatcher(db_factory)
+
+    async with db_factory() as db:
+        inst = Instance(name="effort-inst", effort_level="high")
+        db.add(inst)
+        await db.commit()
+        await db.refresh(inst)
+        inst_id = inst.id
+
+    result = await d._get_effort_level(inst_id)
+    assert result == "high"
+
+
+@pytest.mark.asyncio
+async def test_get_effort_level_falls_back_to_default(db_factory):
+    """_get_effort_level returns default_effort when instance has no effort_level."""
+    d = _make_dispatcher(db_factory)
+
+    async with db_factory() as db:
+        inst = Instance(name="no-effort-inst")
+        db.add(inst)
+        await db.commit()
+        await db.refresh(inst)
+        inst_id = inst.id
+
+    result = await d._get_effort_level(inst_id)
+    from backend.config import settings
+    assert result == settings.default_effort

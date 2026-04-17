@@ -22,8 +22,11 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   const [priority, setPriority] = useState(0);
   const [mode, setMode] = useState('auto');
   const [model, setModel] = useState('');
-  const [defaultModel, setDefaultModel] = useState('opus');
+  const [effort, setEffort] = useState('');
+  const [defaultModel, setDefaultModel] = useState('claude-opus-4-6');
   const [modelOptions, setModelOptions] = useState<string[]>([]);
+  const [effortOptions, setEffortOptions] = useState<string[]>([]);
+  const [defaultEffort, setDefaultEffort] = useState('medium');
   const [todoFilePath, setTodoFilePath] = useState('');
   const [maxIterations, setMaxIterations] = useState(50);
   const [loading, setLoading] = useState(false);
@@ -45,6 +48,8 @@ export function TaskForm({ onCreated }: TaskFormProps) {
     api.config().then((c) => {
       setDefaultModel(c.default_model);
       setModelOptions(c.model_options.filter((m) => m !== 'default'));
+      setDefaultEffort(c.default_effort);
+      setEffortOptions(c.effort_options);
     }).catch(() => {});
   }, []);
 
@@ -120,6 +125,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
         ...(uploadedPaths.length > 0 ? { image_paths: uploadedPaths } : {}),
         ...(selectedSecretIds.length > 0 ? { secret_ids: selectedSecretIds } : {}),
         model: model || defaultModel,
+        ...(effort ? { effort_level: effort } : {}),
       });
       setDescription('');
       setPriority(0);
@@ -128,6 +134,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
       setImagePreviews([]);
       setSelectedSecretIds([]);
       setModel('');
+      setEffort('');
       onCreated();
     } finally {
       setLoading(false);
@@ -274,13 +281,24 @@ export function TaskForm({ onCreated }: TaskFormProps) {
         </select>
         <label className="text-sm text-gray-400 ml-2">Model:</label>
         <select
-          className="w-[130px] bg-gray-700 text-foreground rounded px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          className="w-[180px] bg-gray-700 text-foreground rounded px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
           value={model}
           onChange={(e) => setModel(e.target.value)}
         >
           <option value="">{defaultModel} (default)</option>
           {modelOptions.map((m) => (
             <option key={m} value={m}>{m}</option>
+          ))}
+        </select>
+        <label className="text-sm text-gray-400 ml-2">Effort:</label>
+        <select
+          className="w-[120px] bg-gray-700 text-foreground rounded px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          value={effort}
+          onChange={(e) => setEffort(e.target.value)}
+        >
+          <option value="">{defaultEffort} (default)</option>
+          {effortOptions.filter((e) => e !== defaultEffort).map((e) => (
+            <option key={e} value={e}>{e}</option>
           ))}
         </select>
         {mode === 'loop' && (
