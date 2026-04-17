@@ -17,6 +17,9 @@ class Instance(Base):
     worktree_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     worktree_branch: Mapped[str | None] = mapped_column(String(100), nullable=True)
     model: Mapped[str] = mapped_column(String(50), default="default")
+    # Optional Extended Thinking budget (max tokens). Forwarded to Claude Code
+    # subprocess via MAX_THINKING_TOKENS env var. NULL = use CLI default.
+    thinking_budget: Mapped[int | None] = mapped_column(Integer, nullable=True)
     total_tasks_completed: Mapped[int] = mapped_column(Integer, default=0)
     total_cost_usd: Mapped[float] = mapped_column(Float, default=0.0)
     config: Mapped[dict | None] = mapped_column(JSON, nullable=True)

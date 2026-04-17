@@ -27,7 +27,7 @@ class InstanceManager:
         self.processes: dict[int, asyncio.subprocess.Process] = {}
         self._tasks: dict[int, asyncio.Task] = {}  # instance_id -> consumer task
 
-    async def launch(self, instance_id: int, prompt: str, task_id: int | None = None, cwd: str | None = None, model: str | None = None, resume_session_id: str | None = None, loop_iteration: int | None = None, git_env: dict | None = None) -> int:
+    async def launch(self, instance_id: int, prompt: str, task_id: int | None = None, cwd: str | None = None, model: str | None = None, resume_session_id: str | None = None, loop_iteration: int | None = None, git_env: dict | None = None, thinking_budget: int | None = None) -> int:
         """Launch a Claude Code subprocess for the given instance.
 
         If resume_session_id is provided, uses --resume to continue the conversation.
@@ -53,6 +53,11 @@ class InstanceManager:
         # These take precedence over any global ~/.gitconfig or system credential helper.
         if git_env:
             env.update(git_env)
+
+        # Forward Extended Thinking budget. Claude Code reads MAX_THINKING_TOKENS
+        # to decide the per-turn thinking budget. Skip when 0 / negative / None.
+        if thinking_budget and thinking_budget > 0:
+            env["MAX_THINKING_TOKENS"] = str(thinking_budget)
 
         # Claude Code can output very large NDJSON lines (e.g. Read tool with big files).
         # Default asyncio limit is 64KB which causes LimitOverrunError and kills the consumer.

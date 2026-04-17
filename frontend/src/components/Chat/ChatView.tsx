@@ -704,17 +704,25 @@ function MessageBubble({ message }: { message: ChatMessage }) {
   const isUser = message.role === 'user';
 
   if (message.event_type === 'thinking') {
+    const text = message.content || '';
+    const isEncrypted = text.startsWith('[encrypted thinking');
     return (
       <div className="mx-4 px-3 py-2 bg-gray-800/30 rounded text-xs border border-gray-700/30">
         <div className="flex items-center gap-1.5 text-gray-500">
           <span>💭</span>
           <span className="font-medium">Thinking</span>
         </div>
-        {message.content && (
-          <div className="mt-1.5">
-            <CollapsibleContent content={message.content} maxLines={3} />
-          </div>
-        )}
+        <div className="mt-1.5">
+          {text && !isEncrypted ? (
+            <CollapsibleContent content={text} maxLines={20} />
+          ) : (
+            <span className="text-gray-600 italic">
+              {isEncrypted
+                ? text
+                : '[no thinking text in stream — model may have returned encrypted thinking]'}
+            </span>
+          )}
+        </div>
       </div>
     );
   }

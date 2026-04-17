@@ -411,3 +411,86 @@ def test_result_model_usage_no_context_window(parser):
     })
     result = parser.parse_line(line)[0]
     assert "context_usage" not in result
+
+
+# ── Thinking block fallback tests (Opus 4.7+ field-name variations) ─────────────
+
+def test_thinking_with_text_field(parser):
+    """Some Claude Code versions emit thinking under `text` instead of `thinking`."""
+    line = json.dumps({
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "thinking", "text": "Reasoning via text field"}],
+        },
+    })
+    result = parser.parse_line(line)[0]
+    assert result["event_type"] == "thinking"
+    assert result["content"] == "Reasoning via text field"
+
+
+def test_thinking_with_nested_content_blocks(parser):
+    """thinking block whose `content` is a list of text sub-blocks."""
+    line = json.dumps({
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "thinking",
+                    "content": [
+                        {"type": "text", "text": "step 1"},
+                        {"type": "text", "text": "step 2"},
+                    ],
+                }
+            ],
+        },
+    })
+    result = parser.parse_line(line)[0]
+    assert result["event_type"] == "thinking"
+    assert result["content"] == "step 1\nstep 2"
+
+
+def test_thinking_encrypted_block(parser):
+    """Encrypted thinking (only signature/data, no plaintext) → marker string."""
+    line = json.dumps({
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": [{
+                "type": "thinking",
+                "signature": "sig-abc",
+                "data": "base64payload==",
+            }],
+        },
+    })
+    result = parser.parse_line(line)[0]
+    assert result["event_type"] == "thinking"
+    assert result["content"].startswith("[encrypted thinking")
+
+
+def test_thinking_completely_empty_block(parser):
+    """thinking block with no recognised text fields and no encryption → empty content."""
+    line = json.dumps({
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "thinking"}],
+        },
+    })
+    result = parser.parse_line(line)[0]
+    assert result["event_type"] == "thinking"
+    assert result["content"] == ""
+
+
+def test_thinking_legacy_field_still_works(parser):
+    """Existing `thinking` field must still be the primary path."""
+    line = json.dumps({
+        "type": "assistant",
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "thinking", "thinking": "primary text"}],
+        },
+    })
+    result = parser.parse_line(line)[0]
+    assert result["content"] == "primary text"

@@ -191,6 +191,80 @@ async def test_launch_unsets_claude_env(db_factory):
 
 
 @pytest.mark.asyncio
+async def test_launch_with_thinking_budget_sets_env(db_factory):
+    """launch(thinking_budget=N) injects MAX_THINKING_TOKENS=N into subprocess env."""
+    async with db_factory() as db:
+        inst = Instance(name="thinking-inst")
+        db.add(inst)
+        await db.commit()
+        await db.refresh(inst)
+        inst_id = inst.id
+
+    mock_proc = _make_mock_process()
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    im = InstanceManager(db_factory, broadcaster)
+
+    with patch("backend.services.instance_manager.asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=mock_proc) as mock_exec:
+        await im.launch(instance_id=inst_id, prompt="hi", cwd="/tmp", thinking_budget=12000)
+
+    env = mock_exec.call_args[1]["env"]
+    assert env.get("MAX_THINKING_TOKENS") == "12000"
+    await asyncio.sleep(0.1)
+
+
+@pytest.mark.asyncio
+async def test_launch_without_thinking_budget_omits_env(db_factory):
+    """launch() without thinking_budget leaves MAX_THINKING_TOKENS unset."""
+    async with db_factory() as db:
+        inst = Instance(name="no-thinking-inst")
+        db.add(inst)
+        await db.commit()
+        await db.refresh(inst)
+        inst_id = inst.id
+
+    mock_proc = _make_mock_process()
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    im = InstanceManager(db_factory, broadcaster)
+
+    # Make sure the env var isn't already set in the test environment
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("MAX_THINKING_TOKENS", None)
+        with patch("backend.services.instance_manager.asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=mock_proc) as mock_exec:
+            await im.launch(instance_id=inst_id, prompt="hi", cwd="/tmp")
+
+    env = mock_exec.call_args[1]["env"]
+    assert "MAX_THINKING_TOKENS" not in env
+    await asyncio.sleep(0.1)
+
+
+@pytest.mark.asyncio
+async def test_launch_with_zero_thinking_budget_omits_env(db_factory):
+    """thinking_budget=0 is treated as 'no budget' (CLI default)."""
+    async with db_factory() as db:
+        inst = Instance(name="zero-budget-inst")
+        db.add(inst)
+        await db.commit()
+        await db.refresh(inst)
+        inst_id = inst.id
+
+    mock_proc = _make_mock_process()
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    im = InstanceManager(db_factory, broadcaster)
+
+    with patch.dict(os.environ, {}, clear=False):
+        os.environ.pop("MAX_THINKING_TOKENS", None)
+        with patch("backend.services.instance_manager.asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=mock_proc) as mock_exec:
+            await im.launch(instance_id=inst_id, prompt="hi", cwd="/tmp", thinking_budget=0)
+
+    env = mock_exec.call_args[1]["env"]
+    assert "MAX_THINKING_TOKENS" not in env
+    await asyncio.sleep(0.1)
+
+
+@pytest.mark.asyncio
 async def test_stop_terminates(db_factory):
     """stop() sends terminate and updates DB status."""
     async with db_factory() as db:

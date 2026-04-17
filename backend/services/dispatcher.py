@@ -295,6 +295,12 @@ class GlobalDispatcher:
                 logger.error(f"Dispatch loop error: {e}", exc_info=True)
                 await asyncio.sleep(5)
 
+    async def _get_thinking_budget(self, instance_id: int) -> int | None:
+        """Look up the configured Extended Thinking budget for an instance."""
+        async with self.db_factory() as db:
+            inst = await db.get(Instance, instance_id)
+            return inst.thinking_budget if inst else None
+
     async def _run_task_lifecycle(self, instance_id: int, task: Task, git_env: dict | None = None):
         """Execute the task lifecycle: assign → Claude Code → judge result.
 
@@ -313,14 +319,16 @@ class GlobalDispatcher:
 
             # === Step 2: Determine cwd and update task ===
             cwd = task.target_repo or "."
+            thinking_budget: int | None = None
             async with self.db_factory() as db:
+                instance = await db.get(Instance, instance_id)
+                if instance:
+                    thinking_budget = instance.thinking_budget
                 # Resolve actual model: task's own model, or fall back to instance's model
-                if not task.model:
-                    instance = await db.get(Instance, instance_id)
-                    if instance:
-                        resolved_model = instance.model if instance.model != "default" else None
-                        if resolved_model:
-                            task.model = resolved_model
+                if not task.model and instance:
+                    resolved_model = instance.model if instance.model != "default" else None
+                    if resolved_model:
+                        task.model = resolved_model
                 update_values: dict = {"status": "executing", "instance_id": instance_id}
                 if task.model:
                     update_values["model"] = task.model
@@ -369,6 +377,7 @@ class GlobalDispatcher:
                 cwd=cwd,
                 model=task.model,
                 git_env=git_env or {},
+                thinking_budget=thinking_budget,
             )
 
             # Wait for process to finish (with timeout)
@@ -515,6 +524,7 @@ class GlobalDispatcher:
                 model=None,
                 loop_iteration=iteration,
                 git_env=git_env or {},
+                thinking_budget=await self._get_thinking_budget(instance_id),
             )
 
             process = self.instance_manager.processes.get(instance_id)
@@ -697,6 +707,7 @@ class GlobalDispatcher:
             resume_session_id=resume_sid,
             loop_iteration=iteration,
             git_env=git_env,
+            thinking_budget=await self._get_thinking_budget(instance_id),
         )
 
         fix_proc = self.instance_manager.processes.get(instance_id)
@@ -723,6 +734,7 @@ class GlobalDispatcher:
             cwd=cwd,
             model=None,
             git_env=git_env or {},
+            thinking_budget=await self._get_thinking_budget(instance_id),
         )
         process = self.instance_manager.processes.get(instance_id)
         if process:

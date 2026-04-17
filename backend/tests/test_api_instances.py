@@ -59,6 +59,43 @@ async def test_create_instance_custom_model(client):
 
 
 @pytest.mark.asyncio
+async def test_create_instance_with_thinking_budget(client):
+    """thinking_budget passed in POST is stored and returned."""
+    resp = await client.post(
+        "/api/instances",
+        json={"name": "deep-thinker", "model": "opus", "thinking_budget": 16000},
+    )
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["thinking_budget"] == 16000
+
+
+@pytest.mark.asyncio
+async def test_create_instance_default_thinking_budget_is_null(client):
+    """Without thinking_budget, the response field is null."""
+    resp = await client.post("/api/instances", json={"name": "no-budget"})
+    assert resp.status_code == 201
+    assert resp.json()["thinking_budget"] is None
+
+
+@pytest.mark.asyncio
+async def test_run_instance_forwards_thinking_budget(client):
+    """POST /run forwards stored thinking_budget to instance_manager.launch()."""
+    inst_resp = await client.post(
+        "/api/instances",
+        json={"name": "budget-runner", "thinking_budget": 8000},
+    )
+    inst_id = inst_resp.json()["id"]
+    mock_im = _make_mock_instance_manager(is_running_val=False, launch_pid=42)
+    with patch("backend.main.instance_manager", mock_im):
+        resp = await client.post(f"/api/instances/{inst_id}/run?prompt=hello")
+    assert resp.status_code == 200
+    mock_im.launch.assert_awaited_once()
+    kwargs = mock_im.launch.call_args.kwargs
+    assert kwargs["thinking_budget"] == 8000
+
+
+@pytest.mark.asyncio
 async def test_get_instance(client):
     create_resp = await client.post("/api/instances", json={"name": "w"})
     inst_id = create_resp.json()["id"]
