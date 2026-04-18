@@ -6,6 +6,7 @@ import type { ChatMessage, Task, Project, UploadResult } from '../../api/client'
 import { useWebSocket } from '../../hooks/useWebSocket';
 import { Send, ArrowLeft, Loader2, ChevronDown, ChevronRight, Copy, Check, Paperclip, X, StopCircle, Pencil } from 'lucide-react';
 import { SecretPicker } from '../Secrets/SecretPicker';
+import { formatMessageTime } from '../../config/timezone';
 
 interface ChatViewProps {
   task: Task;
@@ -700,6 +701,15 @@ function MarkdownContent({ content, className }: { content: string; className?: 
   );
 }
 
+function MessageTimestamp({ timestamp, className }: { timestamp: string | null; className?: string }) {
+  if (!timestamp) return null;
+  return (
+    <span className={`text-[10px] text-gray-600 select-none ${className || ''}`}>
+      {formatMessageTime(timestamp)}
+    </span>
+  );
+}
+
 function MessageBubble({ message }: { message: ChatMessage }) {
   const isUser = message.role === 'user';
 
@@ -711,6 +721,9 @@ function MessageBubble({ message }: { message: ChatMessage }) {
         <div className="flex items-center gap-1.5 text-gray-500">
           <span>💭</span>
           <span className="font-medium">Thinking</span>
+          {message.timestamp && (
+            <MessageTimestamp timestamp={message.timestamp} className="ml-auto" />
+          )}
         </div>
         <div className="mt-1.5">
           {text && !isEncrypted ? (
@@ -736,20 +749,33 @@ function MessageBubble({ message }: { message: ChatMessage }) {
     return (
       <div className="text-center text-xs text-gray-600 py-1">
         {label}
+        {message.timestamp && (
+          <>
+            {' '}
+            <MessageTimestamp timestamp={message.timestamp} />
+          </>
+        )}
       </div>
     );
   }
 
   if (message.is_error) {
     return (
-      <div className="mx-4 px-3 py-2 bg-red-500/10 border border-red-500/30 rounded text-sm text-red-400">
-        {message.content}
+      <div className="mx-4">
+        <div className="px-3 py-2 bg-red-500/10 border border-red-500/30 rounded text-sm text-red-400">
+          {message.content}
+        </div>
+        {message.timestamp && (
+          <div className="mt-0.5 px-1">
+            <MessageTimestamp timestamp={message.timestamp} />
+          </div>
+        )}
       </div>
     );
   }
 
   return (
-    <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
+    <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'}`}>
       <div
         className={`max-w-[85%] rounded-2xl px-4 py-2.5 text-sm ${
           isUser
@@ -763,6 +789,11 @@ function MessageBubble({ message }: { message: ChatMessage }) {
           <MarkdownContent content={message.content || ''} />
         )}
       </div>
+      {message.timestamp && (
+        <div className={`mt-0.5 ${isUser ? 'pr-1' : 'pl-1'}`}>
+          <MessageTimestamp timestamp={message.timestamp} />
+        </div>
+      )}
     </div>
   );
 }
