@@ -356,12 +356,12 @@ class GlobalDispatcher:
 
             # === Step 3: Plan mode check ===
             if task.mode == "plan" and not task.plan_approved:
-                await self._run_plan_phase(instance_id, task, cwd, git_env)
+                await self._run_plan_phase(instance_id, task, cwd, git_env, effort_level=effort_level)
                 return
 
             # === Step 3b: Loop mode ===
             if task.mode == "loop":
-                await self._run_loop_lifecycle(instance_id, task, cwd, git_env)
+                await self._run_loop_lifecycle(instance_id, task, cwd, git_env, effort_level=effort_level)
                 return
 
             # === Step 4: Launch Claude Code ===
@@ -481,7 +481,7 @@ class GlobalDispatcher:
         finally:
             self._running_tasks.pop(instance_id, None)
 
-    async def _run_loop_lifecycle(self, instance_id: int, task: Task, cwd: str, git_env: dict | None = None):
+    async def _run_loop_lifecycle(self, instance_id: int, task: Task, cwd: str, git_env: dict | None = None, effort_level: str | None = None):
         """Loop: repeatedly invoke Claude Code until it signals done or abort.
 
         Each iteration starts a fresh Claude Code subprocess. Claude reads the todo
@@ -531,11 +531,11 @@ class GlobalDispatcher:
                 prompt=prompt,
                 task_id=task.id,
                 cwd=cwd,
-                model=None,
+                model=task.model,
                 loop_iteration=iteration,
                 git_env=git_env or {},
                 thinking_budget=await self._get_thinking_budget(instance_id),
-                effort_level=await self._get_effort_level(instance_id),
+                effort_level=effort_level,
             )
 
             process = self.instance_manager.processes.get(instance_id)
@@ -560,7 +560,8 @@ class GlobalDispatcher:
             # P0: If signal is missing, attempt one resume to ask Claude to write it
             if signal.get("reason") == "Signal file missing or invalid JSON":
                 signal = await self._resume_fix_signal(
-                    instance_id, task, cwd, signal_path, iteration, git_env or {}
+                    instance_id, task, cwd, signal_path, iteration, git_env or {},
+                    effort_level=effort_level,
                 )
 
             # Update loop_progress from signal (Claude's self-reported progress string)
@@ -686,6 +687,7 @@ class GlobalDispatcher:
         signal_path,
         iteration: int,
         git_env: dict,
+        effort_level: str | None = None,
     ) -> dict:
         """Resume the last session to ask Claude to write the missing signal file.
 
@@ -715,11 +717,12 @@ class GlobalDispatcher:
             prompt=fix_prompt,
             task_id=task.id,
             cwd=cwd,
+            model=task.model,
             resume_session_id=resume_sid,
             loop_iteration=iteration,
             git_env=git_env,
             thinking_budget=await self._get_thinking_budget(instance_id),
-            effort_level=await self._get_effort_level(instance_id),
+            effort_level=effort_level,
         )
 
         fix_proc = self.instance_manager.processes.get(instance_id)
@@ -733,7 +736,7 @@ class GlobalDispatcher:
 
         return self._read_loop_signal(signal_path)
 
-    async def _run_plan_phase(self, instance_id: int, task: Task, cwd: str, git_env: dict | None = None):
+    async def _run_plan_phase(self, instance_id: int, task: Task, cwd: str, git_env: dict | None = None, effort_level: str | None = None):
         """Run plan phase for plan-mode tasks."""
         plan_prompt = (
             f"Please analyze the following task and create a detailed plan. "
@@ -744,10 +747,10 @@ class GlobalDispatcher:
             prompt=plan_prompt,
             task_id=task.id,
             cwd=cwd,
-            model=None,
+            model=task.model,
             git_env=git_env or {},
             thinking_budget=await self._get_thinking_budget(instance_id),
-            effort_level=await self._get_effort_level(instance_id),
+            effort_level=effort_level,
         )
         process = self.instance_manager.processes.get(instance_id)
         if process:
