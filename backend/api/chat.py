@@ -98,16 +98,22 @@ async def send_chat_message(
     if not cwd or not os.path.isdir(cwd):
         raise HTTPException(400, "Task working directory not found.")
 
+    # Resolve effort: task.effort_level → instance.effort_level → settings.default_effort
+    from backend.config import settings as app_settings
+    effort_level = task.effort_level or inst.effort_level or app_settings.default_effort
+
     # Launch with --resume, using the task's cwd
+    # Use task.model (the model that created the session) to maintain consistency,
+    # falling back to instance model only if task has no model set.
     pid = await instance_manager.launch(
         instance_id=inst.id,
         prompt=prompt,
         task_id=task_id,
         cwd=cwd,
-        model=inst.model,
+        model=task.model or inst.model,
         resume_session_id=task.session_id,
         thinking_budget=inst.thinking_budget,
-        effort_level=inst.effort_level,
+        effort_level=effort_level,
     )
     return {"ok": True, "pid": pid, "instance_id": inst.id, "session_id": task.session_id}
 
