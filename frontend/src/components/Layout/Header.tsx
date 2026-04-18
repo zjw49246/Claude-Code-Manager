@@ -1,7 +1,8 @@
 import { useState } from 'react';
-import { Sun, Moon } from 'lucide-react';
+import { Sun, Moon, Globe } from 'lucide-react';
 import { isCapacitor } from '../../config/server';
 import { getTheme, toggleTheme } from '../../config/theme';
+import { getTimezone, setTimezone, TIMEZONE_OPTIONS } from '../../config/timezone';
 
 interface HeaderProps {
   currentPage: string;
@@ -10,6 +11,7 @@ interface HeaderProps {
 
 export function Header({ currentPage, onNavigate }: HeaderProps) {
   const [theme, setTheme] = useState(getTheme());
+  const [tz, setTz] = useState(getTimezone());
 
   const pages = [
     { key: 'dashboard', label: 'Dashboard' },
@@ -43,13 +45,28 @@ export function Header({ currentPage, onNavigate }: HeaderProps) {
           </button>
         ))}
       </nav>
-      <button
-        onClick={handleToggleTheme}
-        className="ml-auto p-2 rounded text-gray-400 hover:text-foreground hover:bg-gray-800 transition-colors"
-        title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-      >
-        {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
-      </button>
+      <div className="ml-auto flex items-center gap-1">
+        <div className="relative flex items-center">
+          <Globe size={16} className="absolute left-2 text-gray-500 pointer-events-none" />
+          <select
+            value={tz}
+            onChange={(e) => { setTimezone(e.target.value); setTz(e.target.value); }}
+            className="appearance-none bg-gray-800 text-gray-300 text-xs rounded pl-7 pr-6 py-1.5 border border-gray-700 hover:border-gray-600 focus:outline-none focus:ring-1 focus:ring-indigo-500 cursor-pointer"
+            title="Timezone"
+          >
+            {TIMEZONE_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>{opt.label}</option>
+            ))}
+          </select>
+        </div>
+        <button
+          onClick={handleToggleTheme}
+          className="p-2 rounded text-gray-400 hover:text-foreground hover:bg-gray-800 transition-colors"
+          title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+        >
+          {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
+        </button>
+      </div>
     </header>
   );
 }
