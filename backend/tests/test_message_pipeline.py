@@ -638,6 +638,50 @@ async def test_chat_history_limit(client, session_factory):
 
 
 @pytest.mark.asyncio
+async def test_chat_history_no_limit_returns_all(client, session_factory):
+    """Default limit=0 should return all messages for a task."""
+    create_resp = await client.post("/api/tasks", json={
+        "title": "T", "description": "d", "target_repo": "/tmp",
+    })
+    task_id = create_resp.json()["id"]
+
+    async with session_factory() as db:
+        for i in range(50):
+            db.add(LogEntry(
+                instance_id=1, task_id=task_id,
+                event_type="message", role="assistant", content=f"msg-{i}", is_error=False,
+            ))
+        await db.commit()
+
+    resp = await client.get(f"/api/tasks/{task_id}/chat/history")
+    msgs = resp.json()
+    assert len(msgs) == 50
+    assert msgs[0]["content"] == "msg-0"
+    assert msgs[49]["content"] == "msg-49"
+
+
+@pytest.mark.asyncio
+async def test_chat_history_explicit_zero_returns_all(client, session_factory):
+    """Explicitly passing limit=0 should return all messages."""
+    create_resp = await client.post("/api/tasks", json={
+        "title": "T", "description": "d", "target_repo": "/tmp",
+    })
+    task_id = create_resp.json()["id"]
+
+    async with session_factory() as db:
+        for i in range(20):
+            db.add(LogEntry(
+                instance_id=1, task_id=task_id,
+                event_type="message", role="assistant", content=f"m-{i}", is_error=False,
+            ))
+        await db.commit()
+
+    resp = await client.get(f"/api/tasks/{task_id}/chat/history?limit=0")
+    msgs = resp.json()
+    assert len(msgs) == 20
+
+
+@pytest.mark.asyncio
 async def test_chat_history_ordered_by_id(client, session_factory):
     """Chat history should be ordered by ID ascending."""
     create_resp = await client.post("/api/tasks", json={

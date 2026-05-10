@@ -121,7 +121,7 @@ async def send_chat_message(
 @router.get("/{task_id}/chat/history")
 async def get_chat_history(
     task_id: int,
-    limit: int = 500,
+    limit: int = 0,
     db: AsyncSession = Depends(get_db),
 ):
     """Get chat-formatted history for a task (user messages + assistant responses)."""
@@ -129,29 +129,29 @@ async def get_chat_history(
     if not task:
         raise HTTPException(404, "Task not found")
 
-    # Fetch the most recent N messages (desc) then reverse to chronological order
-    stmt = (
-        select(
-            LogEntry.id,
-            LogEntry.role,
-            LogEntry.event_type,
-            LogEntry.content,
-            LogEntry.tool_name,
-            LogEntry.tool_input,
-            LogEntry.tool_output,
-            LogEntry.is_error,
-            LogEntry.loop_iteration,
-            LogEntry.timestamp,
+    allowed = ["user_message", "message", "result", "tool_use", "tool_result", "system_init", "system_event", "thinking", "process_exit"]
+    cols = [
+        LogEntry.id, LogEntry.role, LogEntry.event_type, LogEntry.content,
+        LogEntry.tool_name, LogEntry.tool_input, LogEntry.tool_output,
+        LogEntry.is_error, LogEntry.loop_iteration, LogEntry.timestamp,
+    ]
+    if limit > 0:
+        stmt = (
+            select(*cols)
+            .where(LogEntry.task_id == task_id, LogEntry.event_type.in_(allowed))
+            .order_by(LogEntry.id.desc())
+            .limit(limit)
         )
-        .where(
-            LogEntry.task_id == task_id,
-            LogEntry.event_type.in_(["user_message", "message", "result", "tool_use", "tool_result", "system_init", "system_event", "thinking", "process_exit"]),
+        result = await db.execute(stmt)
+        rows = list(reversed(result.all()))
+    else:
+        stmt = (
+            select(*cols)
+            .where(LogEntry.task_id == task_id, LogEntry.event_type.in_(allowed))
+            .order_by(LogEntry.id.asc())
         )
-        .order_by(LogEntry.id.desc())
-        .limit(limit)
-    )
-    result = await db.execute(stmt)
-    rows = list(reversed(result.all()))
+        result = await db.execute(stmt)
+        rows = result.all()
 
     _TRUNCATE = 20_000  # chars; tool outputs can be huge (file reads, bash output)
 
