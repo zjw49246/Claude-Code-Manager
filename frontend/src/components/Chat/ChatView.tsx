@@ -110,6 +110,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
   const titleInputRef = useRef<HTMLInputElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Handle real-time WebSocket messages via callback (not state) to avoid
   // losing messages when React batches rapid state updates.
@@ -216,6 +217,13 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
       bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
     }
   }, [messages]);
+
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = el.scrollHeight + 'px';
+  }, [input]);
 
   const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
@@ -459,6 +467,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
             </button>
             <SecretPicker selectedIds={selectedSecretIds} onChange={setSelectedSecretIds} disabled={sending || !task.session_id} />
             <textarea
+              ref={textareaRef}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
@@ -471,7 +480,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
               }
               disabled={sending || !task.session_id}
               rows={1}
-              className="flex-1 bg-gray-800 text-foreground rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-none disabled:opacity-50 max-h-32"
+              className="flex-1 bg-gray-800 text-foreground rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-none disabled:opacity-50 max-h-48 overflow-y-auto"
               style={{ minHeight: '40px' }}
             />
             <button

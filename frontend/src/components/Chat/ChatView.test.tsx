@@ -165,6 +165,48 @@ describe('ChatView', () => {
     });
   });
 
+  describe('Textarea auto-resize', () => {
+    it('textarea has ref and auto-resize classes', () => {
+      const task = makeTask();
+      const { container } = render(<ChatView task={task} projects={projects} onBack={onBack} />);
+
+      const textarea = container.querySelector('textarea');
+      expect(textarea).toBeInTheDocument();
+      expect(textarea?.className).toContain('max-h-48');
+      expect(textarea?.className).toContain('overflow-y-auto');
+      expect(textarea?.className).toContain('resize-none');
+    });
+
+    it('adjusts height when input changes', async () => {
+      const task = makeTask();
+      const { container } = render(<ChatView task={task} projects={projects} onBack={onBack} />);
+
+      const textarea = container.querySelector('textarea')!;
+      // Mock scrollHeight
+      Object.defineProperty(textarea, 'scrollHeight', { value: 80, configurable: true });
+
+      await userEvent.type(textarea, 'Line 1\nLine 2\nLine 3');
+
+      expect(textarea.style.height).toBe('80px');
+    });
+
+    it('resets height when input is cleared', async () => {
+      const task = makeTask();
+      const { container } = render(<ChatView task={task} projects={projects} onBack={onBack} />);
+
+      const textarea = container.querySelector('textarea')!;
+      Object.defineProperty(textarea, 'scrollHeight', { value: 80, configurable: true });
+
+      await userEvent.type(textarea, 'Hello');
+      expect(textarea.style.height).toBe('80px');
+
+      // Simulate clearing input and smaller scrollHeight
+      Object.defineProperty(textarea, 'scrollHeight', { value: 40, configurable: true });
+      await userEvent.clear(textarea);
+      expect(textarea.style.height).toBe('40px');
+    });
+  });
+
   describe('Back button', () => {
     it('calls onBack when back button clicked', async () => {
       const task = makeTask();
