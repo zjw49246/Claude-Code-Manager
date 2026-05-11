@@ -18,8 +18,8 @@ class TokenAuthMiddleware(BaseHTTPMiddleware):
 
         path = request.url.path
 
-        # Skip auth for public paths and static files
-        if path in self.PUBLIC_PATHS or not path.startswith("/api"):
+        # Skip auth for public paths, static files, and uploaded images (UUID filenames)
+        if path in self.PUBLIC_PATHS or not path.startswith("/api") or path.startswith("/api/uploads/"):
             return await call_next(request)
 
         # Skip auth for WebSocket (handled separately)
