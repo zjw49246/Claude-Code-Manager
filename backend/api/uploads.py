@@ -1,8 +1,13 @@
+import asyncio
+import logging
+import time
 import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, UploadFile, File
 from fastapi.responses import FileResponse
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/uploads", tags=["uploads"])
 
@@ -10,6 +15,8 @@ router = APIRouter(prefix="/api/uploads", tags=["uploads"])
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 UPLOAD_DIR = _PROJECT_ROOT / "uploads"
 
+_CLEANUP_MAX_AGE_DAYS = 15
+_CLEANUP_INTERVAL_HOURS = 24
 _BLOCKED_EXTENSIONS = {".exe", ".zip"}
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 _MAX_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
@@ -69,3 +76,32 @@ async def get_file(filename: str):
         raise HTTPException(404, "File not found")
 
     return FileResponse(str(file_path))
+
+
+def cleanup_expired_uploads() -> int:
+    """Delete files in UPLOAD_DIR older than _CLEANUP_MAX_AGE_DAYS. Returns count deleted."""
+    if not UPLOAD_DIR.is_dir():
+        return 0
+    cutoff = time.time() - _CLEANUP_MAX_AGE_DAYS * 86400
+    deleted = 0
+    for f in UPLOAD_DIR.iterdir():
+        if f.is_file() and f.stat().st_mtime < cutoff:
+            f.unlink()
+            deleted += 1
+    return deleted
+
+
+async def start_upload_cleanup_loop() -> asyncio.Task:
+    """Start a background loop that cleans expired uploads every 24 hours."""
+
+    async def _loop():
+        while True:
+            try:
+                deleted = await asyncio.to_thread(cleanup_expired_uploads)
+                if deleted:
+                    logger.info("Upload cleanup: deleted %d expired file(s)", deleted)
+            except Exception:
+                logger.exception("Upload cleanup error")
+            await asyncio.sleep(_CLEANUP_INTERVAL_HOURS * 3600)
+
+    return asyncio.create_task(_loop())
