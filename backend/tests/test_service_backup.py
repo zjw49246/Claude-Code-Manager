@@ -1,5 +1,4 @@
 """Tests for BackupService."""
-import subprocess
 from unittest.mock import MagicMock, call
 
 import pytest
@@ -31,11 +30,25 @@ def _make_svc(**overrides) -> BackupService:
 class TestBuildDestination:
     def test_local_ok(self):
         svc = _make_svc(backup_type="local", destination_path="/mnt/bak")
-        assert svc._build_destination() == {"type": "local", "path": "/mnt/bak"}
+        dest = svc._build_destination()
+        assert dest["type"] == "local"
+        assert dest["path"] == "/mnt/bak"
 
     def test_local_empty_path_returns_none(self):
         svc = _make_svc(backup_type="local", destination_path="")
         assert svc._build_destination() is None
+
+    def test_local_tilde_path_expanded(self):
+        svc = _make_svc(backup_type="local", destination_path="~/backup/data")
+        dest = svc._build_destination()
+        assert dest is not None
+        assert "~" not in dest["path"]
+        assert dest["path"].startswith("/")
+
+    def test_local_relative_path_resolved(self):
+        svc = _make_svc(backup_type="local", destination_path="./backups")
+        dest = svc._build_destination()
+        assert dest["path"].startswith("/")
 
     def test_s3_ok(self):
         svc = _make_svc(
@@ -125,7 +138,6 @@ class TestStart:
         kwargs = mock_instance.add_task.call_args.kwargs
         assert kwargs["interval_seconds"] == 3600
         assert kwargs["max_copies"] == 10
-        assert kwargs["destinations"] == [{"type": "local", "path": "/tmp/bak"}]
         mock_instance.start.assert_called_once()
 
     def test_returns_false_when_destination_not_configured(self):
@@ -187,6 +199,46 @@ class TestStart:
         kwargs = mock_instance.add_task.call_args.kwargs
         assert kwargs["interval_seconds"] == 7200
         assert kwargs["max_copies"] == 5
+
+    def test_temp_dir_passed_to_auto_backup(self):
+        mock_instance = MagicMock()
+        mock_cls = MagicMock(return_value=mock_instance)
+        svc = _make_svc(
+            temp_dir="~/cache/backup-tmp",
+            _auto_backup_cls=mock_cls,
+        )
+
+        svc.start()
+
+        init_kwargs = mock_cls.call_args.kwargs
+        assert "tmp_base_dir" in init_kwargs
+        assert "~" not in init_kwargs["tmp_base_dir"]
+        assert init_kwargs["tmp_base_dir"].startswith("/")
+
+    def test_no_temp_dir_passes_none(self):
+        mock_instance = MagicMock()
+        mock_cls = MagicMock(return_value=mock_instance)
+        svc = _make_svc(temp_dir="", _auto_backup_cls=mock_cls)
+
+        svc.start()
+
+        init_kwargs = mock_cls.call_args.kwargs
+        assert init_kwargs.get("tmp_base_dir") is None
+
+    def test_tilde_destination_expanded_in_destination_dict(self):
+        mock_instance = MagicMock()
+        mock_cls = MagicMock(return_value=mock_instance)
+        svc = _make_svc(
+            backup_type="local",
+            destination_path="~/backup/data",
+            _auto_backup_cls=mock_cls,
+        )
+
+        svc.start()
+
+        destinations = mock_instance.add_task.call_args.kwargs["destinations"]
+        assert "~" not in destinations[0]["path"]
+        assert destinations[0]["path"].startswith("/")
 
 
 # ── stop ──────────────────────────────────────────────────────────────────────

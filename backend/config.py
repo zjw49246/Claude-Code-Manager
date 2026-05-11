@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     backup_type: str = "local"          # local | s3 | oss
     backup_interval_seconds: int = 3600
     backup_max_copies: int = 10
+    backup_temp_dir: str = ""           # Custom temp dir for archive files (avoids filling /tmp)
     # local backend
     backup_destination_path: str = ""
     # AWS S3 backend
