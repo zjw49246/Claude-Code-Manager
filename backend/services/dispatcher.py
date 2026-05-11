@@ -496,6 +496,8 @@ class GlobalDispatcher:
         signal_path.parent.mkdir(parents=True, exist_ok=True)
 
         iteration = 0
+        history: list[dict] = []
+        anchored_total: int | None = None
 
         max_iterations = task.max_iterations or 50
 
@@ -524,7 +526,7 @@ class GlobalDispatcher:
             # Clear signal file so we can detect if Claude fails to write one
             signal_path.unlink(missing_ok=True)
 
-            prompt = self._build_loop_prompt(task, iteration, str(signal_path))
+            prompt = self._build_loop_prompt(task, iteration, str(signal_path), history, anchored_total)
 
             await self.instance_manager.launch(
                 instance_id=instance_id,
@@ -573,6 +575,21 @@ class GlobalDispatcher:
                         .values(loop_progress=signal["progress"])
                     )
                     await db.commit()
+
+            # Anchor total from the first progress report so subsequent iterations stay consistent
+            progress_str = signal.get("progress", "")
+            if progress_str and anchored_total is None:
+                try:
+                    anchored_total = int(progress_str.split("/")[1])
+                except (IndexError, ValueError):
+                    pass
+
+            # Collect iteration history for subsequent prompts
+            history.append({
+                "iteration": iteration + 1,
+                "progress": progress_str,
+                "summary": signal.get("summary", ""),
+            })
 
             # Broadcast iteration result so frontend can update the panel header
             await self.broadcaster.broadcast(f"task:{task.id}", {
@@ -631,7 +648,8 @@ class GlobalDispatcher:
 
         signal_path.unlink(missing_ok=True)
 
-    def _build_loop_prompt(self, task: Task, iteration: int, signal_path: str) -> str:
+    def _build_loop_prompt(self, task: Task, iteration: int, signal_path: str,
+                           history: list[dict] | None = None, anchored_total: int | None = None) -> str:
         """Build the per-iteration prompt for a loop task.
 
         Only describes todo-related responsibilities. Git/commit/worktree lifecycle
@@ -641,6 +659,26 @@ class GlobalDispatcher:
 
         if task.description:
             parts.append(f"背景说明：{task.description}\n")
+
+        # Include previous iterations' summaries so Claude has context
+        if history:
+            parts.append("=== 前几轮完成情况 ===")
+            for h in history:
+                line = f"第 {h['iteration']} 轮"
+                if h.get("progress"):
+                    line += f" | 进度: {h['progress']}"
+                if h.get("summary"):
+                    line += f" | {h['summary']}"
+                parts.append(line)
+            parts.append("=== 前几轮完成情况结束 ===\n")
+
+        # Progress format: anchor total from first iteration so denominator stays consistent
+        if anchored_total is not None:
+            progress_hint = f"已完成数/{anchored_total}"
+            total_note = f"\n注意：任务总数已确定为 {anchored_total}，progress 分母必须始终为 {anchored_total}，不要重新计数。"
+        else:
+            progress_hint = "已完成数/总数"
+            total_note = ""
 
         parts.append(f"""\
 请遵循 CLAUDE.md 中的所有要求和项目约定。
@@ -655,13 +693,14 @@ class GlobalDispatcher:
 完成后，将以下 JSON 写入 {signal_path}：
 
 还有待完成项，请继续下一轮：
-{{"action": "continue", "reason": "...", "progress": "已完成数/总数"}}
+{{"action": "continue", "reason": "...", "progress": "{progress_hint}", "summary": "本轮做了什么（一句话）"}}
 
 全部完成：
-{{"action": "done", "reason": "所有 todo 项已完成"}}
+{{"action": "done", "reason": "所有 todo 项已完成", "progress": "{progress_hint}", "summary": "本轮做了什么（一句话）"}}
 
 无法继续（遇到阻塞或明确问题）：
-{{"action": "abort", "reason": "具体原因"}}
+{{"action": "abort", "reason": "具体原因", "progress": "{progress_hint}", "summary": "本轮做了什么（一句话）"}}
+{total_note}
 """)
         return "\n".join(parts)
 

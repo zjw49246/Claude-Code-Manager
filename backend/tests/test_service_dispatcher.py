@@ -347,13 +347,15 @@ async def test_lifecycle_prompt_no_images(db_factory):
 # ===  Loop lifecycle tests ===
 
 
-def _write_signal(signal_path, action: str, reason: str = "", progress: str | None = None):
+def _write_signal(signal_path, action: str, reason: str = "", progress: str | None = None, summary: str | None = None):
     """Helper: write a signal file synchronously."""
     import json
     from pathlib import Path
     data = {"action": action, "reason": reason}
     if progress:
         data["progress"] = progress
+    if summary:
+        data["summary"] = summary
     Path(signal_path).write_text(json.dumps(data), encoding="utf-8")
 
 
@@ -647,6 +649,246 @@ async def test_loop_prompt_iteration_numbering(db_factory, tmp_path):
     p2 = d._build_loop_prompt(task, iteration=2, signal_path="/sig")
     assert "第 1 轮" in p0
     assert "第 3 轮" in p2
+
+
+@pytest.mark.asyncio
+async def test_loop_prompt_no_history_no_anchor(db_factory):
+    """First iteration: no history section, progress hint is generic."""
+    d = _make_dispatcher(db_factory)
+    task = Task(title="t", mode="loop", todo_file_path="TODO.md", max_iterations=10)
+
+    prompt = d._build_loop_prompt(task, iteration=0, signal_path="/sig", history=None, anchored_total=None)
+    assert "前几轮完成情况" not in prompt
+    assert "已完成数/总数" in prompt
+    assert "不要重新计数" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_loop_prompt_with_history_and_anchor(db_factory):
+    """Subsequent iterations include history and anchored total in denominator."""
+    d = _make_dispatcher(db_factory)
+    task = Task(title="t", mode="loop", todo_file_path="TODO.md", max_iterations=10)
+
+    history = [
+        {"iteration": 1, "progress": "2/10", "summary": "完成了登录和注册"},
+        {"iteration": 2, "progress": "5/10", "summary": "实现了JWT刷新"},
+    ]
+    prompt = d._build_loop_prompt(task, iteration=2, signal_path="/sig", history=history, anchored_total=10)
+
+    # History section present
+    assert "=== 前几轮完成情况 ===" in prompt
+    assert "第 1 轮 | 进度: 2/10 | 完成了登录和注册" in prompt
+    assert "第 2 轮 | 进度: 5/10 | 实现了JWT刷新" in prompt
+    assert "=== 前几轮完成情况结束 ===" in prompt
+
+    # Anchored denominator
+    assert "已完成数/10" in prompt
+    assert "任务总数已确定为 10" in prompt
+    assert "不要重新计数" in prompt
+
+    # Generic hint should NOT appear
+    assert "已完成数/总数" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_loop_prompt_history_without_summary(db_factory):
+    """History entries with missing summary still render correctly."""
+    d = _make_dispatcher(db_factory)
+    task = Task(title="t", mode="loop", todo_file_path="TODO.md", max_iterations=10)
+
+    history = [{"iteration": 1, "progress": "1/5", "summary": ""}]
+    prompt = d._build_loop_prompt(task, iteration=1, signal_path="/sig", history=history, anchored_total=5)
+
+    assert "第 1 轮 | 进度: 1/5" in prompt
+    # No trailing " | " when summary is empty
+    assert "第 1 轮 | 进度: 1/5 |" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_loop_prompt_history_without_progress(db_factory):
+    """History entries with missing progress still render correctly."""
+    d = _make_dispatcher(db_factory)
+    task = Task(title="t", mode="loop", todo_file_path="TODO.md", max_iterations=10)
+
+    history = [{"iteration": 1, "progress": "", "summary": "did something"}]
+    prompt = d._build_loop_prompt(task, iteration=1, signal_path="/sig", history=history, anchored_total=None)
+
+    assert "第 1 轮 | did something" in prompt
+    assert "进度:" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_loop_prompt_all_actions_include_summary_and_progress(db_factory):
+    """All three signal templates (continue/done/abort) include summary and progress fields."""
+    d = _make_dispatcher(db_factory)
+    task = Task(title="t", mode="loop", todo_file_path="TODO.md", max_iterations=10)
+
+    prompt = d._build_loop_prompt(task, iteration=0, signal_path="/sig")
+
+    # Each action block should have both progress and summary
+    for action in ["continue", "done", "abort"]:
+        # Find the line containing this action
+        lines = [l for l in prompt.split("\n") if f'"action": "{action}"' in l]
+        assert len(lines) == 1, f"Expected exactly one template line for action={action}"
+        assert '"progress":' in lines[0], f"action={action} missing progress field"
+        assert '"summary":' in lines[0], f"action={action} missing summary field"
+
+
+@pytest.mark.asyncio
+async def test_loop_lifecycle_anchors_total_from_first_signal(db_factory, tmp_path):
+    """Total is anchored from the first progress report and used in subsequent prompts."""
+    d = _make_dispatcher(db_factory)
+
+    async with db_factory() as db:
+        inst = Instance(name="anchor-worker")
+        db.add(inst)
+        task = _make_loop_task(db, tmp_path, max_iterations=10)
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_obj = task
+
+    signal_path = tmp_path / ".claude-manager" / f"loop_signal_{task_obj.id}.json"
+    prompts_sent: list[str] = []
+    call_count = {"n": 0}
+
+    async def launch_capture_prompt(*args, **kwargs):
+        prompt = kwargs.get("prompt", args[1] if len(args) > 1 else "")
+        prompts_sent.append(prompt)
+        signal_path.parent.mkdir(parents=True, exist_ok=True)
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            _write_signal(signal_path, "continue", "more to do", "3/10", "完成了前三项")
+        elif call_count["n"] == 2:
+            _write_signal(signal_path, "continue", "more to do", "7/10", "完成了四项")
+        else:
+            _write_signal(signal_path, "done", "all done", "10/10", "最后三项")
+        return 12345
+
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.wait = AsyncMock(return_value=0)
+    d.instance_manager.launch = AsyncMock(side_effect=launch_capture_prompt)
+    d.instance_manager.processes = {inst_id: mock_proc}
+
+    await d._run_loop_lifecycle(inst_id, task_obj, str(tmp_path))
+
+    assert call_count["n"] == 3
+
+    # First prompt: no anchor yet, generic hint
+    assert "已完成数/总数" in prompts_sent[0]
+    assert "前几轮完成情况" not in prompts_sent[0]
+
+    # Second prompt: anchored total=10, has first iteration history
+    assert "已完成数/10" in prompts_sent[1]
+    assert "任务总数已确定为 10" in prompts_sent[1]
+    assert "第 1 轮 | 进度: 3/10 | 完成了前三项" in prompts_sent[1]
+
+    # Third prompt: still anchored at 10, has two iterations of history
+    assert "已完成数/10" in prompts_sent[2]
+    assert "第 1 轮 | 进度: 3/10 | 完成了前三项" in prompts_sent[2]
+    assert "第 2 轮 | 进度: 7/10 | 完成了四项" in prompts_sent[2]
+
+    # Final progress stored in DB
+    async with db_factory() as db:
+        t = await db.get(Task, task_obj.id)
+        assert t.status == "completed"
+        assert t.loop_progress == "10/10"
+
+
+@pytest.mark.asyncio
+async def test_loop_lifecycle_anchor_survives_missing_progress(db_factory, tmp_path):
+    """If a later signal omits progress, the anchored total is still used for prompts."""
+    d = _make_dispatcher(db_factory)
+
+    async with db_factory() as db:
+        inst = Instance(name="anchor-missing-worker")
+        db.add(inst)
+        task = _make_loop_task(db, tmp_path, max_iterations=10)
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_obj = task
+
+    signal_path = tmp_path / ".claude-manager" / f"loop_signal_{task_obj.id}.json"
+    prompts_sent: list[str] = []
+    call_count = {"n": 0}
+
+    async def launch_capture(*args, **kwargs):
+        prompt = kwargs.get("prompt", args[1] if len(args) > 1 else "")
+        prompts_sent.append(prompt)
+        signal_path.parent.mkdir(parents=True, exist_ok=True)
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            _write_signal(signal_path, "continue", "ok", "1/8", "第一项")
+        elif call_count["n"] == 2:
+            # Claude forgets to include progress
+            _write_signal(signal_path, "continue", "ok")
+        else:
+            _write_signal(signal_path, "done", "done", "8/8")
+        return 12345
+
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.wait = AsyncMock(return_value=0)
+    d.instance_manager.launch = AsyncMock(side_effect=launch_capture)
+    d.instance_manager.processes = {inst_id: mock_proc}
+
+    await d._run_loop_lifecycle(inst_id, task_obj, str(tmp_path))
+
+    # Third prompt should still have anchored_total=8 even though second signal had no progress
+    assert "已完成数/8" in prompts_sent[2]
+    assert "任务总数已确定为 8" in prompts_sent[2]
+
+
+@pytest.mark.asyncio
+async def test_loop_lifecycle_non_numeric_progress_no_anchor(db_factory, tmp_path):
+    """If progress is not in N/M format, anchoring is skipped gracefully."""
+    d = _make_dispatcher(db_factory)
+
+    async with db_factory() as db:
+        inst = Instance(name="non-numeric-worker")
+        db.add(inst)
+        task = _make_loop_task(db, tmp_path, max_iterations=10)
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_obj = task
+
+    signal_path = tmp_path / ".claude-manager" / f"loop_signal_{task_obj.id}.json"
+    prompts_sent: list[str] = []
+    call_count = {"n": 0}
+
+    async def launch_capture(*args, **kwargs):
+        prompt = kwargs.get("prompt", args[1] if len(args) > 1 else "")
+        prompts_sent.append(prompt)
+        signal_path.parent.mkdir(parents=True, exist_ok=True)
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            _write_signal(signal_path, "continue", "ok", "一些进度")
+        else:
+            _write_signal(signal_path, "done", "done", "全部完成")
+        return 12345
+
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.wait = AsyncMock(return_value=0)
+    d.instance_manager.launch = AsyncMock(side_effect=launch_capture)
+    d.instance_manager.processes = {inst_id: mock_proc}
+
+    await d._run_loop_lifecycle(inst_id, task_obj, str(tmp_path))
+
+    # No anchoring happened — still using generic hint
+    assert "已完成数/总数" in prompts_sent[1]
+    assert "不要重新计数" not in prompts_sent[1]
+    # But the history still shows the raw progress string
+    assert "一些进度" in prompts_sent[1]
 
 
 @pytest.mark.asyncio
