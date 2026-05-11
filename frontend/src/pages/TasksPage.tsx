@@ -34,9 +34,9 @@ export function TasksPage() {
     try {
       const offset = (page - 1) * PAGE_SIZE;
       const [filtered, count, all, projs, tags] = await Promise.all([
-        api.listTasks(filter || undefined, showArchived, projectFilter, starredFilter || undefined, PAGE_SIZE, offset),
-        api.countTasks(filter || undefined, showArchived, projectFilter, starredFilter || undefined),
-        api.listTasks(undefined, showArchived, undefined, undefined, PAGE_SIZE, 0),
+        api.listTasks(filter || undefined, false, projectFilter, starredFilter || undefined, PAGE_SIZE, offset, showArchived),
+        api.countTasks(filter || undefined, false, projectFilter, starredFilter || undefined, showArchived),
+        api.listTasks(undefined, false, undefined, undefined, PAGE_SIZE, 0, showArchived),
         api.listProjects(),
         api.listTags(),
       ]);
