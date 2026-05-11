@@ -10,7 +10,8 @@ router = APIRouter(prefix="/api/uploads", tags=["uploads"])
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 UPLOAD_DIR = _PROJECT_ROOT / "uploads"
 
-_ALLOWED_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
+_BLOCKED_EXTENSIONS = {".exe", ".zip"}
+_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 _MAX_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
 _MAX_FILES = 5
 
@@ -21,28 +22,25 @@ def _get_upload_dir() -> Path:
 
 
 @router.post("")
-async def upload_images(files: list[UploadFile] = File(...)):
-    """Upload up to 5 images. Returns list of {id, filename, path, url}."""
+async def upload_files(files: list[UploadFile] = File(...)):
+    """Upload up to 5 files. Returns list of {id, filename, path, url, is_image}."""
     if len(files) > _MAX_FILES:
         raise HTTPException(400, f"Maximum {_MAX_FILES} files allowed per request")
 
     results = []
     for file in files:
-        if file.content_type not in _ALLOWED_TYPES:
-            raise HTTPException(
-                400,
-                f"File type '{file.content_type}' not allowed. Allowed: png, jpg, gif, webp",
-            )
+        ext = Path(file.filename or "file").suffix.lower()
+        if ext in _BLOCKED_EXTENSIONS:
+            raise HTTPException(400, f"File type '{ext}' is not allowed")
 
         data = await file.read()
         if len(data) > _MAX_SIZE_BYTES:
             raise HTTPException(400, f"File '{file.filename}' exceeds 10 MB limit")
 
-        ext = Path(file.filename or "image").suffix.lower() or ".png"
         file_id = str(uuid.uuid4())
-        filename = f"{file_id}{ext}"
+        saved_name = f"{file_id}{ext}" if ext else file_id
 
-        save_path = _get_upload_dir() / filename
+        save_path = _get_upload_dir() / saved_name
         save_path.write_bytes(data)
 
         results.append(
@@ -50,7 +48,8 @@ async def upload_images(files: list[UploadFile] = File(...)):
                 "id": file_id,
                 "filename": file.filename,
                 "path": str(save_path.resolve()),
-                "url": f"/api/uploads/{filename}",
+                "url": f"/api/uploads/{saved_name}",
+                "is_image": ext in _IMAGE_EXTENSIONS,
             }
         )
 
@@ -58,8 +57,8 @@ async def upload_images(files: list[UploadFile] = File(...)):
 
 
 @router.get("/{filename}")
-async def get_image(filename: str):
-    """Serve an uploaded image (used for frontend preview)."""
+async def get_file(filename: str):
+    """Serve an uploaded file."""
     upload_dir = _get_upload_dir()
     file_path = upload_dir / filename
 
