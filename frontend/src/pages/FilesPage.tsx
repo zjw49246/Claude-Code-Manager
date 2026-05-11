@@ -1,9 +1,9 @@
 import { useState, useEffect } from 'react';
 import {
   ChevronRight, ChevronDown, Folder, FolderOpen, FileText,
-  AlertCircle, Loader2, Plus, Trash2, Server, HardDrive,
+  AlertCircle, Loader2, Plus, Trash2, Server, HardDrive, Download,
 } from 'lucide-react';
-import { api } from '../api/client';
+import { api, getToken } from '../api/client';
 import type { Project } from '../api/client';
 
 // ---------------------------------------------------------------------------
@@ -353,6 +353,39 @@ export function FilesPage() {
     saveProfiles(next);
   };
 
+  const handleDownload = async () => {
+    if (!selectedFile) return;
+    if (mode === 'local') {
+      const url = api.downloadFileUrl(selectedFile);
+      const a = document.createElement('a');
+      a.href = url;
+      const token = getToken();
+      if (token) {
+        const res = await fetch(url, { headers: { 'Authorization': `Bearer ${token}` } });
+        if (!res.ok) { setFileError('Download failed'); return; }
+        const blob = await res.blob();
+        a.href = URL.createObjectURL(blob);
+      }
+      a.download = selectedFile.split('/').pop() || 'download';
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } else if (activeProfile) {
+      try {
+        const res = await api.sshDownloadFile(profileToCreds(activeProfile), selectedFile);
+        if (!res.ok) { setFileError('Download failed'); return; }
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = selectedFile.split('/').pop() || 'download';
+        a.click();
+        URL.revokeObjectURL(url);
+      } catch {
+        setFileError('Download failed');
+      }
+    }
+  };
+
   const currentEntries = mode === 'local' ? rootEntries : sshEntries;
   const currentRootLabel = mode === 'local' ? rootPath : (activeProfile ? `${activeProfile.username}@${activeProfile.host}:${sshPath}` : '');
 
@@ -484,8 +517,15 @@ export function FilesPage() {
             )}
             {selectedFile && (
               <>
-                <div className="px-4 py-2 border-b border-gray-700 text-xs text-gray-400 truncate" title={selectedFile}>
-                  {selectedFile}
+                <div className="px-4 py-2 border-b border-gray-700 text-xs text-gray-400 flex items-center gap-2">
+                  <span className="truncate flex-1" title={selectedFile}>{selectedFile}</span>
+                  <button
+                    onClick={handleDownload}
+                    className="flex items-center gap-1 px-2 py-1 bg-indigo-600 text-white rounded text-xs hover:bg-indigo-700 flex-shrink-0"
+                    title="Download file"
+                  >
+                    <Download size={12} /> Download
+                  </button>
                 </div>
                 <div className="flex-1 overflow-auto">
                   {fileLoading && (

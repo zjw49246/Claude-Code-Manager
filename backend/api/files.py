@@ -1,8 +1,10 @@
 import os
+import tempfile
 from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/files", tags=["files"])
@@ -116,6 +118,32 @@ async def read_file(path: str = Query(..., description="Absolute file path")):
     return {"path": str(target), "content": content, "size": size}
 
 
+MAX_DOWNLOAD_SIZE = 100 * 1024 * 1024  # 100 MB
+
+
+@router.get("/download")
+async def download_file(path: str = Query(..., description="Absolute file path")):
+    """Download a file (max 100 MB)."""
+    target = _safe_path(path)
+    if not target.exists():
+        raise HTTPException(status_code=404, detail=f"File not found: {path}")
+    if not target.is_file():
+        raise HTTPException(status_code=400, detail="Path is not a file")
+
+    size = target.stat().st_size
+    if size > MAX_DOWNLOAD_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large ({size // 1024 // 1024} MB). Max is {MAX_DOWNLOAD_SIZE // 1024 // 1024} MB.",
+        )
+
+    return FileResponse(
+        path=str(target),
+        filename=target.name,
+        media_type="application/octet-stream",
+    )
+
+
 # ---------------------------------------------------------------------------
 # SSH endpoints
 # ---------------------------------------------------------------------------
@@ -180,3 +208,42 @@ async def ssh_read_file(req: SSHReadRequest):
         client.close()
 
     return {"path": req.path, "content": content, "size": size}
+
+
+@router.post("/ssh/download")
+async def ssh_download_file(req: SSHReadRequest):
+    """Download a file from a remote SSH server (max 100 MB)."""
+    client = _make_ssh_client(req)
+    try:
+        sftp = client.open_sftp()
+        try:
+            file_attr = sftp.stat(req.path)
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail=f"File not found: {req.path}")
+
+        size = file_attr.st_size or 0
+        if size > MAX_DOWNLOAD_SIZE:
+            raise HTTPException(
+                status_code=413,
+                detail=f"File too large ({size // 1024 // 1024} MB). Max is {MAX_DOWNLOAD_SIZE // 1024 // 1024} MB.",
+            )
+
+        filename = req.path.rstrip("/").rsplit("/", 1)[-1] or "download"
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=f"_{filename}")
+        try:
+            sftp.getfo(req.path, tmp)
+            tmp.close()
+        except PermissionError:
+            os.unlink(tmp.name)
+            raise HTTPException(status_code=403, detail="Permission denied")
+        finally:
+            sftp.close()
+    finally:
+        client.close()
+
+    return FileResponse(
+        path=tmp.name,
+        filename=filename,
+        media_type="application/octet-stream",
+        background=None,
+    )
