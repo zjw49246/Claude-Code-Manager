@@ -92,8 +92,12 @@ async def lifespan(app: FastAPI):
         )
         backup_svc.start()
 
+    from backend.api.uploads import start_upload_cleanup_loop
+    upload_cleanup_task = await start_upload_cleanup_loop()
+
     yield
 
+    upload_cleanup_task.cancel()
     # Stop all running Claude processes before shutdown
     for inst_id in list(instance_manager.processes.keys()):
         await instance_manager.stop(inst_id)
