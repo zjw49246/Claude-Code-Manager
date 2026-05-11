@@ -153,7 +153,7 @@ wheels = [
 [[package]]
 name = "auto-backup"
 version = "0.1.0"
-source = { git = "ssh://git@github.com/zjw49246/auto-backup#27a605ab1e0bd101a1491cfc57fe5d5bf0db9273" }
+source = { git = "https://github.com/zjw49246/auto-backup#d5449f22c948e5876b9a8ee7113d8a4f4ea9a8e6" }
 dependencies = [
     { name = "apscheduler" },
     { name = "boto3" },
@@ -471,7 +471,7 @@ requires-dist = [
     { name = "aiosqlite", specifier = ">=0.20.0" },
     { name = "alembic", specifier = ">=1.13.0" },
     { name = "asyncpg", marker = "extra == 'postgres'", specifier = ">=0.29.0" },
-    { name = "auto-backup", git = "ssh://git@github.com/zjw49246/auto-backup" },
+    { name = "auto-backup", git = "https://github.com/zjw49246/auto-backup" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "paramiko", specifier = ">=3.0.0" },

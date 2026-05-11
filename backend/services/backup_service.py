@@ -1,5 +1,6 @@
 """Backup service: wraps auto-backup SDK to periodically back up the SQLite database."""
 import logging
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -18,6 +19,7 @@ class BackupService:
         interval_seconds: How often to run a backup (default 3600).
         max_copies: How many backup copies to keep per destination (default 10).
         destination_path: Local directory path (required when *backup_type* is ``"local"``).
+        temp_dir: Custom directory for temporary archive files (avoids filling /tmp).
         s3_bucket / s3_region / s3_access_key / s3_secret_key: S3 credentials.
         oss_endpoint / oss_bucket / oss_access_key / oss_secret_key: OSS credentials.
         _auto_backup_cls: Injectable AutoBackup class (for testing).
@@ -30,6 +32,7 @@ class BackupService:
         interval_seconds: int = 3600,
         max_copies: int = 10,
         destination_path: str = "",
+        temp_dir: str = "",
         s3_bucket: str = "",
         s3_region: str = "",
         s3_access_key: str = "",
@@ -45,6 +48,7 @@ class BackupService:
         self._interval_seconds = interval_seconds
         self._max_copies = max_copies
         self._destination_path = destination_path
+        self._temp_dir = temp_dir
         self._s3_bucket = s3_bucket
         self._s3_region = s3_region
         self._s3_access_key = s3_access_key
@@ -61,7 +65,8 @@ class BackupService:
         if t == "local":
             if not self._destination_path:
                 return None
-            return {"type": "local", "path": self._destination_path}
+            resolved = str(Path(self._destination_path).expanduser().resolve())
+            return {"type": "local", "path": resolved}
         elif t == "s3":
             if not self._s3_bucket:
                 return None
@@ -109,7 +114,8 @@ class BackupService:
             cls = AutoBackup
 
         db_file = self._resolve_db_path()
-        self._backup = cls()
+        tmp_dir = str(Path(self._temp_dir).expanduser().resolve()) if self._temp_dir else None
+        self._backup = cls(tmp_base_dir=tmp_dir)
         self._backup.add_task(
             name="claude-manager-db",
             source_paths=[db_file],

@@ -14,7 +14,7 @@ dependencies = [
     "python-multipart>=0.0.18",
     "websockets>=14.0",
     "alembic>=1.13.0",
-    "auto-backup @ git+ssh://git@github.com/zjw49246/auto-backup",
+    "auto-backup @ git+https://github.com/zjw49246/auto-backup",
     "paramiko>=3.0.0",
 ]
 

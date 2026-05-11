@@ -80,6 +80,7 @@ async def lifespan(app: FastAPI):
             interval_seconds=settings.backup_interval_seconds,
             max_copies=settings.backup_max_copies,
             destination_path=settings.backup_destination_path,
+            temp_dir=settings.backup_temp_dir,
             s3_bucket=settings.backup_s3_bucket,
             s3_region=settings.backup_s3_region,
             s3_access_key=settings.backup_s3_access_key,
