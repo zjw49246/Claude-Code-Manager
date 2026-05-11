@@ -17,8 +17,10 @@ class TaskCreate(BaseModel):
     model: str | None = None
     effort_level: str | None = None
     tags: list[str] | None = None
-    image_paths: list[str] | None = None  # absolute paths of uploaded images
-    secret_ids: list[int] | None = None  # IDs of secrets to inject into prompt
+    image_paths: list[str] | None = None  # kept for backwards compat
+    file_paths: list[str] | None = None
+    attachments: list[dict] | None = None  # [{url, name, is_image}, ...]
+    secret_ids: list[int] | None = None
 
     @model_validator(mode='after')
     def validate_mode_fields(self):
@@ -71,6 +73,7 @@ class TaskResponse(BaseModel):
     has_unread: bool
     error_message: str | None
     tags: list[str] | None
+    metadata_: dict | None = None
     context_window_usage: dict | None
     created_at: datetime
     started_at: datetime | None

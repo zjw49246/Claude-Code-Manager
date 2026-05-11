@@ -1,9 +1,10 @@
 from datetime import datetime
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete as sa_delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config import settings
+from backend.models.log_entry import LogEntry
 from backend.models.task import Task
 
 
@@ -23,11 +24,14 @@ class TaskQueue:
 
     async def list_tasks(
         self, status: str | None = None, include_archived: bool = False,
+        archived_only: bool = False,
         project_id: int | None = None, starred: bool | None = None,
         limit: int = 50, offset: int = 0,
     ) -> list[Task]:
         stmt = select(Task).order_by(Task.starred.desc(), Task.created_at.desc())
-        if not include_archived:
+        if archived_only:
+            stmt = stmt.where(Task.archived == True)
+        elif not include_archived:
             stmt = stmt.where(Task.archived == False)
         if status:
             stmt = stmt.where(Task.status == status)
@@ -41,10 +45,13 @@ class TaskQueue:
 
     async def count_tasks(
         self, status: str | None = None, include_archived: bool = False,
+        archived_only: bool = False,
         project_id: int | None = None, starred: bool | None = None,
     ) -> int:
         stmt = select(func.count(Task.id))
-        if not include_archived:
+        if archived_only:
+            stmt = stmt.where(Task.archived == True)
+        elif not include_archived:
             stmt = stmt.where(Task.archived == False)
         if status:
             stmt = stmt.where(Task.status == status)
@@ -88,8 +95,9 @@ class TaskQueue:
         task = await self.get(task_id)
         if not task:
             return False
-        if task.status not in ("pending", "failed", "cancelled", "conflict"):
+        if task.status not in ("pending", "failed", "cancelled", "conflict", "completed"):
             return False
+        await self.db.execute(sa_delete(LogEntry).where(LogEntry.task_id == task_id))
         await self.db.delete(task)
         await self.db.commit()
         return True

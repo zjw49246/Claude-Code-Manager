@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { api } from '../../api/client';
-import type { ChatMessage, Task, Project, UploadResult } from '../../api/client';
+import type { ChatMessage, FileAttachment, Task, Project, UploadResult } from '../../api/client';
 import { useWebSocket } from '../../hooks/useWebSocket';
 import { Send, ArrowLeft, Loader2, ChevronDown, ChevronRight, Copy, Check, Paperclip, X, StopCircle, Pencil } from 'lucide-react';
 import { SecretPicker } from '../Secrets/SecretPicker';
@@ -101,8 +101,8 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
   const [interrupting, setInterrupting] = useState(false);
   const [stillRunning, setStillRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [pendingImages, setPendingImages] = useState<File[]>([]);
-  const [imagePreviews, setImagePreviews] = useState<string[]>([]);
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  const [filePreviews, setFilePreviews] = useState<string[]>([]);
   const [selectedSecretIds, setSelectedSecretIds] = useState<number[]>([]);
   const [contextUsage, setContextUsage] = useState<ContextUsage | null>(task.context_window_usage ?? null);
   const [editingTitle, setEditingTitle] = useState(false);
@@ -160,6 +160,8 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
       is_error: (msg.data.is_error as boolean) || false,
       loop_iteration: (msg.data.loop_iteration as number) || null,
       timestamp: new Date().toISOString(),
+      image_urls: (msg.data.image_urls as string[]) || null,
+      attachments: (msg.data.attachments as FileAttachment[]) || null,
     };
     setMessages((prev) => [...prev, entry]);
   }, [task.id]);
@@ -225,19 +227,22 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
     el.style.height = el.scrollHeight + 'px';
   }, [input]);
 
-  const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.gif', '.webp'];
+  const isImageFile = (f: File) => IMAGE_EXTS.some((ext) => f.name.toLowerCase().endsWith(ext));
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
     if (!files.length) return;
-    const combined = [...pendingImages, ...files].slice(0, 5);
-    setPendingImages(combined);
-    setImagePreviews(combined.map((f) => URL.createObjectURL(f)));
+    const combined = [...pendingFiles, ...files].slice(0, 5);
+    setPendingFiles(combined);
+    setFilePreviews(combined.map((f) => isImageFile(f) ? URL.createObjectURL(f) : ''));
     e.target.value = '';
   };
 
-  const removeImage = (idx: number) => {
-    URL.revokeObjectURL(imagePreviews[idx]);
-    setPendingImages((prev) => prev.filter((_, i) => i !== idx));
-    setImagePreviews((prev) => prev.filter((_, i) => i !== idx));
+  const removeFile = (idx: number) => {
+    if (filePreviews[idx]) URL.revokeObjectURL(filePreviews[idx]);
+    setPendingFiles((prev) => prev.filter((_, i) => i !== idx));
+    setFilePreviews((prev) => prev.filter((_, i) => i !== idx));
   };
 
   const handleTitleSave = async () => {
@@ -255,40 +260,44 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
 
   const handleSend = async () => {
     const text = input.trim();
-    if ((!text && pendingImages.length === 0) || sending) return;
+    if ((!text && pendingFiles.length === 0) || sending) return;
 
-    const snapshotImages = [...pendingImages];
-    const snapshotPreviews = [...imagePreviews];
+    const snapshotFiles = [...pendingFiles];
+    const snapshotPreviews = [...filePreviews];
 
     setInput('');
-    snapshotPreviews.forEach((url) => URL.revokeObjectURL(url));
-    setPendingImages([]);
-    setImagePreviews([]);
+    setPendingFiles([]);
+    setFilePreviews([]);
     setSending(true);
     setError(null);
 
-    // Optimistically add user message
-    const userMsg: ChatMessage = {
-      id: Date.now(),
-      role: 'user',
-      event_type: 'user_message',
-      content: text || '(images attached)',
-      tool_name: null,
-      tool_input: null,
-      tool_output: null,
-      is_error: false,
-      loop_iteration: null,
-      timestamp: new Date().toISOString(),
-    };
-    setMessages((prev) => [...prev, userMsg]);
-
     try {
       let uploadedPaths: string[] | undefined;
-      if (snapshotImages.length > 0) {
-        const results: UploadResult[] = await api.uploadImages(snapshotImages);
+      let attachments: FileAttachment[] | undefined;
+      if (snapshotFiles.length > 0) {
+        const results: UploadResult[] = await api.uploadImages(snapshotFiles);
         uploadedPaths = results.map((r) => r.path);
+        attachments = results.map((r) => ({ url: r.url, name: r.filename || r.url.split('/').pop() || 'file', is_image: r.is_image }));
       }
-      await api.sendTaskChat(task.id, text || '(images attached)', uploadedPaths, selectedSecretIds.length > 0 ? selectedSecretIds : undefined);
+      snapshotPreviews.forEach((url) => { if (url) URL.revokeObjectURL(url); });
+
+      const userMsg: ChatMessage = {
+        id: Date.now(),
+        role: 'user',
+        event_type: 'user_message',
+        content: text || '(files attached)',
+        tool_name: null,
+        tool_input: null,
+        tool_output: null,
+        is_error: false,
+        loop_iteration: null,
+        timestamp: new Date().toISOString(),
+        image_urls: attachments?.filter((a) => a.is_image).map((a) => a.url) || null,
+        attachments: attachments || null,
+      };
+      setMessages((prev) => [...prev, userMsg]);
+
+      await api.sendTaskChat(task.id, text || '(files attached)', uploadedPaths, selectedSecretIds.length > 0 ? selectedSecretIds : undefined);
     } catch (e) {
       setSending(false);
       const errMsg = String(e);
@@ -399,6 +408,21 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
             <div className="text-center text-xs text-gray-600 py-1 mb-1">— Initial Prompt —</div>
             <div className="flex justify-end">
               <div className="max-w-[85%] rounded-2xl px-4 py-2.5 text-sm bg-indigo-600 text-white rounded-br-md whitespace-pre-wrap">
+                {task.metadata_?.attachments && task.metadata_.attachments.length > 0 && (
+                  <div className="mb-2 flex flex-wrap gap-2">
+                    {task.metadata_.attachments.filter((a) => a.is_image).length > 0 && (
+                      <MessageImages urls={task.metadata_.attachments.filter((a) => a.is_image).map((a) => a.url)} />
+                    )}
+                    {task.metadata_.attachments.filter((a) => !a.is_image).map((a, i) => (
+                      <a key={i} href={a.url} target="_blank" rel="noopener noreferrer"
+                        className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-500/30 rounded-lg text-xs text-indigo-100 hover:bg-indigo-500/40 transition-colors max-w-[200px]"
+                      >
+                        <Paperclip size={12} className="shrink-0" />
+                        <span className="truncate">{a.name}</span>
+                      </a>
+                    ))}
+                  </div>
+                )}
                 {task.description}
               </div>
             </div>
@@ -430,15 +454,24 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
       {/* Input */}
       <div className="border-t border-gray-800 bg-gray-900 p-3">
         <div className="flex flex-col gap-2 max-w-3xl mx-auto">
-          {/* Image preview strip */}
-          {imagePreviews.length > 0 && (
+          {/* File preview strip */}
+          {pendingFiles.length > 0 && (
             <div className="flex gap-2 flex-wrap">
-              {imagePreviews.map((src, idx) => (
-                <div key={idx} className="relative w-14 h-14 rounded overflow-hidden border border-gray-600">
-                  <img src={src} alt="" className="w-full h-full object-cover" />
+              {pendingFiles.map((file, idx) => (
+                <div key={idx} className="relative rounded overflow-hidden border border-gray-600">
+                  {filePreviews[idx] ? (
+                    <div className="w-14 h-14">
+                      <img src={filePreviews[idx]} alt="" className="w-full h-full object-cover" />
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-1.5 px-2.5 py-1.5 bg-gray-800 text-xs text-gray-300 max-w-[150px]">
+                      <Paperclip size={12} className="shrink-0" />
+                      <span className="truncate">{file.name}</span>
+                    </div>
+                  )}
                   <button
                     type="button"
-                    onClick={() => removeImage(idx)}
+                    onClick={() => removeFile(idx)}
                     className="absolute top-0 right-0 bg-gray-900/80 rounded-bl p-0.5 text-gray-300 hover:text-white"
                   >
                     <X size={10} />
@@ -451,17 +484,16 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
             <input
               ref={fileInputRef}
               type="file"
-              accept="image/png,image/jpeg,image/gif,image/webp"
               multiple
               className="hidden"
-              onChange={handleImageSelect}
+              onChange={handleFileSelect}
             />
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              disabled={sending || !task.session_id || pendingImages.length >= 5}
+              disabled={sending || !task.session_id || pendingFiles.length >= 5}
               className="p-2.5 text-gray-500 hover:text-gray-300 disabled:opacity-40 disabled:cursor-not-allowed"
-              title="Attach images"
+              title="Attach files"
             >
               <Paperclip size={18} />
             </button>
@@ -485,7 +517,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
             />
             <button
               onClick={handleSend}
-              disabled={(!input.trim() && pendingImages.length === 0) || sending || !task.session_id}
+              disabled={(!input.trim() && pendingFiles.length === 0) || sending || !task.session_id}
               title="Send (Ctrl+Enter)"
               className="p-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg disabled:opacity-40 disabled:cursor-not-allowed"
             >
@@ -720,6 +752,35 @@ function MessageTimestamp({ timestamp, className }: { timestamp: string | null; 
   );
 }
 
+function ImageLightbox({ src, onClose }: { src: string; onClose: () => void }) {
+  return (
+    <div className="fixed inset-0 z-[9999] bg-black/80 flex items-center justify-center" onClick={onClose}>
+      <button onClick={onClose} className="absolute top-4 right-4 text-white/70 hover:text-white text-3xl font-light">&times;</button>
+      <img src={src} alt="" className="max-w-[90vw] max-h-[90vh] object-contain rounded-lg" onClick={(e) => e.stopPropagation()} />
+    </div>
+  );
+}
+
+function MessageImages({ urls }: { urls: string[] }) {
+  const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+  return (
+    <>
+      <div className="flex flex-wrap gap-2">
+        {urls.map((url, i) => (
+          <img
+            key={i}
+            src={url}
+            alt=""
+            className="max-w-[200px] max-h-[150px] rounded-lg object-cover cursor-pointer hover:opacity-80 transition-opacity"
+            onClick={() => setLightboxSrc(url)}
+          />
+        ))}
+      </div>
+      {lightboxSrc && <ImageLightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />}
+    </>
+  );
+}
+
 function MessageBubble({ message }: { message: ChatMessage }) {
   const isUser = message.role === 'user';
 
@@ -794,7 +855,29 @@ function MessageBubble({ message }: { message: ChatMessage }) {
         }`}
       >
         {isUser ? (
-          message.content || ''
+          <>
+            {message.attachments && message.attachments.length > 0 && (
+              <div className="mb-2 flex flex-wrap gap-2">
+                {message.attachments.filter((a) => a.is_image).length > 0 && (
+                  <MessageImages urls={message.attachments.filter((a) => a.is_image).map((a) => a.url)} />
+                )}
+                {message.attachments.filter((a) => !a.is_image).map((a, i) => (
+                  <a key={i} href={a.url} target="_blank" rel="noopener noreferrer"
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-500/30 rounded-lg text-xs text-indigo-100 hover:bg-indigo-500/40 transition-colors max-w-[200px]"
+                  >
+                    <Paperclip size={12} className="shrink-0" />
+                    <span className="truncate">{a.name}</span>
+                  </a>
+                ))}
+              </div>
+            )}
+            {message.image_urls && !message.attachments && message.image_urls.length > 0 && (
+              <div className="mb-2">
+                <MessageImages urls={message.image_urls} />
+              </div>
+            )}
+            {message.content && message.content !== '(files attached)' && message.content !== '(images attached)' ? message.content : !message.attachments?.length && !message.image_urls?.length ? message.content || '' : null}
+          </>
         ) : (
           <MarkdownContent content={message.content || ''} />
         )}

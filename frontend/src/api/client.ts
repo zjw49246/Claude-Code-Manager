@@ -98,6 +98,11 @@ export interface Task {
   model: string | null;
   effort_level: string | null;
   tags: string[] | null;
+  metadata_: {
+    image_paths?: string[];
+    attachments?: FileAttachment[];
+    secret_ids?: number[];
+  } | null;
   context_window_usage: {
     input_tokens: number;
     cache_read_input_tokens: number;
@@ -127,6 +132,12 @@ export interface Instance {
   last_heartbeat: string | null;
 }
 
+export interface FileAttachment {
+  url: string;
+  name: string;
+  is_image: boolean;
+}
+
 export interface ChatMessage {
   id: number;
   role: string;
@@ -138,6 +149,8 @@ export interface ChatMessage {
   is_error: boolean;
   loop_iteration: number | null;
   timestamp: string | null;
+  image_urls: string[] | null;
+  attachments: FileAttachment[] | null;
 }
 
 export interface LogEntry {
@@ -172,6 +185,7 @@ export interface UploadResult {
   filename: string | null;
   path: string;
   url: string;
+  is_image: boolean;
 }
 
 export const api = {
@@ -258,19 +272,19 @@ export const api = {
   },
 
   // Tasks
-  listTasks: (status?: string, includeArchived?: boolean, projectId?: number, starred?: boolean, limit?: number, offset?: number) =>
+  listTasks: (status?: string, includeArchived?: boolean, projectId?: number, starred?: boolean, limit?: number, offset?: number, archivedOnly?: boolean) =>
     request<Task[]>(`/api/tasks?${new URLSearchParams({
       ...(status ? { status } : {}),
-      ...(includeArchived ? { include_archived: 'true' } : {}),
+      ...(archivedOnly ? { archived_only: 'true' } : includeArchived ? { include_archived: 'true' } : {}),
       ...(projectId != null ? { project_id: String(projectId) } : {}),
       ...(starred != null ? { starred: String(starred) } : {}),
       ...(limit != null ? { limit: String(limit) } : {}),
       ...(offset != null ? { offset: String(offset) } : {}),
     })}`),
-  countTasks: (status?: string, includeArchived?: boolean, projectId?: number, starred?: boolean) =>
+  countTasks: (status?: string, includeArchived?: boolean, projectId?: number, starred?: boolean, archivedOnly?: boolean) =>
     request<{ total: number }>(`/api/tasks/count?${new URLSearchParams({
       ...(status ? { status } : {}),
-      ...(includeArchived ? { include_archived: 'true' } : {}),
+      ...(archivedOnly ? { archived_only: 'true' } : includeArchived ? { include_archived: 'true' } : {}),
       ...(projectId != null ? { project_id: String(projectId) } : {}),
       ...(starred != null ? { starred: String(starred) } : {}),
     })}`),
@@ -282,7 +296,7 @@ export const api = {
     request<Task>(`/api/tasks/${id}/read`, { method: 'POST' }),
   stopTaskSession: (id: number) =>
     request<{ ok: boolean }>(`/api/tasks/${id}/stop-session`, { method: 'POST' }),
-  createTask: (data: { title?: string; description?: string; project_id?: number; priority?: number; target_branch?: string; mode?: string; todo_file_path?: string; max_iterations?: number; image_paths?: string[]; secret_ids?: number[]; model?: string; effort_level?: string }) =>
+  createTask: (data: { title?: string; description?: string; project_id?: number; priority?: number; target_branch?: string; mode?: string; todo_file_path?: string; max_iterations?: number; image_paths?: string[]; file_paths?: string[]; attachments?: { url: string; name: string; is_image: boolean }[]; secret_ids?: number[]; model?: string; effort_level?: string }) =>
     request<Task>('/api/tasks', { method: 'POST', body: JSON.stringify(data) }),
   updateTask: (id: number, data: { title?: string; description?: string; priority?: number }) =>
     request<Task>(`/api/tasks/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
@@ -326,8 +340,8 @@ export const api = {
     request<{ ok: boolean }>('/api/dispatcher/stop', { method: 'POST' }),
 
   // Chat (task-based)
-  sendTaskChat: (taskId: number, message: string, imagePaths?: string[], secretIds?: number[]) =>
-    request<{ ok: boolean; pid: number; instance_id: number; session_id: string }>(`/api/tasks/${taskId}/chat`, { method: 'POST', body: JSON.stringify({ message, image_paths: imagePaths, secret_ids: secretIds }) }),
+  sendTaskChat: (taskId: number, message: string, filePaths?: string[], secretIds?: number[]) =>
+    request<{ ok: boolean; pid: number; instance_id: number; session_id: string }>(`/api/tasks/${taskId}/chat`, { method: 'POST', body: JSON.stringify({ message, file_paths: filePaths, secret_ids: secretIds }) }),
   getTaskChatHistory: (taskId: number, limit = 0) =>
     request<ChatMessage[]>(`/api/tasks/${taskId}/chat/history?limit=${limit}`),
 

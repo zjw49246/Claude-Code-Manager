@@ -218,7 +218,7 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat }: TaskListPro
                     {t.archived ? <ArchiveRestore size={14} /> : <Archive size={14} />}
                     {t.archived ? 'Unarchive' : 'Archive'}
                   </button>
-                  {['pending', 'failed', 'cancelled'].includes(t.status) && (
+                  {['pending', 'failed', 'cancelled', 'completed'].includes(t.status) && (
                     <button
                       onClick={() => { handleDelete(t.id); setMenuOpenId(null); }}
                       className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-red-400 hover:bg-gray-800 text-left"
