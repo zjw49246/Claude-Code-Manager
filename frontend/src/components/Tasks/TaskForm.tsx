@@ -33,8 +33,8 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [tagItems, setTagItems] = useState<TagItem[]>([]);
   const [tagFilter, setTagFilter] = useState<string>('');
-  const [pendingImages, setPendingImages] = useState<File[]>([]);
-  const [imagePreviews, setImagePreviews] = useState<string[]>([]);
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  const [filePreviews, setFilePreviews] = useState<string[]>([]);
   const [selectedSecretIds, setSelectedSecretIds] = useState<number[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -65,22 +65,22 @@ export function TaskForm({ onCreated }: TaskFormProps) {
     }
   };
 
-  const handleImageSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.gif', '.webp'];
+  const isImageFile = (f: File) => IMAGE_EXTS.some((ext) => f.name.toLowerCase().endsWith(ext));
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
     if (!files.length) return;
-    const combined = [...pendingImages, ...files].slice(0, 5);
-    setPendingImages(combined);
-    setImagePreviews(combined.map((f) => URL.createObjectURL(f)));
-    // Reset input so same file can be re-selected after removal
+    const combined = [...pendingFiles, ...files].slice(0, 5);
+    setPendingFiles(combined);
+    setFilePreviews(combined.map((f) => isImageFile(f) ? URL.createObjectURL(f) : ''));
     e.target.value = '';
   };
 
-  const removeImage = (idx: number) => {
-    URL.revokeObjectURL(imagePreviews[idx]);
-    const imgs = pendingImages.filter((_, i) => i !== idx);
-    const prevs = imagePreviews.filter((_, i) => i !== idx);
-    setPendingImages(imgs);
-    setImagePreviews(prevs);
+  const removeFile = (idx: number) => {
+    if (filePreviews[idx]) URL.revokeObjectURL(filePreviews[idx]);
+    setPendingFiles((prev) => prev.filter((_, i) => i !== idx));
+    setFilePreviews((prev) => prev.filter((_, i) => i !== idx));
   };
 
   const canSubmit =
@@ -111,9 +111,15 @@ export function TaskForm({ onCreated }: TaskFormProps) {
       }
 
       let uploadedPaths: string[] = [];
-      if (pendingImages.length > 0) {
-        const results: UploadResult[] = await api.uploadImages(pendingImages);
+      let attachments: { url: string; name: string; is_image: boolean }[] = [];
+      if (pendingFiles.length > 0) {
+        const results: UploadResult[] = await api.uploadImages(pendingFiles);
         uploadedPaths = results.map((r) => r.path);
+        attachments = results.map((r) => ({
+          url: r.url,
+          name: r.filename || r.url.split('/').pop() || 'file',
+          is_image: r.is_image,
+        }));
       }
 
       await api.createTask({
@@ -122,16 +128,17 @@ export function TaskForm({ onCreated }: TaskFormProps) {
         priority,
         mode,
         ...(mode === 'loop' ? { todo_file_path: todoFilePath, max_iterations: maxIterations } : {}),
-        ...(uploadedPaths.length > 0 ? { image_paths: uploadedPaths } : {}),
+        ...(uploadedPaths.length > 0 ? { file_paths: uploadedPaths } : {}),
+        ...(attachments.length > 0 ? { attachments } : {}),
         ...(selectedSecretIds.length > 0 ? { secret_ids: selectedSecretIds } : {}),
         model: model || defaultModel,
         ...(effort ? { effort_level: effort } : {}),
       });
       setDescription('');
       setPriority(0);
-      imagePreviews.forEach((url) => URL.revokeObjectURL(url));
-      setPendingImages([]);
-      setImagePreviews([]);
+      filePreviews.forEach((url) => URL.revokeObjectURL(url));
+      setPendingFiles([]);
+      setFilePreviews([]);
       setSelectedSecretIds([]);
       setModel('');
       setEffort('');
@@ -159,27 +166,35 @@ export function TaskForm({ onCreated }: TaskFormProps) {
         <input
           ref={fileInputRef}
           type="file"
-          accept="image/png,image/jpeg,image/gif,image/webp"
           multiple
           className="hidden"
-          onChange={handleImageSelect}
+          onChange={handleFileSelect}
         />
         <button
           type="button"
           onClick={() => fileInputRef.current?.click()}
-          disabled={pendingImages.length >= 5}
+          disabled={pendingFiles.length >= 5}
           className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-200 px-2 py-1 rounded border border-gray-600 hover:border-gray-400 disabled:opacity-40"
         >
           <Paperclip size={13} />
-          {pendingImages.length > 0 ? `${pendingImages.length}/5 images` : 'Attach images'}
+          {pendingFiles.length > 0 ? `${pendingFiles.length}/5 files` : 'Attach files'}
         </button>
         <SecretPicker selectedIds={selectedSecretIds} onChange={setSelectedSecretIds} />
-        {imagePreviews.map((src, idx) => (
-          <div key={idx} className="relative w-12 h-12 rounded overflow-hidden border border-gray-600">
-            <img src={src} alt="" className="w-full h-full object-cover" />
+        {pendingFiles.map((file, idx) => (
+          <div key={idx} className="relative rounded overflow-hidden border border-gray-600">
+            {filePreviews[idx] ? (
+              <div className="w-12 h-12">
+                <img src={filePreviews[idx]} alt="" className="w-full h-full object-cover" />
+              </div>
+            ) : (
+              <div className="flex items-center gap-1 px-2 py-1.5 bg-gray-700 text-xs text-gray-300 max-w-[120px]">
+                <Paperclip size={11} className="shrink-0" />
+                <span className="truncate">{file.name}</span>
+              </div>
+            )}
             <button
               type="button"
-              onClick={() => removeImage(idx)}
+              onClick={() => removeFile(idx)}
               className="absolute top-0 right-0 bg-gray-900/80 rounded-bl p-0.5 text-gray-300 hover:text-white"
             >
               <X size={10} />
