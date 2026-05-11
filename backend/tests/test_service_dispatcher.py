@@ -347,7 +347,7 @@ async def test_lifecycle_prompt_no_images(db_factory):
 # ===  Loop lifecycle tests ===
 
 
-def _write_signal(signal_path, action: str, reason: str = "", progress: str | None = None, summary: str | None = None):
+def _write_signal(signal_path, action: str, reason: str = "", progress: str | None = None, summary: str | None = None, plan: str | None = None):
     """Helper: write a signal file synchronously."""
     import json
     from pathlib import Path
@@ -356,6 +356,8 @@ def _write_signal(signal_path, action: str, reason: str = "", progress: str | No
         data["progress"] = progress
     if summary:
         data["summary"] = summary
+    if plan:
+        data["plan"] = plan
     Path(signal_path).write_text(json.dumps(data), encoding="utf-8")
 
 
@@ -889,6 +891,369 @@ async def test_loop_lifecycle_non_numeric_progress_no_anchor(db_factory, tmp_pat
     assert "不要重新计数" not in prompts_sent[1]
     # But the history still shows the raw progress string
     assert "一些进度" in prompts_sent[1]
+
+
+@pytest.mark.asyncio
+async def test_must_complete_prompt_first_iteration(db_factory):
+    """must_complete first iteration requires planning and shows total rounds."""
+    d = _make_dispatcher(db_factory)
+    task = Task(title="t", mode="loop", todo_file_path="TODO.md", max_iterations=8, must_complete=True)
+
+    prompt = d._build_loop_prompt(task, iteration=0, signal_path="/sig")
+    assert "必须全部完成" in prompt
+    assert "总共有 8 轮" in prompt
+    assert "制定整体执行计划" in prompt
+    assert '"plan":' in prompt
+    assert "已完成数/总数" in prompt
+
+
+@pytest.mark.asyncio
+async def test_must_complete_prompt_subsequent_iteration(db_factory):
+    """must_complete subsequent iteration shows remaining rounds, plan, and anchored total."""
+    d = _make_dispatcher(db_factory)
+    task = Task(title="t", mode="loop", todo_file_path="TODO.md", max_iterations=10, must_complete=True)
+
+    history = [
+        {"iteration": 1, "progress": "3/10", "summary": "完成前三项"},
+    ]
+    plan_text = "第2轮: 权限; 第3轮: 测试"
+    prompt = d._build_loop_prompt(
+        task, iteration=1, signal_path="/sig",
+        history=history, anchored_total=10, plan=plan_text,
+    )
+
+    assert "必须全部完成" in prompt
+    assert "第 2 轮" in prompt
+    assert "还剩 9 轮" in prompt
+    assert "=== 整体计划 ===" in prompt
+    assert plan_text in prompt
+    assert "任务总数已确定为 10" in prompt
+    assert "还剩 7 项未完成" in prompt
+    assert "已完成数/10" in prompt
+
+
+@pytest.mark.asyncio
+async def test_must_complete_prompt_no_anchor_subsequent(db_factory):
+    """must_complete subsequent iteration without anchored_total doesn't show total info."""
+    d = _make_dispatcher(db_factory)
+    task = Task(title="t", mode="loop", todo_file_path="TODO.md", max_iterations=5, must_complete=True)
+
+    history = [{"iteration": 1, "progress": "", "summary": "did something"}]
+    prompt = d._build_loop_prompt(task, iteration=1, signal_path="/sig", history=history, anchored_total=None)
+
+    assert "必须全部完成" in prompt
+    assert "还剩 4 轮" in prompt
+    assert "任务总数已确定为" not in prompt
+    assert "已完成数/总数" in prompt
+
+
+@pytest.mark.asyncio
+async def test_must_complete_prompt_plan_update_field(db_factory):
+    """must_complete continue template includes plan field for updating."""
+    d = _make_dispatcher(db_factory)
+    task = Task(title="t", mode="loop", todo_file_path="TODO.md", max_iterations=5, must_complete=True)
+
+    prompt = d._build_loop_prompt(task, iteration=1, signal_path="/sig", history=[{"iteration": 1, "progress": "1/5", "summary": "x"}], anchored_total=5)
+    continue_lines = [l for l in prompt.split("\n") if '"action": "continue"' in l]
+    assert len(continue_lines) == 1
+    assert '"plan":' in continue_lines[0]
+
+
+@pytest.mark.asyncio
+async def test_normal_loop_prompt_no_plan_field(db_factory):
+    """Normal (non-must_complete) loop prompt does NOT include plan field."""
+    d = _make_dispatcher(db_factory)
+    task = Task(title="t", mode="loop", todo_file_path="TODO.md", max_iterations=10, must_complete=False)
+
+    prompt = d._build_loop_prompt(task, iteration=0, signal_path="/sig")
+    assert "必须全部完成" not in prompt
+    assert '"plan":' not in prompt
+    assert "制定整体执行计划" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_must_complete_rejects_premature_done(db_factory, tmp_path):
+    """must_complete rejects done signal when progress numerator < anchored total."""
+    d = _make_dispatcher(db_factory)
+
+    async with db_factory() as db:
+        inst = Instance(name="mc-reject-worker")
+        db.add(inst)
+        task = Task(
+            title="mc-reject", mode="loop", todo_file_path="TODO.md",
+            target_repo=str(tmp_path), max_iterations=10, must_complete=True,
+        )
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_obj = task
+
+    signal_path = tmp_path / ".claude-manager" / f"loop_signal_{task_obj.id}.json"
+    call_count = {"n": 0}
+
+    async def launch_side(*args, **kwargs):
+        signal_path.parent.mkdir(parents=True, exist_ok=True)
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            _write_signal(signal_path, "continue", "more", "3/10", "did 3", plan="第2轮: 做剩下的")
+        elif call_count["n"] == 2:
+            # Premature done — only 7/10
+            _write_signal(signal_path, "done", "I think I'm done", "7/10", "did 4")
+        elif call_count["n"] == 3:
+            # After rejection, continue
+            _write_signal(signal_path, "continue", "ok more", "9/10", "did 2")
+        else:
+            _write_signal(signal_path, "done", "really done", "10/10", "did last 1")
+        return 12345
+
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.wait = AsyncMock(return_value=0)
+    d.instance_manager.launch = AsyncMock(side_effect=launch_side)
+    d.instance_manager.processes = {inst_id: mock_proc}
+
+    await d._run_loop_lifecycle(inst_id, task_obj, str(tmp_path))
+
+    # Should have run 4 iterations: iter0(continue), iter1(done→rejected), iter2(continue), iter3(done→accepted)
+    assert call_count["n"] == 4
+    async with db_factory() as db:
+        t = await db.get(Task, task_obj.id)
+        assert t.status == "completed"
+        assert t.loop_progress == "10/10"
+
+
+@pytest.mark.asyncio
+async def test_must_complete_accepts_done_when_complete(db_factory, tmp_path):
+    """must_complete accepts done signal when progress numerator == anchored total."""
+    d = _make_dispatcher(db_factory)
+
+    async with db_factory() as db:
+        inst = Instance(name="mc-accept-worker")
+        db.add(inst)
+        task = Task(
+            title="mc-accept", mode="loop", todo_file_path="TODO.md",
+            target_repo=str(tmp_path), max_iterations=10, must_complete=True,
+        )
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_obj = task
+
+    signal_path = tmp_path / ".claude-manager" / f"loop_signal_{task_obj.id}.json"
+    call_count = {"n": 0}
+
+    async def launch_side(*args, **kwargs):
+        signal_path.parent.mkdir(parents=True, exist_ok=True)
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            _write_signal(signal_path, "continue", "more", "5/10", "half done", plan="finish rest")
+        else:
+            _write_signal(signal_path, "done", "all done", "10/10", "finished all")
+        return 12345
+
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.wait = AsyncMock(return_value=0)
+    d.instance_manager.launch = AsyncMock(side_effect=launch_side)
+    d.instance_manager.processes = {inst_id: mock_proc}
+
+    await d._run_loop_lifecycle(inst_id, task_obj, str(tmp_path))
+
+    assert call_count["n"] == 2
+    async with db_factory() as db:
+        t = await db.get(Task, task_obj.id)
+        assert t.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_must_complete_done_unparseable_progress_accepted(db_factory, tmp_path):
+    """must_complete accepts done if progress can't be parsed (can't verify, don't block)."""
+    d = _make_dispatcher(db_factory)
+
+    async with db_factory() as db:
+        inst = Instance(name="mc-noparse-worker")
+        db.add(inst)
+        task = Task(
+            title="mc-noparse", mode="loop", todo_file_path="TODO.md",
+            target_repo=str(tmp_path), max_iterations=10, must_complete=True,
+        )
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_obj = task
+
+    signal_path = tmp_path / ".claude-manager" / f"loop_signal_{task_obj.id}.json"
+
+    async def launch_side(*args, **kwargs):
+        signal_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_signal(signal_path, "done", "all done", "全部完成")
+        return 12345
+
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.wait = AsyncMock(return_value=0)
+    d.instance_manager.launch = AsyncMock(side_effect=launch_side)
+    d.instance_manager.processes = {inst_id: mock_proc}
+
+    await d._run_loop_lifecycle(inst_id, task_obj, str(tmp_path))
+
+    async with db_factory() as db:
+        t = await db.get(Task, task_obj.id)
+        assert t.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_must_complete_max_iterations_fail_message(db_factory, tmp_path):
+    """must_complete uses specific fail message when max iterations exceeded."""
+    d = _make_dispatcher(db_factory)
+
+    async with db_factory() as db:
+        inst = Instance(name="mc-maxiter-worker")
+        db.add(inst)
+        task = Task(
+            title="mc-maxiter", mode="loop", todo_file_path="TODO.md",
+            target_repo=str(tmp_path), max_iterations=2, must_complete=True,
+        )
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_obj = task
+
+    signal_path = tmp_path / ".claude-manager" / f"loop_signal_{task_obj.id}.json"
+
+    async def launch_side(*args, **kwargs):
+        signal_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_signal(signal_path, "continue", "more", "1/5", "did one", plan="plan")
+        return 12345
+
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.wait = AsyncMock(return_value=0)
+    d.instance_manager.launch = AsyncMock(side_effect=launch_side)
+    d.instance_manager.processes = {inst_id: mock_proc}
+
+    await d._run_loop_lifecycle(inst_id, task_obj, str(tmp_path))
+
+    async with db_factory() as db:
+        t = await db.get(Task, task_obj.id)
+        assert t.status == "failed"
+        assert "未能在 2 轮内完成所有任务项" in t.error_message
+        assert "1/5" in t.error_message
+
+
+@pytest.mark.asyncio
+async def test_must_complete_plan_captured_and_updated(db_factory, tmp_path):
+    """Plan is captured from signal and latest version is passed to subsequent prompts."""
+    d = _make_dispatcher(db_factory)
+
+    async with db_factory() as db:
+        inst = Instance(name="mc-plan-worker")
+        db.add(inst)
+        task = Task(
+            title="mc-plan", mode="loop", todo_file_path="TODO.md",
+            target_repo=str(tmp_path), max_iterations=10, must_complete=True,
+        )
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_obj = task
+
+    signal_path = tmp_path / ".claude-manager" / f"loop_signal_{task_obj.id}.json"
+    prompts_sent: list[str] = []
+    call_count = {"n": 0}
+
+    async def launch_side(*args, **kwargs):
+        prompt = kwargs.get("prompt", args[1] if len(args) > 1 else "")
+        prompts_sent.append(prompt)
+        signal_path.parent.mkdir(parents=True, exist_ok=True)
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            _write_signal(signal_path, "continue", "more", "2/6", "did 2", plan="第2轮: A+B; 第3轮: C+D")
+        elif call_count["n"] == 2:
+            # Update the plan
+            _write_signal(signal_path, "continue", "more", "4/6", "did 2", plan="第3轮: C+D+E（合并了）")
+        else:
+            _write_signal(signal_path, "done", "done", "6/6", "finished")
+        return 12345
+
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.wait = AsyncMock(return_value=0)
+    d.instance_manager.launch = AsyncMock(side_effect=launch_side)
+    d.instance_manager.processes = {inst_id: mock_proc}
+
+    await d._run_loop_lifecycle(inst_id, task_obj, str(tmp_path))
+
+    assert call_count["n"] == 3
+
+    # First prompt: no plan section (first iteration)
+    assert "整体计划" not in prompts_sent[0]
+
+    # Second prompt: has original plan
+    assert "第2轮: A+B; 第3轮: C+D" in prompts_sent[1]
+
+    # Third prompt: has UPDATED plan (not the original)
+    assert "第3轮: C+D+E（合并了）" in prompts_sent[2]
+    assert "第2轮: A+B" not in prompts_sent[2]
+
+
+@pytest.mark.asyncio
+async def test_must_complete_plan_persists_when_not_updated(db_factory, tmp_path):
+    """Plan from earlier iteration persists if later signals don't include plan."""
+    d = _make_dispatcher(db_factory)
+
+    async with db_factory() as db:
+        inst = Instance(name="mc-plan-persist-worker")
+        db.add(inst)
+        task = Task(
+            title="mc-plan-persist", mode="loop", todo_file_path="TODO.md",
+            target_repo=str(tmp_path), max_iterations=10, must_complete=True,
+        )
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_obj = task
+
+    signal_path = tmp_path / ".claude-manager" / f"loop_signal_{task_obj.id}.json"
+    prompts_sent: list[str] = []
+    call_count = {"n": 0}
+
+    async def launch_side(*args, **kwargs):
+        prompt = kwargs.get("prompt", args[1] if len(args) > 1 else "")
+        prompts_sent.append(prompt)
+        signal_path.parent.mkdir(parents=True, exist_ok=True)
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            _write_signal(signal_path, "continue", "more", "2/6", "did 2", plan="原始计划")
+        elif call_count["n"] == 2:
+            # No plan in this signal
+            _write_signal(signal_path, "continue", "more", "4/6", "did 2")
+        else:
+            _write_signal(signal_path, "done", "done", "6/6", "finished")
+        return 12345
+
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.wait = AsyncMock(return_value=0)
+    d.instance_manager.launch = AsyncMock(side_effect=launch_side)
+    d.instance_manager.processes = {inst_id: mock_proc}
+
+    await d._run_loop_lifecycle(inst_id, task_obj, str(tmp_path))
+
+    # Third prompt: still has the original plan since second signal didn't update it
+    assert "原始计划" in prompts_sent[2]
 
 
 @pytest.mark.asyncio

@@ -14,6 +14,7 @@ class TaskCreate(BaseModel):
     mode: str = "auto"  # "auto", "plan", or "loop"
     todo_file_path: str | None = None  # required when mode="loop"
     max_iterations: int = 50  # loop only: max iterations before auto-abort
+    must_complete: bool = False  # loop only: reject done until all items finished
     model: str | None = None
     effort_level: str | None = None
     tags: list[str] | None = None
@@ -40,6 +41,7 @@ class TaskUpdate(BaseModel):
     target_branch: str | None = None
     max_retries: int | None = None
     max_iterations: int | None = None
+    must_complete: bool | None = None
     mode: str | None = None
     starred: bool | None = None
     tags: list[str] | None = None
@@ -63,6 +65,7 @@ class TaskResponse(BaseModel):
     todo_file_path: str | None
     loop_progress: str | None
     max_iterations: int
+    must_complete: bool
     plan_content: str | None
     plan_approved: bool | None
     session_id: str | None
