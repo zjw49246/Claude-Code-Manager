@@ -168,6 +168,19 @@ uv run uvicorn backend.main:app --host 0.0.0.0 --port 8000
 cd frontend && npm run build && cd ..
 uv run uvicorn backend.main:app --host 0.0.0.0 --port 8000  # 终端1
 cloudflared tunnel run <tunnel-name>                          # 终端2
+
+# 生产后台部署 (systemd, SSH 断开后持续运行)
+# 两个 systemd 服务:
+#   ccm-backend  — uvicorn 后端
+#   ccm-tunnel   — cloudflare tunnel
+# 服务文件位于 /etc/systemd/system/ccm-backend.service 和 ccm-tunnel.service
+# 常用命令:
+sudo systemctl restart ccm-backend   # 重启后端
+sudo systemctl restart ccm-tunnel    # 重启 tunnel
+sudo systemctl stop ccm-backend      # 停止后端
+sudo journalctl -u ccm-backend -f    # 查看后端日志
+sudo journalctl -u ccm-tunnel -f     # 查看 tunnel 日志
+# 开机自启已通过 systemctl enable 配置
 ```
 
 ## 数据库
