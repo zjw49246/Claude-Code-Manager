@@ -267,6 +267,13 @@
 
 ---
 
+### 生产部署 (systemd)
+- [x] `ccm-backend.service` — uvicorn 后端，开机自启，崩溃自动重启
+- [x] `ccm-tunnel.service` — Cloudflare Tunnel，开机自启
+- [x] 域名: `claude-code-manager.com`，通过 `claude-code-manager` tunnel (b5c526ab) 路由
+- [x] `auto-backup` 依赖改用 HTTPS 拉取（`5a8ee10`）
+- 教训：服务器部署用 systemd 而非 nohup，确保 SSH 断开和机器重启后自动恢复
+
 ## 已知问题
 
 - `total_cost_usd` 仅在 Claude Code stream-json result 事件报告时更新
