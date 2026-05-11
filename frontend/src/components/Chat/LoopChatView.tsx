@@ -362,6 +362,8 @@ export function LoopChatView({ task, onBack }: LoopChatViewProps) {
       is_error: (msg.data.is_error as boolean) || false,
       loop_iteration: (msg.data.loop_iteration as number) ?? activeIteration ?? 0,
       timestamp: new Date().toISOString(),
+      image_urls: null,
+      attachments: null,
     };
     setMessages((prev) => [...prev, entry]);
   }, [task.id, activeIteration]);

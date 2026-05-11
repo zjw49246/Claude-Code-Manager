@@ -18,12 +18,14 @@ def _get_queue(db: AsyncSession = Depends(get_db)) -> TaskQueue:
 async def count_tasks(
     status: str | None = None,
     include_archived: bool = False,
+    archived_only: bool = False,
     project_id: int | None = None,
     starred: bool | None = None,
     queue: TaskQueue = Depends(_get_queue),
 ):
     total = await queue.count_tasks(
         status=status, include_archived=include_archived,
+        archived_only=archived_only,
         project_id=project_id, starred=starred,
     )
     return {"total": total}
@@ -33,6 +35,7 @@ async def count_tasks(
 async def list_tasks(
     status: str | None = None,
     include_archived: bool = False,
+    archived_only: bool = False,
     project_id: int | None = None,
     starred: bool | None = None,
     limit: int = 50,
@@ -41,6 +44,7 @@ async def list_tasks(
 ):
     return await queue.list_tasks(
         status=status, include_archived=include_archived,
+        archived_only=archived_only,
         project_id=project_id, starred=starred,
         limit=limit, offset=offset,
     )
@@ -50,10 +54,15 @@ async def list_tasks(
 async def create_task(body: TaskCreate, queue: TaskQueue = Depends(_get_queue)):
     data = body.model_dump()
     image_paths = data.pop("image_paths", None)
+    file_paths = data.pop("file_paths", None)
+    attachments = data.pop("attachments", None)
     secret_ids = data.pop("secret_ids", None)
     meta = data.get("metadata_") or {}
-    if image_paths:
-        meta["image_paths"] = image_paths
+    all_paths = file_paths or image_paths
+    if all_paths:
+        meta["image_paths"] = all_paths
+    if attachments:
+        meta["attachments"] = attachments
     if secret_ids:
         meta["secret_ids"] = secret_ids
     if meta:

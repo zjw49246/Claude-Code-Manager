@@ -1,3 +1,4 @@
+import json
 import os
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -15,8 +16,9 @@ router = APIRouter(prefix="/api/tasks", tags=["chat"])
 
 class ChatMessage(BaseModel):
     message: str
-    image_paths: list[str] | None = None  # absolute paths of uploaded images
-    secret_ids: list[int] | None = None  # IDs of secrets to inject into prompt
+    image_paths: list[str] | None = None  # kept for backwards compatibility
+    file_paths: list[str] | None = None
+    secret_ids: list[int] | None = None
 
 
 async def _find_idle_instance(db: AsyncSession) -> Instance | None:
@@ -67,10 +69,23 @@ async def send_chat_message(
         secrets_block = await _build_secrets_block(async_session, body.secret_ids)
         if secrets_block:
             prompt_parts.append(secrets_block)
-    if body.image_paths:
-        image_list = "\n".join(f"- {p}" for p in body.image_paths)
-        prompt_parts.append(f"请用 Read 工具查看以下图片：\n{image_list}")
+    all_paths = body.file_paths or body.image_paths or []
+    if all_paths:
+        file_list = "\n".join(f"- {p}" for p in all_paths)
+        prompt_parts.append(f"请用 Read 工具查看以下文件：\n{file_list}")
     prompt = "\n\n".join(prompt_parts)
+
+    # Build file attachment metadata for storage and display
+    _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+    attachments: list[dict] = []
+    for p in all_paths:
+        filename = os.path.basename(p)
+        ext = os.path.splitext(filename)[1].lower()
+        attachments.append({
+            "url": f"/api/uploads/{filename}",
+            "name": filename,
+            "is_image": ext in _IMAGE_EXTS,
+        })
 
     # Store user message as a log entry
     user_log = LogEntry(
@@ -79,6 +94,7 @@ async def send_chat_message(
         event_type="user_message",
         role="user",
         content=body.message,
+        raw_json=json.dumps({"attachments": attachments}) if attachments else None,
         is_error=False,
     )
     db.add(user_log)
@@ -98,6 +114,19 @@ async def send_chat_message(
     if not cwd or not os.path.isdir(cwd):
         raise HTTPException(400, "Task working directory not found.")
 
+    # Build git env (SSH key, HTTPS token, author info) same as dispatcher
+    from backend.services.dispatcher import _build_git_env
+    from backend.services.git_config import merge_git_config, settings_to_dict
+    from backend.models.project import Project
+    from backend.models.global_settings import GlobalSettings
+    merged: dict = {}
+    if task.project_id:
+        project = await db.get(Project, task.project_id)
+        global_cfg = await db.get(GlobalSettings, 1)
+        if project:
+            merged = merge_git_config(settings_to_dict(project), settings_to_dict(global_cfg))
+    git_env = _build_git_env(merged)
+
     # Resolve effort: task.effort_level → instance.effort_level → settings.default_effort
     from backend.config import settings as app_settings
     effort_level = task.effort_level or inst.effort_level or app_settings.default_effort
@@ -112,6 +141,7 @@ async def send_chat_message(
         cwd=cwd,
         model=task.model or inst.model,
         resume_session_id=task.session_id,
+        git_env=git_env,
         thinking_budget=inst.thinking_budget,
         effort_level=effort_level,
     )
@@ -134,6 +164,7 @@ async def get_chat_history(
         LogEntry.id, LogEntry.role, LogEntry.event_type, LogEntry.content,
         LogEntry.tool_name, LogEntry.tool_input, LogEntry.tool_output,
         LogEntry.is_error, LogEntry.loop_iteration, LogEntry.timestamp,
+        LogEntry.raw_json,
     ]
     if limit > 0:
         stmt = (
@@ -166,6 +197,20 @@ async def get_chat_history(
             tool_input = tool_input[:_TRUNCATE] + "\n…(truncated)"
         if tool_output and len(tool_output) > _TRUNCATE:
             tool_output = tool_output[:_TRUNCATE] + "\n…(truncated)"
+        attachments = None
+        image_urls = None
+        if row.raw_json:
+            try:
+                raw = json.loads(row.raw_json)
+                if isinstance(raw, dict):
+                    if raw.get("attachments"):
+                        attachments = raw["attachments"]
+                        image_urls = [a["url"] for a in attachments if a.get("is_image")]
+                    elif raw.get("image_urls"):
+                        image_urls = raw["image_urls"]
+                        attachments = [{"url": u, "name": u.split("/")[-1], "is_image": True} for u in image_urls]
+            except (json.JSONDecodeError, TypeError):
+                pass
         messages.append({
             "id": row.id,
             "role": row.role or ("assistant" if row.event_type in ("message", "result") else "system"),
@@ -177,6 +222,8 @@ async def get_chat_history(
             "is_error": row.is_error,
             "loop_iteration": row.loop_iteration,
             "timestamp": row.timestamp.isoformat() if row.timestamp else None,
+            "image_urls": image_urls or None,
+            "attachments": attachments,
         })
 
     return messages
