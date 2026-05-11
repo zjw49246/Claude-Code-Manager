@@ -351,11 +351,26 @@ export const api = {
   readFile: (path: string) =>
     request<{ path: string; content: string; size: number }>(`/api/files/read?path=${encodeURIComponent(path)}`),
 
+  // Files (download)
+  downloadFileUrl: (path: string) =>
+    `${getBase()}/api/files/download?path=${encodeURIComponent(path)}`,
+
   // Files (SSH)
   sshListDir: (creds: { host: string; port: number; username: string; password?: string; key_path?: string }, path: string) =>
     request<{ path: string; entries: { name: string; path: string; is_dir: boolean; size: number | null }[] }>('/api/files/ssh/list', { method: 'POST', body: JSON.stringify({ ...creds, path }) }),
   sshReadFile: (creds: { host: string; port: number; username: string; password?: string; key_path?: string }, path: string) =>
     request<{ path: string; content: string; size: number }>('/api/files/ssh/read', { method: 'POST', body: JSON.stringify({ ...creds, path }) }),
+  sshDownloadFile: (creds: { host: string; port: number; username: string; password?: string; key_path?: string }, path: string) => {
+    const token = getToken();
+    return fetch(`${getBase()}/api/files/ssh/download`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({ ...creds, path }),
+    });
+  },
 
   // System
   health: () => request<{ status: string }>('/api/system/health'),
