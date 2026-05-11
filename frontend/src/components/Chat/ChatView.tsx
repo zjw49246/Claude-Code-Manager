@@ -310,7 +310,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.nativeEvent.isComposing) {
       e.preventDefault();
       handleSend();
     }
@@ -518,6 +518,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
             <button
               onClick={handleSend}
               disabled={(!input.trim() && pendingFiles.length === 0) || sending || !task.session_id}
+              title="Send (Ctrl+Enter)"
               className="p-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg disabled:opacity-40 disabled:cursor-not-allowed"
             >
               <Send size={18} />
