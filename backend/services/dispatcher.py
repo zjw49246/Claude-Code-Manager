@@ -498,6 +498,7 @@ class GlobalDispatcher:
         iteration = 0
         history: list[dict] = []
         anchored_total: int | None = None
+        plan: str | None = None
 
         max_iterations = task.max_iterations or 50
 
@@ -511,9 +512,14 @@ class GlobalDispatcher:
 
             # Enforce max iterations limit
             if iteration >= max_iterations:
+                if task.must_complete:
+                    last_progress = history[-1]["progress"] if history else "unknown"
+                    fail_msg = f"未能在 {max_iterations} 轮内完成所有任务项（当前进度: {last_progress}）"
+                else:
+                    fail_msg = f"超出最大迭代次数限制 ({max_iterations})"
                 async with self.db_factory() as db:
                     queue = TaskQueue(db)
-                    await queue.mark_failed(task.id, f"超出最大迭代次数限制 ({max_iterations})")
+                    await queue.mark_failed(task.id, fail_msg)
                 await self.broadcaster.broadcast("tasks", {
                     "event": "status_change",
                     "task_id": task.id,
@@ -526,7 +532,9 @@ class GlobalDispatcher:
             # Clear signal file so we can detect if Claude fails to write one
             signal_path.unlink(missing_ok=True)
 
-            prompt = self._build_loop_prompt(task, iteration, str(signal_path), history, anchored_total)
+            prompt = self._build_loop_prompt(
+                task, iteration, str(signal_path), history, anchored_total, plan,
+            )
 
             await self.instance_manager.launch(
                 instance_id=instance_id,
@@ -584,6 +592,10 @@ class GlobalDispatcher:
                 except (IndexError, ValueError):
                     pass
 
+            # Capture plan from signal (latest plan overwrites previous)
+            if signal.get("plan"):
+                plan = signal["plan"]
+
             # Collect iteration history for subsequent prompts
             history.append({
                 "iteration": iteration + 1,
@@ -601,6 +613,20 @@ class GlobalDispatcher:
             })
 
             action = signal.get("action")
+
+            # must_complete: reject "done" if progress shows incomplete
+            if action == "done" and task.must_complete and anchored_total is not None:
+                try:
+                    numerator = int(progress_str.split("/")[0])
+                except (IndexError, ValueError):
+                    numerator = None
+                if numerator is not None and numerator < anchored_total:
+                    logger.info(
+                        f"Loop task {task.id} rejected premature done "
+                        f"(progress {progress_str}, need {anchored_total}), forcing continue"
+                    )
+                    iteration += 1
+                    continue
 
             if action == "continue":
                 iteration += 1
@@ -649,13 +675,16 @@ class GlobalDispatcher:
         signal_path.unlink(missing_ok=True)
 
     def _build_loop_prompt(self, task: Task, iteration: int, signal_path: str,
-                           history: list[dict] | None = None, anchored_total: int | None = None) -> str:
+                           history: list[dict] | None = None, anchored_total: int | None = None,
+                           plan: str | None = None) -> str:
         """Build the per-iteration prompt for a loop task.
 
         Only describes todo-related responsibilities. Git/commit/worktree lifecycle
         is already covered by CLAUDE.md — no need to repeat it here.
         """
         parts = []
+        max_iterations = task.max_iterations or 50
+        remaining = max_iterations - iteration
 
         if task.description:
             parts.append(f"背景说明：{task.description}\n")
@@ -672,15 +701,90 @@ class GlobalDispatcher:
                 parts.append(line)
             parts.append("=== 前几轮完成情况结束 ===\n")
 
+        # Include plan from previous iterations
+        if plan:
+            parts.append("=== 整体计划 ===")
+            parts.append(plan)
+            parts.append("=== 整体计划结束 ===\n")
+
         # Progress format: anchor total from first iteration so denominator stays consistent
         if anchored_total is not None:
             progress_hint = f"已完成数/{anchored_total}"
-            total_note = f"\n注意：任务总数已确定为 {anchored_total}，progress 分母必须始终为 {anchored_total}，不要重新计数。"
         else:
             progress_hint = "已完成数/总数"
-            total_note = ""
 
-        parts.append(f"""\
+        # Signal template: plan field for must_complete, without for normal
+        plan_field = ', "plan": "后续每轮计划（简洁，如需调整则更新，无变化则留空）"' if task.must_complete else ""
+
+        if task.must_complete and iteration == 0:
+            # First iteration of must_complete: require planning
+            parts.append(f"""\
+请遵循 CLAUDE.md 中的所有要求和项目约定。
+
+这是一个必须全部完成的循环任务，你总共有 {max_iterations} 轮来完成所有任务项。
+
+你的职责：
+1. 打开 {task.todo_file_path}，理解其结构，统计所有待完成的任务项
+2. 制定整体执行计划：规划每一轮大致完成哪些项，确保在 {max_iterations} 轮内全部完成
+3. 执行本轮计划的任务项，在 todo 文件中标记为已完成
+
+完成后，将以下 JSON 写入 {signal_path}：
+
+还有待完成项，请继续下一轮：
+{{"action": "continue", "reason": "...", "progress": "{progress_hint}", "summary": "本轮做了什么（一句话）", "plan": "后续每轮计划（简洁）"}}
+
+全部完成：
+{{"action": "done", "reason": "所有 todo 项已完成", "progress": "{progress_hint}", "summary": "本轮做了什么（一句话）"}}
+
+注意：所有任务项必须全部完成，任务才算成功。请合理分配每轮工作量，确保在 {max_iterations} 轮内完成。
+""")
+        elif task.must_complete:
+            # Subsequent iterations of must_complete
+            # Calculate remaining items
+            remaining_items = ""
+            if anchored_total is not None and history:
+                last_progress = ""
+                for h in reversed(history):
+                    if h.get("progress"):
+                        last_progress = h["progress"]
+                        break
+                if last_progress:
+                    try:
+                        done_count = int(last_progress.split("/")[0])
+                        remaining_items = f"，还剩 {anchored_total - done_count} 项未完成"
+                    except (IndexError, ValueError):
+                        pass
+
+            parts.append(f"""\
+请遵循 CLAUDE.md 中的所有要求和项目约定。
+
+这是一个必须全部完成的循环任务的第 {iteration + 1} 轮，还剩 {remaining} 轮。
+
+你的职责：
+1. 打开 {task.todo_file_path}，按照计划执行本轮应完成的任务项
+2. 在 todo 文件中将完成的项标记为已完成
+
+完成后，将以下 JSON 写入 {signal_path}：
+
+还有待完成项，请继续下一轮：
+{{"action": "continue", "reason": "...", "progress": "{progress_hint}", "summary": "本轮做了什么（一句话）"{plan_field}}}
+
+全部完成：
+{{"action": "done", "reason": "所有 todo 项已完成", "progress": "{progress_hint}", "summary": "本轮做了什么（一句话）"}}
+
+无法继续（遇到阻塞或明确问题）：
+{{"action": "abort", "reason": "具体原因", "progress": "{progress_hint}", "summary": "本轮做了什么（一句话）"}}
+
+注意：{"任务总数已确定为 " + str(anchored_total) + remaining_items + "，" if anchored_total is not None else ""}你还有 {remaining} 轮机会。
+所有任务项必须全部完成。如需调整计划，在 plan 字段中更新。
+""")
+        else:
+            # Normal (non-must_complete) loop
+            total_note = ""
+            if anchored_total is not None:
+                total_note = f"\n注意：任务总数已确定为 {anchored_total}，progress 分母必须始终为 {anchored_total}，不要重新计数。"
+
+            parts.append(f"""\
 请遵循 CLAUDE.md 中的所有要求和项目约定。
 
 这是一个持续循环任务的第 {iteration + 1} 轮。

@@ -37,6 +37,7 @@ function makeTask(overrides: Partial<Task> = {}): Task {
     todo_file_path: null,
     loop_progress: null,
     max_iterations: 50,
+    must_complete: false,
     plan_content: null,
     plan_approved: null,
     starred: false,

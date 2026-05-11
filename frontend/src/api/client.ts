@@ -88,6 +88,7 @@ export interface Task {
   todo_file_path: string | null;
   loop_progress: string | null;
   max_iterations: number;
+  must_complete: boolean;
   plan_content: string | null;
   plan_approved: boolean | null;
   starred: boolean;

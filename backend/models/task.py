@@ -28,6 +28,7 @@ class Task(Base):
     todo_file_path: Mapped[str | None] = mapped_column(String(500), nullable=True)  # loop only: path relative to target_repo
     loop_progress: Mapped[str | None] = mapped_column(String(200), nullable=True)  # loop only: e.g. "3/5", written by Claude
     max_iterations: Mapped[int] = mapped_column(Integer, default=50)  # loop only: max iterations before auto-abort
+    must_complete: Mapped[bool] = mapped_column(default=False, server_default="0")  # loop only: reject done until all items finished
     plan_content: Mapped[str | None] = mapped_column(Text, nullable=True)  # Claude's proposed plan
     plan_approved: Mapped[bool | None] = mapped_column(default=None)  # None=pending, True=approved, False=rejected
     session_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
