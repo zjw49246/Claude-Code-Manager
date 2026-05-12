@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     merge_push_retries: int = 3
     auto_push_to_origin: bool = True
     task_timeout_seconds: int = 1800  # 30 minutes
+    default_goal_evaluator_model: str = "claude-haiku-4-5"
+    goal_evaluation_timeout: int = 120
     git_ssh_key_path: str = ""  # Instance-level SSH key, fallback when project has none
 
     # --- Backup service (auto-backup) ---

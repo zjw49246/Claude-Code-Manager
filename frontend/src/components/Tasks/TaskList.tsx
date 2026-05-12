@@ -143,8 +143,17 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat }: TaskListPro
                 ? (t.description || <span className="text-gray-500 italic">{t.todo_file_path}</span>)
                 : t.description}
             </p>
+            {t.mode === 'goal' && t.goal_condition && (
+              <p className="text-emerald-500/70 text-xs mt-0.5 line-clamp-1">Goal: {t.goal_condition}</p>
+            )}
             {t.mode === 'loop' && t.loop_progress && (
               <p className="text-indigo-400 text-xs mt-0.5">⟳ {t.loop_progress}</p>
+            )}
+            {t.mode === 'goal' && t.goal_turns_used > 0 && (
+              <p className="text-emerald-400 text-xs mt-0.5">
+                ◎ Turn {t.goal_turns_used}/{t.goal_max_turns}
+                {t.goal_last_reason && <span className="text-gray-500 ml-1">— {t.goal_last_reason}</span>}
+              </p>
             )}
             {t.target_repo && (
               <p className="text-gray-600 text-xs mt-0.5 truncate">{t.target_repo}</p>

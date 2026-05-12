@@ -43,7 +43,8 @@ claude-manager/
 │   ├── schemas/                 # Pydantic 请求/响应模型
 │   └── services/                # 核心业务逻辑
 │       ├── instance_manager.py  # 子进程生命周期 (launch/stop/consume output)
-│       ├── dispatcher.py        # 全局调度器 (9 步任务生命周期)
+│       ├── dispatcher.py        # 全局调度器 (9 步任务生命周期, 含 goal 模式)
+│       ├── goal_evaluator.py    # Goal 条件评估器 (claude -p 子进程)
 │       ├── ralph_loop.py        # 自动取活循环 (legacy, 保留兼容)
 │       ├── stream_parser.py     # NDJSON stream-json 解析器
 │       ├── task_queue.py        # 优先级队列 (asc = 优先级越高)
@@ -91,6 +92,8 @@ claude-manager/
 - **Tailwind v4**: 用 `@import "tailwindcss"` + `@tailwindcss/vite` 插件，无 tailwind.config
 - **主题**: 深色/浅色切换通过覆盖 `--color-gray-*` CSS 变量实现灰度反转，内容文字用 `text-foreground`（随主题变化），按钮文字保持 `text-white`
 - **Android App**: Capacitor 打包，API/WS 地址通过 `config/server.ts` 动态获取，LoginPage 可展开配置 Server URL
+- **Goal 模式**: `mode="goal"` 任务使用自然语言完成条件（`goal_condition`），每 turn 后由独立评估器（默认 Haiku）判断是否达成。使用 `--resume` 保持同一 session 的连续上下文。评估器通过 `claude -p` 子进程调用，不需要额外 API key
+- **Goal 评估器**: `GoalEvaluator`（`backend/services/goal_evaluator.py`）读取对话日志摘要，发给轻量模型判断条件是否满足。默认模型 `claude-haiku-4-5`，可通过 `goal_evaluator_model` 覆盖
 - **调度器**: `GlobalDispatcher` 只负责分配任务、启动 Claude Code、判断成败。所有 git 操作（worktree、commit、merge、push）全由 Claude Code 自主完成
 - **任务生命周期**: pending → in_progress → executing → completed（失败回 pending 重试）
 - **项目**: `Project` 模型管理 git repo，支持 clone 已有仓库（has_remote=True）和本地 git init（has_remote=False）

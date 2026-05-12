@@ -30,6 +30,8 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   const [defaultEffort, setDefaultEffort] = useState('medium');
   const [todoFilePath, setTodoFilePath] = useState('');
   const [maxIterations, setMaxIterations] = useState(50);
+  const [goalCondition, setGoalCondition] = useState('');
+  const [goalMaxTurns, setGoalMaxTurns] = useState(30);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [projects, setProjects] = useState<Project[]>([]);
@@ -105,6 +107,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   const canSubmit =
     (description || mode === 'loop') &&
     (mode !== 'loop' || todoFilePath) &&
+    (mode !== 'goal' || goalCondition) &&
     (projectId || (isNewProject && newProjectName));
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -148,6 +151,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
         priority,
         mode,
         ...(mode === 'loop' ? { todo_file_path: todoFilePath, max_iterations: maxIterations } : {}),
+        ...(mode === 'goal' ? { goal_condition: goalCondition, goal_max_turns: goalMaxTurns } : {}),
         ...(uploadedPaths.length > 0 ? { file_paths: uploadedPaths } : {}),
         ...(attachments.length > 0 ? { attachments } : {}),
         ...(selectedSecretIds.length > 0 ? { secret_ids: selectedSecretIds } : {}),
@@ -331,6 +335,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
           <option value="auto">Auto (direct execute)</option>
           <option value="plan">Plan (review first)</option>
           <option value="loop">Loop (todo list)</option>
+          <option value="goal">Goal (condition-based)</option>
         </select>
         <label className="text-sm text-gray-400 ml-2">Model:</label>
         <select
@@ -370,6 +375,26 @@ export function TaskForm({ onCreated }: TaskFormProps) {
               className="w-20 bg-gray-700 text-foreground rounded px-2 py-1 text-sm"
               value={maxIterations}
               onChange={(e) => setMaxIterations(Math.max(1, Number(e.target.value)))}
+            />
+          </>
+        )}
+        {mode === 'goal' && (
+          <>
+            <input
+              className="flex-1 min-w-0 bg-gray-700 text-foreground rounded px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              placeholder="Goal condition (e.g. all tests pass and lint is clean)"
+              value={goalCondition}
+              onChange={(e) => setGoalCondition(e.target.value)}
+              required
+            />
+            <label className="text-sm text-gray-400 ml-1 whitespace-nowrap">Max turns:</label>
+            <input
+              type="number"
+              min={1}
+              max={100}
+              className="w-20 bg-gray-700 text-foreground rounded px-2 py-1 text-sm"
+              value={goalMaxTurns}
+              onChange={(e) => setGoalMaxTurns(Math.max(1, Number(e.target.value)))}
             />
           </>
         )}

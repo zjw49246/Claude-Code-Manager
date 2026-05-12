@@ -11,10 +11,13 @@ class TaskCreate(BaseModel):
     target_branch: str = "main"
     priority: int = 0
     max_retries: int = 2
-    mode: str = "auto"  # "auto", "plan", or "loop"
+    mode: str = "auto"  # "auto", "plan", "loop", or "goal"
     todo_file_path: str | None = None  # required when mode="loop"
     max_iterations: int = 50  # loop only: max iterations before auto-abort
     must_complete: bool = False  # loop only: reject done until all items finished
+    goal_condition: str | None = None  # goal only: natural-language completion condition
+    goal_max_turns: int = 30  # goal only: max turns before auto-fail
+    goal_evaluator_model: str | None = None  # goal only: evaluator model (default haiku)
     model: str | None = None
     effort_level: str | None = None
     tags: list[str] | None = None
@@ -25,10 +28,12 @@ class TaskCreate(BaseModel):
 
     @model_validator(mode='after')
     def validate_mode_fields(self):
-        if self.mode != 'loop' and not self.description:
+        if self.mode not in ('loop',) and not self.description:
             raise ValueError('description is required for non-loop tasks')
         if self.mode == 'loop' and not self.todo_file_path:
             raise ValueError('todo_file_path is required for loop tasks')
+        if self.mode == 'goal' and not self.goal_condition:
+            raise ValueError('goal_condition is required for goal tasks')
         return self
 
 
@@ -43,6 +48,9 @@ class TaskUpdate(BaseModel):
     max_iterations: int | None = None
     must_complete: bool | None = None
     mode: str | None = None
+    goal_condition: str | None = None
+    goal_max_turns: int | None = None
+    goal_evaluator_model: str | None = None
     starred: bool | None = None
     tags: list[str] | None = None
 
@@ -66,6 +74,11 @@ class TaskResponse(BaseModel):
     loop_progress: str | None
     max_iterations: int
     must_complete: bool
+    goal_condition: str | None
+    goal_evaluator_model: str | None
+    goal_max_turns: int
+    goal_turns_used: int
+    goal_last_reason: str | None
     plan_content: str | None
     plan_approved: bool | None
     session_id: str | None
