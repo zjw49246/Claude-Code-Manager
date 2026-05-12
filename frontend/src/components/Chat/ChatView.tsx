@@ -7,6 +7,7 @@ import { useWebSocket } from '../../hooks/useWebSocket';
 import { Send, ArrowLeft, Loader2, ChevronDown, ChevronRight, Copy, Check, Paperclip, X, StopCircle, Pencil } from 'lucide-react';
 import { SecretPicker } from '../Secrets/SecretPicker';
 import { formatMessageTime } from '../../config/timezone';
+import { useFileDrop } from '../../hooks/useFileDrop';
 
 interface ChatViewProps {
   task: Task;
@@ -101,6 +102,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
   const [interrupting, setInterrupting] = useState(false);
   const [stillRunning, setStillRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [dropError, setDropError] = useState<string | null>(null);
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [filePreviews, setFilePreviews] = useState<string[]>([]);
   const [selectedSecretIds, setSelectedSecretIds] = useState<number[]>([]);
@@ -229,6 +231,21 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
 
   const IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.gif', '.webp'];
   const isImageFile = (f: File) => IMAGE_EXTS.some((ext) => f.name.toLowerCase().endsWith(ext));
+
+  useFileDrop({
+    pendingFiles,
+    setPendingFiles,
+    setFilePreviews,
+    disabled: sending || !task.session_id,
+    onError: (msg) => setDropError(msg),
+  });
+
+  useEffect(() => {
+    if (dropError) {
+      const t = setTimeout(() => setDropError(null), 2000);
+      return () => clearTimeout(t);
+    }
+  }, [dropError]);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
@@ -448,6 +465,11 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
       {error && (
         <div className="mx-4 mb-2 px-3 py-2 bg-red-500/10 border border-red-500/30 rounded text-sm text-red-400">
           {error}
+        </div>
+      )}
+      {dropError && (
+        <div className="mx-4 mb-2 px-3 py-2 bg-yellow-500/10 border border-yellow-500/30 rounded text-sm text-yellow-400">
+          {dropError}
         </div>
       )}
 

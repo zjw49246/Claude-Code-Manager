@@ -6,6 +6,7 @@ import { ProjectSelect } from '../ProjectSelect';
 import { resolveTagColor } from '../TagColors';
 import { VoiceButton } from '../Voice/VoiceButton';
 import { SecretPicker } from '../Secrets/SecretPicker';
+import { useFileDrop } from '../../hooks/useFileDrop';
 
 interface TaskFormProps {
   onCreated: () => void;
@@ -30,13 +31,16 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   const [todoFilePath, setTodoFilePath] = useState('');
   const [maxIterations, setMaxIterations] = useState(50);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
   const [projects, setProjects] = useState<Project[]>([]);
   const [tagItems, setTagItems] = useState<TagItem[]>([]);
   const [tagFilter, setTagFilter] = useState<string>('');
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [filePreviews, setFilePreviews] = useState<string[]>([]);
   const [selectedSecretIds, setSelectedSecretIds] = useState<number[]>([]);
+  const [dropError, setDropError] = useState('');
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const formRef = useRef<HTMLFormElement>(null);
 
   const loadProjects = () => {
     api.listProjects().then(setProjects).catch(() => {});
@@ -68,6 +72,21 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   const IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.gif', '.webp'];
   const isImageFile = (f: File) => IMAGE_EXTS.some((ext) => f.name.toLowerCase().endsWith(ext));
 
+  useFileDrop({
+    targetRef: formRef,
+    pendingFiles,
+    setPendingFiles,
+    setFilePreviews,
+    onError: (msg) => setDropError(msg),
+  });
+
+  useEffect(() => {
+    if (dropError) {
+      const t = setTimeout(() => setDropError(''), 2000);
+      return () => clearTimeout(t);
+    }
+  }, [dropError]);
+
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
     if (!files.length) return;
@@ -92,6 +111,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
     e.preventDefault();
     if (!canSubmit) return;
     setLoading(true);
+    setError('');
     try {
       let pid = projectId || undefined;
 
@@ -143,14 +163,32 @@ export function TaskForm({ onCreated }: TaskFormProps) {
       setModel('');
       setEffort('');
       onCreated();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to create task');
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <form onSubmit={handleSubmit} className="bg-gray-800 rounded-lg p-4 space-y-3">
+    <form ref={formRef} onSubmit={handleSubmit} className="bg-gray-800 rounded-lg p-4 space-y-3">
       <h3 className="text-sm font-semibold text-gray-300">New Task</h3>
+      {dropError && (
+        <div className="bg-yellow-900/50 border border-yellow-700 text-yellow-300 text-xs rounded px-3 py-2 flex items-center justify-between">
+          <span>{dropError}</span>
+          <button type="button" onClick={() => setDropError('')} className="text-yellow-400 hover:text-yellow-200 ml-2">
+            <X size={14} />
+          </button>
+        </div>
+      )}
+      {error && (
+        <div className="bg-red-900/50 border border-red-700 text-red-300 text-xs rounded px-3 py-2 flex items-center justify-between">
+          <span>{error}</span>
+          <button type="button" onClick={() => setError('')} className="text-red-400 hover:text-red-200 ml-2">
+            <X size={14} />
+          </button>
+        </div>
+      )}
       <div className="flex gap-2">
         <textarea
           className="flex-1 bg-gray-700 text-foreground rounded px-3 py-2 text-sm h-24 resize-none focus:outline-none focus:ring-2 focus:ring-indigo-500"
