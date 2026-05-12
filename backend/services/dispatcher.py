@@ -364,6 +364,11 @@ class GlobalDispatcher:
                 await self._run_loop_lifecycle(instance_id, task, cwd, git_env, effort_level=effort_level)
                 return
 
+            # === Step 3c: Goal mode ===
+            if task.mode == "goal":
+                await self._run_goal_lifecycle(instance_id, task, cwd, git_env, effort_level=effort_level)
+                return
+
             # === Step 4: Launch Claude Code ===
             metadata = task.metadata_ or {}
             image_paths = metadata.get("image_paths") or []
@@ -673,6 +678,230 @@ class GlobalDispatcher:
                 break
 
         signal_path.unlink(missing_ok=True)
+
+    # ------------------------------------------------------------------ #
+    #                       Goal mode lifecycle                           #
+    # ------------------------------------------------------------------ #
+
+    async def _run_goal_lifecycle(
+        self,
+        instance_id: int,
+        task: Task,
+        cwd: str,
+        git_env: dict | None = None,
+        effort_level: str | None = None,
+    ):
+        """Goal mode: repeatedly invoke Claude Code until an evaluator confirms
+        the goal condition is met.
+
+        Uses --resume to keep the same session across turns, preserving full
+        context. After each turn, a lightweight evaluator model judges the
+        conversation transcript against the goal condition.
+        """
+        from backend.services.goal_evaluator import GoalEvaluator
+
+        evaluator = GoalEvaluator()
+        turn = 0
+        max_turns = task.goal_max_turns or 30
+        session_id: str | None = None
+
+        while turn < max_turns:
+            # Check if task was cancelled externally between turns
+            async with self.db_factory() as db:
+                t = await db.get(Task, task.id)
+                if t and t.status == "cancelled":
+                    logger.info(f"Goal task {task.id} cancelled, stopping")
+                    return
+
+            if turn == 0:
+                prompt = self._build_goal_initial_prompt(task)
+                await self.instance_manager.launch(
+                    instance_id=instance_id,
+                    prompt=prompt,
+                    task_id=task.id,
+                    cwd=cwd,
+                    model=task.model,
+                    loop_iteration=turn,
+                    git_env=git_env or {},
+                    thinking_budget=await self._get_thinking_budget(instance_id),
+                    effort_level=effort_level,
+                )
+            else:
+                follow_up = self._build_goal_followup_prompt(last_reason, turn, max_turns)
+                await self.instance_manager.launch(
+                    instance_id=instance_id,
+                    prompt=follow_up,
+                    task_id=task.id,
+                    cwd=cwd,
+                    model=task.model,
+                    resume_session_id=session_id,
+                    loop_iteration=turn,
+                    git_env=git_env or {},
+                    thinking_budget=await self._get_thinking_budget(instance_id),
+                    effort_level=effort_level,
+                )
+
+            # Wait for process to finish
+            process = self.instance_manager.processes.get(instance_id)
+            if process:
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=settings.task_timeout_seconds)
+                except asyncio.TimeoutError:
+                    logger.warning(f"Goal task {task.id} turn {turn} timed out, killing")
+                    process.kill()
+                    await process.wait()
+
+            # Check if cancelled during execution
+            async with self.db_factory() as db:
+                t = await db.get(Task, task.id)
+                if t and t.status == "cancelled":
+                    logger.info(f"Goal task {task.id} cancelled during turn {turn}, stopping")
+                    return
+
+            # Get session_id from DB (set by _consume_output)
+            async with self.db_factory() as db:
+                t = await db.get(Task, task.id)
+                if t and t.session_id:
+                    session_id = t.session_id
+
+            # Collect conversation summary for evaluator
+            conversation_summary = await self._collect_goal_conversation(task.id, turn)
+
+            # Evaluate goal condition
+            eval_result = await evaluator.evaluate(
+                condition=task.goal_condition,
+                conversation_summary=conversation_summary,
+                model=task.goal_evaluator_model,
+            )
+
+            turn += 1
+            last_reason = eval_result.reason
+
+            # Update progress in DB
+            async with self.db_factory() as db:
+                await db.execute(
+                    update(Task)
+                    .where(Task.id == task.id)
+                    .values(
+                        goal_turns_used=turn,
+                        goal_last_reason=eval_result.reason,
+                    )
+                )
+                await db.commit()
+
+            # Broadcast evaluation result
+            await self.broadcaster.broadcast(f"task:{task.id}", {
+                "event_type": "goal_evaluation",
+                "turn": turn,
+                "max_turns": max_turns,
+                "achieved": eval_result.achieved,
+                "reason": eval_result.reason,
+            })
+            await self.broadcaster.broadcast("tasks", {
+                "event": "goal_evaluation",
+                "task_id": task.id,
+                "turn": turn,
+                "achieved": eval_result.achieved,
+            })
+
+            if eval_result.achieved:
+                async with self.db_factory() as db:
+                    queue = TaskQueue(db)
+                    await queue.mark_completed(task.id)
+                    await db.execute(
+                        update(Instance)
+                        .where(Instance.id == instance_id)
+                        .values(total_tasks_completed=Instance.total_tasks_completed + 1)
+                    )
+                    await db.commit()
+                await self.broadcaster.broadcast("tasks", {
+                    "event": "status_change",
+                    "task_id": task.id,
+                    "new_status": "completed",
+                    "instance_id": instance_id,
+                })
+                logger.info(f"Goal task {task.id} achieved after {turn} turn(s)")
+                return
+
+        # Exceeded max turns
+        fail_msg = f"未在 {max_turns} 轮内达成目标条件"
+        async with self.db_factory() as db:
+            queue = TaskQueue(db)
+            await queue.mark_failed(task.id, fail_msg)
+        await self.broadcaster.broadcast("tasks", {
+            "event": "status_change",
+            "task_id": task.id,
+            "new_status": "failed",
+            "instance_id": instance_id,
+        })
+        logger.warning(f"Goal task {task.id} exceeded max turns ({max_turns})")
+
+    def _build_goal_initial_prompt(self, task: Task) -> str:
+        """Build the first-turn prompt for a goal task."""
+        parts = ["请阅读项目根目录的 CLAUDE.md 了解项目规范和任务完成后的 git 流程。"]
+
+        metadata = task.metadata_ or {}
+        image_paths = metadata.get("image_paths") or []
+        if image_paths:
+            image_list = "\n".join(f"- {p}" for p in image_paths)
+            parts.append(f"用户提供了以下参考图片，请先用 Read 工具查看：\n{image_list}")
+
+        parts.append(f"任务:\n{task.description}")
+        parts.append(
+            f"\n目标完成条件:\n{task.goal_condition}\n\n"
+            f"请持续工作直到满足以上目标条件。每轮结束后，"
+            f"一个独立的评估器会检查你的工作是否已达成目标。"
+            f"你有最多 {task.goal_max_turns or 30} 轮来完成。"
+            f"请在每轮结束时简要说明本轮完成了什么、当前状态如何。"
+        )
+        return "\n\n".join(parts)
+
+    def _build_goal_followup_prompt(self, last_reason: str, turn: int, max_turns: int) -> str:
+        """Build follow-up prompt for subsequent goal turns."""
+        remaining = max_turns - turn
+        return (
+            f"评估器判断目标尚未达成。\n\n"
+            f"评估器反馈: {last_reason}\n\n"
+            f"请继续工作以满足目标条件。你还有 {remaining} 轮机会。\n"
+            f"本轮结束时请简要说明完成了什么、当前状态如何。"
+        )
+
+    async def _collect_goal_conversation(self, task_id: int, current_turn: int) -> str:
+        """Collect recent conversation log entries for the evaluator.
+
+        Reads the last N assistant messages from log_entries to build a
+        summary that the evaluator can judge against the goal condition.
+        Only sends recent turns to keep the evaluator prompt concise.
+        """
+        from backend.models.log_entry import LogEntry
+
+        async with self.db_factory() as db:
+            result = await db.execute(
+                select(LogEntry.content, LogEntry.loop_iteration)
+                .where(
+                    LogEntry.task_id == task_id,
+                    LogEntry.event_type == "message",
+                    LogEntry.role == "assistant",
+                )
+                .order_by(LogEntry.id.desc())
+                .limit(30)
+            )
+            rows = list(result.all())
+
+        if not rows:
+            return "(No conversation output recorded)"
+
+        rows.reverse()
+        parts = []
+        for content, iteration in rows:
+            if content:
+                turn_label = f"[Turn {(iteration or 0) + 1}] " if iteration is not None else ""
+                parts.append(f"{turn_label}{content}")
+
+        summary = "\n\n".join(parts)
+        if len(summary) > 15000:
+            summary = summary[-15000:]
+        return summary
 
     def _build_loop_prompt(self, task: Task, iteration: int, signal_path: str,
                            history: list[dict] | None = None, anchored_total: int | None = None,

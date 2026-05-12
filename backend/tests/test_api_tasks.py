@@ -534,3 +534,146 @@ async def test_create_task_effort_level_in_list(client):
     assert resp.status_code == 200
     tasks = resp.json()
     assert tasks[0]["effort_level"] == "low"
+
+
+# === Goal mode tests ===
+
+
+@pytest.mark.asyncio
+async def test_create_goal_task(client):
+    """Goal task with condition is created successfully."""
+    resp = await client.post("/api/tasks", json={
+        "title": "Goal Task",
+        "description": "implement feature",
+        "mode": "goal",
+        "goal_condition": "all tests pass",
+        "target_repo": "/tmp",
+    })
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["mode"] == "goal"
+    assert data["goal_condition"] == "all tests pass"
+    assert data["goal_max_turns"] == 30
+    assert data["goal_turns_used"] == 0
+    assert data["goal_last_reason"] is None
+
+
+@pytest.mark.asyncio
+async def test_create_goal_task_custom_max_turns(client):
+    """Goal task with custom max_turns stores it correctly."""
+    resp = await client.post("/api/tasks", json={
+        "title": "Goal Custom",
+        "description": "do it",
+        "mode": "goal",
+        "goal_condition": "lint clean",
+        "goal_max_turns": 15,
+        "target_repo": "/tmp",
+    })
+    assert resp.status_code == 201
+    assert resp.json()["goal_max_turns"] == 15
+
+
+@pytest.mark.asyncio
+async def test_create_goal_task_requires_condition(client):
+    """Goal task without goal_condition returns 422."""
+    resp = await client.post("/api/tasks", json={
+        "title": "No Condition",
+        "description": "do it",
+        "mode": "goal",
+        "target_repo": "/tmp",
+    })
+    assert resp.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_create_goal_task_with_evaluator_model(client):
+    """Goal task with custom evaluator model stores it."""
+    resp = await client.post("/api/tasks", json={
+        "title": "Goal Eval",
+        "description": "do it",
+        "mode": "goal",
+        "goal_condition": "condition",
+        "goal_evaluator_model": "claude-sonnet-4-6",
+        "target_repo": "/tmp",
+    })
+    assert resp.status_code == 201
+    assert resp.json()["goal_evaluator_model"] == "claude-sonnet-4-6"
+
+
+@pytest.mark.asyncio
+async def test_goal_fields_persisted_in_db(client, session_factory):
+    """Goal fields are actually persisted to the database."""
+    from backend.models.task import Task
+
+    resp = await client.post("/api/tasks", json={
+        "title": "Persist Goal",
+        "description": "do it",
+        "mode": "goal",
+        "goal_condition": "all green",
+        "goal_max_turns": 20,
+        "target_repo": "/tmp",
+    })
+    task_id = resp.json()["id"]
+
+    async with session_factory() as db:
+        task = await db.get(Task, task_id)
+    assert task.goal_condition == "all green"
+    assert task.goal_max_turns == 20
+    assert task.goal_turns_used == 0
+
+
+@pytest.mark.asyncio
+async def test_goal_fields_in_get_response(client):
+    """Goal fields are returned in GET /api/tasks/{id}."""
+    create_resp = await client.post("/api/tasks", json={
+        "title": "T",
+        "description": "d",
+        "mode": "goal",
+        "goal_condition": "tests pass",
+        "target_repo": "/tmp",
+    })
+    task_id = create_resp.json()["id"]
+
+    resp = await client.get(f"/api/tasks/{task_id}")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["goal_condition"] == "tests pass"
+    assert data["goal_max_turns"] == 30
+    assert data["goal_turns_used"] == 0
+
+
+@pytest.mark.asyncio
+async def test_update_goal_task_fields(client):
+    """PUT /api/tasks/{id} can update goal-specific fields."""
+    create_resp = await client.post("/api/tasks", json={
+        "title": "Goal Update",
+        "description": "d",
+        "mode": "goal",
+        "goal_condition": "old condition",
+        "goal_max_turns": 10,
+        "target_repo": "/tmp",
+    })
+    task_id = create_resp.json()["id"]
+
+    resp = await client.put(f"/api/tasks/{task_id}", json={
+        "goal_condition": "new condition",
+        "goal_max_turns": 50,
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["goal_condition"] == "new condition"
+    assert data["goal_max_turns"] == 50
+
+
+@pytest.mark.asyncio
+async def test_non_goal_task_has_null_goal_fields(client):
+    """Auto-mode task has null goal fields."""
+    resp = await client.post("/api/tasks", json={
+        "title": "Auto", "description": "d", "target_repo": "/tmp",
+    })
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["goal_condition"] is None
+    assert data["goal_max_turns"] == 30
+    assert data["goal_turns_used"] == 0
+    assert data["goal_last_reason"] is None

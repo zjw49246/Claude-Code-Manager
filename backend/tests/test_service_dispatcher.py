@@ -2024,3 +2024,499 @@ async def test_get_effort_level_falls_back_to_default(db_factory):
     result = await d._get_effort_level(inst_id)
     from backend.config import settings
     assert result == settings.default_effort
+
+
+# === Goal mode lifecycle tests ===
+
+
+def _make_goal_task(db, target_repo: str = "/repo", goal_max_turns: int = 5) -> Task:
+    """Create a goal mode task."""
+    return Task(
+        title="goal-test",
+        description="implement feature X",
+        mode="goal",
+        goal_condition="all tests pass and lint is clean",
+        goal_max_turns=goal_max_turns,
+        target_repo=target_repo,
+    )
+
+
+@pytest.mark.asyncio
+async def test_goal_achieved_after_one_turn(db_factory):
+    """Goal task marked completed when evaluator says achieved on first turn."""
+    d = _make_dispatcher(db_factory)
+
+    async with db_factory() as db:
+        inst = Instance(name="goal-worker-1")
+        db.add(inst)
+        task = _make_goal_task(db)
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_obj = task
+
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.wait = AsyncMock(return_value=0)
+    d.instance_manager.processes = {inst_id: mock_proc}
+
+    from backend.services.goal_evaluator import GoalEvalResult
+    with patch("backend.services.goal_evaluator.GoalEvaluator.evaluate",
+               return_value=GoalEvalResult(achieved=True, reason="all tests pass")):
+        await d._run_goal_lifecycle(inst_id, task_obj, "/repo")
+
+    async with db_factory() as db:
+        t = await db.get(Task, task_obj.id)
+        assert t.status == "completed"
+        assert t.goal_turns_used == 1
+        assert t.goal_last_reason == "all tests pass"
+
+
+@pytest.mark.asyncio
+async def test_goal_achieved_after_multiple_turns(db_factory):
+    """Goal task continues until evaluator says achieved."""
+    d = _make_dispatcher(db_factory)
+
+    async with db_factory() as db:
+        inst = Instance(name="goal-worker-2")
+        db.add(inst)
+        task = _make_goal_task(db, goal_max_turns=10)
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_obj = task
+
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.wait = AsyncMock(return_value=0)
+    d.instance_manager.processes = {inst_id: mock_proc}
+
+    call_count = {"n": 0}
+    from backend.services.goal_evaluator import GoalEvalResult
+
+    async def eval_side_effect(*args, **kwargs):
+        call_count["n"] += 1
+        if call_count["n"] < 3:
+            return GoalEvalResult(achieved=False, reason=f"still {3 - call_count['n']} issues")
+        return GoalEvalResult(achieved=True, reason="all clear")
+
+    with patch("backend.services.goal_evaluator.GoalEvaluator.evaluate",
+               side_effect=eval_side_effect):
+        await d._run_goal_lifecycle(inst_id, task_obj, "/repo")
+
+    assert call_count["n"] == 3
+    async with db_factory() as db:
+        t = await db.get(Task, task_obj.id)
+        assert t.status == "completed"
+        assert t.goal_turns_used == 3
+
+
+@pytest.mark.asyncio
+async def test_goal_max_turns_exceeded(db_factory):
+    """Goal task fails when max turns exhausted."""
+    d = _make_dispatcher(db_factory)
+
+    async with db_factory() as db:
+        inst = Instance(name="goal-worker-3")
+        db.add(inst)
+        task = _make_goal_task(db, goal_max_turns=2)
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_obj = task
+
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.wait = AsyncMock(return_value=0)
+    d.instance_manager.processes = {inst_id: mock_proc}
+
+    from backend.services.goal_evaluator import GoalEvalResult
+    with patch("backend.services.goal_evaluator.GoalEvaluator.evaluate",
+               return_value=GoalEvalResult(achieved=False, reason="tests still failing")):
+        await d._run_goal_lifecycle(inst_id, task_obj, "/repo")
+
+    async with db_factory() as db:
+        t = await db.get(Task, task_obj.id)
+        assert t.status == "failed"
+        assert "2" in t.error_message
+        assert t.goal_turns_used == 2
+
+
+@pytest.mark.asyncio
+async def test_goal_cancelled_between_turns(db_factory):
+    """Goal task stops cleanly when cancelled externally between turns."""
+    d = _make_dispatcher(db_factory)
+
+    async with db_factory() as db:
+        inst = Instance(name="goal-worker-4")
+        db.add(inst)
+        task = _make_goal_task(db, goal_max_turns=10)
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_obj = task
+
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.wait = AsyncMock(return_value=0)
+    d.instance_manager.processes = {inst_id: mock_proc}
+
+    eval_count = {"n": 0}
+    from backend.services.goal_evaluator import GoalEvalResult
+
+    async def eval_and_cancel(*args, **kwargs):
+        eval_count["n"] += 1
+        # Cancel task after first evaluation
+        async with db_factory() as db:
+            from sqlalchemy import update as sa_update
+            await db.execute(
+                sa_update(Task).where(Task.id == task_obj.id).values(status="cancelled")
+            )
+            await db.commit()
+        return GoalEvalResult(achieved=False, reason="not done")
+
+    with patch("backend.services.goal_evaluator.GoalEvaluator.evaluate",
+               side_effect=eval_and_cancel):
+        await d._run_goal_lifecycle(inst_id, task_obj, "/repo")
+
+    assert eval_count["n"] == 1
+    async with db_factory() as db:
+        t = await db.get(Task, task_obj.id)
+        assert t.status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_goal_cancelled_during_execution(db_factory):
+    """Goal task stops when cancelled while Claude is running."""
+    d = _make_dispatcher(db_factory)
+
+    async with db_factory() as db:
+        inst = Instance(name="goal-worker-5")
+        db.add(inst)
+        task = _make_goal_task(db, goal_max_turns=10)
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_obj = task
+
+    async def launch_and_cancel(*args, **kwargs):
+        async with db_factory() as db:
+            from sqlalchemy import update as sa_update
+            await db.execute(
+                sa_update(Task).where(Task.id == task_obj.id).values(status="cancelled")
+            )
+            await db.commit()
+        return 12345
+
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.wait = AsyncMock(return_value=0)
+    d.instance_manager.launch = AsyncMock(side_effect=launch_and_cancel)
+    d.instance_manager.processes = {inst_id: mock_proc}
+
+    await d._run_goal_lifecycle(inst_id, task_obj, "/repo")
+
+    async with db_factory() as db:
+        t = await db.get(Task, task_obj.id)
+        assert t.status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_goal_uses_resume_on_subsequent_turns(db_factory):
+    """Goal task uses --resume for turns after the first."""
+    d = _make_dispatcher(db_factory)
+
+    async with db_factory() as db:
+        inst = Instance(name="goal-worker-6")
+        db.add(inst)
+        task = _make_goal_task(db, goal_max_turns=5)
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_obj = task
+
+    launch_calls: list[dict] = []
+
+    async def capture_launch(*args, **kwargs):
+        launch_calls.append(kwargs)
+        # Set session_id on first call
+        if len(launch_calls) == 1:
+            async with db_factory() as db:
+                from sqlalchemy import update as sa_update
+                await db.execute(
+                    sa_update(Task).where(Task.id == task_obj.id).values(session_id="sess-goal-123")
+                )
+                await db.commit()
+        return 12345
+
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.wait = AsyncMock(return_value=0)
+    d.instance_manager.launch = AsyncMock(side_effect=capture_launch)
+    d.instance_manager.processes = {inst_id: mock_proc}
+
+    eval_count = {"n": 0}
+    from backend.services.goal_evaluator import GoalEvalResult
+
+    async def eval_twice(*args, **kwargs):
+        eval_count["n"] += 1
+        if eval_count["n"] < 2:
+            return GoalEvalResult(achieved=False, reason="not yet")
+        return GoalEvalResult(achieved=True, reason="done")
+
+    with patch("backend.services.goal_evaluator.GoalEvaluator.evaluate",
+               side_effect=eval_twice):
+        await d._run_goal_lifecycle(inst_id, task_obj, "/repo")
+
+    assert len(launch_calls) == 2
+    # First call: no resume_session_id
+    assert launch_calls[0].get("resume_session_id") is None
+    # Second call: should use resume
+    assert launch_calls[1].get("resume_session_id") == "sess-goal-123"
+
+
+@pytest.mark.asyncio
+async def test_goal_broadcasts_evaluation_events(db_factory):
+    """Goal lifecycle broadcasts goal_evaluation events."""
+    d = _make_dispatcher(db_factory)
+
+    async with db_factory() as db:
+        inst = Instance(name="goal-worker-7")
+        db.add(inst)
+        task = _make_goal_task(db, goal_max_turns=5)
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_obj = task
+
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.wait = AsyncMock(return_value=0)
+    d.instance_manager.processes = {inst_id: mock_proc}
+
+    from backend.services.goal_evaluator import GoalEvalResult
+    with patch("backend.services.goal_evaluator.GoalEvaluator.evaluate",
+               return_value=GoalEvalResult(achieved=True, reason="done")):
+        await d._run_goal_lifecycle(inst_id, task_obj, "/repo")
+
+    # Check broadcasts
+    broadcast_calls = d.broadcaster.broadcast.call_args_list
+    goal_eval_events = [
+        c for c in broadcast_calls
+        if isinstance(c[0][1], dict) and c[0][1].get("event_type") == "goal_evaluation"
+    ]
+    assert len(goal_eval_events) >= 1
+    assert goal_eval_events[0][0][1]["achieved"] is True
+    assert goal_eval_events[0][0][1]["turn"] == 1
+
+
+@pytest.mark.asyncio
+async def test_goal_total_completed_incremented_once(db_factory):
+    """Completing a goal task increments total_tasks_completed exactly once."""
+    d = _make_dispatcher(db_factory)
+
+    async with db_factory() as db:
+        inst = Instance(name="goal-count-worker", total_tasks_completed=0)
+        db.add(inst)
+        task = _make_goal_task(db, goal_max_turns=5)
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_obj = task
+
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.wait = AsyncMock(return_value=0)
+    d.instance_manager.processes = {inst_id: mock_proc}
+
+    eval_count = {"n": 0}
+    from backend.services.goal_evaluator import GoalEvalResult
+
+    async def eval_multi(*args, **kwargs):
+        eval_count["n"] += 1
+        if eval_count["n"] < 3:
+            return GoalEvalResult(achieved=False, reason="not yet")
+        return GoalEvalResult(achieved=True, reason="done")
+
+    with patch("backend.services.goal_evaluator.GoalEvaluator.evaluate",
+               side_effect=eval_multi):
+        await d._run_goal_lifecycle(inst_id, task_obj, "/repo")
+
+    async with db_factory() as db:
+        i = await db.get(Instance, inst_id)
+        assert i.total_tasks_completed == 1
+
+
+@pytest.mark.asyncio
+async def test_goal_total_completed_not_incremented_on_failure(db_factory):
+    """Failed goal task does NOT increment total_tasks_completed."""
+    d = _make_dispatcher(db_factory)
+
+    async with db_factory() as db:
+        inst = Instance(name="goal-fail-count-worker", total_tasks_completed=0)
+        db.add(inst)
+        task = _make_goal_task(db, goal_max_turns=1)
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_obj = task
+
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.wait = AsyncMock(return_value=0)
+    d.instance_manager.processes = {inst_id: mock_proc}
+
+    from backend.services.goal_evaluator import GoalEvalResult
+    with patch("backend.services.goal_evaluator.GoalEvaluator.evaluate",
+               return_value=GoalEvalResult(achieved=False, reason="nope")):
+        await d._run_goal_lifecycle(inst_id, task_obj, "/repo")
+
+    async with db_factory() as db:
+        i = await db.get(Instance, inst_id)
+        assert i.total_tasks_completed == 0
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_routes_to_goal(db_factory):
+    """_run_task_lifecycle delegates to _run_goal_lifecycle for mode='goal'."""
+    d = _make_dispatcher(db_factory)
+
+    goal_called = {"called": False}
+    async def fake_goal(*args, **kwargs):
+        goal_called["called"] = True
+    d._run_goal_lifecycle = fake_goal
+
+    async with db_factory() as db:
+        inst = Instance(name="goal-router")
+        db.add(inst)
+        task = Task(
+            title="route-goal",
+            description="do it",
+            mode="goal",
+            goal_condition="tests pass",
+            target_repo="/repo",
+        )
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_obj = task
+
+    await d._run_task_lifecycle(inst_id, task_obj)
+    assert goal_called["called"]
+
+
+# === Goal prompt construction tests ===
+
+
+@pytest.mark.asyncio
+async def test_goal_initial_prompt_contains_condition(db_factory):
+    """_build_goal_initial_prompt includes the goal condition."""
+    d = _make_dispatcher(db_factory)
+    task = Task(
+        title="t", description="implement X", mode="goal",
+        goal_condition="all tests pass", goal_max_turns=10,
+    )
+    prompt = d._build_goal_initial_prompt(task)
+    assert "all tests pass" in prompt
+    assert "implement X" in prompt
+    assert "CLAUDE.md" in prompt
+    assert "10" in prompt
+
+
+@pytest.mark.asyncio
+async def test_goal_initial_prompt_with_images(db_factory):
+    """_build_goal_initial_prompt includes image paths from metadata."""
+    d = _make_dispatcher(db_factory)
+    task = Task(
+        title="t", description="implement X", mode="goal",
+        goal_condition="condition", goal_max_turns=5,
+        metadata_={"image_paths": ["/uploads/a.png"]},
+    )
+    prompt = d._build_goal_initial_prompt(task)
+    assert "/uploads/a.png" in prompt
+    assert "Read" in prompt
+
+
+@pytest.mark.asyncio
+async def test_goal_followup_prompt_contains_reason(db_factory):
+    """_build_goal_followup_prompt includes evaluator reason and remaining turns."""
+    d = _make_dispatcher(db_factory)
+    prompt = d._build_goal_followup_prompt("3 tests still failing", turn=2, max_turns=10)
+    assert "3 tests still failing" in prompt
+    assert "8" in prompt  # remaining turns
+
+
+@pytest.mark.asyncio
+async def test_goal_conversation_collection(db_factory):
+    """_collect_goal_conversation returns formatted log entries."""
+    d = _make_dispatcher(db_factory)
+
+    from backend.models.log_entry import LogEntry
+
+    async with db_factory() as db:
+        task = Task(
+            title="conv-test", description="d", mode="goal",
+            goal_condition="c", target_repo="/repo",
+        )
+        db.add(task)
+        await db.commit()
+        await db.refresh(task)
+
+        db.add(LogEntry(
+            instance_id=1, task_id=task.id, event_type="message",
+            role="assistant", content="Implemented feature A",
+            loop_iteration=0,
+        ))
+        db.add(LogEntry(
+            instance_id=1, task_id=task.id, event_type="message",
+            role="assistant", content="Fixed test failures",
+            loop_iteration=1,
+        ))
+        await db.commit()
+
+        task_id = task.id
+
+    summary = await d._collect_goal_conversation(task_id, current_turn=1)
+    assert "Implemented feature A" in summary
+    assert "Fixed test failures" in summary
+    assert "[Turn 1]" in summary
+    assert "[Turn 2]" in summary
+
+
+@pytest.mark.asyncio
+async def test_goal_conversation_empty_log(db_factory):
+    """_collect_goal_conversation handles empty log gracefully."""
+    d = _make_dispatcher(db_factory)
+
+    async with db_factory() as db:
+        task = Task(
+            title="empty-conv", description="d", mode="goal",
+            goal_condition="c", target_repo="/repo",
+        )
+        db.add(task)
+        await db.commit()
+        await db.refresh(task)
+        task_id = task.id
+
+    summary = await d._collect_goal_conversation(task_id, current_turn=0)
+    assert "No conversation" in summary

@@ -29,6 +29,11 @@ class Task(Base):
     loop_progress: Mapped[str | None] = mapped_column(String(200), nullable=True)  # loop only: e.g. "3/5", written by Claude
     max_iterations: Mapped[int] = mapped_column(Integer, default=50)  # loop only: max iterations before auto-abort
     must_complete: Mapped[bool] = mapped_column(default=False, server_default="0")  # loop only: reject done until all items finished
+    goal_condition: Mapped[str | None] = mapped_column(Text, nullable=True)  # goal mode: natural-language completion condition
+    goal_evaluator_model: Mapped[str | None] = mapped_column(String(100), nullable=True)  # goal mode: model for evaluator (default haiku)
+    goal_max_turns: Mapped[int] = mapped_column(Integer, default=30)  # goal mode: max turns before auto-fail
+    goal_turns_used: Mapped[int] = mapped_column(Integer, default=0)  # goal mode: turns completed so far
+    goal_last_reason: Mapped[str | None] = mapped_column(Text, nullable=True)  # goal mode: evaluator's latest judgment reason
     plan_content: Mapped[str | None] = mapped_column(Text, nullable=True)  # Claude's proposed plan
     plan_approved: Mapped[bool | None] = mapped_column(default=None)  # None=pending, True=approved, False=rejected
     session_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
