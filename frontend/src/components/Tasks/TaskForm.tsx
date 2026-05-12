@@ -30,6 +30,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   const [defaultEffort, setDefaultEffort] = useState('medium');
   const [todoFilePath, setTodoFilePath] = useState('');
   const [maxIterations, setMaxIterations] = useState(50);
+  const [mustComplete, setMustComplete] = useState(false);
   const [goalCondition, setGoalCondition] = useState('');
   const [goalMaxTurns, setGoalMaxTurns] = useState(30);
   const [loading, setLoading] = useState(false);
@@ -150,7 +151,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
         project_id: pid as number,
         priority,
         mode,
-        ...(mode === 'loop' ? { todo_file_path: todoFilePath, max_iterations: maxIterations } : {}),
+        ...(mode === 'loop' ? { todo_file_path: todoFilePath, max_iterations: maxIterations, must_complete: mustComplete } : {}),
         ...(mode === 'goal' ? { goal_condition: goalCondition, goal_max_turns: goalMaxTurns } : {}),
         ...(uploadedPaths.length > 0 ? { file_paths: uploadedPaths } : {}),
         ...(attachments.length > 0 ? { attachments } : {}),
@@ -376,6 +377,15 @@ export function TaskForm({ onCreated }: TaskFormProps) {
               value={maxIterations}
               onChange={(e) => setMaxIterations(Math.max(1, Number(e.target.value)))}
             />
+            <label className="flex items-center gap-1 text-sm text-gray-400 ml-1 whitespace-nowrap cursor-pointer">
+              <input
+                type="checkbox"
+                checked={mustComplete}
+                onChange={(e) => setMustComplete(e.target.checked)}
+                className="accent-indigo-500"
+              />
+              Must complete
+            </label>
           </>
         )}
         {mode === 'goal' && (
