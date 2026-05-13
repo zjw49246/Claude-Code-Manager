@@ -125,3 +125,11 @@ html.light {
 .markdown-body em {
   font-style: italic;
 }
+
+/* On touch devices (no hover), always show copy buttons */
+@media (hover: none) {
+  .copy-btn {
+    opacity: 1 !important;
+    pointer-events: auto !important;
+  }
+}
