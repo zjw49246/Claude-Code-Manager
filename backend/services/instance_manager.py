@@ -160,6 +160,20 @@ class InstanceManager:
                 await db.execute(
                     update(Instance).where(Instance.id == instance_id).values(**values)
                 )
+                # Restore task status for chat-initiated runs (not managed by dispatcher)
+                if task_id:
+                    result = await db.execute(
+                        update(Task)
+                        .where(Task.id == task_id, Task.status == "executing")
+                        .values(status="completed", completed_at=datetime.utcnow())
+                    )
+                    if result.rowcount:
+                        await self.broadcaster.broadcast("tasks", {
+                            "event": "status_change",
+                            "task_id": task_id,
+                            "new_status": "completed",
+                            "instance_id": instance_id,
+                        })
                 await db.commit()
 
             # Broadcast completion

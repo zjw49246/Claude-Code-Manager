@@ -405,6 +405,17 @@ class GlobalDispatcher:
                     process.kill()
                     await process.wait()
 
+            # Wait for output consumer to finish processing all remaining
+            # buffered output before judging the result. Without this the
+            # task can be marked completed while the last chunk of Claude's
+            # reply is still being parsed/broadcast.
+            consumer = self.instance_manager._tasks.get(instance_id)
+            if consumer:
+                try:
+                    await asyncio.wait_for(consumer, timeout=30)
+                except asyncio.TimeoutError:
+                    logger.warning(f"Output consumer for instance {instance_id} did not finish in 30s, proceeding")
+
             exit_code = process.returncode if process else -1
 
             # === Step 5: Judge result ===
