@@ -123,7 +123,9 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
     const eventType = msg.data.event_type as string;
 
     if (eventType === 'process_exit') {
-      setSending(false);
+      // Small delay so any final output messages queued just before
+      // process_exit are rendered before the "thinking" indicator hides.
+      setTimeout(() => setSending(false), 500);
       return;
     }
 

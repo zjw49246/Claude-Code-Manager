@@ -145,6 +145,16 @@ async def send_chat_message(
         thinking_budget=inst.thinking_budget,
         effort_level=effort_level,
     )
+
+    task.status = "executing"
+    await db.commit()
+    await broadcaster.broadcast("tasks", {
+        "event": "status_change",
+        "task_id": task_id,
+        "new_status": "executing",
+        "instance_id": inst.id,
+    })
+
     return {"ok": True, "pid": pid, "instance_id": inst.id, "session_id": task.session_id}
 
 
