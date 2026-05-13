@@ -426,23 +426,28 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
           <div>
             <div className="text-center text-xs text-gray-600 py-1 mb-1">— Initial Prompt —</div>
             <div className="flex justify-end">
-              <div className="max-w-[85%] rounded-2xl px-4 py-2.5 text-sm bg-indigo-600 text-white rounded-br-md whitespace-pre-wrap">
-                {task.metadata_?.attachments && task.metadata_.attachments.length > 0 && (
-                  <div className="mb-2 flex flex-wrap gap-2">
-                    {task.metadata_.attachments.filter((a) => a.is_image).length > 0 && (
-                      <MessageImages urls={task.metadata_.attachments.filter((a) => a.is_image).map((a) => a.url)} />
-                    )}
-                    {task.metadata_.attachments.filter((a) => !a.is_image).map((a, i) => (
-                      <a key={i} href={a.url} target="_blank" rel="noopener noreferrer"
-                        className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-500/30 rounded-lg text-xs text-indigo-100 hover:bg-indigo-500/40 transition-colors max-w-[200px]"
-                      >
-                        <Paperclip size={12} className="shrink-0" />
-                        <span className="truncate">{a.name}</span>
-                      </a>
-                    ))}
-                  </div>
-                )}
-                {task.description}
+              <div className="max-w-[85%] group">
+                <div className="rounded-2xl px-4 py-2.5 text-sm bg-indigo-600 text-white rounded-br-md whitespace-pre-wrap">
+                  {task.metadata_?.attachments && task.metadata_.attachments.length > 0 && (
+                    <div className="mb-2 flex flex-wrap gap-2">
+                      {task.metadata_.attachments.filter((a) => a.is_image).length > 0 && (
+                        <MessageImages urls={task.metadata_.attachments.filter((a) => a.is_image).map((a) => a.url)} />
+                      )}
+                      {task.metadata_.attachments.filter((a) => !a.is_image).map((a, i) => (
+                        <a key={i} href={a.url} target="_blank" rel="noopener noreferrer"
+                          className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-500/30 rounded-lg text-xs text-indigo-100 hover:bg-indigo-500/40 transition-colors max-w-[200px]"
+                        >
+                          <Paperclip size={12} className="shrink-0" />
+                          <span className="truncate">{a.name}</span>
+                        </a>
+                      ))}
+                    </div>
+                  )}
+                  {task.description}
+                </div>
+                <div className="flex items-center justify-end gap-1 mt-0.5 pr-1">
+                  <MessageCopyButton text={task.description} />
+                </div>
               </div>
             </div>
           </div>
@@ -893,7 +898,7 @@ const MessageBubble = memo(function MessageBubble({ message }: { message: ChatMe
 
   return (
     <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'}`}>
-      <div className={`max-w-[85%] ${!isUser ? 'group' : ''}`}>
+      <div className="max-w-[85%] group">
         <div
           className={`rounded-2xl px-4 py-2.5 text-sm ${
             isUser
@@ -931,7 +936,7 @@ const MessageBubble = memo(function MessageBubble({ message }: { message: ChatMe
         </div>
         <div className={`flex items-center gap-1 mt-0.5 ${isUser ? 'justify-end pr-1' : 'pl-1'}`}>
           {message.timestamp && <MessageTimestamp timestamp={message.timestamp} />}
-          {!isUser && message.content && <MessageCopyButton text={message.content} />}
+          {message.content && <MessageCopyButton text={message.content} />}
         </div>
       </div>
     </div>
