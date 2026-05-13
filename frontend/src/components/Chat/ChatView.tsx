@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm';
 import { api } from '../../api/client';
 import type { ChatMessage, FileAttachment, Task, Project, UploadResult } from '../../api/client';
 import { useWebSocket } from '../../hooks/useWebSocket';
-import { Send, ArrowLeft, Loader2, ChevronDown, ChevronRight, Copy, Check, Paperclip, X, StopCircle, Pencil } from 'lucide-react';
+import { Send, ArrowLeft, Loader2, ChevronDown, ChevronRight, Copy, Check, Paperclip, X, StopCircle, Pencil, ArrowDown } from 'lucide-react';
 import { SecretPicker } from '../Secrets/SecretPicker';
 import { formatMessageTime } from '../../config/timezone';
 import { useFileDrop } from '../../hooks/useFileDrop';
@@ -111,8 +111,10 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
   const [titleDraft, setTitleDraft] = useState(task.title || '');
   const titleInputRef = useRef<HTMLInputElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const [showScrollBottom, setShowScrollBottom] = useState(false);
 
   // Handle real-time WebSocket messages via callback (not state) to avoid
   // losing messages when React batches rapid state updates.
@@ -214,6 +216,17 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
     return () => {
       document.body.style.overflow = '';
     };
+  }, []);
+
+  useEffect(() => {
+    const el = messagesContainerRef.current;
+    if (!el) return;
+    const handleScroll = () => {
+      const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+      setShowScrollBottom(distanceFromBottom > 300);
+    };
+    el.addEventListener('scroll', handleScroll, { passive: true });
+    return () => el.removeEventListener('scroll', handleScroll);
   }, []);
 
   // Auto-scroll only on initial history load
@@ -410,7 +423,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
       )}
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-3 min-h-0">
+      <div ref={messagesContainerRef} className="flex-1 overflow-y-auto p-4 space-y-3 min-h-0 relative">
         {messages.length === 0 && (
           <div className="text-center text-gray-600 mt-20">
             <p className="text-lg mb-2">Chat with this task</p>
@@ -467,6 +480,15 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
         )}
         <div ref={bottomRef} />
       </div>
+      {showScrollBottom && (
+        <button
+          onClick={() => bottomRef.current?.scrollIntoView({ behavior: 'smooth' })}
+          className="absolute bottom-28 right-6 z-10 p-2.5 bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-white rounded-full shadow-lg transition-all"
+          title="Scroll to bottom"
+        >
+          <ArrowDown size={18} />
+        </button>
+      )}
 
       {/* Error */}
       {error && (
