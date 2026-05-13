@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import ReactMarkdown from 'react-markdown';
+import { useState, useEffect, useRef, useMemo, useCallback, memo } from 'react';
+import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { api } from '../../api/client';
 import type { ChatMessage, Task } from '../../api/client';
@@ -191,41 +191,45 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
-function MarkdownContent({ content }: { content: string }) {
+const remarkPlugins = [remarkGfm];
+
+const markdownComponents: Components = {
+  pre({ children }) {
+    let codeText = '';
+    if (children && typeof children === 'object' && 'props' in (children as React.ReactElement)) {
+      const el = children as React.ReactElement<{ children?: React.ReactNode }>;
+      codeText = typeof el.props.children === 'string' ? el.props.children : '';
+    }
+    return (
+      <div className="relative group my-2">
+        {codeText && <CopyButton text={codeText} />}
+        <pre className="bg-gray-900 rounded-lg p-3 overflow-x-auto text-xs">{children}</pre>
+      </div>
+    );
+  },
+  code({ className: codeClassName, children, ...props }) {
+    if (!codeClassName) return <code className="bg-gray-700/60 px-1.5 py-0.5 rounded text-xs" {...props}>{children}</code>;
+    return <code className={`${codeClassName} text-xs`} {...props}>{children}</code>;
+  },
+  a({ href, children }) {
+    return <a href={href} target="_blank" rel="noopener noreferrer" className="text-indigo-400 hover:text-indigo-300 underline">{children}</a>;
+  },
+};
+
+const MarkdownContent = memo(function MarkdownContent({ content }: { content: string }) {
   return (
     <div className="markdown-body">
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
-        components={{
-          pre({ children }) {
-            let codeText = '';
-            if (children && typeof children === 'object' && 'props' in (children as React.ReactElement)) {
-              const el = children as React.ReactElement<{ children?: React.ReactNode }>;
-              codeText = typeof el.props.children === 'string' ? el.props.children : '';
-            }
-            return (
-              <div className="relative group my-2">
-                {codeText && <CopyButton text={codeText} />}
-                <pre className="bg-gray-900 rounded-lg p-3 overflow-x-auto text-xs">{children}</pre>
-              </div>
-            );
-          },
-          code({ className: codeClassName, children, ...props }) {
-            if (!codeClassName) return <code className="bg-gray-700/60 px-1.5 py-0.5 rounded text-xs" {...props}>{children}</code>;
-            return <code className={`${codeClassName} text-xs`} {...props}>{children}</code>;
-          },
-          a({ href, children }) {
-            return <a href={href} target="_blank" rel="noopener noreferrer" className="text-indigo-400 hover:text-indigo-300 underline">{children}</a>;
-          },
-        }}
+        remarkPlugins={remarkPlugins}
+        components={markdownComponents}
       >
         {content}
       </ReactMarkdown>
     </div>
   );
-}
+});
 
-function MessageBubble({ message }: { message: ChatMessage }) {
+const MessageBubble = memo(function MessageBubble({ message }: { message: ChatMessage }) {
   if (message.event_type === 'thinking') {
     return (
       <div className="mx-4 px-3 py-2 bg-gray-800/30 rounded text-xs border border-gray-700/30">
@@ -254,7 +258,7 @@ function MessageBubble({ message }: { message: ChatMessage }) {
       </div>
     </div>
   );
-}
+});
 
 // ─── Iteration panel ──────────────────────────────────────────────────────────
 

@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import ReactMarkdown from 'react-markdown';
+import { useState, useEffect, useRef, useMemo, useCallback, memo } from 'react';
+import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { api } from '../../api/client';
 import type { ChatMessage, FileAttachment, Task, Project, UploadResult } from '../../api/client';
@@ -720,52 +720,55 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
-function MarkdownContent({ content, className }: { content: string; className?: string }) {
+const remarkPlugins = [remarkGfm];
+
+const markdownComponents: Components = {
+  pre({ children }) {
+    let codeText = '';
+    if (children && typeof children === 'object' && 'props' in (children as React.ReactElement)) {
+      const codeEl = children as React.ReactElement<{ children?: React.ReactNode }>;
+      codeText = typeof codeEl.props.children === 'string' ? codeEl.props.children : '';
+    }
+    return (
+      <div className="relative group my-2">
+        {codeText && <CopyButton text={codeText} />}
+        <pre className="bg-gray-900 rounded-lg p-3 overflow-x-auto text-xs">{children}</pre>
+      </div>
+    );
+  },
+  code({ className: codeClassName, children, ...props }) {
+    const isInline = !codeClassName;
+    if (isInline) {
+      return <code className="bg-gray-700/60 px-1.5 py-0.5 rounded text-xs" {...props}>{children}</code>;
+    }
+    return <code className={`${codeClassName || ''} text-xs`} {...props}>{children}</code>;
+  },
+  a({ href, children }) {
+    return <a href={href} target="_blank" rel="noopener noreferrer" className="text-indigo-400 hover:text-indigo-300 underline">{children}</a>;
+  },
+  table({ children }) {
+    return <div className="overflow-x-auto my-2"><table className="border-collapse text-xs w-full">{children}</table></div>;
+  },
+  th({ children }) {
+    return <th className="border border-gray-700 px-2 py-1 bg-gray-800/50 text-left">{children}</th>;
+  },
+  td({ children }) {
+    return <td className="border border-gray-700 px-2 py-1">{children}</td>;
+  },
+};
+
+const MarkdownContent = memo(function MarkdownContent({ content, className }: { content: string; className?: string }) {
   return (
     <div className={`markdown-body ${className || ''}`}>
     <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
-      components={{
-        pre({ children }) {
-          // Extract code string for copy button
-          let codeText = '';
-          if (children && typeof children === 'object' && 'props' in (children as React.ReactElement)) {
-            const codeEl = children as React.ReactElement<{ children?: React.ReactNode }>;
-            codeText = typeof codeEl.props.children === 'string' ? codeEl.props.children : '';
-          }
-          return (
-            <div className="relative group my-2">
-              {codeText && <CopyButton text={codeText} />}
-              <pre className="bg-gray-900 rounded-lg p-3 overflow-x-auto text-xs">{children}</pre>
-            </div>
-          );
-        },
-        code({ className: codeClassName, children, ...props }) {
-          const isInline = !codeClassName;
-          if (isInline) {
-            return <code className="bg-gray-700/60 px-1.5 py-0.5 rounded text-xs" {...props}>{children}</code>;
-          }
-          return <code className={`${codeClassName || ''} text-xs`} {...props}>{children}</code>;
-        },
-        a({ href, children }) {
-          return <a href={href} target="_blank" rel="noopener noreferrer" className="text-indigo-400 hover:text-indigo-300 underline">{children}</a>;
-        },
-        table({ children }) {
-          return <div className="overflow-x-auto my-2"><table className="border-collapse text-xs w-full">{children}</table></div>;
-        },
-        th({ children }) {
-          return <th className="border border-gray-700 px-2 py-1 bg-gray-800/50 text-left">{children}</th>;
-        },
-        td({ children }) {
-          return <td className="border border-gray-700 px-2 py-1">{children}</td>;
-        },
-      }}
+      remarkPlugins={remarkPlugins}
+      components={markdownComponents}
     >
       {content}
     </ReactMarkdown>
     </div>
   );
-}
+});
 
 function MessageTimestamp({ timestamp, className }: { timestamp: string | null; className?: string }) {
   if (!timestamp) return null;
@@ -805,7 +808,7 @@ function MessageImages({ urls }: { urls: string[] }) {
   );
 }
 
-function MessageBubble({ message }: { message: ChatMessage }) {
+const MessageBubble = memo(function MessageBubble({ message }: { message: ChatMessage }) {
   const isUser = message.role === 'user';
 
   if (message.event_type === 'thinking') {
@@ -913,4 +916,4 @@ function MessageBubble({ message }: { message: ChatMessage }) {
       )}
     </div>
   );
-}
+});
