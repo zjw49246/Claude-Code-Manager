@@ -712,10 +712,29 @@ function CopyButton({ text }: { text: string }) {
   return (
     <button
       onClick={handleCopy}
-      className="absolute top-2 right-2 p-1 rounded bg-gray-700/80 hover:bg-gray-600 text-gray-400 hover:text-gray-200 opacity-0 group-hover:opacity-100 transition-opacity"
+      className="absolute top-2 right-2 p-1 rounded bg-gray-700/80 hover:bg-gray-600 text-gray-400 hover:text-gray-200 opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto transition-opacity"
       title="Copy"
     >
       {copied ? <Check size={12} /> : <Copy size={12} />}
+    </button>
+  );
+}
+
+function MessageCopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+  const handleCopy = () => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+  return (
+    <button
+      onClick={handleCopy}
+      className="opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto p-1 rounded hover:bg-gray-700/60 text-gray-600 hover:text-gray-400 transition-opacity"
+      title="Copy message"
+    >
+      {copied ? <Check size={14} /> : <Copy size={14} />}
     </button>
   );
 }
@@ -874,46 +893,47 @@ const MessageBubble = memo(function MessageBubble({ message }: { message: ChatMe
 
   return (
     <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'}`}>
-      <div
-        className={`max-w-[85%] rounded-2xl px-4 py-2.5 text-sm ${
-          isUser
-            ? 'bg-indigo-600 text-white rounded-br-md whitespace-pre-wrap'
-            : 'bg-gray-800 text-gray-200 rounded-bl-md'
-        }`}
-      >
-        {isUser ? (
-          <>
-            {message.attachments && message.attachments.length > 0 && (
-              <div className="mb-2 flex flex-wrap gap-2">
-                {message.attachments.filter((a) => a.is_image).length > 0 && (
-                  <MessageImages urls={message.attachments.filter((a) => a.is_image).map((a) => a.url)} />
-                )}
-                {message.attachments.filter((a) => !a.is_image).map((a, i) => (
-                  <a key={i} href={a.url} target="_blank" rel="noopener noreferrer"
-                    className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-500/30 rounded-lg text-xs text-indigo-100 hover:bg-indigo-500/40 transition-colors max-w-[200px]"
-                  >
-                    <Paperclip size={12} className="shrink-0" />
-                    <span className="truncate">{a.name}</span>
-                  </a>
-                ))}
-              </div>
-            )}
-            {message.image_urls && !message.attachments && message.image_urls.length > 0 && (
-              <div className="mb-2">
-                <MessageImages urls={message.image_urls} />
-              </div>
-            )}
-            {message.content && message.content !== '(files attached)' && message.content !== '(images attached)' ? message.content : !message.attachments?.length && !message.image_urls?.length ? message.content || '' : null}
-          </>
-        ) : (
-          <MarkdownContent content={message.content || ''} />
-        )}
-      </div>
-      {message.timestamp && (
-        <div className={`mt-0.5 ${isUser ? 'pr-1' : 'pl-1'}`}>
-          <MessageTimestamp timestamp={message.timestamp} />
+      <div className={`max-w-[85%] ${!isUser ? 'group' : ''}`}>
+        <div
+          className={`rounded-2xl px-4 py-2.5 text-sm ${
+            isUser
+              ? 'bg-indigo-600 text-white rounded-br-md whitespace-pre-wrap'
+              : 'bg-gray-800 text-gray-200 rounded-bl-md'
+          }`}
+        >
+          {isUser ? (
+            <>
+              {message.attachments && message.attachments.length > 0 && (
+                <div className="mb-2 flex flex-wrap gap-2">
+                  {message.attachments.filter((a) => a.is_image).length > 0 && (
+                    <MessageImages urls={message.attachments.filter((a) => a.is_image).map((a) => a.url)} />
+                  )}
+                  {message.attachments.filter((a) => !a.is_image).map((a, i) => (
+                    <a key={i} href={a.url} target="_blank" rel="noopener noreferrer"
+                      className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-500/30 rounded-lg text-xs text-indigo-100 hover:bg-indigo-500/40 transition-colors max-w-[200px]"
+                    >
+                      <Paperclip size={12} className="shrink-0" />
+                      <span className="truncate">{a.name}</span>
+                    </a>
+                  ))}
+                </div>
+              )}
+              {message.image_urls && !message.attachments && message.image_urls.length > 0 && (
+                <div className="mb-2">
+                  <MessageImages urls={message.image_urls} />
+                </div>
+              )}
+              {message.content && message.content !== '(files attached)' && message.content !== '(images attached)' ? message.content : !message.attachments?.length && !message.image_urls?.length ? message.content || '' : null}
+            </>
+          ) : (
+            <MarkdownContent content={message.content || ''} />
+          )}
         </div>
-      )}
+        <div className={`flex items-center gap-1 mt-0.5 ${isUser ? 'justify-end pr-1' : 'pl-1'}`}>
+          {message.timestamp && <MessageTimestamp timestamp={message.timestamp} />}
+          {!isUser && message.content && <MessageCopyButton text={message.content} />}
+        </div>
+      </div>
     </div>
   );
 });

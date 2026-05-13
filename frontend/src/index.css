@@ -49,6 +49,8 @@ html.light {
   line-height: 1.6;
   word-wrap: break-word;
   overflow-wrap: break-word;
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 .markdown-body > *:first-child {
