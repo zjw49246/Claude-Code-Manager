@@ -144,4 +144,4 @@ if FRONTEND_DIST.is_dir():
         file_path = FRONTEND_DIST / full_path
         if file_path.is_file():
             return FileResponse(str(file_path))
-        return FileResponse(str(FRONTEND_DIST / "index.html"))
+        return FileResponse(str(FRONTEND_DIST / "index.html"), headers={"Cache-Control": "no-cache"})
