@@ -149,11 +149,43 @@ class GlobalDispatcher:
             return
         self._running = True
 
+        await self._cleanup_stale_state()
+
         # Ensure we have worker instances up to max_concurrent_instances
         await self._ensure_instances()
 
         self._dispatch_task = asyncio.create_task(self._dispatch_loop())
         logger.info("GlobalDispatcher started")
+
+    async def _cleanup_stale_state(self):
+        """Reset instances and tasks stuck in active states after a crash/restart."""
+        import os
+        async with self.db_factory() as db:
+            result = await db.execute(
+                select(Instance).where(Instance.status == "running")
+            )
+            for inst in result.scalars().all():
+                alive = False
+                if inst.pid:
+                    try:
+                        os.kill(inst.pid, 0)
+                        alive = True
+                    except OSError:
+                        pass
+                if not alive:
+                    logger.warning(f"Cleaning up stale instance {inst.id} ({inst.name}), dead PID {inst.pid}")
+                    await db.execute(
+                        update(Instance)
+                        .where(Instance.id == inst.id)
+                        .values(status="idle", current_task_id=None, pid=None)
+                    )
+            result = await db.execute(
+                select(Task).where(Task.status.in_(["executing", "in_progress"]))
+            )
+            for t in result.scalars().all():
+                logger.warning(f"Resetting stuck task {t.id} from '{t.status}' to 'completed'")
+                t.status = "completed"
+            await db.commit()
 
     async def stop(self):
         self._running = False
@@ -496,6 +528,19 @@ class GlobalDispatcher:
             })
         finally:
             self._running_tasks.pop(instance_id, None)
+            try:
+                async with self.db_factory() as db:
+                    await db.execute(
+                        update(Instance)
+                        .where(Instance.id == instance_id)
+                        .values(status="idle", current_task_id=None, pid=None)
+                    )
+                    t = await db.get(Task, task.id)
+                    if t and t.status in ("executing", "in_progress"):
+                        t.status = "completed"
+                    await db.commit()
+            except Exception:
+                logger.exception(f"Failed to cleanup instance {instance_id} / task {task.id}")
 
     async def _run_loop_lifecycle(self, instance_id: int, task: Task, cwd: str, git_env: dict | None = None, effort_level: str | None = None):
         """Loop: repeatedly invoke Claude Code until it signals done or abort.
