@@ -802,7 +802,7 @@ export function ProjectsPage() {
             className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-300 border border-gray-600 rounded hover:bg-gray-700"
             title="Global Git Config"
           >
-            <Settings size={14} /> Global Git Config
+            <Settings size={14} /><span className="hidden sm:inline"> Global Git</span> Config
           </button>
           <button
             onClick={() => setShowTagManager(true)}
@@ -815,7 +815,7 @@ export function ProjectsPage() {
             onClick={() => setShowCreate(true)}
             className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-indigo-600 text-white rounded hover:bg-indigo-500"
           >
-            <Plus size={14} /> New project
+            <Plus size={14} /><span className="hidden sm:inline"> New project</span><span className="sm:hidden"> New</span>
           </button>
         </div>
       </div>

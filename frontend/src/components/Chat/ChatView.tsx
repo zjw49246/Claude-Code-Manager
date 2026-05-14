@@ -365,7 +365,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
             <p className="text-xs text-gray-500 whitespace-nowrap">
               {task.session_id ? 'Session active' : 'No session yet'}
             </p>
-            {contextUsage && <><span className="flex-1" /><ContextUsageIndicator usage={contextUsage} /></>}
+            {contextUsage && <><span className="flex-1" /><span className="hidden sm:flex"><ContextUsageIndicator usage={contextUsage} /></span></>}
           </div>
           {editingTitle ? (
             <input
@@ -412,7 +412,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
             title="Interrupt session"
           >
             <StopCircle size={14} />
-            {interrupting ? 'Interrupting...' : 'Interrupt'}
+            <span className="hidden sm:inline">{interrupting ? 'Interrupting...' : 'Interrupt'}</span>
           </button>
         )}
       </div>

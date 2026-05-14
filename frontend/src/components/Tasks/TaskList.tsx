@@ -116,7 +116,7 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat }: TaskListPro
               )}
               <span className="text-xs text-gray-500 capitalize">{t.status.replace('_', ' ')}</span>
               {t.model && (
-                <span className="text-xs bg-gray-700 text-gray-300 px-1.5 rounded">{t.model}</span>
+                <span className="hidden sm:inline text-xs bg-gray-700 text-gray-300 px-1.5 rounded">{t.model}</span>
               )}
             </div>
             {/* Title (editable) */}
@@ -182,7 +182,7 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat }: TaskListPro
                 className="flex items-center gap-1 px-2 py-1 rounded text-xs font-medium bg-indigo-600/20 text-indigo-400 hover:bg-indigo-600/30"
                 title="Chat"
               >
-                <MessageCircle size={14} /> Chat
+                <MessageCircle size={14} /><span className="hidden sm:inline"> Chat</span>
               </button>
             )}
             <button
