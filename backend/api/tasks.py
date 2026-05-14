@@ -117,6 +117,11 @@ async def stop_task_session(task_id: int, db: AsyncSession = Depends(get_db)):
     """Stop the running Claude Code session for a task."""
     stopped = await _stop_task_process(task_id, db)
     if not stopped:
+        task = await db.get(Task, task_id)
+        if task and task.status in ("executing", "in_progress"):
+            task.status = "completed"
+            await db.commit()
+            return {"ok": True, "note": "No running process found, task marked as completed"}
         raise HTTPException(400, "No running session found for this task")
     return {"ok": True}
 

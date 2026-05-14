@@ -451,16 +451,14 @@ class GlobalDispatcher:
             if interrupted:
                 logger.info(f"Task {task.id} was interrupted by user (exit_code={exit_code})")
                 async with self.db_factory() as db:
-                    # Reset task to pending so it's not marked as failed,
-                    # but keep session_id so chat can resume
                     await db.execute(
-                        update(Task).where(Task.id == task.id).values(status="pending")
+                        update(Task).where(Task.id == task.id).values(status="completed")
                     )
                     await db.commit()
                 await self.broadcaster.broadcast("tasks", {
                     "event": "status_change",
                     "task_id": task.id,
-                    "new_status": "pending",
+                    "new_status": "completed",
                     "instance_id": instance_id,
                 })
                 return
