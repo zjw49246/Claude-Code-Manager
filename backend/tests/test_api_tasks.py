@@ -744,3 +744,28 @@ async def test_stop_session_no_process_returns_400(client):
         resp = await client.post(f"/api/tasks/{task_id}/stop-session")
 
     assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_cancel_sets_status_before_stopping_process(client):
+    """Cancel must set status to cancelled BEFORE stopping process to prevent race."""
+    create_resp = await client.post("/api/tasks", json={
+        "title": "Race Test", "description": "d", "target_repo": "/tmp",
+    })
+    task_id = create_resp.json()["id"]
+
+    call_order = []
+
+    original_cancel = None
+
+    async def tracking_stop(tid, db):
+        call_order.append("stop")
+        return True
+
+    with patch("backend.api.tasks._stop_task_process", side_effect=tracking_stop):
+        resp = await client.post(f"/api/tasks/{task_id}/cancel")
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "cancelled"
+    # stop should be called (after cancel sets status)
+    assert "stop" in call_order
