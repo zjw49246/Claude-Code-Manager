@@ -3,6 +3,7 @@ import { api } from '../../api/client';
 import type { Task, Project } from '../../api/client';
 import { Trash2, RotateCcw, XCircle, MessageCircle, Archive, ArchiveRestore, Star, Copy, Check, MoreVertical, Pencil } from 'lucide-react';
 import { TAG_COLOR_OPTIONS } from '../TagColors';
+import { ExpandableText } from '../ExpandableText';
 
 interface TaskListProps {
   tasks: Task[];
@@ -137,12 +138,16 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat }: TaskListPro
                 <p className="text-foreground text-sm font-medium mt-0.5 line-clamp-1">{t.title}</p>
               ) : null
             )}
-            {/* Description */}
-            <p className={`text-sm mt-0.5 line-clamp-2 ${t.title ? 'text-gray-400' : 'text-foreground'}`}>
-              {t.mode === 'loop'
-                ? (t.description || <span className="text-gray-500 italic">{t.todo_file_path}</span>)
-                : t.description}
-            </p>
+            {/* Description (expandable) */}
+            {t.mode === 'loop' && !t.description ? (
+              <p className="text-sm mt-0.5 text-gray-500 italic">{t.todo_file_path}</p>
+            ) : t.description ? (
+              <ExpandableText
+                text={t.description}
+                collapsedLines={2}
+                className={`text-sm mt-0.5 ${t.title ? 'text-gray-400' : 'text-foreground'}`}
+              />
+            ) : null}
             {t.mode === 'goal' && t.goal_condition && (
               <p className="text-emerald-500/70 text-xs mt-0.5 line-clamp-1">Goal: {t.goal_condition}</p>
             )}

@@ -6,6 +6,7 @@ import type { ChatMessage, FileAttachment, Task, Project, UploadResult } from '.
 import { useWebSocket } from '../../hooks/useWebSocket';
 import { Send, ArrowLeft, Loader2, ChevronDown, ChevronRight, Copy, Check, Paperclip, X, StopCircle, Pencil } from 'lucide-react';
 import { SecretPicker } from '../Secrets/SecretPicker';
+import { ExpandableText } from '../ExpandableText';
 import { formatMessageTime } from '../../config/timezone';
 import { useFileDrop } from '../../hooks/useFileDrop';
 
@@ -366,9 +367,11 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
             />
           ) : (
             <div className="flex items-center gap-1.5 mt-0.5 group/title">
-              <p className="text-sm text-gray-400 truncate">
-                {task.title || task.description || 'Untitled'}
-              </p>
+              <ExpandableText
+                text={task.title || task.description || 'Untitled'}
+                collapsedLines={1}
+                className="text-sm text-gray-400"
+              />
               <button
                 onClick={() => { setTitleDraft(task.title || ''); setEditingTitle(true); }}
                 className="text-gray-600 hover:text-gray-400 opacity-0 group-hover/title:opacity-100 transition-opacity shrink-0"
@@ -427,7 +430,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
             <div className="text-center text-xs text-gray-600 py-1 mb-1">— Initial Prompt —</div>
             <div className="flex justify-end">
               <div className="max-w-[85%] group">
-                <div className="rounded-2xl px-4 py-2.5 text-sm bg-indigo-600 text-white rounded-br-md whitespace-pre-wrap">
+                <div className="rounded-2xl px-4 py-2.5 text-sm bg-indigo-600 text-white rounded-br-md">
                   {task.metadata_?.attachments && task.metadata_.attachments.length > 0 && (
                     <div className="mb-2 flex flex-wrap gap-2">
                       {task.metadata_.attachments.filter((a) => a.is_image).length > 0 && (
@@ -443,7 +446,12 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
                       ))}
                     </div>
                   )}
-                  {task.description}
+                  <ExpandableText
+                    text={task.description!}
+                    collapsedLines={6}
+                    className="whitespace-pre-wrap text-white"
+                    expandedClassName="whitespace-pre-wrap text-white"
+                  />
                 </div>
                 <div className="flex items-center justify-end gap-1 mt-0.5 pr-1">
                   <MessageCopyButton text={task.description} />
