@@ -409,8 +409,19 @@ export function LoopChatView({ task, onBack }: LoopChatViewProps) {
 
   const maxIteration = iterationGroups.length > 0 ? iterationGroups[iterationGroups.length - 1][0] : 0;
 
+  const [cancelling, setCancelling] = useState(false);
+  const [cancelError, setCancelError] = useState<string | null>(null);
+
   const handleCancel = async () => {
-    try { await api.cancelTask(task.id); } catch { /* ignore */ }
+    setCancelling(true);
+    setCancelError(null);
+    try {
+      await api.cancelTask(task.id);
+    } catch (e) {
+      setCancelError(`Cancel failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setCancelling(false);
+    }
   };
 
   const isRunning = ['executing', 'in_progress'].includes(task.status);
@@ -466,12 +477,16 @@ export function LoopChatView({ task, onBack }: LoopChatViewProps) {
 
       {/* Footer */}
       {isRunning && (
-        <div className="border-t border-gray-800 bg-gray-900 p-3 flex justify-center">
+        <div className="border-t border-gray-800 bg-gray-900 p-3 flex flex-col items-center gap-2">
+          {cancelError && (
+            <p className="text-xs text-red-400">{cancelError}</p>
+          )}
           <button
             onClick={handleCancel}
-            className="flex items-center gap-2 px-4 py-2 rounded text-sm font-medium bg-red-600/20 text-red-400 hover:bg-red-600/30"
+            disabled={cancelling}
+            className="flex items-center gap-2 px-4 py-2 rounded text-sm font-medium bg-red-600/20 text-red-400 hover:bg-red-600/30 disabled:opacity-50"
           >
-            <XCircle size={16} /> Cancel Loop
+            <XCircle size={16} /> {cancelling ? 'Cancelling...' : 'Cancel Loop'}
           </button>
         </div>
       )}

@@ -404,7 +404,9 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
                 setSending(false);
                 setStillRunning(false);
                 setError(null);
-              } catch { /* ignore */ }
+              } catch (e) {
+                setError(`Interrupt failed: ${e instanceof Error ? e.message : String(e)}`);
+              }
               finally { setInterrupting(false); }
             }}
             disabled={interrupting}
