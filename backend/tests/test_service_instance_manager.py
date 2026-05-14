@@ -1,6 +1,7 @@
 """Tests for InstanceManager — subprocess lifecycle management."""
 import asyncio
 import os
+import signal
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -314,7 +315,7 @@ async def test_launch_without_effort_level_omits_flag(db_factory):
 
 @pytest.mark.asyncio
 async def test_stop_terminates(db_factory):
-    """stop() sends terminate and updates DB status."""
+    """stop() sends SIGINT first and updates DB status."""
     async with db_factory() as db:
         inst = Instance(name="stop-inst", status="running")
         db.add(inst)
@@ -325,6 +326,7 @@ async def test_stop_terminates(db_factory):
     mock_proc = MagicMock()
     mock_proc.returncode = None  # Still running
     mock_proc.terminate = MagicMock()
+    mock_proc.send_signal = MagicMock()
     mock_proc.wait = AsyncMock(return_value=0)
     mock_proc.kill = MagicMock()
 
@@ -333,7 +335,7 @@ async def test_stop_terminates(db_factory):
     im = InstanceManager(db_factory, broadcaster)
     im.processes[inst_id] = mock_proc
 
-    # After terminate, set returncode
+    # After SIGINT, wait() succeeds — set returncode
     async def fake_wait():
         mock_proc.returncode = 0
         return 0
@@ -341,7 +343,7 @@ async def test_stop_terminates(db_factory):
 
     result = await im.stop(inst_id)
     assert result is True
-    mock_proc.terminate.assert_called_once()
+    mock_proc.send_signal.assert_called_once_with(signal.SIGINT)
 
     async with db_factory() as db:
         inst = await db.get(Instance, inst_id)
@@ -653,3 +655,87 @@ async def test_process_event_does_not_set_has_unread_for_tool_use(db_factory):
     async with db_factory() as db:
         task = await db.get(Task, task_id)
     assert task.has_unread is False
+
+
+# === chat_initiated flag tests ===
+
+
+@pytest.mark.asyncio
+async def test_consume_output_chat_initiated_restores_task_status(db_factory):
+    """When chat_initiated=True, consumer marks task as completed on process exit."""
+    async with db_factory() as db:
+        inst = Instance(name="chat-init-inst")
+        db.add(inst)
+        task = Task(title="chat task", description="d", status="executing")
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_id = task.id
+
+    mock_proc = _make_mock_process(returncode=0)
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    im = InstanceManager(db_factory, broadcaster)
+    im.processes[inst_id] = mock_proc
+
+    await im._consume_output(inst_id, task_id, mock_proc, chat_initiated=True)
+
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+    assert task.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_consume_output_dispatcher_does_not_restore_task_status(db_factory):
+    """When chat_initiated=False (dispatcher), consumer does NOT mark task completed."""
+    async with db_factory() as db:
+        inst = Instance(name="dispatch-inst")
+        db.add(inst)
+        task = Task(title="dispatch task", description="d", status="executing")
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_id = task.id
+
+    mock_proc = _make_mock_process(returncode=0)
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    im = InstanceManager(db_factory, broadcaster)
+    im.processes[inst_id] = mock_proc
+
+    await im._consume_output(inst_id, task_id, mock_proc, chat_initiated=False)
+
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+    assert task.status == "executing"
+
+
+@pytest.mark.asyncio
+async def test_consume_output_default_does_not_restore_task_status(db_factory):
+    """Default launch (no chat_initiated) does NOT mark task completed — same as dispatcher."""
+    async with db_factory() as db:
+        inst = Instance(name="default-inst")
+        db.add(inst)
+        task = Task(title="default task", description="d", status="executing")
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_id = task.id
+
+    mock_proc = _make_mock_process(returncode=0)
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    im = InstanceManager(db_factory, broadcaster)
+    im.processes[inst_id] = mock_proc
+
+    await im._consume_output(inst_id, task_id, mock_proc)
+
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+    assert task.status == "executing"

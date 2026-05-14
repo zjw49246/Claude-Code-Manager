@@ -519,10 +519,13 @@ class GlobalDispatcher:
         max_iterations = task.max_iterations or 50
 
         while True:
-            # Check if task was cancelled externally between iterations
+            # Check if task was cancelled or deleted externally between iterations
             async with self.db_factory() as db:
                 t = await db.get(Task, task.id)
-                if t and t.status == "cancelled":
+                if not t:
+                    logger.info(f"Loop task {task.id} deleted, stopping")
+                    return
+                if t.status == "cancelled":
                     logger.info(f"Loop task {task.id} cancelled, stopping")
                     return
 
@@ -573,11 +576,13 @@ class GlobalDispatcher:
                     process.kill()
                     await process.wait()
 
-            # P1: Check if task was cancelled while the iteration was running
-            # (e.g. user called cancel + stop-session mid-iteration)
+            # P1: Check if task was cancelled/deleted while the iteration was running
             async with self.db_factory() as db:
                 t = await db.get(Task, task.id)
-                if t and t.status == "cancelled":
+                if not t:
+                    logger.info(f"Loop task {task.id} deleted during iteration {iteration}, stopping")
+                    return
+                if t.status == "cancelled":
                     logger.info(f"Loop task {task.id} cancelled during iteration {iteration}, stopping")
                     return
 
@@ -717,10 +722,13 @@ class GlobalDispatcher:
         session_id: str | None = None
 
         while turn < max_turns:
-            # Check if task was cancelled externally between turns
+            # Check if task was cancelled or deleted externally between turns
             async with self.db_factory() as db:
                 t = await db.get(Task, task.id)
-                if t and t.status == "cancelled":
+                if not t:
+                    logger.info(f"Goal task {task.id} deleted, stopping")
+                    return
+                if t.status == "cancelled":
                     logger.info(f"Goal task {task.id} cancelled, stopping")
                     return
 
@@ -762,10 +770,13 @@ class GlobalDispatcher:
                     process.kill()
                     await process.wait()
 
-            # Check if cancelled during execution
+            # Check if cancelled/deleted during execution
             async with self.db_factory() as db:
                 t = await db.get(Task, task.id)
-                if t and t.status == "cancelled":
+                if not t:
+                    logger.info(f"Goal task {task.id} deleted during turn {turn}, stopping")
+                    return
+                if t.status == "cancelled":
                     logger.info(f"Goal task {task.id} cancelled during turn {turn}, stopping")
                     return
 

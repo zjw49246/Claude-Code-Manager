@@ -2520,3 +2520,133 @@ async def test_goal_conversation_empty_log(db_factory):
 
     summary = await d._collect_goal_conversation(task_id, current_turn=0)
     assert "No conversation" in summary
+
+
+# === Deleted task handling tests ===
+
+
+@pytest.mark.asyncio
+async def test_loop_deleted_between_iterations(db_factory, tmp_path):
+    """Loop stops cleanly when task is deleted between iterations."""
+    d = _make_dispatcher(db_factory)
+
+    async with db_factory() as db:
+        inst = Instance(name="loop-del-worker-1")
+        db.add(inst)
+        task = _make_loop_task(db, tmp_path, max_iterations=10)
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_obj = task
+
+    signal_path = tmp_path / ".claude-manager" / f"loop_signal_{task_obj.id}.json"
+
+    async def launch_continue_then_delete(*args, **kwargs):
+        signal_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_signal(signal_path, "continue", "keep going")
+        # Delete the task from DB after first iteration
+        async with db_factory() as db:
+            t = await db.get(Task, task_obj.id)
+            if t:
+                await db.delete(t)
+                await db.commit()
+        return 12345
+
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.wait = AsyncMock(return_value=0)
+    d.instance_manager.launch = AsyncMock(side_effect=launch_continue_then_delete)
+    d.instance_manager.processes = {inst_id: mock_proc}
+
+    await d._run_loop_lifecycle(inst_id, task_obj, str(tmp_path))
+
+    # loop stopped — launch called exactly once
+    assert d.instance_manager.launch.await_count == 1
+    # Task should be deleted
+    async with db_factory() as db:
+        t = await db.get(Task, task_obj.id)
+        assert t is None
+
+
+@pytest.mark.asyncio
+async def test_goal_deleted_between_turns(db_factory):
+    """Goal task stops cleanly when deleted externally between turns."""
+    d = _make_dispatcher(db_factory)
+
+    async with db_factory() as db:
+        inst = Instance(name="goal-del-worker-1")
+        db.add(inst)
+        task = _make_goal_task(db, goal_max_turns=10)
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_obj = task
+
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.wait = AsyncMock(return_value=0)
+    d.instance_manager.processes = {inst_id: mock_proc}
+
+    eval_count = {"n": 0}
+    from backend.services.goal_evaluator import GoalEvalResult
+
+    async def eval_and_delete(*args, **kwargs):
+        eval_count["n"] += 1
+        # Delete task after first evaluation
+        async with db_factory() as db:
+            t = await db.get(Task, task_obj.id)
+            if t:
+                await db.delete(t)
+                await db.commit()
+        return GoalEvalResult(achieved=False, reason="not done")
+
+    with patch("backend.services.goal_evaluator.GoalEvaluator.evaluate",
+               side_effect=eval_and_delete):
+        await d._run_goal_lifecycle(inst_id, task_obj, "/repo")
+
+    assert eval_count["n"] == 1
+    async with db_factory() as db:
+        t = await db.get(Task, task_obj.id)
+        assert t is None
+
+
+@pytest.mark.asyncio
+async def test_goal_deleted_during_execution(db_factory):
+    """Goal task stops when deleted while Claude is running."""
+    d = _make_dispatcher(db_factory)
+
+    async with db_factory() as db:
+        inst = Instance(name="goal-del-worker-2")
+        db.add(inst)
+        task = _make_goal_task(db, goal_max_turns=10)
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_obj = task
+
+    async def launch_and_delete(*args, **kwargs):
+        async with db_factory() as db:
+            t = await db.get(Task, task_obj.id)
+            if t:
+                await db.delete(t)
+                await db.commit()
+        return 12345
+
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.wait = AsyncMock(return_value=0)
+    d.instance_manager.launch = AsyncMock(side_effect=launch_and_delete)
+    d.instance_manager.processes = {inst_id: mock_proc}
+
+    await d._run_goal_lifecycle(inst_id, task_obj, "/repo")
+
+    assert d.instance_manager.launch.await_count == 1
+    async with db_factory() as db:
+        t = await db.get(Task, task_obj.id)
+        assert t is None

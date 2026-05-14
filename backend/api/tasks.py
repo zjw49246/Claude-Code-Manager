@@ -88,6 +88,22 @@ async def update_task(
     return task
 
 
+async def _stop_task_process(task_id: int, db: AsyncSession) -> bool:
+    """Stop the running Claude Code process for a task, if any. Returns True if stopped."""
+    from backend.main import instance_manager
+    for inst_id, proc in list(instance_manager.processes.items()):
+        if proc.returncode is not None:
+            continue
+        inst = await db.get(Instance, inst_id)
+        if inst and inst.current_task_id == task_id:
+            await instance_manager.stop(inst_id)
+            return True
+    task = await db.get(Task, task_id)
+    if task and task.instance_id:
+        return await instance_manager.stop(task.instance_id)
+    return False
+
+
 @router.delete("/{task_id}")
 async def delete_task(task_id: int, queue: TaskQueue = Depends(_get_queue)):
     ok = await queue.delete(task_id)
@@ -99,30 +115,15 @@ async def delete_task(task_id: int, queue: TaskQueue = Depends(_get_queue)):
 @router.post("/{task_id}/stop-session")
 async def stop_task_session(task_id: int, db: AsyncSession = Depends(get_db)):
     """Stop the running Claude Code session for a task."""
-    from backend.main import instance_manager
-    task = await db.get(Task, task_id)
-    if not task:
-        raise HTTPException(404, "Task not found")
-    # Find the instance running this task by checking instance_manager processes
-    stopped = False
-    for inst_id, proc in list(instance_manager.processes.items()):
-        if proc.returncode is not None:
-            continue
-        inst = await db.get(Instance, inst_id)
-        if inst and inst.current_task_id == task_id:
-            await instance_manager.stop(inst_id)
-            stopped = True
-            break
-    # Fallback: try task.instance_id
-    if not stopped and task.instance_id:
-        stopped = await instance_manager.stop(task.instance_id)
+    stopped = await _stop_task_process(task_id, db)
     if not stopped:
         raise HTTPException(400, "No running session found for this task")
     return {"ok": True}
 
 
 @router.post("/{task_id}/cancel", response_model=TaskResponse)
-async def cancel_task(task_id: int, queue: TaskQueue = Depends(_get_queue)):
+async def cancel_task(task_id: int, queue: TaskQueue = Depends(_get_queue), db: AsyncSession = Depends(get_db)):
+    await _stop_task_process(task_id, db)
     task = await queue.cancel(task_id)
     if not task:
         raise HTTPException(400, "Cannot cancel task")

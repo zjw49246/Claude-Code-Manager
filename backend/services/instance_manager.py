@@ -27,7 +27,7 @@ class InstanceManager:
         self.processes: dict[int, asyncio.subprocess.Process] = {}
         self._tasks: dict[int, asyncio.Task] = {}  # instance_id -> consumer task
 
-    async def launch(self, instance_id: int, prompt: str, task_id: int | None = None, cwd: str | None = None, model: str | None = None, resume_session_id: str | None = None, loop_iteration: int | None = None, git_env: dict | None = None, thinking_budget: int | None = None, effort_level: str | None = None) -> int:
+    async def launch(self, instance_id: int, prompt: str, task_id: int | None = None, cwd: str | None = None, model: str | None = None, resume_session_id: str | None = None, loop_iteration: int | None = None, git_env: dict | None = None, thinking_budget: int | None = None, effort_level: str | None = None, chat_initiated: bool = False) -> int:
         """Launch a Claude Code subprocess for the given instance.
 
         If resume_session_id is provided, uses --resume to continue the conversation.
@@ -99,13 +99,13 @@ class InstanceManager:
 
         # Start consuming stdout
         consumer = asyncio.create_task(
-            self._consume_output(instance_id, task_id, process, loop_iteration)
+            self._consume_output(instance_id, task_id, process, loop_iteration, chat_initiated)
         )
         self._tasks[instance_id] = consumer
 
         return process.pid
 
-    async def _consume_output(self, instance_id: int, task_id: int | None, process: asyncio.subprocess.Process, loop_iteration: int | None = None):
+    async def _consume_output(self, instance_id: int, task_id: int | None, process: asyncio.subprocess.Process, loop_iteration: int | None = None, chat_initiated: bool = False):
         """Read NDJSON lines from stdout, parse, store, and broadcast.
 
         This method MUST keep running until the process closes stdout (EOF).
@@ -161,7 +161,7 @@ class InstanceManager:
                     update(Instance).where(Instance.id == instance_id).values(**values)
                 )
                 # Restore task status for chat-initiated runs (not managed by dispatcher)
-                if task_id:
+                if task_id and chat_initiated:
                     result = await db.execute(
                         update(Task)
                         .where(Task.id == task_id, Task.status == "executing")
