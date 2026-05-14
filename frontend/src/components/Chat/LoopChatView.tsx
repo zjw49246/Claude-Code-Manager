@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm';
 import { api } from '../../api/client';
 import type { ChatMessage, Task } from '../../api/client';
 import { useWebSocket } from '../../hooks/useWebSocket';
-import { ArrowLeft, ChevronDown, ChevronRight, Copy, Check, XCircle } from 'lucide-react';
+import { ArrowLeft, ChevronDown, ChevronRight, Copy, Check, XCircle, ArrowDown } from 'lucide-react';
 
 interface LoopChatViewProps {
   task: Task;
@@ -324,6 +324,9 @@ export function LoopChatView({ task, onBack }: LoopChatViewProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [iterMeta, setIterMeta] = useState<Map<number, IterationMeta>>(new Map());
   const [activeIteration, setActiveIteration] = useState<number | null>(null);
+  const [showScrollBottom, setShowScrollBottom] = useState(false);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const scrollBottomRef = useRef<HTMLDivElement>(null);
 
   const handleWsMessage = useCallback((raw: Record<string, unknown>) => {
     const msg = raw as { channel?: string; data?: Record<string, unknown> };
@@ -388,6 +391,17 @@ export function LoopChatView({ task, onBack }: LoopChatViewProps) {
     }).catch(() => {});
   }, [task.id, task.status]);
 
+  useEffect(() => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const handleScroll = () => {
+      const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+      setShowScrollBottom(distanceFromBottom > 300);
+    };
+    el.addEventListener('scroll', handleScroll, { passive: true });
+    return () => el.removeEventListener('scroll', handleScroll);
+  }, []);
+
   const iterationGroups = useMemo(() => {
     const map = groupByIteration(messages);
     return [...map.entries()].sort(([a], [b]) => a - b);
@@ -421,7 +435,7 @@ export function LoopChatView({ task, onBack }: LoopChatViewProps) {
       </div>
 
       {/* Iteration panels */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-3">
+      <div ref={scrollContainerRef} className="flex-1 overflow-y-auto p-4 space-y-3">
         {iterationGroups.length === 0 && (
           <div className="text-center text-gray-600 mt-20">
             <p className="text-lg mb-2">Loop task</p>
@@ -438,7 +452,17 @@ export function LoopChatView({ task, onBack }: LoopChatViewProps) {
             defaultOpen={iter === maxIteration}
           />
         ))}
+        <div ref={scrollBottomRef} />
       </div>
+      {showScrollBottom && (
+        <button
+          onClick={() => scrollBottomRef.current?.scrollIntoView({ behavior: 'smooth' })}
+          className="absolute bottom-28 right-6 z-10 p-2.5 bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-white rounded-full shadow-lg transition-all"
+          title="Scroll to bottom"
+        >
+          <ArrowDown size={18} />
+        </button>
+      )}
 
       {/* Footer */}
       {isRunning && (

@@ -1,6 +1,7 @@
 """Tests for Task API endpoints."""
 import pytest
 import pytest_asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -677,3 +678,69 @@ async def test_non_goal_task_has_null_goal_fields(client):
     assert data["goal_max_turns"] == 30
     assert data["goal_turns_used"] == 0
     assert data["goal_last_reason"] is None
+
+
+# === Cancel task kills process tests ===
+
+
+@pytest.mark.asyncio
+async def test_cancel_task_attempts_process_stop(client, session_factory):
+    """POST /api/tasks/{id}/cancel calls _stop_task_process before cancelling."""
+    create_resp = await client.post("/api/tasks", json={
+        "title": "Cancel Me", "description": "d", "target_repo": "/tmp",
+    })
+    task_id = create_resp.json()["id"]
+
+    with patch("backend.api.tasks._stop_task_process", new_callable=AsyncMock, return_value=False) as mock_stop:
+        resp = await client.post(f"/api/tasks/{task_id}/cancel")
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "cancelled"
+    mock_stop.assert_awaited_once()
+    call_args = mock_stop.call_args
+    assert call_args[0][0] == task_id
+
+
+@pytest.mark.asyncio
+async def test_cancel_task_still_works_if_no_process(client):
+    """Cancel works even when no process is running (stop returns False)."""
+    create_resp = await client.post("/api/tasks", json={
+        "title": "No Process", "description": "d", "target_repo": "/tmp",
+    })
+    task_id = create_resp.json()["id"]
+
+    with patch("backend.api.tasks._stop_task_process", new_callable=AsyncMock, return_value=False):
+        resp = await client.post(f"/api/tasks/{task_id}/cancel")
+
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_stop_session_uses_helper(client, session_factory):
+    """POST /api/tasks/{id}/stop-session delegates to _stop_task_process."""
+    create_resp = await client.post("/api/tasks", json={
+        "title": "Stop Me", "description": "d", "target_repo": "/tmp",
+    })
+    task_id = create_resp.json()["id"]
+
+    with patch("backend.api.tasks._stop_task_process", new_callable=AsyncMock, return_value=True) as mock_stop:
+        resp = await client.post(f"/api/tasks/{task_id}/stop-session")
+
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+    mock_stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_stop_session_no_process_returns_400(client):
+    """POST /api/tasks/{id}/stop-session returns 400 when no process found."""
+    create_resp = await client.post("/api/tasks", json={
+        "title": "No Session", "description": "d", "target_repo": "/tmp",
+    })
+    task_id = create_resp.json()["id"]
+
+    with patch("backend.api.tasks._stop_task_process", new_callable=AsyncMock, return_value=False):
+        resp = await client.post(f"/api/tasks/{task_id}/stop-session")
+
+    assert resp.status_code == 400

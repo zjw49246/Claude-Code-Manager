@@ -144,6 +144,7 @@ async def send_chat_message(
         git_env=git_env,
         thinking_budget=inst.thinking_budget,
         effort_level=effort_level,
+        chat_initiated=True,
     )
 
     task.status = "executing"
