@@ -4,6 +4,7 @@ from sqlalchemy import delete as sa_delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config import settings
+from backend.models.instance import Instance
 from backend.models.log_entry import LogEntry
 from backend.models.task import Task
 
@@ -98,6 +99,11 @@ class TaskQueue:
         if task.status not in ("pending", "failed", "cancelled", "conflict", "completed"):
             return False
         await self.db.execute(sa_delete(LogEntry).where(LogEntry.task_id == task_id))
+        await self.db.execute(
+            update(Instance)
+            .where(Instance.current_task_id == task_id)
+            .values(current_task_id=None)
+        )
         await self.db.delete(task)
         await self.db.commit()
         return True

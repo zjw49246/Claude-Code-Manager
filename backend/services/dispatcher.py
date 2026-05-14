@@ -149,11 +149,43 @@ class GlobalDispatcher:
             return
         self._running = True
 
+        await self._cleanup_stale_state()
+
         # Ensure we have worker instances up to max_concurrent_instances
         await self._ensure_instances()
 
         self._dispatch_task = asyncio.create_task(self._dispatch_loop())
         logger.info("GlobalDispatcher started")
+
+    async def _cleanup_stale_state(self):
+        """Reset instances and tasks stuck in active states after a crash/restart."""
+        import os
+        async with self.db_factory() as db:
+            result = await db.execute(
+                select(Instance).where(Instance.status == "running")
+            )
+            for inst in result.scalars().all():
+                alive = False
+                if inst.pid:
+                    try:
+                        os.kill(inst.pid, 0)
+                        alive = True
+                    except OSError:
+                        pass
+                if not alive:
+                    logger.warning(f"Cleaning up stale instance {inst.id} ({inst.name}), dead PID {inst.pid}")
+                    await db.execute(
+                        update(Instance)
+                        .where(Instance.id == inst.id)
+                        .values(status="idle", current_task_id=None, pid=None)
+                    )
+            result = await db.execute(
+                select(Task).where(Task.status.in_(["executing", "in_progress"]))
+            )
+            for t in result.scalars().all():
+                logger.warning(f"Resetting stuck task {t.id} from '{t.status}' to 'completed'")
+                t.status = "completed"
+            await db.commit()
 
     async def stop(self):
         self._running = False
@@ -425,16 +457,14 @@ class GlobalDispatcher:
             if interrupted:
                 logger.info(f"Task {task.id} was interrupted by user (exit_code={exit_code})")
                 async with self.db_factory() as db:
-                    # Reset task to pending so it's not marked as failed,
-                    # but keep session_id so chat can resume
                     await db.execute(
-                        update(Task).where(Task.id == task.id).values(status="pending")
+                        update(Task).where(Task.id == task.id).values(status="completed")
                     )
                     await db.commit()
                 await self.broadcaster.broadcast("tasks", {
                     "event": "status_change",
                     "task_id": task.id,
-                    "new_status": "pending",
+                    "new_status": "completed",
                     "instance_id": instance_id,
                 })
                 return
@@ -496,6 +526,26 @@ class GlobalDispatcher:
             })
         finally:
             self._running_tasks.pop(instance_id, None)
+            await self._reset_instance_if_stale(instance_id, task.id)
+
+    async def _reset_instance_if_stale(self, instance_id: int, task_id: int):
+        """Safety net: reset instance to idle if _consume_output didn't clean up."""
+        try:
+            async with self.db_factory() as db:
+                inst = await db.get(Instance, instance_id)
+                if inst and inst.status == "running":
+                    inst.status = "idle"
+                    inst.current_task_id = None
+                    inst.pid = None
+                    await db.commit()
+                    logger.warning(f"Safety reset: instance {instance_id} was still 'running' after lifecycle ended")
+                t = await db.get(Task, task_id)
+                if t and t.status in ("executing", "in_progress"):
+                    t.status = "completed"
+                    await db.commit()
+                    logger.warning(f"Safety reset: task {task_id} was still '{t.status}' after lifecycle ended")
+        except Exception:
+            logger.exception(f"Failed to safety-reset instance {instance_id} / task {task_id}")
 
     async def _run_loop_lifecycle(self, instance_id: int, task: Task, cwd: str, git_env: dict | None = None, effort_level: str | None = None):
         """Loop: repeatedly invoke Claude Code until it signals done or abort.
