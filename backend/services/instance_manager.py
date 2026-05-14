@@ -162,18 +162,32 @@ class InstanceManager:
                 )
                 # Restore task status for chat-initiated runs (not managed by dispatcher)
                 if task_id and chat_initiated:
-                    result = await db.execute(
-                        update(Task)
-                        .where(Task.id == task_id, Task.status == "executing")
-                        .values(status="completed", completed_at=datetime.utcnow())
-                    )
-                    if result.rowcount:
-                        await self.broadcaster.broadcast("tasks", {
-                            "event": "status_change",
-                            "task_id": task_id,
-                            "new_status": "completed",
-                            "instance_id": instance_id,
-                        })
+                    if exit_code == 0 or interrupted:
+                        result = await db.execute(
+                            update(Task)
+                            .where(Task.id == task_id, Task.status == "executing")
+                            .values(status="completed", completed_at=datetime.utcnow())
+                        )
+                        if result.rowcount:
+                            await self.broadcaster.broadcast("tasks", {
+                                "event": "status_change",
+                                "task_id": task_id,
+                                "new_status": "completed",
+                                "instance_id": instance_id,
+                            })
+                    else:
+                        result = await db.execute(
+                            update(Task)
+                            .where(Task.id == task_id, Task.status == "executing")
+                            .values(status="failed", error_message=stderr_text[:500] if stderr_text else f"Process exited with code {exit_code}")
+                        )
+                        if result.rowcount:
+                            await self.broadcaster.broadcast("tasks", {
+                                "event": "status_change",
+                                "task_id": task_id,
+                                "new_status": "failed",
+                                "instance_id": instance_id,
+                            })
                 await db.commit()
 
             # Broadcast completion

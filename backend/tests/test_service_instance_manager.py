@@ -739,3 +739,85 @@ async def test_consume_output_default_does_not_restore_task_status(db_factory):
     async with db_factory() as db:
         task = await db.get(Task, task_id)
     assert task.status == "executing"
+
+
+@pytest.mark.asyncio
+async def test_consume_output_chat_initiated_error_marks_failed(db_factory):
+    """When chat_initiated=True and process exits with error, task is marked failed."""
+    async with db_factory() as db:
+        inst = Instance(name="chat-err-inst")
+        db.add(inst)
+        task = Task(title="chat error task", description="d", status="executing")
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_id = task.id
+
+    mock_proc = _make_mock_process(returncode=1)
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    im = InstanceManager(db_factory, broadcaster)
+    im.processes[inst_id] = mock_proc
+
+    await im._consume_output(inst_id, task_id, mock_proc, chat_initiated=True)
+
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+    assert task.status == "failed"
+    assert task.error_message is not None
+
+
+@pytest.mark.asyncio
+async def test_consume_output_chat_initiated_interrupt_marks_completed(db_factory):
+    """When chat_initiated=True and process is interrupted (SIGINT), task is marked completed."""
+    async with db_factory() as db:
+        inst = Instance(name="chat-int-inst")
+        db.add(inst)
+        task = Task(title="chat interrupt task", description="d", status="executing")
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_id = task.id
+
+    mock_proc = _make_mock_process(returncode=-2)  # SIGINT
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    im = InstanceManager(db_factory, broadcaster)
+    im.processes[inst_id] = mock_proc
+
+    await im._consume_output(inst_id, task_id, mock_proc, chat_initiated=True)
+
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+    assert task.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_consume_output_chat_initiated_no_override_cancelled(db_factory):
+    """Consumer does not override 'cancelled' status even for chat_initiated=True runs."""
+    async with db_factory() as db:
+        inst = Instance(name="chat-cancel-inst")
+        db.add(inst)
+        task = Task(title="cancelled chat task", description="d", status="cancelled")
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_id = task.id
+
+    mock_proc = _make_mock_process(returncode=0)
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    im = InstanceManager(db_factory, broadcaster)
+    im.processes[inst_id] = mock_proc
+
+    await im._consume_output(inst_id, task_id, mock_proc, chat_initiated=True)
+
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+    assert task.status == "cancelled"

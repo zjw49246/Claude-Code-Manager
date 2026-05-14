@@ -13,6 +13,7 @@ def _make_dispatcher(db_factory):
     instance_manager = MagicMock()
     instance_manager.launch = AsyncMock(return_value=12345)
     instance_manager.processes = {}
+    instance_manager._tasks = {}
 
     broadcaster = MagicMock()
     broadcaster.broadcast = AsyncMock()

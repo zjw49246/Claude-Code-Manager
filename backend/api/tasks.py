@@ -123,10 +123,10 @@ async def stop_task_session(task_id: int, db: AsyncSession = Depends(get_db)):
 
 @router.post("/{task_id}/cancel", response_model=TaskResponse)
 async def cancel_task(task_id: int, queue: TaskQueue = Depends(_get_queue), db: AsyncSession = Depends(get_db)):
-    await _stop_task_process(task_id, db)
     task = await queue.cancel(task_id)
     if not task:
         raise HTTPException(400, "Cannot cancel task")
+    await _stop_task_process(task_id, db)
     return task
 
 
