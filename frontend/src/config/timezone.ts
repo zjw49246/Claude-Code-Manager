@@ -44,13 +44,45 @@ export function resolveTimezone(): string {
   return tz;
 }
 
-/** Format an ISO timestamp string for display in chat */
-export function formatMessageTime(isoString: string): string {
+function getDateParts(date: Date, tz: string): { year: number; month: number; day: number } {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz,
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+  }).formatToParts(date);
+  return {
+    year: Number(parts.find(p => p.type === 'year')!.value),
+    month: Number(parts.find(p => p.type === 'month')!.value),
+    day: Number(parts.find(p => p.type === 'day')!.value),
+  };
+}
+
+/** Format an ISO timestamp string for display in chat.
+ *  Today → HH:MM, same year → MM/DD HH:MM, different year → YYYY/MM/DD HH:MM */
+export function formatMessageTime(isoString: string, now?: Date): string {
   const tz = resolveTimezone();
   const date = new Date(isoString);
-  return date.toLocaleTimeString(undefined, {
+  const msgParts = getDateParts(date, tz);
+  const nowParts = getDateParts(now ?? new Date(), tz);
+
+  const time = date.toLocaleTimeString(undefined, {
     timeZone: tz,
     hour: '2-digit',
     minute: '2-digit',
   });
+
+  const isToday = msgParts.year === nowParts.year
+    && msgParts.month === nowParts.month
+    && msgParts.day === nowParts.day;
+
+  if (isToday) return time;
+
+  const mm = String(msgParts.month).padStart(2, '0');
+  const dd = String(msgParts.day).padStart(2, '0');
+
+  if (msgParts.year !== nowParts.year) {
+    return `${msgParts.year}/${mm}/${dd} ${time}`;
+  }
+  return `${mm}/${dd} ${time}`;
 }
