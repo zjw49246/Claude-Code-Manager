@@ -74,8 +74,10 @@ export function TasksPage() {
 
   const filters = ['', 'pending', 'in_progress', 'executing', 'plan_review', 'completed', 'failed'];
 
-  // Collect all unique tags from loaded projects
-  const allProjectTags = Array.from(new Set(projects.flatMap((p) => p.tags))).sort();
+  const visibleProjects = projects.filter((p) => p.show_in_selector);
+
+  // Collect all unique tags from visible projects
+  const allProjectTags = Array.from(new Set(visibleProjects.flatMap((p) => p.tags))).sort();
 
   // Build tag color map
   const tagColorMap: Record<string, string> = {};
@@ -83,8 +85,8 @@ export function TasksPage() {
 
   // Projects filtered by tag (for the project dropdown)
   const tagFilteredProjects = tagFilter
-    ? projects.filter((p) => p.tags.includes(tagFilter))
-    : projects;
+    ? visibleProjects.filter((p) => p.tags.includes(tagFilter))
+    : visibleProjects;
 
   return (
     <div className="space-y-4">
@@ -120,7 +122,7 @@ export function TasksPage() {
                 const next = active ? '' : tag;
                 setTagFilter(next);
                 if (next && projectFilter !== undefined) {
-                  const filtered = projects.filter((p) => p.tags.includes(next));
+                  const filtered = visibleProjects.filter((p) => p.tags.includes(next));
                   if (!filtered.some((p) => p.id === projectFilter)) {
                     setProjectFilter(undefined);
                   }
