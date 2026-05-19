@@ -29,10 +29,10 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   const [effortOptions, setEffortOptions] = useState<string[]>([]);
   const [defaultEffort, setDefaultEffort] = useState('medium');
   const [todoFilePath, setTodoFilePath] = useState('');
-  const [maxIterations, setMaxIterations] = useState(50);
+  const [maxIterations, setMaxIterations] = useState('50');
   const [mustComplete, setMustComplete] = useState(false);
   const [goalCondition, setGoalCondition] = useState('');
-  const [goalMaxTurns, setGoalMaxTurns] = useState(30);
+  const [goalMaxTurns, setGoalMaxTurns] = useState('30');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [projects, setProjects] = useState<Project[]>([]);
@@ -151,8 +151,8 @@ export function TaskForm({ onCreated }: TaskFormProps) {
         project_id: pid as number,
         priority,
         mode,
-        ...(mode === 'loop' ? { todo_file_path: todoFilePath, max_iterations: maxIterations, must_complete: mustComplete } : {}),
-        ...(mode === 'goal' ? { goal_condition: goalCondition, goal_max_turns: goalMaxTurns } : {}),
+        ...(mode === 'loop' ? { todo_file_path: todoFilePath, max_iterations: parseInt(maxIterations) || 50, must_complete: mustComplete } : {}),
+        ...(mode === 'goal' ? { goal_condition: goalCondition, goal_max_turns: parseInt(goalMaxTurns) || 30 } : {}),
         ...(uploadedPaths.length > 0 ? { file_paths: uploadedPaths } : {}),
         ...(attachments.length > 0 ? { attachments } : {}),
         ...(selectedSecretIds.length > 0 ? { secret_ids: selectedSecretIds } : {}),
@@ -371,11 +371,15 @@ export function TaskForm({ onCreated }: TaskFormProps) {
             />
             <label className="text-sm text-gray-400 ml-1 whitespace-nowrap">Max iter:</label>
             <input
-              type="number"
-              min={1}
+              type="text"
+              inputMode="numeric"
               className="w-20 bg-gray-700 text-foreground rounded px-2 py-1 text-sm"
               value={maxIterations}
-              onChange={(e) => setMaxIterations(Math.max(1, Number(e.target.value)))}
+              onChange={(e) => setMaxIterations(e.target.value.replace(/[^0-9]/g, ''))}
+              onBlur={() => {
+                const n = parseInt(maxIterations);
+                setMaxIterations(String((!n || n < 1) ? 1 : n));
+              }}
             />
             <label className="flex items-center gap-1 text-sm text-gray-400 ml-1 whitespace-nowrap cursor-pointer">
               <input
@@ -399,12 +403,15 @@ export function TaskForm({ onCreated }: TaskFormProps) {
             />
             <label className="text-sm text-gray-400 ml-1 whitespace-nowrap">Max turns:</label>
             <input
-              type="number"
-              min={1}
-              max={100}
+              type="text"
+              inputMode="numeric"
               className="w-20 bg-gray-700 text-foreground rounded px-2 py-1 text-sm"
               value={goalMaxTurns}
-              onChange={(e) => setGoalMaxTurns(Math.max(1, Number(e.target.value)))}
+              onChange={(e) => setGoalMaxTurns(e.target.value.replace(/[^0-9]/g, ''))}
+              onBlur={() => {
+                const n = parseInt(goalMaxTurns);
+                setGoalMaxTurns(String((!n || n < 1) ? 1 : n));
+              }}
             />
           </>
         )}
