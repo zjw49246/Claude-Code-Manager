@@ -270,6 +270,8 @@ class InstanceManager:
 
         # Broadcast via WebSocket
         broadcast_data = {k: v for k, v in event.items() if k != "raw_json"}
+        if loop_iteration is not None:
+            broadcast_data["loop_iteration"] = loop_iteration
         await self.broadcaster.broadcast(f"instance:{instance_id}", broadcast_data)
         if task_id:
             await self.broadcaster.broadcast(f"task:{task_id}", broadcast_data)
