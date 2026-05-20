@@ -91,6 +91,16 @@ describe('LoopChatView', () => {
     capturedOnMessage = undefined;
   });
 
+  describe('History loading', () => {
+    it('loads all history without a limit', async () => {
+      const task = makeTask();
+      render(<LoopChatView task={task} onBack={onBack} />);
+      await waitFor(() => {
+        expect(api.getTaskChatHistory).toHaveBeenCalledWith(task.id);
+      });
+    });
+  });
+
   describe('WebSocket message uses loop_iteration from backend', () => {
     it('uses loop_iteration from the WebSocket message data', async () => {
       const task = makeTask();

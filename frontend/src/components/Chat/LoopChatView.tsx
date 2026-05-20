@@ -386,7 +386,7 @@ export function LoopChatView({ task, onBack }: LoopChatViewProps) {
   useEffect(() => {
     historyLoadedRef.current = false;
     pendingWsRef.current = [];
-    api.getTaskChatHistory(task.id, 1000).then((msgs) => {
+    api.getTaskChatHistory(task.id).then((msgs) => {
       const filtered = msgs.filter((m) =>
         !((m.event_type === 'message' || m.event_type === 'result') && !m.content)
       );
