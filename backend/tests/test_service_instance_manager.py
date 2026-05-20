@@ -657,6 +657,123 @@ async def test_process_event_does_not_set_has_unread_for_tool_use(db_factory):
     assert task.has_unread is False
 
 
+# === loop_iteration broadcast tests ===
+
+
+@pytest.mark.asyncio
+async def test_process_event_broadcasts_loop_iteration(db_factory):
+    """_process_event includes loop_iteration in broadcast data when provided."""
+    async with db_factory() as db:
+        inst = Instance(name="loop-iter-inst")
+        db.add(inst)
+        task = Task(title="loop task", description="d")
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_id = task.id
+
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    im = InstanceManager(db_factory, broadcaster)
+
+    event = {
+        "event_type": "message",
+        "role": "assistant",
+        "content": "Working on item 3",
+        "tool_name": None,
+        "tool_input": None,
+        "tool_output": None,
+        "raw_json": "{}",
+        "is_error": False,
+    }
+
+    await im._process_event(inst_id, task_id, event, loop_iteration=2)
+
+    calls = broadcaster.broadcast.call_args_list
+    task_broadcasts = [c for c in calls if c[0][0] == f"task:{task_id}"]
+    assert len(task_broadcasts) >= 1
+    broadcast_data = task_broadcasts[0][0][1]
+    assert broadcast_data["loop_iteration"] == 2
+
+
+@pytest.mark.asyncio
+async def test_process_event_omits_loop_iteration_when_none(db_factory):
+    """_process_event does not add loop_iteration to broadcast when it is None."""
+    async with db_factory() as db:
+        inst = Instance(name="no-loop-inst")
+        db.add(inst)
+        task = Task(title="auto task", description="d")
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_id = task.id
+
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    im = InstanceManager(db_factory, broadcaster)
+
+    event = {
+        "event_type": "message",
+        "role": "assistant",
+        "content": "Hello",
+        "tool_name": None,
+        "tool_input": None,
+        "tool_output": None,
+        "raw_json": "{}",
+        "is_error": False,
+    }
+
+    await im._process_event(inst_id, task_id, event)
+
+    calls = broadcaster.broadcast.call_args_list
+    task_broadcasts = [c for c in calls if c[0][0] == f"task:{task_id}"]
+    assert len(task_broadcasts) >= 1
+    broadcast_data = task_broadcasts[0][0][1]
+    assert "loop_iteration" not in broadcast_data
+
+
+@pytest.mark.asyncio
+async def test_process_event_broadcasts_loop_iteration_zero(db_factory):
+    """_process_event includes loop_iteration=0 in broadcast (first iteration)."""
+    async with db_factory() as db:
+        inst = Instance(name="loop-zero-inst")
+        db.add(inst)
+        task = Task(title="loop task zero", description="d")
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_id = task.id
+
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    im = InstanceManager(db_factory, broadcaster)
+
+    event = {
+        "event_type": "tool_use",
+        "role": "assistant",
+        "content": None,
+        "tool_name": "Read",
+        "tool_input": '{"file_path": "TODO.md"}',
+        "tool_output": None,
+        "raw_json": "{}",
+        "is_error": False,
+    }
+
+    await im._process_event(inst_id, task_id, event, loop_iteration=0)
+
+    calls = broadcaster.broadcast.call_args_list
+    task_broadcasts = [c for c in calls if c[0][0] == f"task:{task_id}"]
+    assert len(task_broadcasts) >= 1
+    broadcast_data = task_broadcasts[0][0][1]
+    assert broadcast_data["loop_iteration"] == 0
+
+
 # === chat_initiated flag tests ===
 
 

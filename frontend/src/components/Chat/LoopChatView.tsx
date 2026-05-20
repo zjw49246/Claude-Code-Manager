@@ -327,6 +327,8 @@ export function LoopChatView({ task, onBack }: LoopChatViewProps) {
   const [showScrollBottom, setShowScrollBottom] = useState(false);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const scrollBottomRef = useRef<HTMLDivElement>(null);
+  const historyLoadedRef = useRef(false);
+  const pendingWsRef = useRef<ChatMessage[]>([]);
 
   const handleWsMessage = useCallback((raw: Record<string, unknown>) => {
     const msg = raw as { channel?: string; data?: Record<string, unknown> };
@@ -348,7 +350,6 @@ export function LoopChatView({ task, onBack }: LoopChatViewProps) {
     }
 
     if (eventType === 'process_exit') {
-      // Don't change activeIteration here — loop_iteration_end handles that
       return;
     }
 
@@ -367,25 +368,38 @@ export function LoopChatView({ task, onBack }: LoopChatViewProps) {
       tool_input: (msg.data.tool_input as string) || null,
       tool_output: (msg.data.tool_output as string) || null,
       is_error: (msg.data.is_error as boolean) || false,
-      loop_iteration: (msg.data.loop_iteration as number) ?? activeIteration ?? 0,
+      loop_iteration: (msg.data.loop_iteration as number) ?? 0,
       timestamp: new Date().toISOString(),
       image_urls: null,
       attachments: null,
     };
+
+    if (!historyLoadedRef.current) {
+      pendingWsRef.current.push(entry);
+      return;
+    }
     setMessages((prev) => [...prev, entry]);
-  }, [task.id, activeIteration]);
+  }, [task.id]);
 
   useWebSocket([`task:${task.id}`], handleWsMessage);
 
   useEffect(() => {
+    historyLoadedRef.current = false;
+    pendingWsRef.current = [];
     api.getTaskChatHistory(task.id, 1000).then((msgs) => {
       const filtered = msgs.filter((m) =>
         !((m.event_type === 'message' || m.event_type === 'result') && !m.content)
       );
-      setMessages(filtered);
-      // Determine active iteration from task status
+      const maxHistoryId = filtered.length > 0
+        ? Math.max(...filtered.map((m) => m.id))
+        : 0;
+      const fresh = pendingWsRef.current.filter((m) => m.id > maxHistoryId);
+      setMessages([...filtered, ...fresh]);
+      pendingWsRef.current = [];
+      historyLoadedRef.current = true;
       if (['executing', 'in_progress'].includes(task.status)) {
-        const maxIter = filtered.reduce((acc, m) => Math.max(acc, m.loop_iteration ?? 0), 0);
+        const allMsgs = [...filtered, ...fresh];
+        const maxIter = allMsgs.reduce((acc, m) => Math.max(acc, m.loop_iteration ?? 0), 0);
         setActiveIteration(maxIter);
       }
     }).catch(() => {});
