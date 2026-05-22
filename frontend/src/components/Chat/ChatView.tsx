@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm';
 import { api } from '../../api/client';
 import type { ChatMessage, FileAttachment, Task, Project, UploadResult } from '../../api/client';
 import { useWebSocket } from '../../hooks/useWebSocket';
-import { Send, ArrowLeft, Loader2, ChevronDown, ChevronRight, Copy, Check, Paperclip, X, StopCircle, Pencil, ArrowDown } from 'lucide-react';
+import { Send, ArrowLeft, Loader2, ChevronDown, ChevronRight, Copy, Check, Paperclip, X, StopCircle, Pencil, ArrowDown, Star } from 'lucide-react';
 import { SecretPicker } from '../Secrets/SecretPicker';
 import { ExpandableText } from '../ExpandableText';
 import { formatMessageTime } from '../../config/timezone';
@@ -116,6 +116,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [showScrollBottom, setShowScrollBottom] = useState(false);
+  const [starred, setStarred] = useState(task.starred);
 
   // Handle real-time WebSocket messages via callback (not state) to avoid
   // losing messages when React batches rapid state updates.
@@ -291,6 +292,14 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
     setEditingTitle(false);
   };
 
+  const handleStar = async () => {
+    try {
+      const updated = await api.starTask(task.id);
+      setStarred(updated.starred);
+      onTaskUpdated?.();
+    } catch { /* ignore */ }
+  };
+
   const handleSend = async () => {
     const text = input.trim();
     if ((!text && pendingFiles.length === 0) || sending) return;
@@ -395,6 +404,13 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
             </div>
           )}
         </div>
+        <button
+          onClick={handleStar}
+          className={`p-1.5 transition-colors ${starred ? 'text-yellow-400 hover:text-yellow-300' : 'text-gray-600 hover:text-yellow-400'}`}
+          title={starred ? "Unstar" : "Star"}
+        >
+          <Star size={18} fill={starred ? 'currentColor' : 'none'} />
+        </button>
         {(sending || stillRunning || ['in_progress', 'executing'].includes(task.status)) && (
           <button
             onClick={async () => {

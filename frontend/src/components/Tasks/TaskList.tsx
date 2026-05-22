@@ -1,7 +1,7 @@
 import { useState, useMemo, useRef, useEffect } from 'react';
 import { api } from '../../api/client';
 import type { Task, Project } from '../../api/client';
-import { Trash2, RotateCcw, XCircle, MessageCircle, Archive, ArchiveRestore, Star, Copy, Check, MoreVertical, Pencil } from 'lucide-react';
+import { Trash2, RotateCcw, XCircle, MessageCircle, Archive, ArchiveRestore, Star, Copy, Check, MoreVertical, Pencil, Mail, MailOpen } from 'lucide-react';
 import { TAG_COLOR_OPTIONS } from '../TagColors';
 import { ExpandableText } from '../ExpandableText';
 
@@ -67,6 +67,14 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat }: TaskListPro
   };
   const handleStar = async (id: number) => {
     await api.starTask(id);
+    onRefresh();
+  };
+  const handleToggleUnread = async (id: number, currentlyUnread: boolean) => {
+    if (currentlyUnread) {
+      await api.markTaskRead(id);
+    } else {
+      await api.markTaskUnread(id);
+    }
     onRefresh();
   };
   const handleArchive = async (id: number) => {
@@ -175,6 +183,13 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat }: TaskListPro
               title={t.starred ? "Unstar" : "Star"}
             >
               <Star size={16} fill={t.starred ? 'currentColor' : 'none'} />
+            </button>
+            <button
+              onClick={() => handleToggleUnread(t.id, t.has_unread)}
+              className={`p-1.5 transition-colors ${t.has_unread ? 'text-indigo-400 hover:text-indigo-300' : 'text-gray-600 hover:text-indigo-400'}`}
+              title={t.has_unread ? "Mark as read" : "Mark as unread"}
+            >
+              {t.has_unread ? <MailOpen size={16} /> : <Mail size={16} />}
             </button>
             {t.session_id && (
               <button
