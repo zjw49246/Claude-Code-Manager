@@ -26,6 +26,7 @@ class InstanceManager:
         self.parser = StreamParser()
         self.processes: dict[int, asyncio.subprocess.Process] = {}
         self._tasks: dict[int, asyncio.Task] = {}  # instance_id -> consumer task
+        self._stopping: set[int] = set()  # instance_ids being intentionally stopped
 
     async def launch(self, instance_id: int, prompt: str, task_id: int | None = None, cwd: str | None = None, model: str | None = None, resume_session_id: str | None = None, loop_iteration: int | None = None, git_env: dict | None = None, thinking_budget: int | None = None, effort_level: str | None = None, chat_initiated: bool = False) -> int:
         """Launch a Claude Code subprocess for the given instance.
@@ -146,6 +147,11 @@ class InstanceManager:
             # Read stderr
             stderr_data = await process.stderr.read()
             stderr_text = stderr_data.decode("utf-8", errors="replace").strip() if stderr_data else ""
+
+            # If stop() was called, it handles instance + task cleanup — skip here
+            intentionally_stopped = instance_id in self._stopping
+            if intentionally_stopped:
+                return
 
             # Update instance status
             # SIGINT (exit code -2 or 130) = user interrupt, treat as idle not error
@@ -300,6 +306,7 @@ class InstanceManager:
         if not process or process.returncode is not None:
             return False
 
+        self._stopping.add(instance_id)
         import signal
         process.send_signal(signal.SIGINT)
         try:
@@ -326,6 +333,7 @@ class InstanceManager:
             await db.commit()
 
         self.processes.pop(instance_id, None)
+        self._stopping.discard(instance_id)
         return True
 
     def is_running(self, instance_id: int) -> bool:
