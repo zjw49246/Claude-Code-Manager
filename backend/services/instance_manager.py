@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import re
 import signal
 from datetime import datetime
 
@@ -143,9 +144,15 @@ class InstanceManager:
             await process.wait()
             exit_code = process.returncode
 
-            # Read stderr
+            # Read stderr, filtering out launcher informational lines
             stderr_data = await process.stderr.read()
             stderr_text = stderr_data.decode("utf-8", errors="replace").strip() if stderr_data else ""
+            if stderr_text:
+                _ansi_re = re.compile(r"\x1b\[[0-9;]*m")
+                stderr_text = "\n".join(
+                    line for line in stderr_text.splitlines()
+                    if not _ansi_re.sub("", line).startswith("[auto]")
+                ).strip()
 
             # Update instance status
             # SIGINT (exit code -2 or 130) = user interrupt, treat as idle not error
@@ -166,7 +173,7 @@ class InstanceManager:
                         result = await db.execute(
                             update(Task)
                             .where(Task.id == task_id, Task.status == "executing")
-                            .values(status="completed", completed_at=datetime.utcnow())
+                            .values(status="completed", completed_at=datetime.utcnow(), error_message=None)
                         )
                         if result.rowcount:
                             await self.broadcaster.broadcast("tasks", {
