@@ -276,7 +276,7 @@ class GlobalDispatcher:
                 # Find idle instances
                 async with self.db_factory() as db:
                     result = await db.execute(
-                        select(Instance).where(Instance.status.in_(["idle", "stopped"]))
+                        select(Instance).where(Instance.status == "idle")
                     )
                     idle_instances = list(result.scalars().all())
 
