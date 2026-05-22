@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { api } from '../../api/client';
 import type { Project, TagItem, UploadResult } from '../../api/client';
-import { Plus, Paperclip, X } from 'lucide-react';
+import { Plus, Paperclip, X, Star } from 'lucide-react';
 import { ProjectSelect } from '../ProjectSelect';
 import { resolveTagColor } from '../TagColors';
 import { VoiceButton } from '../Voice/VoiceButton';
@@ -42,6 +42,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   const [filePreviews, setFilePreviews] = useState<string[]>([]);
   const [selectedSecretIds, setSelectedSecretIds] = useState<number[]>([]);
   const [dropError, setDropError] = useState('');
+  const [starOnCreate, setStarOnCreate] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
 
@@ -158,6 +159,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
         ...(selectedSecretIds.length > 0 ? { secret_ids: selectedSecretIds } : {}),
         model: model || defaultModel,
         ...(effort ? { effort_level: effort } : {}),
+        ...(starOnCreate ? { starred: true } : {}),
       });
       setDescription('');
       setPriority(0);
@@ -415,10 +417,20 @@ export function TaskForm({ onCreated }: TaskFormProps) {
             />
           </>
         )}
+        <label className="flex items-center gap-1.5 text-sm text-gray-400 ml-auto whitespace-nowrap cursor-pointer">
+          <Star size={14} className={starOnCreate ? 'text-yellow-400' : 'text-gray-600'} fill={starOnCreate ? 'currentColor' : 'none'} />
+          <input
+            type="checkbox"
+            checked={starOnCreate}
+            onChange={(e) => setStarOnCreate(e.target.checked)}
+            className="accent-yellow-500 hidden"
+          />
+          Star
+        </label>
         <button
           type="submit"
           disabled={loading || !canSubmit}
-          className="ml-auto flex items-center gap-1 bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded text-sm font-medium disabled:opacity-50"
+          className="flex items-center gap-1 bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded text-sm font-medium disabled:opacity-50"
         >
           <Plus size={16} />
           {loading ? 'Creating...' : 'Create Task'}

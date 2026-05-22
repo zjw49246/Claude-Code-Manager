@@ -769,3 +769,142 @@ async def test_cancel_sets_status_before_stopping_process(client):
     assert resp.json()["status"] == "cancelled"
     # stop should be called (after cancel sets status)
     assert "stop" in call_order
+
+
+# === Mark unread tests ===
+
+
+@pytest.mark.asyncio
+async def test_mark_task_unread(client, session_factory):
+    """POST /api/tasks/{id}/unread sets has_unread=True."""
+    create_resp = await client.post("/api/tasks", json={
+        "title": "Read task", "description": "d", "target_repo": "/tmp",
+    })
+    task_id = create_resp.json()["id"]
+    assert create_resp.json()["has_unread"] is False
+
+    resp = await client.post(f"/api/tasks/{task_id}/unread")
+    assert resp.status_code == 200
+    assert resp.json()["has_unread"] is True
+
+
+@pytest.mark.asyncio
+async def test_mark_task_unread_not_found(client):
+    """POST /api/tasks/9999/unread returns 404 for missing task."""
+    resp = await client.post("/api/tasks/9999/unread")
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_toggle_read_unread_roundtrip(client, session_factory):
+    """Can toggle between read and unread states."""
+    from backend.models.task import Task
+    from sqlalchemy import update
+
+    create_resp = await client.post("/api/tasks", json={
+        "title": "Toggle", "description": "d", "target_repo": "/tmp",
+    })
+    task_id = create_resp.json()["id"]
+
+    # Mark unread
+    resp = await client.post(f"/api/tasks/{task_id}/unread")
+    assert resp.json()["has_unread"] is True
+
+    # Mark read
+    resp = await client.post(f"/api/tasks/{task_id}/read")
+    assert resp.json()["has_unread"] is False
+
+    # Mark unread again
+    resp = await client.post(f"/api/tasks/{task_id}/unread")
+    assert resp.json()["has_unread"] is True
+
+
+@pytest.mark.asyncio
+async def test_mark_already_unread_task_unread(client, session_factory):
+    """Marking an already-unread task as unread is idempotent."""
+    from backend.models.task import Task
+    from sqlalchemy import update
+
+    create_resp = await client.post("/api/tasks", json={
+        "title": "Already unread", "description": "d", "target_repo": "/tmp",
+    })
+    task_id = create_resp.json()["id"]
+
+    # Set unread via DB
+    async with session_factory() as db:
+        await db.execute(update(Task).where(Task.id == task_id).values(has_unread=True))
+        await db.commit()
+
+    resp = await client.post(f"/api/tasks/{task_id}/unread")
+    assert resp.status_code == 200
+    assert resp.json()["has_unread"] is True
+
+
+# === Starred on create tests ===
+
+
+@pytest.mark.asyncio
+async def test_create_task_starred_default_false(client):
+    """Task created without starred flag has starred=False."""
+    resp = await client.post("/api/tasks", json={
+        "title": "No star", "description": "d", "target_repo": "/tmp",
+    })
+    assert resp.status_code == 201
+    assert resp.json()["starred"] is False
+
+
+@pytest.mark.asyncio
+async def test_create_task_with_starred_true(client):
+    """Task created with starred=True is starred immediately."""
+    resp = await client.post("/api/tasks", json={
+        "title": "Starred", "description": "d", "target_repo": "/tmp",
+        "starred": True,
+    })
+    assert resp.status_code == 201
+    assert resp.json()["starred"] is True
+
+
+@pytest.mark.asyncio
+async def test_create_task_starred_persisted_in_db(client, session_factory):
+    """starred=True at creation is persisted to the database."""
+    from backend.models.task import Task
+
+    resp = await client.post("/api/tasks", json={
+        "title": "Starred persist", "description": "d", "target_repo": "/tmp",
+        "starred": True,
+    })
+    task_id = resp.json()["id"]
+
+    async with session_factory() as db:
+        task = await db.get(Task, task_id)
+    assert task.starred is True
+
+
+@pytest.mark.asyncio
+async def test_create_task_starred_in_list(client):
+    """Starred task appears with starred=True in list endpoint."""
+    await client.post("/api/tasks", json={
+        "title": "Starred list", "description": "d", "target_repo": "/tmp",
+        "starred": True,
+    })
+    resp = await client.get("/api/tasks")
+    assert resp.status_code == 200
+    tasks = resp.json()
+    assert any(t["starred"] is True for t in tasks)
+
+
+@pytest.mark.asyncio
+async def test_create_task_starred_filter(client):
+    """Starred filter returns only starred tasks including those starred at creation."""
+    await client.post("/api/tasks", json={
+        "title": "Not starred", "description": "d", "target_repo": "/tmp",
+    })
+    await client.post("/api/tasks", json={
+        "title": "Starred", "description": "d", "target_repo": "/tmp",
+        "starred": True,
+    })
+    resp = await client.get("/api/tasks?starred=true")
+    assert resp.status_code == 200
+    tasks = resp.json()
+    assert len(tasks) == 1
+    assert tasks[0]["starred"] is True

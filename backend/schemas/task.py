@@ -25,6 +25,7 @@ class TaskCreate(BaseModel):
     file_paths: list[str] | None = None
     attachments: list[dict] | None = None  # [{url, name, is_image}, ...]
     secret_ids: list[int] | None = None
+    starred: bool = False
 
     @model_validator(mode='after')
     def validate_mode_fields(self):
