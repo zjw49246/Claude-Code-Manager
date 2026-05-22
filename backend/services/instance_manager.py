@@ -325,11 +325,19 @@ class InstanceManager:
             task.cancel()
 
         async with self.db_factory() as db:
+            inst = await db.get(Instance, instance_id)
+            task_id = inst.current_task_id if inst else None
             await db.execute(
                 update(Instance)
                 .where(Instance.id == instance_id)
                 .values(status="idle", pid=None, current_task_id=None)
             )
+            if task_id:
+                await db.execute(
+                    update(Task)
+                    .where(Task.id == task_id, Task.status == "executing")
+                    .values(status="completed", error_message=None)
+                )
             await db.commit()
 
         self.processes.pop(instance_id, None)
