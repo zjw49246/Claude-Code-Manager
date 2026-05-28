@@ -1,10 +1,6 @@
-const CACHE_NAME = 'cc-manager-v1';
-const STATIC_ASSETS = ['/', '/index.html', '/icons/icon.svg'];
+const CACHE_NAME = 'cc-manager-v3';
 
 self.addEventListener('install', (event) => {
-  event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(STATIC_ASSETS))
-  );
   self.skipWaiting();
 });
 
@@ -20,21 +16,19 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
 
-  // Network-first for API and WebSocket
+  // Skip API and WebSocket
   if (url.pathname.startsWith('/api') || url.pathname.startsWith('/ws')) {
     return;
   }
 
-  // Cache-first for static assets
+  // Network-first: always try network, fall back to cache when offline
   event.respondWith(
-    caches.match(event.request).then((cached) => {
-      return cached || fetch(event.request).then((response) => {
-        if (response.ok) {
-          const clone = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
-        }
-        return response;
-      });
-    })
+    fetch(event.request).then((response) => {
+      if (response.ok) {
+        const clone = response.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+      }
+      return response;
+    }).catch(() => caches.match(event.request))
   );
 });

@@ -45,7 +45,8 @@ export function ProjectSelect({
   }, []);
 
   const selected = projects.find((p) => String(p.id) === String(value));
-  const displayValue = selected ? selected.name : placeholder;
+  const extraSelected = extraOptions?.find((o) => o.value === String(value));
+  const displayValue = selected ? selected.name : extraSelected ? extraSelected.label : placeholder;
 
   return (
     <div ref={ref} className={`relative ${className}`}>
