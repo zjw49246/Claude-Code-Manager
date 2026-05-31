@@ -296,7 +296,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
     if (!files.length) return;
-    const combined = [...pendingFiles, ...files].slice(0, 5);
+    const combined = [...pendingFiles, ...files].slice(0, 10);
     setPendingFiles(combined);
     setFilePreviews(combined.map((f) => isImageFile(f) ? URL.createObjectURL(f) : ''));
     e.target.value = '';
@@ -597,7 +597,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              disabled={sending || !task.session_id || pendingFiles.length >= 5}
+              disabled={sending || !task.session_id || pendingFiles.length >= 10}
               className="p-2.5 text-gray-500 hover:text-gray-300 disabled:opacity-40 disabled:cursor-not-allowed"
               title="Attach files"
             >

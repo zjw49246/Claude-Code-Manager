@@ -1,7 +1,7 @@
 import { useEffect, useCallback, type RefObject } from 'react';
 
-const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
-const MAX_FILES = 5;
+const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
+const MAX_FILES = 10;
 
 interface UseFileDropOptions {
   targetRef?: RefObject<HTMLElement | null>;
@@ -36,7 +36,7 @@ export function useFileDrop({
         const names = oversized.map((f) => f.name).join(', ');
         onError?.(
           oversized.length === 1
-            ? `File "${names}" exceeds 10MB limit`
+            ? `File "${names}" exceeds 50MB limit`
             : `${oversized.length} files exceed 10MB limit: ${names}`,
         );
       }
