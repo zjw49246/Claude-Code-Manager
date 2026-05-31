@@ -94,7 +94,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
     if (!files.length) return;
-    const combined = [...pendingFiles, ...files].slice(0, 5);
+    const combined = [...pendingFiles, ...files].slice(0, 10);
     setPendingFiles(combined);
     setFilePreviews(combined.map((f) => isImageFile(f) ? URL.createObjectURL(f) : ''));
     e.target.value = '';
@@ -218,11 +218,11 @@ export function TaskForm({ onCreated }: TaskFormProps) {
         <button
           type="button"
           onClick={() => fileInputRef.current?.click()}
-          disabled={pendingFiles.length >= 5}
+          disabled={pendingFiles.length >= 10}
           className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-200 px-2 py-1 rounded border border-gray-600 hover:border-gray-400 disabled:opacity-40"
         >
           <Paperclip size={13} />
-          {pendingFiles.length > 0 ? `${pendingFiles.length}/5 files` : 'Attach files'}
+          {pendingFiles.length > 0 ? `${pendingFiles.length}/10 files` : 'Attach files'}
         </button>
         <SecretPicker selectedIds={selectedSecretIds} onChange={setSelectedSecretIds} />
         {pendingFiles.map((file, idx) => (
