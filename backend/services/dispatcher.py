@@ -125,6 +125,7 @@ class GlobalDispatcher:
     - Task assignment (dequeue)
     - Starting/waiting on Claude Code processes
     - Marking tasks completed/failed
+    - Pool rotation on rate limit (when pool is enabled)
     """
 
     def __init__(
@@ -140,6 +141,9 @@ class GlobalDispatcher:
         self._running_tasks: dict[int, asyncio.Task] = {}  # instance_id -> lifecycle task
         self._running = False
 
+        # Pool: initialized lazily on start() if pool_enabled
+        self.pool: "ClaudePool | None" = None
+
     @property
     def is_running(self) -> bool:
         return self._running
@@ -148,6 +152,19 @@ class GlobalDispatcher:
         if self._running:
             return
         self._running = True
+
+        # Initialize pool if enabled
+        if settings.pool_enabled:
+            from backend.services.claude_pool import ClaudePool
+            self.pool = ClaudePool(
+                config_path=settings.pool_config_path,
+                cooldown_seconds=settings.pool_cooldown_seconds,
+            )
+            if self.pool.enabled:
+                logger.info("Claude pool enabled with %d accounts", len(self.pool._accounts))
+            else:
+                logger.warning("Pool enabled in config but only %d account(s) — rotation disabled", len(self.pool._accounts))
+                self.pool = None
 
         await self._cleanup_stale_state()
 
@@ -327,6 +344,90 @@ class GlobalDispatcher:
                 logger.error(f"Dispatch loop error: {e}", exc_info=True)
                 await asyncio.sleep(5)
 
+    def _pool_select(self, exclude: set[str] | None = None) -> str | None:
+        """Select a pool account config_dir, or None if pool is off / exhausted."""
+        if not self.pool:
+            return None
+        return self.pool.select(exclude=exclude)
+
+    async def _check_rate_limit_and_rotate(
+        self,
+        instance_id: int,
+        task_id: int,
+        exit_code: int,
+    ) -> dict | None:
+        """After a failed process, check if it was a rate limit and attempt rotation.
+
+        Returns a dict with {config_dir, session_id, excluded} if rotation is
+        possible, or None if this is not a pool-rotatable failure.
+        """
+        if not self.pool or exit_code == 0 or exit_code in (-2, 130):
+            return None
+
+        from backend.services.claude_pool import is_pool_rotatable, is_auth_failure, is_rate_limited
+        from backend.services.claude_pool import migrate_session, collect_process_output_for_detection
+
+        stderr = self.instance_manager.get_last_stderr(instance_id)
+        log_contents = await self.instance_manager.get_recent_log_contents(task_id, limit=10)
+        combined = collect_process_output_for_detection(stderr, log_contents)
+
+        if not is_pool_rotatable(combined):
+            return None
+
+        old_config_dir = self.instance_manager.get_config_dir(instance_id)
+        if not old_config_dir:
+            return None
+
+        # Mark the old account
+        if is_auth_failure(combined):
+            self.pool.mark_auth_failure(old_config_dir)
+            logger.warning("Pool account %s auth failure, marked indefinite cooldown", old_config_dir)
+        elif is_rate_limited(combined):
+            self.pool.mark_rate_limited(old_config_dir)
+            logger.info("Pool account %s rate-limited, marked cooldown", old_config_dir)
+
+        # Build exclusion set
+        old_account_id = self.pool.account_id_from_config_dir(old_config_dir)
+        excluded = {old_account_id} if old_account_id else set()
+
+        new_config_dir = self._pool_select(exclude=excluded)
+        if not new_config_dir:
+            logger.warning("Pool exhausted — no alternative account for task %d", task_id)
+            return None
+
+        # Get session_id for --resume
+        async with self.db_factory() as db:
+            t = await db.get(Task, task_id)
+            session_id = t.session_id if t else None
+
+        if session_id:
+            migrate_session(
+                old_config_dir=old_config_dir,
+                new_config_dir=new_config_dir,
+                session_id=session_id,
+            )
+
+        # Broadcast pool rotation event
+        await self.broadcaster.broadcast(f"task:{task_id}", {
+            "event_type": "pool_rotation",
+            "old_account": old_account_id,
+            "new_account": self.pool.account_id_from_config_dir(new_config_dir),
+            "reason": "rate_limit" if is_rate_limited(combined) else "auth_failure",
+        })
+        await self.broadcaster.broadcast("system", {
+            "event": "pool_rotation",
+            "task_id": task_id,
+            "instance_id": instance_id,
+            "old_account": old_account_id,
+            "new_account": self.pool.account_id_from_config_dir(new_config_dir),
+        })
+
+        return {
+            "config_dir": new_config_dir,
+            "session_id": session_id,
+            "excluded": excluded,
+        }
+
     async def _get_thinking_budget(self, instance_id: int) -> int | None:
         """Look up the configured Extended Thinking budget for an instance."""
         async with self.db_factory() as db:
@@ -416,6 +517,9 @@ class GlobalDispatcher:
             parts.append(f"任务:\n{task.description}")
             full_prompt = "\n\n".join(parts)
 
+            # Pool: select an account for the initial launch
+            pool_config_dir = self._pool_select()
+
             await self.instance_manager.launch(
                 instance_id=instance_id,
                 prompt=full_prompt,
@@ -425,6 +529,7 @@ class GlobalDispatcher:
                 git_env=git_env or {},
                 thinking_budget=thinking_budget,
                 effort_level=effort_level,
+                config_dir=pool_config_dir,
             )
 
             # Wait for process to finish (with timeout)
@@ -470,6 +575,18 @@ class GlobalDispatcher:
                 return
 
             if exit_code != 0:
+                # Pool rotation: if rate-limited, switch account and resume
+                rotation = await self._check_rate_limit_and_rotate(instance_id, task.id, exit_code)
+                if rotation:
+                    await self._run_pool_retry(
+                        instance_id, task, cwd, git_env,
+                        rotation["config_dir"], rotation["session_id"],
+                        rotation["excluded"],
+                        thinking_budget=thinking_budget,
+                        effort_level=effort_level,
+                    )
+                    return
+
                 async with self.db_factory() as db:
                     queue = TaskQueue(db)
                     t = await queue.get(task.id)
@@ -546,6 +663,156 @@ class GlobalDispatcher:
                     logger.warning(f"Safety reset: task {task_id} was still '{t.status}' after lifecycle ended")
         except Exception:
             logger.exception(f"Failed to safety-reset instance {instance_id} / task {task_id}")
+
+    async def _run_pool_retry(
+        self,
+        instance_id: int,
+        task: Task,
+        cwd: str,
+        git_env: dict | None,
+        config_dir: str,
+        session_id: str | None,
+        excluded: set[str],
+        *,
+        thinking_budget: int | None = None,
+        effort_level: str | None = None,
+        max_rotations: int = 5,
+        _rotation_count: int = 1,
+    ):
+        """Resume a task on a different pool account after rate limit.
+
+        If the new account also hits a rate limit, recurse with the accumulated
+        exclusion set until max_rotations is reached or accounts are exhausted.
+        """
+        logger.info(
+            "Pool retry #%d for task %d: switching to %s (session=%s)",
+            _rotation_count, task.id, config_dir, session_id,
+        )
+
+        if session_id:
+            # Resume the same session on the new account
+            await self.instance_manager.launch(
+                instance_id=instance_id,
+                prompt="请继续之前的工作。",
+                task_id=task.id,
+                cwd=cwd,
+                model=task.model,
+                resume_session_id=session_id,
+                git_env=git_env or {},
+                thinking_budget=thinking_budget,
+                effort_level=effort_level,
+                config_dir=config_dir,
+            )
+        else:
+            # No session to resume — re-launch from scratch
+            metadata = task.metadata_ or {}
+            image_paths = metadata.get("image_paths") or []
+            secret_ids = metadata.get("secret_ids") or []
+            secrets_block = await _build_secrets_block(self.db_factory, secret_ids)
+            parts = ["请阅读项目根目录的 CLAUDE.md 了解项目规范和任务完成后的 git 流程。"]
+            if secrets_block:
+                parts.append(secrets_block)
+            if image_paths:
+                image_list = "\n".join(f"- {p}" for p in image_paths)
+                parts.append(f"用户提供了以下参考图片，请先用 Read 工具查看：\n{image_list}")
+            parts.append(f"任务:\n{task.description}")
+            full_prompt = "\n\n".join(parts)
+
+            await self.instance_manager.launch(
+                instance_id=instance_id,
+                prompt=full_prompt,
+                task_id=task.id,
+                cwd=cwd,
+                model=task.model,
+                git_env=git_env or {},
+                thinking_budget=thinking_budget,
+                effort_level=effort_level,
+                config_dir=config_dir,
+            )
+
+        # Wait for process
+        process = self.instance_manager.processes.get(instance_id)
+        if process:
+            try:
+                await asyncio.wait_for(process.wait(), timeout=settings.task_timeout_seconds)
+            except asyncio.TimeoutError:
+                process.kill()
+                await process.wait()
+
+        consumer = self.instance_manager._tasks.get(instance_id)
+        if consumer:
+            try:
+                await asyncio.wait_for(consumer, timeout=30)
+            except asyncio.TimeoutError:
+                pass
+
+        exit_code = process.returncode if process else -1
+
+        if exit_code in (0, -2, 130):
+            # Success or user interrupt
+            if exit_code == 0:
+                async with self.db_factory() as db:
+                    queue = TaskQueue(db)
+                    await queue.mark_completed(task.id)
+                    await db.execute(
+                        update(Instance)
+                        .where(Instance.id == instance_id)
+                        .values(total_tasks_completed=Instance.total_tasks_completed + 1)
+                    )
+                    await db.commit()
+                await self.broadcaster.broadcast("tasks", {
+                    "event": "status_change",
+                    "task_id": task.id,
+                    "new_status": "completed",
+                    "instance_id": instance_id,
+                })
+                logger.info("Task %d completed after %d pool rotation(s)", task.id, _rotation_count)
+            else:
+                async with self.db_factory() as db:
+                    await db.execute(
+                        update(Task).where(Task.id == task.id).values(status="completed")
+                    )
+                    await db.commit()
+                await self.broadcaster.broadcast("tasks", {
+                    "event": "status_change",
+                    "task_id": task.id,
+                    "new_status": "completed",
+                    "instance_id": instance_id,
+                })
+            return
+
+        # Failed again — try another rotation if budget remains
+        if _rotation_count < max_rotations:
+            rotation = await self._check_rate_limit_and_rotate(instance_id, task.id, exit_code)
+            if rotation:
+                merged_excluded = excluded | rotation["excluded"]
+                await self._run_pool_retry(
+                    instance_id, task, cwd, git_env,
+                    rotation["config_dir"], rotation["session_id"],
+                    merged_excluded,
+                    thinking_budget=thinking_budget,
+                    effort_level=effort_level,
+                    max_rotations=max_rotations,
+                    _rotation_count=_rotation_count + 1,
+                )
+                return
+
+        # Non-rotatable failure or exhausted rotations — normal retry/fail
+        async with self.db_factory() as db:
+            queue = TaskQueue(db)
+            t = await queue.get(task.id)
+            if t and t.retry_count < t.max_retries:
+                await queue.retry(task.id)
+                status = "pending"
+            else:
+                await queue.mark_failed(task.id, f"Exit code: {exit_code} after {_rotation_count} pool rotation(s)")
+                status = "failed"
+        await self.broadcaster.broadcast("tasks", {
+            "event": "status_change",
+            "task_id": task.id,
+            "new_status": status,
+            "instance_id": instance_id,
+        })
 
     async def _run_loop_lifecycle(self, instance_id: int, task: Task, cwd: str, git_env: dict | None = None, effort_level: str | None = None):
         """Loop: repeatedly invoke Claude Code until it signals done or abort.
