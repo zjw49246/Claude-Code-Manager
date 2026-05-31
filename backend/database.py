@@ -4,7 +4,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from sqlalchemy import inspect
+from sqlalchemy import event, inspect
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import DeclarativeBase
 
@@ -48,11 +48,24 @@ if _is_sqlite(_db_url):
 
 # Build engine kwargs based on database type
 _engine_kwargs: dict = {"echo": False}
-if not _is_sqlite(_db_url):
+if _is_sqlite(_db_url):
+    # Wait for short SQLite write locks instead of surfacing intermittent HTTP 500s.
+    _engine_kwargs.update(connect_args={"timeout": 30})
+elif not _is_sqlite(_db_url):
     # Connection pool settings for external databases
     _engine_kwargs.update(pool_size=5, max_overflow=10, pool_pre_ping=True)
 
 engine = create_async_engine(_db_url, **_engine_kwargs)
+
+if _is_sqlite(_db_url):
+    @event.listens_for(engine.sync_engine, "connect")
+    def _set_sqlite_pragmas(dbapi_connection, _connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA busy_timeout=30000")
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+        cursor.close()
+
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
