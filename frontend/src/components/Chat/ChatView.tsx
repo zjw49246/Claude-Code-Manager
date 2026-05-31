@@ -118,6 +118,14 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
   const [showScrollBottom, setShowScrollBottom] = useState(false);
   const [starred, setStarred] = useState(task.starred);
 
+  useEffect(() => {
+    const prev = document.title;
+    const label = task.title || task.description || '';
+    const preview = label.length > 30 ? label.slice(0, 30) + '…' : label;
+    document.title = preview ? `#${task.id} ${preview}` : `#${task.id} - CCM`;
+    return () => { document.title = prev; };
+  }, [task.id, task.title, task.description]);
+
   // Handle real-time WebSocket messages via callback (not state) to avoid
   // losing messages when React batches rapid state updates.
   const handleWsMessage = useCallback((raw: Record<string, unknown>) => {
