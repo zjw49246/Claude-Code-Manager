@@ -106,4 +106,6 @@ export function useFileDrop({
       }
     };
   }, [targetRef, disabled, addFiles]);
+
+  return { addFiles };
 }

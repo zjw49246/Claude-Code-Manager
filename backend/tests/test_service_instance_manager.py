@@ -347,7 +347,7 @@ async def test_stop_terminates(db_factory):
 
     async with db_factory() as db:
         inst = await db.get(Instance, inst_id)
-        assert inst.status == "stopped"
+        assert inst.status == "idle"
 
 
 @pytest.mark.asyncio

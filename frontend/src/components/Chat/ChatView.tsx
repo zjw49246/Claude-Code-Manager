@@ -257,13 +257,34 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
   const IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.gif', '.webp'];
   const isImageFile = (f: File) => IMAGE_EXTS.some((ext) => f.name.toLowerCase().endsWith(ext));
 
-  useFileDrop({
+  const { addFiles } = useFileDrop({
     pendingFiles,
     setPendingFiles,
     setFilePreviews,
     disabled: sending || !task.session_id,
     onError: (msg) => setDropError(msg),
   });
+
+  useEffect(() => {
+    if (sending || !task.session_id) return;
+    const handlePaste = (e: ClipboardEvent) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      const files: File[] = [];
+      for (const item of items) {
+        if (item.kind === 'file') {
+          const f = item.getAsFile();
+          if (f) files.push(f);
+        }
+      }
+      if (files.length > 0) {
+        e.preventDefault();
+        addFiles(files);
+      }
+    };
+    document.addEventListener('paste', handlePaste);
+    return () => document.removeEventListener('paste', handlePaste);
+  }, [sending, task.session_id, addFiles]);
 
   useEffect(() => {
     if (dropError) {

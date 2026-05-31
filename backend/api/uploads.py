@@ -19,8 +19,8 @@ _CLEANUP_MAX_AGE_DAYS = 15
 _CLEANUP_INTERVAL_HOURS = 24
 _BLOCKED_EXTENSIONS = {".exe", ".zip"}
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
-_MAX_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
-_MAX_FILES = 5
+_MAX_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB
+_MAX_FILES = 10
 
 
 def _get_upload_dir() -> Path:
