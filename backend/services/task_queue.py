@@ -155,6 +155,7 @@ class TaskQueue:
         if task:
             task.status = "in_progress"
             task.started_at = datetime.utcnow()
+            task.error_message = None
             await self.db.commit()
             await self.db.refresh(task)
         return task
@@ -173,7 +174,7 @@ class TaskQueue:
         await self.db.execute(
             update(Task)
             .where(Task.id == task_id)
-            .values(status="completed", completed_at=datetime.utcnow())
+            .values(status="completed", completed_at=datetime.utcnow(), error_message=None)
         )
         await self.db.commit()
 

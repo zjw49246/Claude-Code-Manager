@@ -202,6 +202,7 @@ class GlobalDispatcher:
             for t in result.scalars().all():
                 logger.warning(f"Resetting stuck task {t.id} from '{t.status}' to 'completed'")
                 t.status = "completed"
+                t.error_message = None
             await db.commit()
 
     async def stop(self):
@@ -293,7 +294,7 @@ class GlobalDispatcher:
                 # Find idle instances
                 async with self.db_factory() as db:
                     result = await db.execute(
-                        select(Instance).where(Instance.status.in_(["idle", "stopped"]))
+                        select(Instance).where(Instance.status == "idle")
                     )
                     idle_instances = list(result.scalars().all())
 
@@ -563,7 +564,7 @@ class GlobalDispatcher:
                 logger.info(f"Task {task.id} was interrupted by user (exit_code={exit_code})")
                 async with self.db_factory() as db:
                     await db.execute(
-                        update(Task).where(Task.id == task.id).values(status="completed")
+                        update(Task).where(Task.id == task.id).values(status="completed", error_message=None)
                     )
                     await db.commit()
                 await self.broadcaster.broadcast("tasks", {
@@ -659,6 +660,7 @@ class GlobalDispatcher:
                 t = await db.get(Task, task_id)
                 if t and t.status in ("executing", "in_progress"):
                     t.status = "completed"
+                    t.error_message = None
                     await db.commit()
                     logger.warning(f"Safety reset: task {task_id} was still '{t.status}' after lifecycle ended")
         except Exception:
@@ -770,7 +772,7 @@ class GlobalDispatcher:
             else:
                 async with self.db_factory() as db:
                     await db.execute(
-                        update(Task).where(Task.id == task.id).values(status="completed")
+                        update(Task).where(Task.id == task.id).values(status="completed", error_message=None)
                     )
                     await db.commit()
                 await self.broadcaster.broadcast("tasks", {

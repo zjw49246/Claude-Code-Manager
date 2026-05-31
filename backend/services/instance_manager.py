@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import re
 import signal
 from datetime import datetime
 
@@ -26,6 +27,7 @@ class InstanceManager:
         self.parser = StreamParser()
         self.processes: dict[int, asyncio.subprocess.Process] = {}
         self._tasks: dict[int, asyncio.Task] = {}  # instance_id -> consumer task
+        self._stopping: set[int] = set()  # instance_ids being intentionally stopped
         self._config_dirs: dict[int, str] = {}  # instance_id -> CLAUDE_CONFIG_DIR used
         self._last_stderr: dict[int, str] = {}  # instance_id -> stderr from last run
 
@@ -153,7 +155,15 @@ class InstanceManager:
             # Read stderr
             stderr_data = await process.stderr.read()
             stderr_text = stderr_data.decode("utf-8", errors="replace").strip() if stderr_data else ""
+            if stderr_text:
+                lines = stderr_text.splitlines()
+                lines = [l for l in lines if not re.sub(r'\x1b\[[0-9;]*m', '', l).strip().startswith("[auto]")]
+                stderr_text = "\n".join(lines).strip()
             self._last_stderr[instance_id] = stderr_text
+
+            # If stop() was called, it handles instance + task cleanup — skip here
+            if instance_id in self._stopping:
+                return
 
             # Update instance status
             # SIGINT (exit code -2 or 130) = user interrupt, treat as idle not error
@@ -174,7 +184,7 @@ class InstanceManager:
                         result = await db.execute(
                             update(Task)
                             .where(Task.id == task_id, Task.status == "executing")
-                            .values(status="completed", completed_at=datetime.utcnow())
+                            .values(status="completed", completed_at=datetime.utcnow(), error_message=None)
                         )
                         if result.rowcount:
                             await self.broadcaster.broadcast("tasks", {
@@ -308,6 +318,7 @@ class InstanceManager:
         if not process or process.returncode is not None:
             return False
 
+        self._stopping.add(instance_id)
         import signal
         process.send_signal(signal.SIGINT)
         try:
@@ -326,14 +337,23 @@ class InstanceManager:
             task.cancel()
 
         async with self.db_factory() as db:
+            inst = await db.get(Instance, instance_id)
+            task_id = inst.current_task_id if inst else None
             await db.execute(
                 update(Instance)
                 .where(Instance.id == instance_id)
-                .values(status="stopped", pid=None, current_task_id=None)
+                .values(status="idle", pid=None, current_task_id=None)
             )
+            if task_id:
+                await db.execute(
+                    update(Task)
+                    .where(Task.id == task_id, Task.status == "executing")
+                    .values(status="completed", error_message=None)
+                )
             await db.commit()
 
         self.processes.pop(instance_id, None)
+        self._stopping.discard(instance_id)
         return True
 
     def is_running(self, instance_id: int) -> bool:
