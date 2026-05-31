@@ -82,7 +82,11 @@ class ClaudePool:
     """In-process account pool with cooldown tracking."""
 
     def __init__(self, config_path: str | Path | None = None, cooldown_seconds: int = DEFAULT_COOLDOWN_SECONDS):
-        self._config_path = Path(config_path) if config_path else DEFAULT_CONFIG_PATH
+        if config_path:
+            expanded = os.path.expandvars(os.path.expanduser(str(config_path)))
+            self._config_path = Path(expanded)
+        else:
+            self._config_path = DEFAULT_CONFIG_PATH
         self._cooldown_seconds = cooldown_seconds
         self._accounts: list[PoolAccount] = []
         # account_id -> timestamp when cooldown expires
