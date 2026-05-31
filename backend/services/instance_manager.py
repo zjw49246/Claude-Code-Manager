@@ -26,8 +26,10 @@ class InstanceManager:
         self.parser = StreamParser()
         self.processes: dict[int, asyncio.subprocess.Process] = {}
         self._tasks: dict[int, asyncio.Task] = {}  # instance_id -> consumer task
+        self._config_dirs: dict[int, str] = {}  # instance_id -> CLAUDE_CONFIG_DIR used
+        self._last_stderr: dict[int, str] = {}  # instance_id -> stderr from last run
 
-    async def launch(self, instance_id: int, prompt: str, task_id: int | None = None, cwd: str | None = None, model: str | None = None, resume_session_id: str | None = None, loop_iteration: int | None = None, git_env: dict | None = None, thinking_budget: int | None = None, effort_level: str | None = None, chat_initiated: bool = False) -> int:
+    async def launch(self, instance_id: int, prompt: str, task_id: int | None = None, cwd: str | None = None, model: str | None = None, resume_session_id: str | None = None, loop_iteration: int | None = None, git_env: dict | None = None, thinking_budget: int | None = None, effort_level: str | None = None, chat_initiated: bool = False, config_dir: str | None = None) -> int:
         """Launch a Claude Code subprocess for the given instance.
 
         If resume_session_id is provided, uses --resume to continue the conversation.
@@ -55,6 +57,11 @@ class InstanceManager:
         # These take precedence over any global ~/.gitconfig or system credential helper.
         if git_env:
             env.update(git_env)
+
+        # Pool: inject CLAUDE_CONFIG_DIR so this subprocess uses a specific account
+        if config_dir:
+            env["CLAUDE_CONFIG_DIR"] = config_dir
+            self._config_dirs[instance_id] = config_dir
 
         # Forward Extended Thinking budget. Claude Code reads MAX_THINKING_TOKENS
         # to decide the per-turn thinking budget. Skip when 0 / negative / None.
@@ -146,6 +153,7 @@ class InstanceManager:
             # Read stderr
             stderr_data = await process.stderr.read()
             stderr_text = stderr_data.decode("utf-8", errors="replace").strip() if stderr_data else ""
+            self._last_stderr[instance_id] = stderr_text
 
             # Update instance status
             # SIGINT (exit code -2 or 130) = user interrupt, treat as idle not error
@@ -331,3 +339,22 @@ class InstanceManager:
     def is_running(self, instance_id: int) -> bool:
         process = self.processes.get(instance_id)
         return process is not None and process.returncode is None
+
+    def get_last_stderr(self, instance_id: int) -> str:
+        return self._last_stderr.pop(instance_id, "")
+
+    def get_config_dir(self, instance_id: int) -> str | None:
+        return self._config_dirs.get(instance_id)
+
+    async def get_recent_log_contents(self, task_id: int, limit: int = 10) -> list[str]:
+        """Fetch recent log entry contents for a task (for rate-limit detection)."""
+        from backend.models.log_entry import LogEntry
+        from sqlalchemy import select as sa_select
+        async with self.db_factory() as db:
+            result = await db.execute(
+                sa_select(LogEntry.content)
+                .where(LogEntry.task_id == task_id)
+                .order_by(LogEntry.id.desc())
+                .limit(limit)
+            )
+            return [row[0] for row in result.all() if row[0]]

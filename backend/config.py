@@ -22,6 +22,11 @@ class Settings(BaseSettings):
     goal_evaluation_timeout: int = 120
     git_ssh_key_path: str = ""  # Instance-level SSH key, fallback when project has none
 
+    # --- Claude account pool (auto-rotation on rate limit) ---
+    pool_enabled: bool = False
+    pool_config_path: str = "~/.claude-pool/accounts.json"
+    pool_cooldown_seconds: int = 300  # per-account cooldown after rate limit
+
     # --- Backup service (auto-backup) ---
     backup_enabled: bool = False        # Set true to enable periodic DB backups
     backup_type: str = "local"          # local | s3 | oss
