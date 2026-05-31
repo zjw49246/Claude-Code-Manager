@@ -330,6 +330,14 @@ export function LoopChatView({ task, onBack }: LoopChatViewProps) {
   const historyLoadedRef = useRef(false);
   const pendingWsRef = useRef<ChatMessage[]>([]);
 
+  useEffect(() => {
+    const prev = document.title;
+    const label = task.title || task.description || '';
+    const preview = label.length > 30 ? label.slice(0, 30) + '…' : label;
+    document.title = preview ? `#${task.id} ${preview}` : `#${task.id} - CCM`;
+    return () => { document.title = prev; };
+  }, [task.id, task.title, task.description]);
+
   const handleWsMessage = useCallback((raw: Record<string, unknown>) => {
     const msg = raw as { channel?: string; data?: Record<string, unknown> };
     if (msg.channel !== `task:${task.id}` || !msg.data) return;
