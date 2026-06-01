@@ -45,7 +45,7 @@ export function ProjectSelect({
   }, []);
 
   const selected = projects.find((p) => String(p.id) === String(value));
-  const extraSelected = !selected && value ? extraOptions?.find((o) => o.value === String(value)) : undefined;
+  const extraSelected = extraOptions?.find((o) => o.value === String(value));
   const displayValue = selected ? selected.name : extraSelected ? extraSelected.label : placeholder;
 
   return (
