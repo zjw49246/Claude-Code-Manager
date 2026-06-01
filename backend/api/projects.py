@@ -426,7 +426,7 @@ async def _init_local_repo(project_id: int, local_path: str, project_name: str, 
     """Initialize a local git repo (no remote)."""
     async with async_session() as db:
         await db.execute(
-            update(Project).where(Project.id == project_id).values(status="cloning")
+            update(Project).where(Project.id == project_id).values(status="initializing")
         )
         await db.commit()
 

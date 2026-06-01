@@ -781,6 +781,7 @@ export function ProjectsPage() {
     ready: 'bg-green-500',
     pending: 'bg-yellow-500',
     cloning: 'bg-blue-500 animate-pulse',
+    initializing: 'bg-blue-500 animate-pulse',
     error: 'bg-red-500',
   };
 
