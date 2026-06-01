@@ -27,6 +27,7 @@ _RATE_LIMIT_RE = re.compile(
     r"|usage limit reached"
     r"|resets \d{1,2}[ap]m \(America/"
     r"|organization has been disabled"
+    r"|organization has disabled"
     r"|account has been disabled"
     r"|当前限速",
     re.IGNORECASE,
