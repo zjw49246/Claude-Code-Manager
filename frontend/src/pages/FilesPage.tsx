@@ -353,39 +353,33 @@ export function FilesPage() {
     saveProfiles(next);
   };
 
-  const triggerBlobDownload = (blob: Blob, filename: string) => {
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
-  };
-
   const handleDownload = async () => {
     if (!selectedFile) return;
     const filename = selectedFile.split('/').pop() || 'download';
     if (mode === 'local') {
-      try {
-        const url = api.downloadFileUrl(selectedFile);
-        const token = getToken();
-        const headers: Record<string, string> = {};
-        if (token) headers['Authorization'] = `Bearer ${token}`;
-        const res = await fetch(url, { headers });
-        if (!res.ok) { setFileError('Download failed'); return; }
-        const blob = await res.blob();
-        triggerBlobDownload(blob, filename);
-      } catch {
-        setFileError('Download failed');
-      }
+      // Use direct URL with token query param to stay within user gesture context
+      let url = api.downloadFileUrl(selectedFile);
+      const token = getToken();
+      if (token) url += `&token=${encodeURIComponent(token)}`;
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
     } else if (activeProfile) {
       try {
         const res = await api.sshDownloadFile(profileToCreds(activeProfile), selectedFile);
         if (!res.ok) { setFileError('Download failed'); return; }
         const blob = await res.blob();
-        triggerBlobDownload(blob, filename);
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
       } catch {
         setFileError('Download failed');
       }
