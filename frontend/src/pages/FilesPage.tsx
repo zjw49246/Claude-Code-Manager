@@ -357,16 +357,14 @@ export function FilesPage() {
     if (!selectedFile) return;
     const filename = selectedFile.split('/').pop() || 'download';
     if (mode === 'local') {
-      // Use direct URL with token query param to stay within user gesture context
       let url = api.downloadFileUrl(selectedFile);
       const token = getToken();
       if (token) url += `&token=${encodeURIComponent(token)}`;
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
+      const iframe = document.createElement('iframe');
+      iframe.style.display = 'none';
+      iframe.src = url;
+      document.body.appendChild(iframe);
+      setTimeout(() => document.body.removeChild(iframe), 10000);
     } else if (activeProfile) {
       try {
         const res = await api.sshDownloadFile(profileToCreds(activeProfile), selectedFile);
