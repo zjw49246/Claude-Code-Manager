@@ -353,33 +353,39 @@ export function FilesPage() {
     saveProfiles(next);
   };
 
+  const triggerBlobDownload = (blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
   const handleDownload = async () => {
     if (!selectedFile) return;
+    const filename = selectedFile.split('/').pop() || 'download';
     if (mode === 'local') {
-      const url = api.downloadFileUrl(selectedFile);
-      const a = document.createElement('a');
-      a.href = url;
-      const token = getToken();
-      if (token) {
-        const res = await fetch(url, { headers: { 'Authorization': `Bearer ${token}` } });
+      try {
+        const url = api.downloadFileUrl(selectedFile);
+        const token = getToken();
+        const headers: Record<string, string> = {};
+        if (token) headers['Authorization'] = `Bearer ${token}`;
+        const res = await fetch(url, { headers });
         if (!res.ok) { setFileError('Download failed'); return; }
         const blob = await res.blob();
-        a.href = URL.createObjectURL(blob);
+        triggerBlobDownload(blob, filename);
+      } catch {
+        setFileError('Download failed');
       }
-      a.download = selectedFile.split('/').pop() || 'download';
-      a.click();
-      URL.revokeObjectURL(a.href);
     } else if (activeProfile) {
       try {
         const res = await api.sshDownloadFile(profileToCreds(activeProfile), selectedFile);
         if (!res.ok) { setFileError('Download failed'); return; }
         const blob = await res.blob();
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = selectedFile.split('/').pop() || 'download';
-        a.click();
-        URL.revokeObjectURL(url);
+        triggerBlobDownload(blob, filename);
       } catch {
         setFileError('Download failed');
       }
