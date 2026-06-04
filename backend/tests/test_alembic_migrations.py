@@ -24,6 +24,7 @@ import backend.models.log_entry  # noqa: F401
 import backend.models.worktree  # noqa: F401
 import backend.models.global_settings  # noqa: F401
 import backend.models.secret  # noqa: F401
+import backend.models.quick_phrase  # noqa: F401
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -272,7 +273,7 @@ class TestFreshMigration:
 
         engine = create_engine(f"sqlite:///{db_path}")
         tables = _get_all_tables(engine)
-        expected_tables = {"instances", "projects", "tasks", "log_entries", "worktrees", "global_settings", "secrets", "tags"}
+        expected_tables = {"instances", "projects", "tasks", "log_entries", "worktrees", "global_settings", "secrets", "tags", "discussions", "discussion_messages", "discussion_agents", "discussion_events", "quick_phrases"}
         assert tables == expected_tables, f"Missing tables: {expected_tables - tables}"
 
         # Verify all columns from latest migration exist

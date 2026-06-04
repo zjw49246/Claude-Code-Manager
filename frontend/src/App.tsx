@@ -8,6 +8,7 @@ import { ServerConfigPage } from './pages/ServerConfigPage';
 import { ProjectsPage } from './pages/ProjectsPage';
 import { SecretsPage } from './pages/SecretsPage';
 import { FilesPage } from './pages/FilesPage';
+import { DiscussionsPage } from './pages/DiscussionsPage';
 import { getToken } from './api/client';
 import { isCapacitor, getServerUrl, getApiBase } from './config/server';
 
@@ -108,6 +109,7 @@ function App() {
           {page === 'projects' && <ProjectsPage />}
           {page === 'secrets' && <SecretsPage />}
           {page === 'files' && <FilesPage />}
+          {page === 'discussions' && <DiscussionsPage />}
           {page === 'server' && (
             <ServerConfigPage onConfigured={() => window.location.reload()} />
           )}
