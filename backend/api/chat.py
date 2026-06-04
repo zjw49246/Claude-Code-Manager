@@ -199,8 +199,8 @@ async def get_chat_history(
 
     messages = []
     for row in rows:
-        # Skip heartbeat events
-        if row.event_type == "system_event" and row.content == "task_progress":
+        # Skip noisy system events (heartbeats, telemetry subtypes)
+        if row.event_type == "system_event" and row.content in ("task_progress", "thinking_tokens", "token_usage", "api_request", "api_response"):
             continue
         tool_input = row.tool_input
         tool_output = row.tool_output
