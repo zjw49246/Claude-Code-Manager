@@ -669,6 +669,13 @@ export function ProjectsPage() {
   const [draggingId, setDraggingId] = useState<number | null>(null);
   const [dragOverId, setDragOverId] = useState<number | null>(null);
 
+  // Touch drag state
+  const touchDragId = useRef<number | null>(null);
+  const touchOverId = useRef<number | null>(null);
+  const touchStartY = useRef<number>(0);
+  const touchMoved = useRef(false);
+  const cardRefs = useRef<Map<number, HTMLDivElement>>(new Map());
+
   const refresh = useCallback(async () => {
     try {
       const [list, tags, tagList] = await Promise.all([api.listProjects(), api.listProjectTags(), api.listTags()]);
@@ -777,6 +784,74 @@ export function ProjectsPage() {
     setDragOverId(null);
   };
 
+  // ── Touch drag handlers (mobile) ──
+  const performReorder = useCallback(async (sourceId: number, targetId: number) => {
+    if (sourceId === targetId) return;
+    const reordered = [...projects];
+    const fromIdx = reordered.findIndex((p) => p.id === sourceId);
+    const toIdx = reordered.findIndex((p) => p.id === targetId);
+    if (fromIdx === -1 || toIdx === -1) return;
+    const [moved] = reordered.splice(fromIdx, 1);
+    reordered.splice(toIdx, 0, moved);
+    const updated = reordered.map((p, i) => ({ ...p, sort_order: i }));
+    setProjects(updated);
+    try {
+      await api.reorderProjects(updated.map((p) => ({ id: p.id, sort_order: p.sort_order })));
+    } catch (e) {
+      setError(String(e));
+      await refresh();
+    }
+  }, [projects, refresh]);
+
+  const handleTouchStart = (id: number) => (e: React.TouchEvent) => {
+    touchDragId.current = id;
+    touchStartY.current = e.touches[0].clientY;
+    touchMoved.current = false;
+  };
+
+  const handleTouchMove = useCallback((e: React.TouchEvent) => {
+    if (touchDragId.current === null) return;
+    const dy = Math.abs(e.touches[0].clientY - touchStartY.current);
+    if (dy > 8) {
+      touchMoved.current = true;
+      e.preventDefault();
+    }
+    if (!touchMoved.current) return;
+
+    setDraggingId(touchDragId.current);
+
+    const touch = e.touches[0];
+    let foundId: number | null = null;
+    for (const [pid, el] of cardRefs.current) {
+      const rect = el.getBoundingClientRect();
+      if (touch.clientY >= rect.top && touch.clientY <= rect.bottom) {
+        foundId = pid;
+        break;
+      }
+    }
+    const overId = foundId !== touchDragId.current ? foundId : null;
+    touchOverId.current = overId;
+    setDragOverId(overId);
+  }, []);
+
+  const handleTouchEnd = useCallback(() => {
+    const sourceId = touchDragId.current;
+    const targetId = touchOverId.current;
+    touchDragId.current = null;
+    touchOverId.current = null;
+    setDraggingId(null);
+    setDragOverId(null);
+    if (!touchMoved.current) return;
+    if (sourceId !== null && targetId !== null) {
+      performReorder(sourceId, targetId);
+    }
+  }, [performReorder]);
+
+  const setCardRef = useCallback((id: number) => (el: HTMLDivElement | null) => {
+    if (el) cardRefs.current.set(id, el);
+    else cardRefs.current.delete(id);
+  }, []);
+
   const statusColor: Record<string, string> = {
     ready: 'bg-green-500',
     pending: 'bg-yellow-500',
@@ -867,6 +942,7 @@ export function ProjectsPage() {
           {filteredProjects.map((p) => (
             <div
               key={p.id}
+              ref={setCardRef(p.id)}
               draggable
               onDragStart={handleDragStart(p.id)}
               onDragOver={handleDragOver(p.id)}
@@ -883,8 +959,11 @@ export function ProjectsPage() {
               <div className="flex items-start gap-3">
                 {/* Drag handle */}
                 <div
-                  className="mt-1 text-gray-600 hover:text-gray-400 cursor-grab active:cursor-grabbing select-none"
+                  className="mt-1 text-gray-600 hover:text-gray-400 cursor-grab active:cursor-grabbing select-none touch-none"
                   title="Drag to reorder"
+                  onTouchStart={handleTouchStart(p.id)}
+                  onTouchMove={handleTouchMove}
+                  onTouchEnd={handleTouchEnd}
                 >
                   <GripVertical size={18} />
                 </div>
