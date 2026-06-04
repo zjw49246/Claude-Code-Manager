@@ -194,6 +194,71 @@ export interface UploadResult {
   is_image: boolean;
 }
 
+export interface DiscussionMessage {
+  id: number;
+  discussion_id: number;
+  role: string;
+  agent_role_name: string | null;
+  content: string;
+  created_at: string;
+}
+
+export interface DiscussionAgentInfo {
+  id: number;
+  discussion_id: number;
+  role_name: string;
+  session_id: string | null;
+  status: string;
+  created_at: string;
+}
+
+export interface QuickPhrase {
+  id: number;
+  label: string;
+  content: string;
+  sort_order: number;
+}
+
+export interface DiscussionEventItem {
+  id: number;
+  discussion_id: number;
+  agent_id: number;
+  event_type: string;
+  role: string | null;
+  content: string | null;
+  tool_name: string | null;
+  tool_input: string | null;
+  tool_output: string | null;
+  is_error: boolean;
+  timestamp: string;
+}
+
+export interface DiscussionListItem {
+  id: number;
+  title: string;
+  project_id: number | null;
+  max_agents: number;
+  facilitator_model: string;
+  agent_model: string;
+  status: string;
+  created_at: string;
+  agent_count: number;
+  message_count: number;
+}
+
+export interface DiscussionDetail {
+  id: number;
+  title: string;
+  project_id: number | null;
+  max_agents: number;
+  facilitator_model: string;
+  agent_model: string;
+  status: string;
+  created_at: string;
+  messages: DiscussionMessage[];
+  agents: DiscussionAgentInfo[];
+}
+
 export const api = {
   // Projects
   listProjects: () => request<Project[]>('/api/projects'),
@@ -379,6 +444,43 @@ export const api = {
       body: JSON.stringify({ ...creds, path }),
     });
   },
+
+  // Discussions
+  listDiscussions: () => request<DiscussionListItem[]>('/api/discussions'),
+  createDiscussion: (data: { title: string; project_id?: number; max_agents?: number; facilitator_model?: string; agent_model?: string }) =>
+    request<DiscussionListItem>('/api/discussions', { method: 'POST', body: JSON.stringify(data) }),
+  getDiscussion: (id: number) => request<DiscussionDetail>(`/api/discussions/${id}`),
+  sendDiscussionMessage: (id: number, message: string) =>
+    request<{ ok: boolean; agents: { id: number; role_name: string; status: string }[] }>(`/api/discussions/${id}/messages`, {
+      method: 'POST',
+      body: JSON.stringify({ message }),
+    }),
+  sendAgentChat: (discussionId: number, agentId: number, message: string) =>
+    request<{ ok: boolean }>(`/api/discussions/${discussionId}/agents/${agentId}/chat`, {
+      method: 'POST',
+      body: JSON.stringify({ message }),
+    }),
+  triggerAgent: (discussionId: number, agentId: number) =>
+    request<{ ok: boolean }>(`/api/discussions/${discussionId}/agents/${agentId}/trigger`, { method: 'POST' }),
+  stopAgent: (discussionId: number, agentId: number) =>
+    request<{ ok: boolean }>(`/api/discussions/${discussionId}/agents/${agentId}/stop`, { method: 'POST' }),
+  getAgentEvents: (discussionId: number, agentId: number) =>
+    request<DiscussionEventItem[]>(`/api/discussions/${discussionId}/agents/${agentId}/events`),
+  addDiscussionAgent: (discussionId: number) =>
+    request<{ ok: boolean; agent: { id: number; role_name: string; status: string } }>(`/api/discussions/${discussionId}/add-agent`, { method: 'POST' }),
+  resumeAllAgents: (discussionId: number) =>
+    request<{ ok: boolean; resumed: number }>(`/api/discussions/${discussionId}/resume-all`, { method: 'POST' }),
+  deleteDiscussion: (id: number) =>
+    request<{ ok: boolean }>(`/api/discussions/${id}`, { method: 'DELETE' }),
+
+  // Quick Phrases
+  listQuickPhrases: () => request<QuickPhrase[]>('/api/quick-phrases'),
+  createQuickPhrase: (data: { label: string; content: string; sort_order?: number }) =>
+    request<QuickPhrase>('/api/quick-phrases', { method: 'POST', body: JSON.stringify(data) }),
+  updateQuickPhrase: (id: number, data: { label?: string; content?: string; sort_order?: number }) =>
+    request<QuickPhrase>(`/api/quick-phrases/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteQuickPhrase: (id: number) =>
+    request<{ ok: boolean }>(`/api/quick-phrases/${id}`, { method: 'DELETE' }),
 
   // System
   health: () => request<{ status: string }>('/api/system/health'),

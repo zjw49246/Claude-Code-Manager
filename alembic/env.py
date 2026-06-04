@@ -15,7 +15,11 @@ from backend.models.project import Project     # noqa: F401
 from backend.models.task import Task           # noqa: F401
 from backend.models.log_entry import LogEntry  # noqa: F401
 from backend.models.worktree import Worktree   # noqa: F401
-from backend.models.secret import Secret       # noqa: F401
+from backend.models.secret import Secret               # noqa: F401
+from backend.models.tag import Tag                     # noqa: F401
+from backend.models.global_settings import GlobalSettings  # noqa: F401
+from backend.models.discussion import Discussion, DiscussionMessage, DiscussionAgent, DiscussionEvent  # noqa: F401
+from backend.models.quick_phrase import QuickPhrase  # noqa: F401
 from backend.database import Base, _async_url_to_sync, _is_sqlite
 
 target_metadata = Base.metadata

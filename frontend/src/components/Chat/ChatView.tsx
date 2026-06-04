@@ -6,6 +6,7 @@ import type { ChatMessage, FileAttachment, Task, Project, UploadResult } from '.
 import { useWebSocket } from '../../hooks/useWebSocket';
 import { Send, ArrowLeft, Loader2, ChevronDown, ChevronRight, Copy, Check, Paperclip, X, StopCircle, Pencil, ArrowDown, Star } from 'lucide-react';
 import { SecretPicker } from '../Secrets/SecretPicker';
+import { QuickPhraseDropdown } from '../QuickPhrases/QuickPhraseDropdown';
 import { ExpandableText } from '../ExpandableText';
 import { formatMessageTime } from '../../config/timezone';
 import { useFileDrop } from '../../hooks/useFileDrop';
@@ -330,8 +331,8 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
     } catch { /* ignore */ }
   };
 
-  const handleSend = async () => {
-    const text = input.trim();
+  const handleSend = async (overrideText?: string) => {
+    const text = (overrideText ?? input).trim();
     if ((!text && pendingFiles.length === 0) || sending) return;
 
     const snapshotFiles = [...pendingFiles];
@@ -605,6 +606,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
               <Paperclip size={18} />
             </button>
             <SecretPicker selectedIds={selectedSecretIds} onChange={setSelectedSecretIds} disabled={sending || !task.session_id} />
+            <QuickPhraseDropdown onSelect={(text) => handleSend(text)} disabled={sending || !task.session_id} />
             <textarea
               ref={textareaRef}
               value={input}
@@ -623,7 +625,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
               style={{ minHeight: '40px' }}
             />
             <button
-              onClick={handleSend}
+              onClick={() => handleSend()}
               disabled={(!input.trim() && pendingFiles.length === 0) || sending || !task.session_id}
               title="Send (Ctrl+Enter)"
               className="p-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg disabled:opacity-40 disabled:cursor-not-allowed"

@@ -1,6 +1,9 @@
+import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+
+from sqlalchemy import select
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,6 +26,8 @@ from backend.api.secrets import router as secrets_router
 from backend.api.tags import router as tags_router
 from backend.api.files import router as files_router
 from backend.api.pool import router as pool_router
+from backend.api.discussions import router as discussions_router
+from backend.api.quick_phrases import router as quick_phrases_router
 from backend.middleware.auth import TokenAuthMiddleware
 from backend.services.ws_broadcaster import WebSocketBroadcaster
 from backend.services.instance_manager import InstanceManager
@@ -30,6 +35,7 @@ from backend.services.ralph_loop import RalphLoop
 from backend.services.dispatcher import GlobalDispatcher
 
 # Global singletons
+logger = logging.getLogger(__name__)
 broadcaster = WebSocketBroadcaster()
 instance_manager = InstanceManager(db_factory=async_session, broadcaster=broadcaster)
 ralph_loop = RalphLoop(
@@ -64,9 +70,25 @@ async def _sync_tags():
         await db.commit()
 
 
+async def _reset_stale_discussion_agents():
+    from backend.models.discussion import DiscussionAgent
+    async with async_session() as db:
+        result = await db.execute(
+            select(DiscussionAgent).where(DiscussionAgent.status == "running")
+        )
+        stale = result.scalars().all()
+        for agent in stale:
+            agent.status = "idle"
+            agent.pid = None
+        if stale:
+            await db.commit()
+            logger.info("Reset %d stale discussion agents to idle", len(stale))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    await _reset_stale_discussion_agents()
     await _sync_tags()
     if settings.auto_start_dispatcher:
         await dispatcher.start()
@@ -134,6 +156,8 @@ app.include_router(secrets_router)
 app.include_router(tags_router)
 app.include_router(files_router)
 app.include_router(pool_router)
+app.include_router(discussions_router)
+app.include_router(quick_phrases_router)
 
 # Serve frontend static files in production
 FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
