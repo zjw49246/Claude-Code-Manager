@@ -158,8 +158,9 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
     const showTypes = ['message', 'result', 'tool_use', 'tool_result', 'system_init', 'system_event', 'thinking'];
     if (!showTypes.includes(eventType)) return;
 
-    // Skip system heartbeat events (task_progress floods the chat)
-    if (eventType === 'system_event' && msg.data.content === 'task_progress') return;
+    // Skip noisy system events (heartbeats, telemetry subtypes)
+    const skipSystemContent = ['task_progress', 'thinking_tokens', 'token_usage', 'api_request', 'api_response'];
+    if (eventType === 'system_event' && skipSystemContent.includes(msg.data.content as string)) return;
 
     const content = (msg.data.content as string) || null;
     // Skip empty assistant messages (partial streaming chunks with no text)

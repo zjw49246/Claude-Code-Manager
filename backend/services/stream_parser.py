@@ -47,9 +47,14 @@ class StreamParser:
             event["event_type"] = "system_init"
             return [event]
         elif event_type == "system":
+            subtype = data.get("subtype", "system")
+            # Skip noisy telemetry subtypes that flood the chat UI
+            _SKIP_SUBTYPES = {"thinking_tokens", "token_usage", "api_request", "api_response"}
+            if subtype in _SKIP_SUBTYPES:
+                return []
             event = _base_event()
             event["event_type"] = "system_event"
-            event["content"] = data.get("subtype", "system")
+            event["content"] = subtype
             return [event]
         elif event_type == "assistant":
             # Extract token usage from assistant message for context window tracking

@@ -363,7 +363,8 @@ export function LoopChatView({ task, onBack }: LoopChatViewProps) {
 
     const showTypes = ['message', 'result', 'tool_use', 'tool_result', 'system_init', 'system_event', 'thinking'];
     if (!showTypes.includes(eventType)) return;
-    if (eventType === 'system_event' && msg.data.content === 'task_progress') return;
+    const skipSystemContent = ['task_progress', 'thinking_tokens', 'token_usage', 'api_request', 'api_response'];
+    if (eventType === 'system_event' && skipSystemContent.includes(msg.data.content as string)) return;
     const content = (msg.data.content as string) || null;
     if ((eventType === 'message' || eventType === 'result') && !content) return;
 
