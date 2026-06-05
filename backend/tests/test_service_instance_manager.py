@@ -1,5 +1,6 @@
 """Tests for InstanceManager — subprocess lifecycle management."""
 import asyncio
+import json
 import os
 import signal
 import pytest
@@ -8,6 +9,84 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from backend.services.instance_manager import InstanceManager
 from backend.models.instance import Instance
 from backend.models.task import Task
+
+
+def test_parse_codex_agent_message():
+    im = InstanceManager(MagicMock(), MagicMock())
+    event = im._parse_codex_line(json.dumps({
+        "type": "item.completed",
+        "item": {"id": "item_1", "type": "agent_message", "text": "Done"},
+    }))
+
+    assert event["event_type"] == "message"
+    assert event["role"] == "assistant"
+    assert event["content"] == "Done"
+    assert event["is_error"] is False
+
+
+def test_parse_codex_command_started():
+    im = InstanceManager(MagicMock(), MagicMock())
+    event = im._parse_codex_line(json.dumps({
+        "type": "item.started",
+        "item": {
+            "id": "item_2",
+            "type": "command_execution",
+            "command": "npm run build",
+            "status": "in_progress",
+        },
+    }))
+
+    assert event["event_type"] == "tool_use"
+    assert event["role"] == "assistant"
+    assert event["tool_name"] == "Shell"
+    assert json.loads(event["tool_input"]) == {"command": "npm run build"}
+    assert event["content"] is None
+
+
+def test_parse_codex_command_completed():
+    im = InstanceManager(MagicMock(), MagicMock())
+    event = im._parse_codex_line(json.dumps({
+        "type": "item.completed",
+        "item": {
+            "id": "item_3",
+            "type": "command_execution",
+            "command": "git status",
+            "aggregated_output": "nothing to commit\n",
+            "exit_code": 0,
+            "status": "completed",
+        },
+    }))
+
+    assert event["event_type"] == "tool_result"
+    assert event["role"] == "tool"
+    assert event["tool_name"] == "Shell"
+    assert json.loads(event["tool_input"]) == {"command": "git status"}
+    assert event["tool_output"] == "nothing to commit\n"
+    assert event["content"] is None
+    assert event["is_error"] is False
+
+
+def test_parse_codex_turn_completed_usage():
+    im = InstanceManager(MagicMock(), MagicMock())
+    event = im._parse_codex_line(json.dumps({
+        "type": "turn.completed",
+        "usage": {
+            "input_tokens": 100,
+            "cached_input_tokens": 40,
+            "output_tokens": 20,
+            "reasoning_output_tokens": 5,
+        },
+    }))
+
+    assert event["event_type"] == "system_event"
+    assert event["context_usage"] == {
+        "input_tokens": 60,
+        "cache_read_input_tokens": 40,
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 20,
+        "total_input_tokens": 100,
+    }
+    assert event["content"] == "turn.completed"
 
 
 def _make_mock_process(pid=12345, returncode=0):
