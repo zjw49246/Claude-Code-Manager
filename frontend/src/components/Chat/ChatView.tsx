@@ -102,6 +102,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
     const p = projects.find((p) => p.id === task.project_id);
     return p?.name ?? null;
   }, [task.project_id, projects]);
+  const providerLabel = task.provider === 'codex' ? 'Codex' : 'Claude';
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
@@ -536,7 +537,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
         {sending && (
           <div className="flex gap-2 items-center text-gray-500 text-sm px-3">
             <Loader2 size={14} className="animate-spin" />
-            <span>Claude is thinking...</span>
+            <span>{providerLabel} is thinking...</span>
           </div>
         )}
         <div ref={bottomRef} />
