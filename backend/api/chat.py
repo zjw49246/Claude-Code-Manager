@@ -21,10 +21,13 @@ class ChatMessage(BaseModel):
     secret_ids: list[int] | None = None
 
 
-async def _find_idle_instance(db: AsyncSession) -> Instance | None:
+async def _find_idle_instance(db: AsyncSession, provider: str) -> Instance | None:
     """Find an idle instance to run a chat message."""
     result = await db.execute(
-        select(Instance).where(Instance.status == "idle").order_by(Instance.id).limit(1)
+        select(Instance)
+        .where(Instance.status == "idle", Instance.provider == provider)
+        .order_by(Instance.id)
+        .limit(1)
     )
     return result.scalar_one_or_none()
 
@@ -57,7 +60,7 @@ async def send_chat_message(
         raise HTTPException(409, "Task is currently being processed. Use Interrupt to stop it first.")
 
     # Find an idle instance
-    inst = await _find_idle_instance(db)
+    inst = await _find_idle_instance(db, task.provider)
     if not inst:
         raise HTTPException(400, "No idle instance available. Create one or wait.")
 
@@ -145,6 +148,7 @@ async def send_chat_message(
         thinking_budget=inst.thinking_budget,
         effort_level=effort_level,
         chat_initiated=True,
+        provider=task.provider,
     )
 
     task.status = "executing"

@@ -123,6 +123,9 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat }: TaskListPro
                 <span className="text-xs bg-indigo-600/30 text-indigo-300 px-1.5 rounded">P{t.priority}</span>
               )}
               <span className="text-xs text-gray-500 capitalize">{t.status.replace('_', ' ')}</span>
+              <span className="hidden sm:inline text-xs bg-gray-700 text-gray-300 px-1.5 rounded">
+                {t.provider === 'codex' ? 'Codex' : 'Claude'}
+              </span>
               {t.model && (
                 <span className="hidden sm:inline text-xs bg-gray-700 text-gray-300 px-1.5 rounded">{t.model}</span>
               )}

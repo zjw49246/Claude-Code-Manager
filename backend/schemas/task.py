@@ -18,6 +18,7 @@ class TaskCreate(BaseModel):
     goal_condition: str | None = None  # goal only: natural-language completion condition
     goal_max_turns: int = 30  # goal only: max turns before auto-fail
     goal_evaluator_model: str | None = None  # goal only: evaluator model (default haiku)
+    provider: str = "claude"
     model: str | None = None
     effort_level: str | None = None
     tags: list[str] | None = None
@@ -52,6 +53,7 @@ class TaskUpdate(BaseModel):
     goal_condition: str | None = None
     goal_max_turns: int | None = None
     goal_evaluator_model: str | None = None
+    provider: str | None = None
     starred: bool | None = None
     tags: list[str] | None = None
 
@@ -83,6 +85,7 @@ class TaskResponse(BaseModel):
     plan_content: str | None
     plan_approved: bool | None
     session_id: str | None
+    provider: str
     model: str | None
     effort_level: str | None
     starred: bool

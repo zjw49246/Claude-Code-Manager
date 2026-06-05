@@ -1,9 +1,11 @@
 import asyncio
+import json
 import logging
 import os
 import re
 import signal
 from datetime import datetime
+from pathlib import Path
 
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,26 +33,21 @@ class InstanceManager:
         self._config_dirs: dict[int, str] = {}  # instance_id -> CLAUDE_CONFIG_DIR used
         self._last_stderr: dict[int, str] = {}  # instance_id -> stderr from last run
 
-    async def launch(self, instance_id: int, prompt: str, task_id: int | None = None, cwd: str | None = None, model: str | None = None, resume_session_id: str | None = None, loop_iteration: int | None = None, git_env: dict | None = None, thinking_budget: int | None = None, effort_level: str | None = None, chat_initiated: bool = False, config_dir: str | None = None) -> int:
+    async def launch(self, instance_id: int, prompt: str, task_id: int | None = None, cwd: str | None = None, model: str | None = None, resume_session_id: str | None = None, loop_iteration: int | None = None, git_env: dict | None = None, thinking_budget: int | None = None, effort_level: str | None = None, chat_initiated: bool = False, config_dir: str | None = None, provider: str = "claude") -> int:
         """Launch a Claude Code subprocess for the given instance.
 
         If resume_session_id is provided, uses --resume to continue the conversation.
         loop_iteration is recorded on every LogEntry produced by this invocation so
         that loop-task chat history can be grouped by iteration in the frontend.
         """
-        cmd = [
-            settings.claude_binary,
-            "-p", prompt,
-            "--dangerously-skip-permissions",
-            "--output-format", "stream-json",
-            "--verbose",
-        ]
-        if resume_session_id:
-            cmd.extend(["--resume", resume_session_id])
-        if model:
-            cmd.extend(["--model", model])
-        if effort_level:
-            cmd.extend(["--effort", effort_level])
+        provider = (provider or "claude").lower()
+        cmd = self._build_command(
+            provider=provider,
+            prompt=prompt,
+            model=model,
+            resume_session_id=resume_session_id,
+            effort_level=effort_level,
+        )
 
         # Must unset CLAUDE_CODE env var to avoid nested session detection
         env = {k: v for k, v in os.environ.items() if k.upper() not in ("CLAUDECODE", "CLAUDE_CODE")}
@@ -108,13 +105,74 @@ class InstanceManager:
 
         # Start consuming stdout
         consumer = asyncio.create_task(
-            self._consume_output(instance_id, task_id, process, loop_iteration, chat_initiated)
+            self._consume_output(instance_id, task_id, process, loop_iteration, chat_initiated, provider)
         )
         self._tasks[instance_id] = consumer
 
         return process.pid
 
-    async def _consume_output(self, instance_id: int, task_id: int | None, process: asyncio.subprocess.Process, loop_iteration: int | None = None, chat_initiated: bool = False):
+    def _build_command(
+        self,
+        provider: str,
+        prompt: str,
+        model: str | None,
+        resume_session_id: str | None,
+        effort_level: str | None,
+    ) -> list[str]:
+        """Build the subprocess command for a supported coding-agent CLI."""
+        if provider == "claude":
+            cmd = [
+                settings.claude_binary,
+                "-p", prompt,
+                "--dangerously-skip-permissions",
+                "--output-format", "stream-json",
+                "--verbose",
+            ]
+            if resume_session_id:
+                cmd.extend(["--resume", resume_session_id])
+            if model:
+                cmd.extend(["--model", model])
+            if effort_level:
+                cmd.extend(["--effort", effort_level])
+            return cmd
+
+        if provider == "codex":
+            codex_binary = self._resolve_codex_binary()
+            if resume_session_id:
+                cmd = [codex_binary, "exec", "resume"]
+            else:
+                cmd = [codex_binary, "exec"]
+            cmd.extend([
+                "--json",
+                "--skip-git-repo-check",
+                "--dangerously-bypass-approvals-and-sandbox",
+            ])
+            if model and model != "default":
+                cmd.extend(["--model", model])
+            if resume_session_id:
+                cmd.append(resume_session_id)
+            cmd.append(prompt)
+            return cmd
+
+        raise ValueError(f"Unsupported CLI provider: {provider}")
+
+    def _resolve_codex_binary(self) -> str:
+        """Resolve Codex CLI without relying on the WindowsApps execution alias."""
+        configured = settings.codex_binary
+        if configured and configured.lower() != "codex":
+            return configured
+
+        local_appdata = os.environ.get("LOCALAPPDATA")
+        if local_appdata:
+            bin_root = Path(local_appdata) / "OpenAI" / "Codex" / "bin"
+            candidates = list(bin_root.glob("*/codex.exe"))
+            if candidates:
+                newest = max(candidates, key=lambda p: p.stat().st_mtime)
+                return str(newest)
+
+        return configured or "codex"
+
+    async def _consume_output(self, instance_id: int, task_id: int | None, process: asyncio.subprocess.Process, loop_iteration: int | None = None, chat_initiated: bool = False, provider: str = "claude"):
         """Read NDJSON lines from stdout, parse, store, and broadcast.
 
         This method MUST keep running until the process closes stdout (EOF).
@@ -131,7 +189,10 @@ class InstanceManager:
                     if not text:
                         continue
 
-                    events = self.parser.parse_line(text)
+                    if provider == "claude":
+                        events = self.parser.parse_line(text)
+                    else:
+                        events = [self._parse_codex_line(text)]
                     if not events:
                         continue
 
@@ -226,6 +287,48 @@ class InstanceManager:
 
             self.processes.pop(instance_id, None)
             self._tasks.pop(instance_id, None)
+
+    def _parse_codex_line(self, line: str) -> dict:
+        """Best-effort parser for Codex CLI JSONL events."""
+        now = datetime.utcnow().isoformat()
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            return {
+                "event_type": "message",
+                "role": "assistant",
+                "content": line,
+                "tool_name": None,
+                "tool_input": None,
+                "tool_output": None,
+                "raw_json": None,
+                "is_error": False,
+                "timestamp": now,
+            }
+
+        event_type = data.get("type") or data.get("event") or data.get("event_type") or "codex_event"
+        content = data.get("content") or data.get("message") or data.get("text")
+        if isinstance(content, (dict, list)):
+            content = json.dumps(content, ensure_ascii=False)
+        tool_input = data.get("tool_input") or data.get("input")
+        tool_output = data.get("tool_output") or data.get("output")
+        event = {
+            "event_type": event_type,
+            "role": data.get("role") or ("assistant" if "message" in event_type else None),
+            "content": content,
+            "tool_name": data.get("tool_name") or data.get("name"),
+            "tool_input": json.dumps(tool_input, ensure_ascii=False) if isinstance(tool_input, (dict, list)) else tool_input,
+            "tool_output": json.dumps(tool_output, ensure_ascii=False) if isinstance(tool_output, (dict, list)) else tool_output,
+            "raw_json": line,
+            "is_error": bool(data.get("is_error") or data.get("error") or "error" in event_type.lower()),
+            "timestamp": now,
+        }
+        session_id = data.get("session_id") or data.get("sessionId")
+        if not session_id and isinstance(data.get("session"), dict):
+            session_id = data["session"].get("id")
+        if session_id:
+            event["session_id"] = session_id
+        return event
 
     async def _process_event(self, instance_id: int, task_id: int | None, event: dict, loop_iteration: int | None = None):
         """Process a single parsed event: save to DB and broadcast."""

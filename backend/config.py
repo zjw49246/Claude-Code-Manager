@@ -7,8 +7,13 @@ class Settings(BaseSettings):
     auth_token: str = ""
     max_concurrent_instances: int = 5
     claude_binary: str = "claude"
+    codex_binary: str = "codex"
+    default_provider: str = "claude"
+    provider_options: str = "claude,codex"
     default_model: str = "claude-opus-4-6"
     model_options: str = "default,claude-opus-4-6,claude-opus-4-6[1m],claude-opus-4-7,claude-opus-4-7[1m],claude-opus-4-8,claude-opus-4-8[1m],claude-sonnet-4-6,claude-sonnet-4-6[1m],claude-haiku-4-5"  # comma-separated
+    default_codex_model: str = "gpt-5.5"
+    codex_model_options: str = "default,gpt-5.5"  # comma-separated
     default_effort: str = "medium"
     effort_options: str = "low,medium,high,xhigh,max"  # comma-separated
     host: str = "0.0.0.0"

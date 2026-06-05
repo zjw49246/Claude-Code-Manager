@@ -20,6 +20,11 @@ from backend.services.ws_broadcaster import WebSocketBroadcaster
 logger = logging.getLogger(__name__)
 
 
+def _default_provider() -> str:
+    provider = getattr(settings, "default_provider", "claude")
+    return provider if isinstance(provider, str) and provider else "claude"
+
+
 def _build_git_env(merged_config: dict) -> dict:
     """Build git-related environment variables from a merged git config dict.
 
@@ -244,7 +249,11 @@ class GlobalDispatcher:
             async with self.db_factory() as db:
                 for i in range(needed):
                     name = f"worker-{len(existing) + i + 1}"
-                    instance = Instance(name=name, model=settings.default_model)
+                    instance = Instance(
+                        name=name,
+                        provider=_default_provider(),
+                        model=settings.default_model,
+                    )
                     db.add(instance)
                 await db.commit()
             logger.info(f"Created {needed} worker instances")
@@ -252,38 +261,44 @@ class GlobalDispatcher:
     async def _ensure_instances_for_pending_tasks(self):
         """Auto-create instances for pending tasks whose required model has no instance."""
         async with self.db_factory() as db:
-            # Get distinct models required by pending tasks (excluding None/empty)
+            # Get distinct provider/model pairs required by pending tasks (excluding None/empty)
             result = await db.execute(
-                select(Task.model).where(
+                select(Task.provider, Task.model).where(
                     Task.status == "pending",
                     Task.model.isnot(None),
                     Task.model != "",
                 ).distinct()
             )
-            required_models = [row[0] for row in result.all()]
+            required_pairs = [
+                (provider or _default_provider(), model)
+                for provider, model in result.all()
+            ]
 
-            if not required_models:
+            if not required_pairs:
                 return
 
-            # Get existing instance models
-            result = await db.execute(select(Instance.model))
-            existing_models = {row[0] for row in result.all()}
-
-            # Normalize: treat "default" and the actual default_model as equivalent
-            default_model = settings.default_model
-            has_default = "default" in existing_models or default_model in existing_models
+            # Get existing provider/model pairs
+            result = await db.execute(select(Instance.provider, Instance.model))
+            existing_pairs = {(provider or "claude", model) for provider, model in result.all()}
 
             # Create instances for models that have no instance at all
-            for model in required_models:
+            for provider, model in required_pairs:
+                default_model = (
+                    settings.default_codex_model
+                    if provider == "codex"
+                    else settings.default_model
+                )
+                provider_models = {m for p, m in existing_pairs if p == provider}
+                has_default = "default" in provider_models or default_model in provider_models
                 # "default" and the default_model (e.g. "opus") are equivalent
                 if model in ("default", default_model) and has_default:
                     continue
-                if model not in existing_models:
-                    name = f"worker-{model}-1"
-                    instance = Instance(name=name, model=model)
+                if (provider, model) not in existing_pairs:
+                    name = f"worker-{model}-1" if provider == "claude" else f"{provider}-{model}-1"
+                    instance = Instance(name=name, provider=provider, model=model)
                     db.add(instance)
-                    existing_models.add(model)
-                    logger.info(f"Auto-created instance '{name}' for model '{model}'")
+                    existing_pairs.add((provider, model))
+                    logger.info(f"Auto-created instance '{name}' for provider '{provider}' model '{model}'")
 
             await db.commit()
 
@@ -306,7 +321,10 @@ class GlobalDispatcher:
                     # Dequeue a task matching this instance's model
                     async with self.db_factory() as db:
                         queue = TaskQueue(db)
-                        task = await queue.dequeue(instance_model=instance.model)
+                        task = await queue.dequeue(
+                            instance_model=instance.model,
+                            instance_provider=instance.provider,
+                        )
 
                     if not task:
                         continue  # No matching task for this instance, try next
@@ -530,6 +548,7 @@ class GlobalDispatcher:
                 git_env=git_env or {},
                 thinking_budget=thinking_budget,
                 effort_level=effort_level,
+                provider=task.provider,
                 config_dir=pool_config_dir,
             )
 
@@ -703,6 +722,7 @@ class GlobalDispatcher:
                 git_env=git_env or {},
                 thinking_budget=thinking_budget,
                 effort_level=effort_level,
+                provider=task.provider,
                 config_dir=config_dir,
             )
         else:
@@ -729,6 +749,7 @@ class GlobalDispatcher:
                 git_env=git_env or {},
                 thinking_budget=thinking_budget,
                 effort_level=effort_level,
+                provider=task.provider,
                 config_dir=config_dir,
             )
 
@@ -884,6 +905,7 @@ class GlobalDispatcher:
                 git_env=git_env or {},
                 thinking_budget=await self._get_thinking_budget(instance_id),
                 effort_level=effort_level,
+                provider=task.provider,
             )
 
             process = self.instance_manager.processes.get(instance_id)
@@ -1063,6 +1085,7 @@ class GlobalDispatcher:
                     git_env=git_env or {},
                     thinking_budget=await self._get_thinking_budget(instance_id),
                     effort_level=effort_level,
+                    provider=task.provider,
                 )
             else:
                 follow_up = self._build_goal_followup_prompt(last_reason, turn, max_turns)
@@ -1077,6 +1100,7 @@ class GlobalDispatcher:
                     git_env=git_env or {},
                     thinking_budget=await self._get_thinking_budget(instance_id),
                     effort_level=effort_level,
+                    provider=task.provider,
                 )
 
             # Wait for process to finish
@@ -1436,6 +1460,7 @@ class GlobalDispatcher:
             git_env=git_env,
             thinking_budget=await self._get_thinking_budget(instance_id),
             effort_level=effort_level,
+            provider=task.provider,
         )
 
         fix_proc = self.instance_manager.processes.get(instance_id)
@@ -1464,6 +1489,7 @@ class GlobalDispatcher:
             git_env=git_env or {},
             thinking_budget=await self._get_thinking_budget(instance_id),
             effort_level=effort_level,
+            provider=task.provider,
         )
         process = self.instance_manager.processes.get(instance_id)
         if process:
