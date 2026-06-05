@@ -399,7 +399,12 @@ class InstanceManager:
         }
 
     def _extract_codex_session_id(self, data: dict) -> str | None:
-        session_id = data.get("session_id") or data.get("sessionId") or data.get("conversation_id")
+        session_id = (
+            data.get("session_id")
+            or data.get("sessionId")
+            or data.get("conversation_id")
+            or data.get("thread_id")
+        )
         if not session_id and isinstance(data.get("session"), dict):
             session_id = data["session"].get("id")
         if not session_id and isinstance(data.get("thread"), dict):

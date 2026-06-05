@@ -89,6 +89,18 @@ def test_parse_codex_turn_completed_usage():
     assert event["content"] == "turn.completed"
 
 
+def test_parse_codex_thread_started_session_id():
+    im = InstanceManager(MagicMock(), MagicMock())
+    event = im._parse_codex_line(json.dumps({
+        "type": "thread.started",
+        "thread_id": "test-thread-123",
+    }))
+
+    assert event["event_type"] == "system_event"
+    assert event["content"] == "thread.started"
+    assert event["session_id"] == "test-thread-123"
+
+
 def _make_mock_process(pid=12345, returncode=0):
     """Create a mock asyncio subprocess."""
     proc = MagicMock()
