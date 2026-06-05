@@ -908,3 +908,151 @@ async def test_create_task_starred_filter(client):
     tasks = resp.json()
     assert len(tasks) == 1
     assert tasks[0]["starred"] is True
+
+
+# === has_unread filter tests ===
+
+
+@pytest.mark.asyncio
+async def test_filter_unread_tasks(client, session_factory):
+    """has_unread=true filter returns only unread tasks."""
+    from backend.models.task import Task
+    from sqlalchemy import update
+
+    r1 = await client.post("/api/tasks", json={
+        "title": "Read task", "description": "d", "target_repo": "/tmp",
+    })
+    r2 = await client.post("/api/tasks", json={
+        "title": "Unread task", "description": "d", "target_repo": "/tmp",
+    })
+    unread_id = r2.json()["id"]
+
+    async with session_factory() as db:
+        await db.execute(update(Task).where(Task.id == unread_id).values(has_unread=True))
+        await db.commit()
+
+    resp = await client.get("/api/tasks?has_unread=true")
+    assert resp.status_code == 200
+    tasks = resp.json()
+    assert len(tasks) == 1
+    assert tasks[0]["id"] == unread_id
+    assert tasks[0]["has_unread"] is True
+
+
+@pytest.mark.asyncio
+async def test_filter_read_tasks(client, session_factory):
+    """has_unread=false filter returns only read tasks."""
+    from backend.models.task import Task
+    from sqlalchemy import update
+
+    r1 = await client.post("/api/tasks", json={
+        "title": "Read task", "description": "d", "target_repo": "/tmp",
+    })
+    r2 = await client.post("/api/tasks", json={
+        "title": "Unread task", "description": "d", "target_repo": "/tmp",
+    })
+    unread_id = r2.json()["id"]
+    read_id = r1.json()["id"]
+
+    async with session_factory() as db:
+        await db.execute(update(Task).where(Task.id == unread_id).values(has_unread=True))
+        await db.commit()
+
+    resp = await client.get("/api/tasks?has_unread=false")
+    assert resp.status_code == 200
+    tasks = resp.json()
+    assert len(tasks) == 1
+    assert tasks[0]["id"] == read_id
+    assert tasks[0]["has_unread"] is False
+
+
+@pytest.mark.asyncio
+async def test_count_unread_tasks(client, session_factory):
+    """has_unread filter works with count endpoint."""
+    from backend.models.task import Task
+    from sqlalchemy import update
+
+    r1 = await client.post("/api/tasks", json={
+        "title": "Task A", "description": "d", "target_repo": "/tmp",
+    })
+    r2 = await client.post("/api/tasks", json={
+        "title": "Task B", "description": "d", "target_repo": "/tmp",
+    })
+    r3 = await client.post("/api/tasks", json={
+        "title": "Task C", "description": "d", "target_repo": "/tmp",
+    })
+
+    async with session_factory() as db:
+        await db.execute(update(Task).where(Task.id == r1.json()["id"]).values(has_unread=True))
+        await db.execute(update(Task).where(Task.id == r2.json()["id"]).values(has_unread=True))
+        await db.commit()
+
+    resp = await client.get("/api/tasks/count?has_unread=true")
+    assert resp.status_code == 200
+    assert resp.json()["total"] == 2
+
+    resp = await client.get("/api/tasks/count?has_unread=false")
+    assert resp.status_code == 200
+    assert resp.json()["total"] == 1
+
+
+@pytest.mark.asyncio
+async def test_filter_unread_combined_with_status(client, session_factory):
+    """has_unread filter works combined with status filter."""
+    from backend.models.task import Task
+    from sqlalchemy import update
+
+    r1 = await client.post("/api/tasks", json={
+        "title": "Pending unread", "description": "d", "target_repo": "/tmp",
+    })
+    r2 = await client.post("/api/tasks", json={
+        "title": "Pending read", "description": "d", "target_repo": "/tmp",
+    })
+
+    async with session_factory() as db:
+        await db.execute(update(Task).where(Task.id == r1.json()["id"]).values(has_unread=True))
+        await db.commit()
+
+    resp = await client.get("/api/tasks?has_unread=true&status=pending")
+    assert resp.status_code == 200
+    tasks = resp.json()
+    assert len(tasks) == 1
+    assert tasks[0]["id"] == r1.json()["id"]
+
+
+@pytest.mark.asyncio
+async def test_filter_unread_with_no_results(client):
+    """has_unread=true returns empty list when no unread tasks exist."""
+    await client.post("/api/tasks", json={
+        "title": "All read", "description": "d", "target_repo": "/tmp",
+    })
+
+    resp = await client.get("/api/tasks?has_unread=true")
+    assert resp.status_code == 200
+    assert resp.json() == []
+
+    resp = await client.get("/api/tasks/count?has_unread=true")
+    assert resp.status_code == 200
+    assert resp.json()["total"] == 0
+
+
+@pytest.mark.asyncio
+async def test_no_unread_filter_returns_all(client, session_factory):
+    """Without has_unread filter, both read and unread tasks are returned."""
+    from backend.models.task import Task
+    from sqlalchemy import update
+
+    r1 = await client.post("/api/tasks", json={
+        "title": "Read", "description": "d", "target_repo": "/tmp",
+    })
+    r2 = await client.post("/api/tasks", json={
+        "title": "Unread", "description": "d", "target_repo": "/tmp",
+    })
+
+    async with session_factory() as db:
+        await db.execute(update(Task).where(Task.id == r2.json()["id"]).values(has_unread=True))
+        await db.commit()
+
+    resp = await client.get("/api/tasks")
+    assert resp.status_code == 200
+    assert len(resp.json()) == 2

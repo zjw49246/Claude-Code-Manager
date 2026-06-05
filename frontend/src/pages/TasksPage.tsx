@@ -22,6 +22,7 @@ export function TasksPage() {
   const [tagFilter, setTagFilter] = useState<string>('');
   const [projectFilter, setProjectFilter] = useState<number | undefined>(undefined);
   const [starredFilter, setStarredFilter] = useState(false);
+  const [unreadFilter, setUnreadFilter] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
   const [tagItems, setTagItems] = useState<TagItem[]>([]);
   const [chatTask, setChatTask] = useState<Task | null>(null);
@@ -34,8 +35,8 @@ export function TasksPage() {
     try {
       const offset = (page - 1) * PAGE_SIZE;
       const [filtered, count, all, projs, tags] = await Promise.all([
-        api.listTasks(filter || undefined, false, projectFilter, starredFilter || undefined, PAGE_SIZE, offset, showArchived),
-        api.countTasks(filter || undefined, false, projectFilter, starredFilter || undefined, showArchived),
+        api.listTasks(filter || undefined, false, projectFilter, starredFilter || undefined, PAGE_SIZE, offset, showArchived, unreadFilter || undefined),
+        api.countTasks(filter || undefined, false, projectFilter, starredFilter || undefined, showArchived, unreadFilter || undefined),
         api.listTasks(undefined, false, undefined, undefined, PAGE_SIZE, 0, showArchived),
         api.listProjects(),
         api.listTags(),
@@ -54,7 +55,7 @@ export function TasksPage() {
     } catch (e) {
       console.error('Failed to load tasks:', e);
     }
-  }, [filter, showArchived, projectFilter, starredFilter, page]);
+  }, [filter, showArchived, projectFilter, starredFilter, unreadFilter, page]);
 
   useEffect(() => {
     refresh();
@@ -63,14 +64,14 @@ export function TasksPage() {
   }, [refresh]);
 
   // Reset to page 1 when filters change
-  const prevFilter = useRef({ filter, showArchived, projectFilter, starredFilter });
+  const prevFilter = useRef({ filter, showArchived, projectFilter, starredFilter, unreadFilter });
   useEffect(() => {
     const prev = prevFilter.current;
-    if (prev.filter !== filter || prev.showArchived !== showArchived || prev.projectFilter !== projectFilter || prev.starredFilter !== starredFilter) {
+    if (prev.filter !== filter || prev.showArchived !== showArchived || prev.projectFilter !== projectFilter || prev.starredFilter !== starredFilter || prev.unreadFilter !== unreadFilter) {
       setPage(1);
-      prevFilter.current = { filter, showArchived, projectFilter, starredFilter };
+      prevFilter.current = { filter, showArchived, projectFilter, starredFilter, unreadFilter };
     }
-  }, [filter, showArchived, projectFilter, starredFilter]);
+  }, [filter, showArchived, projectFilter, starredFilter, unreadFilter]);
 
   const filters = ['', 'pending', 'in_progress', 'executing', 'plan_review', 'completed', 'failed'];
 
@@ -154,6 +155,16 @@ export function TasksPage() {
           }`}
         >
           ★ Starred
+        </button>
+        <button
+          onClick={() => setUnreadFilter(!unreadFilter)}
+          className={`px-3 py-1 rounded text-xs font-medium transition-colors ${
+            unreadFilter
+              ? 'bg-indigo-600 text-white'
+              : 'bg-gray-800 text-gray-400 hover:bg-gray-700'
+          }`}
+        >
+          Unread
         </button>
         <button
           onClick={() => setShowArchived(!showArchived)}
