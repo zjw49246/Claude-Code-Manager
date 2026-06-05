@@ -27,6 +27,7 @@ class TaskQueue:
         self, status: str | None = None, include_archived: bool = False,
         archived_only: bool = False,
         project_id: int | None = None, starred: bool | None = None,
+        has_unread: bool | None = None,
         limit: int = 50, offset: int = 0,
     ) -> list[Task]:
         stmt = select(Task).order_by(Task.starred.desc(), Task.created_at.desc())
@@ -40,6 +41,8 @@ class TaskQueue:
             stmt = stmt.where(Task.project_id == project_id)
         if starred is not None:
             stmt = stmt.where(Task.starred == starred)
+        if has_unread is not None:
+            stmt = stmt.where(Task.has_unread == has_unread)
         stmt = stmt.limit(limit).offset(offset)
         result = await self.db.execute(stmt)
         return list(result.scalars().all())
@@ -48,6 +51,7 @@ class TaskQueue:
         self, status: str | None = None, include_archived: bool = False,
         archived_only: bool = False,
         project_id: int | None = None, starred: bool | None = None,
+        has_unread: bool | None = None,
     ) -> int:
         stmt = select(func.count(Task.id))
         if archived_only:
@@ -60,6 +64,8 @@ class TaskQueue:
             stmt = stmt.where(Task.project_id == project_id)
         if starred is not None:
             stmt = stmt.where(Task.starred == starred)
+        if has_unread is not None:
+            stmt = stmt.where(Task.has_unread == has_unread)
         result = await self.db.execute(stmt)
         return result.scalar() or 0
 

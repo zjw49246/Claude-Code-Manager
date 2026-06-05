@@ -343,21 +343,23 @@ export const api = {
   },
 
   // Tasks
-  listTasks: (status?: string, includeArchived?: boolean, projectId?: number, starred?: boolean, limit?: number, offset?: number, archivedOnly?: boolean) =>
+  listTasks: (status?: string, includeArchived?: boolean, projectId?: number, starred?: boolean, limit?: number, offset?: number, archivedOnly?: boolean, hasUnread?: boolean) =>
     request<Task[]>(`/api/tasks?${new URLSearchParams({
       ...(status ? { status } : {}),
       ...(archivedOnly ? { archived_only: 'true' } : includeArchived ? { include_archived: 'true' } : {}),
       ...(projectId != null ? { project_id: String(projectId) } : {}),
       ...(starred != null ? { starred: String(starred) } : {}),
+      ...(hasUnread != null ? { has_unread: String(hasUnread) } : {}),
       ...(limit != null ? { limit: String(limit) } : {}),
       ...(offset != null ? { offset: String(offset) } : {}),
     })}`),
-  countTasks: (status?: string, includeArchived?: boolean, projectId?: number, starred?: boolean, archivedOnly?: boolean) =>
+  countTasks: (status?: string, includeArchived?: boolean, projectId?: number, starred?: boolean, archivedOnly?: boolean, hasUnread?: boolean) =>
     request<{ total: number }>(`/api/tasks/count?${new URLSearchParams({
       ...(status ? { status } : {}),
       ...(archivedOnly ? { archived_only: 'true' } : includeArchived ? { include_archived: 'true' } : {}),
       ...(projectId != null ? { project_id: String(projectId) } : {}),
       ...(starred != null ? { starred: String(starred) } : {}),
+      ...(hasUnread != null ? { has_unread: String(hasUnread) } : {}),
     })}`),
   starTask: (id: number) =>
     request<Task>(`/api/tasks/${id}/star`, { method: 'POST' }),

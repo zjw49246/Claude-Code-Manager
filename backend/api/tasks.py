@@ -21,12 +21,14 @@ async def count_tasks(
     archived_only: bool = False,
     project_id: int | None = None,
     starred: bool | None = None,
+    has_unread: bool | None = None,
     queue: TaskQueue = Depends(_get_queue),
 ):
     total = await queue.count_tasks(
         status=status, include_archived=include_archived,
         archived_only=archived_only,
         project_id=project_id, starred=starred,
+        has_unread=has_unread,
     )
     return {"total": total}
 
@@ -38,6 +40,7 @@ async def list_tasks(
     archived_only: bool = False,
     project_id: int | None = None,
     starred: bool | None = None,
+    has_unread: bool | None = None,
     limit: int = 50,
     offset: int = 0,
     queue: TaskQueue = Depends(_get_queue),
@@ -46,6 +49,7 @@ async def list_tasks(
         status=status, include_archived=include_archived,
         archived_only=archived_only,
         project_id=project_id, starred=starred,
+        has_unread=has_unread,
         limit=limit, offset=offset,
     )
 
