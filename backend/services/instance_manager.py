@@ -289,7 +289,7 @@ class InstanceManager:
             self._tasks.pop(instance_id, None)
 
     def _parse_codex_line(self, line: str) -> dict:
-        """Best-effort parser for Codex CLI JSONL events."""
+        """Normalize Codex CLI JSONL events into the same shape as Claude logs."""
         now = datetime.utcnow().isoformat()
         try:
             data = json.loads(line)
@@ -306,29 +306,117 @@ class InstanceManager:
                 "timestamp": now,
             }
 
-        event_type = data.get("type") or data.get("event") or data.get("event_type") or "codex_event"
-        content = data.get("content") or data.get("message") or data.get("text")
-        if isinstance(content, (dict, list)):
-            content = json.dumps(content, ensure_ascii=False)
-        tool_input = data.get("tool_input") or data.get("input")
-        tool_output = data.get("tool_output") or data.get("output")
-        event = {
-            "event_type": event_type,
-            "role": data.get("role") or ("assistant" if "message" in event_type else None),
-            "content": content,
-            "tool_name": data.get("tool_name") or data.get("name"),
-            "tool_input": json.dumps(tool_input, ensure_ascii=False) if isinstance(tool_input, (dict, list)) else tool_input,
-            "tool_output": json.dumps(tool_output, ensure_ascii=False) if isinstance(tool_output, (dict, list)) else tool_output,
-            "raw_json": line,
-            "is_error": bool(data.get("is_error") or data.get("error") or "error" in event_type.lower()),
-            "timestamp": now,
-        }
-        session_id = data.get("session_id") or data.get("sessionId")
-        if not session_id and isinstance(data.get("session"), dict):
-            session_id = data["session"].get("id")
+        codex_type = data.get("type") or data.get("event") or data.get("event_type") or "codex_event"
+        item = data.get("item") if isinstance(data.get("item"), dict) else {}
+        item_type = item.get("type")
+
+        event = self._base_codex_event(line, now)
+
+        if codex_type == "item.completed" and item_type == "agent_message":
+            event.update({
+                "event_type": "message",
+                "role": "assistant",
+                "content": item.get("text") or "",
+            })
+        elif codex_type == "item.started" and item_type == "command_execution":
+            command = item.get("command") or ""
+            event.update({
+                "event_type": "tool_use",
+                "role": "assistant",
+                "content": None,
+                "tool_name": "Shell",
+                "tool_input": json.dumps({"command": command}, ensure_ascii=False),
+            })
+        elif codex_type == "item.completed" and item_type == "command_execution":
+            command = item.get("command") or ""
+            output = item.get("aggregated_output") or ""
+            exit_code = item.get("exit_code")
+            status = item.get("status") or "completed"
+            summary = f"Command {status}"
+            if exit_code is not None:
+                summary += f" with exit code {exit_code}"
+            if output:
+                summary += f"\n{output}"
+            event.update({
+                "event_type": "tool_result",
+                "role": "tool",
+                "content": None,
+                "tool_name": "Shell",
+                "tool_input": json.dumps({"command": command}, ensure_ascii=False),
+                "tool_output": output or summary,
+                "is_error": bool(exit_code not in (None, 0)),
+            })
+        elif codex_type == "turn.completed":
+            usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+            event.update({
+                "event_type": "system_event",
+                "content": "turn.completed",
+                "context_usage": self._codex_context_usage(usage) if usage else None,
+            })
+        elif "error" in codex_type.lower() or data.get("error"):
+            message = data.get("message") or data.get("error") or codex_type
+            if isinstance(message, (dict, list)):
+                message = json.dumps(message, ensure_ascii=False)
+            event.update({
+                "event_type": "system_event",
+                "content": str(message),
+                "is_error": True,
+            })
+        else:
+            content = data.get("content") or data.get("message") or data.get("text")
+            if content is None and item:
+                content = item.get("text") or item.get("command") or item.get("status")
+            if isinstance(content, (dict, list)):
+                content = json.dumps(content, ensure_ascii=False)
+            tool_input = data.get("tool_input") or data.get("input")
+            tool_output = data.get("tool_output") or data.get("output")
+            event.update({
+                "event_type": "system_event",
+                "role": data.get("role") or ("assistant" if "message" in codex_type else None),
+                "content": content or codex_type,
+                "tool_name": data.get("tool_name") or data.get("name"),
+                "tool_input": json.dumps(tool_input, ensure_ascii=False) if isinstance(tool_input, (dict, list)) else tool_input,
+                "tool_output": json.dumps(tool_output, ensure_ascii=False) if isinstance(tool_output, (dict, list)) else tool_output,
+                "is_error": bool(data.get("is_error") or data.get("error") or "error" in codex_type.lower()),
+            })
+
+        session_id = self._extract_codex_session_id(data)
         if session_id:
             event["session_id"] = session_id
         return event
+
+    def _base_codex_event(self, line: str, timestamp: str) -> dict:
+        return {
+            "event_type": "system_event",
+            "role": None,
+            "content": None,
+            "tool_name": None,
+            "tool_input": None,
+            "tool_output": None,
+            "raw_json": line,
+            "is_error": False,
+            "timestamp": timestamp,
+        }
+
+    def _extract_codex_session_id(self, data: dict) -> str | None:
+        session_id = data.get("session_id") or data.get("sessionId") or data.get("conversation_id")
+        if not session_id and isinstance(data.get("session"), dict):
+            session_id = data["session"].get("id")
+        if not session_id and isinstance(data.get("thread"), dict):
+            session_id = data["thread"].get("id")
+        return session_id
+
+    def _codex_context_usage(self, usage: dict) -> dict:
+        input_tokens = int(usage.get("input_tokens") or 0)
+        cached_tokens = int(usage.get("cached_input_tokens") or 0)
+        output_tokens = int(usage.get("output_tokens") or 0)
+        return {
+            "input_tokens": max(input_tokens - cached_tokens, 0),
+            "cache_read_input_tokens": cached_tokens,
+            "cache_creation_input_tokens": 0,
+            "output_tokens": output_tokens,
+            "total_input_tokens": input_tokens,
+        }
 
     async def _process_event(self, instance_id: int, task_id: int | None, event: dict, loop_iteration: int | None = None):
         """Process a single parsed event: save to DB and broadcast."""
