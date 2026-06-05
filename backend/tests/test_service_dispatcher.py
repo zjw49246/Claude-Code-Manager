@@ -92,8 +92,10 @@ async def test_ensure_instances_creates_workers(db_factory):
     """_ensure_instances creates workers up to max_concurrent_instances."""
     d = _make_dispatcher(db_factory)
 
-    with patch("backend.services.dispatcher.settings") as mock_settings:
+    with patch("backend.services.dispatcher.settings") as mock_settings, \
+         patch("backend.services.dispatcher._provider_available", return_value=True):
         mock_settings.max_concurrent_instances = 3
+        mock_settings.default_provider = "claude"
         mock_settings.default_model = "sonnet"
         await d._ensure_instances()
 
@@ -104,6 +106,34 @@ async def test_ensure_instances_creates_workers(db_factory):
     assert len(instances) == 3
     assert instances[0].name == "worker-1"
     assert instances[2].name == "worker-3"
+    assert {inst.provider for inst in instances} == {"claude"}
+    assert {inst.model for inst in instances} == {"sonnet"}
+
+
+@pytest.mark.asyncio
+async def test_ensure_instances_uses_codex_when_claude_cli_missing(db_factory):
+    """Auto-created workers use Codex when Claude is unavailable and Codex exists."""
+    d = _make_dispatcher(db_factory)
+
+    def provider_available(provider: str) -> bool:
+        return provider == "codex"
+
+    with patch("backend.services.dispatcher.settings") as mock_settings, \
+         patch("backend.services.dispatcher._provider_available", side_effect=provider_available):
+        mock_settings.max_concurrent_instances = 2
+        mock_settings.default_provider = "claude"
+        mock_settings.default_model = "claude-opus-4-6"
+        mock_settings.default_codex_model = "gpt-5.5"
+        await d._ensure_instances()
+
+    async with db_factory() as db:
+        from sqlalchemy import select
+        result = await db.execute(select(Instance))
+        instances = list(result.scalars().all())
+
+    assert len(instances) == 2
+    assert {inst.provider for inst in instances} == {"codex"}
+    assert {inst.model for inst in instances} == {"gpt-5.5"}
 
 
 @pytest.mark.asyncio

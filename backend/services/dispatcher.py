@@ -1,6 +1,9 @@
 import asyncio
 import logging
+import os
+import shutil
 from datetime import datetime
+from pathlib import Path
 
 from sqlalchemy import select, update
 
@@ -23,6 +26,51 @@ logger = logging.getLogger(__name__)
 def _default_provider() -> str:
     provider = getattr(settings, "default_provider", "claude")
     return provider if isinstance(provider, str) and provider else "claude"
+
+
+def _binary_available(binary: str) -> bool:
+    if not isinstance(binary, str) or not binary:
+        return False
+    path = Path(binary).expanduser()
+    if path.is_absolute() or any(sep in binary for sep in (os.sep, os.altsep) if sep):
+        return path.exists()
+    return shutil.which(binary) is not None
+
+
+def _codex_binary_available() -> bool:
+    configured = settings.codex_binary
+    if configured and configured.lower() != "codex":
+        return _binary_available(configured)
+    if _binary_available(configured or "codex"):
+        return True
+
+    local_appdata = os.environ.get("LOCALAPPDATA")
+    if not local_appdata:
+        return False
+    bin_root = Path(local_appdata) / "OpenAI" / "Codex" / "bin"
+    return any(bin_root.glob("*/codex.exe"))
+
+
+def _provider_available(provider: str) -> bool:
+    provider = (provider or "claude").lower()
+    if provider == "claude":
+        return _binary_available(settings.claude_binary)
+    if provider == "codex":
+        return _codex_binary_available()
+    return False
+
+
+def _default_worker_provider() -> str:
+    provider = _default_provider()
+    if _provider_available(provider):
+        return provider
+    if provider == "claude" and _provider_available("codex"):
+        return "codex"
+    return provider
+
+
+def _default_worker_model(provider: str) -> str:
+    return settings.default_codex_model if provider == "codex" else settings.default_model
 
 
 def _build_git_env(merged_config: dict) -> dict:
@@ -246,13 +294,15 @@ class GlobalDispatcher:
 
         needed = settings.max_concurrent_instances - len(existing)
         if needed > 0:
+            provider = _default_worker_provider()
+            model = _default_worker_model(provider)
             async with self.db_factory() as db:
                 for i in range(needed):
                     name = f"worker-{len(existing) + i + 1}"
                     instance = Instance(
                         name=name,
-                        provider=_default_provider(),
-                        model=settings.default_model,
+                        provider=provider,
+                        model=model,
                     )
                     db.add(instance)
                 await db.commit()
