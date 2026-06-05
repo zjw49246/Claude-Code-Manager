@@ -99,6 +99,7 @@ class RalphLoop:
                         cwd=cwd,
                         model=None,
                         thinking_budget=thinking_budget,
+                        provider=task.provider,
                     )
                     process = self.instance_manager.processes.get(instance_id)
                     if process:
@@ -143,6 +144,7 @@ class RalphLoop:
                     cwd=cwd,
                     model=None,
                     thinking_budget=thinking_budget,
+                    provider=task.provider,
                 )
 
                 # Wait for process to finish (with timeout)

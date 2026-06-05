@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 class InstanceCreate(BaseModel):
     name: str
+    provider: str = "claude"
     model: str = "default"
     effort_level: str | None = None
     thinking_budget: int | None = None
@@ -19,6 +20,7 @@ class InstanceResponse(BaseModel):
     current_task_id: int | None
     worktree_path: str | None
     worktree_branch: str | None
+    provider: str
     model: str
     effort_level: str | None
     thinking_budget: int | None
