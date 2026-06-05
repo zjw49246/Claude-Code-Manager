@@ -30,6 +30,7 @@ class InstanceManager:
         self._stopping: set[int] = set()  # instance_ids being intentionally stopped
         self._config_dirs: dict[int, str] = {}  # instance_id -> CLAUDE_CONFIG_DIR used
         self._last_stderr: dict[int, str] = {}  # instance_id -> stderr from last run
+        self._launch_params: dict[int, dict] = {}  # instance_id -> params for re-launch on rotation
 
     async def launch(self, instance_id: int, prompt: str, task_id: int | None = None, cwd: str | None = None, model: str | None = None, resume_session_id: str | None = None, loop_iteration: int | None = None, git_env: dict | None = None, thinking_budget: int | None = None, effort_level: str | None = None, chat_initiated: bool = False, config_dir: str | None = None) -> int:
         """Launch a Claude Code subprocess for the given instance.
@@ -82,6 +83,18 @@ class InstanceManager:
         )
 
         self.processes[instance_id] = process
+
+        # Store launch params for potential pool rotation re-launch
+        if chat_initiated:
+            self._launch_params[instance_id] = {
+                "prompt": prompt,
+                "task_id": task_id,
+                "cwd": cwd,
+                "model": model,
+                "git_env": git_env,
+                "thinking_budget": thinking_budget,
+                "effort_level": effort_level,
+            }
 
         # Update instance record
         async with self.db_factory() as db:
@@ -165,6 +178,11 @@ class InstanceManager:
             if instance_id in self._stopping:
                 return
 
+            # Pool rotation for chat-initiated rate limit failures
+            if task_id and chat_initiated and exit_code not in (0, -2, 130):
+                if await self._try_chat_pool_rotation(instance_id, task_id, exit_code, stderr_text):
+                    return
+
             # Update instance status
             # SIGINT (exit code -2 or 130) = user interrupt, treat as idle not error
             async with self.db_factory() as db:
@@ -226,6 +244,96 @@ class InstanceManager:
 
             self.processes.pop(instance_id, None)
             self._tasks.pop(instance_id, None)
+            self._launch_params.pop(instance_id, None)
+
+    async def _try_chat_pool_rotation(
+        self, instance_id: int, task_id: int, exit_code: int, stderr_text: str,
+    ) -> bool:
+        """Attempt pool rotation for a chat-initiated process that hit rate limit.
+
+        Returns True if rotation succeeded and a new process was launched.
+        """
+        try:
+            from backend.main import dispatcher
+            if not dispatcher or not dispatcher.pool or not dispatcher.pool.enabled:
+                return False
+
+            from backend.services.claude_pool import (
+                is_pool_rotatable, is_rate_limited, is_auth_failure,
+                collect_process_output_for_detection, migrate_session,
+            )
+
+            log_contents = await self.get_recent_log_contents(task_id, limit=10)
+            combined = collect_process_output_for_detection(stderr_text, log_contents)
+
+            if not is_pool_rotatable(combined):
+                return False
+
+            old_config_dir = self._config_dirs.get(instance_id)
+            if not old_config_dir:
+                return False
+
+            if is_auth_failure(combined):
+                dispatcher.pool.mark_auth_failure(old_config_dir)
+                logger.warning("Chat pool rotation: account %s auth failure", old_config_dir)
+            elif is_rate_limited(combined):
+                dispatcher.pool.mark_rate_limited(old_config_dir)
+                logger.info("Chat pool rotation: account %s rate-limited", old_config_dir)
+
+            old_account_id = dispatcher.pool.account_id_from_config_dir(old_config_dir)
+            excluded = {old_account_id} if old_account_id else set()
+            new_config_dir = dispatcher.pool.select(exclude=excluded)
+
+            if not new_config_dir:
+                logger.warning("Chat pool rotation: no alternative account for task %d", task_id)
+                return False
+
+            async with self.db_factory() as db:
+                task = await db.get(Task, task_id)
+                if not task or not task.session_id:
+                    return False
+                session_id = task.session_id
+                cwd = task.last_cwd or task.target_repo
+
+            migrate_session(old_config_dir, new_config_dir, session_id)
+
+            new_account_id = dispatcher.pool.account_id_from_config_dir(new_config_dir)
+            logger.info("Chat pool rotation: task %d switching %s -> %s",
+                        task_id, old_account_id, new_account_id)
+
+            await self.broadcaster.broadcast(f"task:{task_id}", {
+                "event_type": "pool_rotation",
+                "old_account": old_account_id,
+                "new_account": new_account_id,
+                "reason": "rate_limit" if is_rate_limited(combined) else "auth_failure",
+            })
+            await self.broadcaster.broadcast("system", {
+                "event": "pool_rotation",
+                "task_id": task_id,
+                "instance_id": instance_id,
+                "old_account": old_account_id,
+                "new_account": new_account_id,
+            })
+
+            params = self._launch_params.get(instance_id, {})
+            await self.launch(
+                instance_id=instance_id,
+                prompt=params.get("prompt", "continue"),
+                task_id=task_id,
+                cwd=cwd,
+                model=params.get("model"),
+                resume_session_id=session_id,
+                git_env=params.get("git_env"),
+                thinking_budget=params.get("thinking_budget"),
+                effort_level=params.get("effort_level"),
+                chat_initiated=True,
+                config_dir=new_config_dir,
+            )
+            return True
+
+        except Exception:
+            logger.exception("Chat pool rotation failed for task %d", task_id)
+            return False
 
     async def _process_event(self, instance_id: int, task_id: int | None, event: dict, loop_iteration: int | None = None):
         """Process a single parsed event: save to DB and broadcast."""

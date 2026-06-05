@@ -131,6 +131,12 @@ async def send_chat_message(
     from backend.config import settings as app_settings
     effort_level = task.effort_level or inst.effort_level or app_settings.default_effort
 
+    # Pool: select an account for the chat launch
+    config_dir = None
+    from backend.main import dispatcher
+    if dispatcher and hasattr(dispatcher, 'pool') and dispatcher.pool and dispatcher.pool.enabled:
+        config_dir = dispatcher.pool.select()
+
     # Launch with --resume, using the task's cwd
     # Use task.model (the model that created the session) to maintain consistency,
     # falling back to instance model only if task has no model set.
@@ -145,6 +151,7 @@ async def send_chat_message(
         thinking_budget=inst.thinking_budget,
         effort_level=effort_level,
         chat_initiated=True,
+        config_dir=config_dir,
     )
 
     task.status = "executing"
