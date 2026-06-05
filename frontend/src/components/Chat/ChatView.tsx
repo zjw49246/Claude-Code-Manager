@@ -62,32 +62,36 @@ function formatTokenCount(n: number): string {
 }
 
 function ContextUsageIndicator({ usage }: { usage: ContextUsage }) {
-  const contextWindow = usage.context_window || 200_000; // default fallback
+  const contextWindow = usage.context_window;
   const totalUsed = usage.total_input_tokens + usage.output_tokens;
-  const percentage = Math.min((totalUsed / contextWindow) * 100, 100);
+  const percentage = contextWindow ? Math.min((totalUsed / contextWindow) * 100, 100) : null;
 
   // Color based on usage level
   let barColor = 'bg-emerald-500';
   let textColor = 'text-emerald-400';
-  if (percentage > 80) {
+  if (percentage !== null && percentage > 80) {
     barColor = 'bg-red-500';
     textColor = 'text-red-400';
-  } else if (percentage > 50) {
+  } else if (percentage !== null && percentage > 50) {
     barColor = 'bg-amber-500';
     textColor = 'text-amber-400';
   }
 
   return (
-    <div className="flex items-center gap-2 text-xs shrink-0" title={`Input: ${formatTokenCount(usage.input_tokens)} | Cache read: ${formatTokenCount(usage.cache_read_input_tokens)} | Cache create: ${formatTokenCount(usage.cache_creation_input_tokens)} | Output: ${formatTokenCount(usage.output_tokens)}`}>
+    <div className="flex items-center gap-2 text-xs shrink-0" title={`Input: ${formatTokenCount(usage.input_tokens)} | Cache read: ${formatTokenCount(usage.cache_read_input_tokens)} | Cache create: ${formatTokenCount(usage.cache_creation_input_tokens)} | Output: ${formatTokenCount(usage.output_tokens)}${contextWindow ? ` | Context window: ${formatTokenCount(contextWindow)}` : ' | Context window: unknown'}`}>
       <div className="flex items-center gap-1.5">
         <span className={`${textColor} font-medium`}>{formatTokenCount(totalUsed)}</span>
         <span className="text-gray-600">/</span>
-        <span className="text-gray-500">{formatTokenCount(contextWindow)}</span>
+        <span className="text-gray-500">{contextWindow ? formatTokenCount(contextWindow) : 'unknown'}</span>
       </div>
-      <div className="w-16 h-1.5 bg-gray-700 rounded-full overflow-hidden">
-        <div className={`h-full ${barColor} rounded-full transition-all duration-300`} style={{ width: `${percentage}%` }} />
-      </div>
-      <span className={`${textColor} w-8 text-right`}>{percentage.toFixed(0)}%</span>
+      {percentage !== null && (
+        <>
+          <div className="w-16 h-1.5 bg-gray-700 rounded-full overflow-hidden">
+            <div className={`h-full ${barColor} rounded-full transition-all duration-300`} style={{ width: `${percentage}%` }} />
+          </div>
+          <span className={`${textColor} w-8 text-right`}>{percentage.toFixed(0)}%</span>
+        </>
+      )}
     </div>
   );
 }
