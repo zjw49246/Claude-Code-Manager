@@ -64,14 +64,15 @@ async def test_upload_multiple_images(client, tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_upload_too_many_files(client, tmp_path, monkeypatch):
-    """Uploading more than 5 files returns 400."""
+    """Uploading more than _MAX_FILES files returns 400."""
     import backend.api.uploads as uploads_mod
     monkeypatch.setattr(uploads_mod, "UPLOAD_DIR", tmp_path)
 
     data = _png_bytes()
+    count = uploads_mod._MAX_FILES + 1
     resp = await client.post(
         "/api/uploads",
-        files=[("files", _file_tuple(f"img{i}.png", data)) for i in range(6)],
+        files=[("files", _file_tuple(f"img{i}.png", data)) for i in range(count)],
     )
     assert resp.status_code == 400
     assert "maximum" in resp.json()["detail"].lower()
@@ -156,9 +157,14 @@ async def test_get_nonexistent_image(client, tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_get_path_traversal_rejected(client, tmp_path, monkeypatch):
-    """GET /api/uploads/../secret.txt is rejected with 4xx."""
+    """Filenames with '..' components are rejected with 4xx."""
     import backend.api.uploads as uploads_mod
     monkeypatch.setattr(uploads_mod, "UPLOAD_DIR", tmp_path)
 
-    resp = await client.get("/api/uploads/..%2Fsecret.txt")
-    assert resp.status_code in (400, 404)
+    # Direct call to the endpoint handler — httpx normalizes encoded slashes
+    # before they reach FastAPI, so we test the handler's own guard directly.
+    from backend.api.uploads import get_file
+    from fastapi import HTTPException as _HTTPException
+    with pytest.raises(_HTTPException) as exc_info:
+        await get_file("../secret.txt")
+    assert exc_info.value.status_code in (400, 404)

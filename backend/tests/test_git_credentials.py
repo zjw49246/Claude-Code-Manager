@@ -523,7 +523,7 @@ class TestApplyGitConfig:
 class TestCloneWithCredentials:
 
     @pytest.mark.asyncio
-    async def test_clone_passes_git_env_with_https(self):
+    async def test_clone_passes_git_env_with_https(self, tmp_path):
         """_clone_repo passes env with HTTPS credentials to git subprocess."""
         from backend.api.projects import _clone_repo
 
@@ -543,21 +543,20 @@ class TestCloneWithCredentials:
             "git_https_token": "ghp_test",
         }
 
-        with patch("backend.api.projects.async_session") as mock_ctx, \
+        mock_db = AsyncMock()
+        mock_session_ctx = AsyncMock()
+        mock_session_ctx.__aenter__ = AsyncMock(return_value=mock_db)
+        mock_session_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        local_path = str(tmp_path / "test-clone-repo")
+        with patch("backend.api.projects.async_session", return_value=mock_session_ctx), \
              patch("asyncio.create_subprocess_exec", side_effect=mock_subprocess), \
-             patch("backend.api.projects._apply_git_config", new_callable=AsyncMock), \
-             patch("builtins.open", MagicMock()), \
-             patch("os.path.exists", return_value=True), \
-             patch("os.path.isdir", return_value=False), \
-             patch("os.makedirs"):
-            mock_db = AsyncMock()
-            mock_ctx.return_value.__aenter__ = AsyncMock(return_value=mock_db)
-            mock_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
+             patch("backend.api.projects._apply_git_config", new_callable=AsyncMock):
 
             await _clone_repo(
                 project_id=1,
                 git_url="https://github.com/test/repo.git",
-                local_path="/tmp/test-clone-repo",
+                local_path=local_path,
                 project_name="test",
                 default_branch="main",
                 git_config=git_config,
@@ -571,7 +570,7 @@ class TestCloneWithCredentials:
         assert clone_env["GIT_CONFIG_NOSYSTEM"] == "1"
 
     @pytest.mark.asyncio
-    async def test_clone_passes_git_env_with_ssh(self):
+    async def test_clone_passes_git_env_with_ssh(self, tmp_path):
         """_clone_repo passes env with SSH credentials to git subprocess."""
         from backend.api.projects import _clone_repo
 
@@ -590,21 +589,20 @@ class TestCloneWithCredentials:
             "git_ssh_key_path": "/keys/my_ssh_key",
         }
 
-        with patch("backend.api.projects.async_session") as mock_ctx, \
+        mock_db = AsyncMock()
+        mock_session_ctx = AsyncMock()
+        mock_session_ctx.__aenter__ = AsyncMock(return_value=mock_db)
+        mock_session_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        local_path = str(tmp_path / "test-clone-repo-ssh")
+        with patch("backend.api.projects.async_session", return_value=mock_session_ctx), \
              patch("asyncio.create_subprocess_exec", side_effect=mock_subprocess), \
-             patch("backend.api.projects._apply_git_config", new_callable=AsyncMock), \
-             patch("builtins.open", MagicMock()), \
-             patch("os.path.exists", return_value=True), \
-             patch("os.path.isdir", return_value=False), \
-             patch("os.makedirs"):
-            mock_db = AsyncMock()
-            mock_ctx.return_value.__aenter__ = AsyncMock(return_value=mock_db)
-            mock_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
+             patch("backend.api.projects._apply_git_config", new_callable=AsyncMock):
 
             await _clone_repo(
                 project_id=1,
                 git_url="git@github.com:test/repo.git",
-                local_path="/tmp/test-clone-repo-ssh",
+                local_path=local_path,
                 project_name="test",
                 default_branch="main",
                 git_config=git_config,
