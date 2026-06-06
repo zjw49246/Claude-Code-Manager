@@ -41,7 +41,7 @@ class InstanceManager:
         """
         cmd = [
             settings.claude_binary,
-            "-p", prompt,
+            "-p",
             "--dangerously-skip-permissions",
             "--output-format", "stream-json",
             "--verbose",
@@ -52,6 +52,7 @@ class InstanceManager:
             cmd.extend(["--model", model])
         if effort_level:
             cmd.extend(["--effort", effort_level])
+        cmd.extend(["--", prompt])
 
         # Must unset CLAUDE_CODE env var to avoid nested session detection
         env = {k: v for k, v in os.environ.items() if k.upper() not in ("CLAUDECODE", "CLAUDE_CODE")}

@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import signal
 import tempfile
 from datetime import datetime, timezone
@@ -17,6 +18,7 @@ from backend.models.discussion import (
     DiscussionEvent,
     DiscussionMessage,
 )
+from backend.models.project import Project
 from backend.services.stream_parser import StreamParser
 from backend.services.ws_broadcaster import WebSocketBroadcaster
 
@@ -39,6 +41,14 @@ class DiscussionService:
         if discussion_id not in self._facilitator_locks:
             self._facilitator_locks[discussion_id] = asyncio.Lock()
         return self._facilitator_locks[discussion_id]
+
+    async def _resolve_project_cwd(self, db: AsyncSession, disc: Discussion) -> str | None:
+        if not disc.project_id:
+            return None
+        project = await db.get(Project, disc.project_id)
+        if project and project.local_path:
+            return project.local_path
+        return None
 
     # ------------------------------------------------------------------
     # Public: user sends group message
@@ -82,10 +92,12 @@ class DiscussionService:
             )
             return existing_agents
 
+        project_cwd = await self._resolve_project_cwd(db, disc)
+
         history = await self._get_history(db, discussion_id)
         history_file = self._write_history_file(discussion_id, history)
 
-        roles = await self._run_facilitator_init(disc, history_file)
+        roles = await self._run_facilitator_init(disc, history_file, cwd=project_cwd)
 
         agents = []
         for role in roles:
@@ -108,7 +120,7 @@ class DiscussionService:
         await db.commit()
 
         for agent in agents:
-            self._launch_agent(agent, disc, history_file)
+            self._launch_agent(agent, disc, history_file, cwd=project_cwd)
 
         return agents
 
@@ -234,10 +246,12 @@ Write in Chinese."""
         )
         existing_roles = [a.role_name for a in existing_agents.scalars().all()]
 
+        project_cwd = await self._resolve_project_cwd(db, disc)
+
         history = await self._get_history(db, discussion_id)
         history_file = self._write_history_file(discussion_id, history)
 
-        role = await self._run_facilitator_add_one(disc, history_file, existing_roles)
+        role = await self._run_facilitator_add_one(disc, history_file, existing_roles, cwd=project_cwd)
 
         agent = DiscussionAgent(
             discussion_id=discussion_id,
@@ -255,7 +269,7 @@ Write in Chinese."""
             "agent": _agent_to_dict(agent),
         })
 
-        self._launch_agent(agent, disc, history_file)
+        self._launch_agent(agent, disc, history_file, cwd=project_cwd)
         return agent
 
     # ------------------------------------------------------------------
@@ -307,15 +321,17 @@ Write in Chinese."""
                 if not agent_list:
                     return
 
-                agent_summaries = await self._collect_agent_summaries(db, discussion_id)
+                agent_outputs_file = await self._write_agent_outputs_file(db, discussion_id)
+                agent_names = [a.role_name for a in agent_list]
                 messages = await self._get_history(db, discussion_id)
+                project_cwd = await self._resolve_project_cwd(db, disc)
 
             goal = messages[0].content if messages else disc.title
             round_num = self._round_count.get(discussion_id, 0) + 1
             self._round_count[discussion_id] = round_num
 
             decision = await self._run_facilitator_decide(
-                disc, goal, agent_summaries, round_num
+                disc, goal, agent_names, agent_outputs_file, round_num, cwd=project_cwd
             )
 
             action = decision.get("action", "complete")
@@ -380,24 +396,24 @@ Write in Chinese."""
                         },
                     )
 
+                    effective_cwd = agent.last_cwd or project_cwd
                     if agent.session_id:
-                        self._launch_agent_resume(agent, disc, instruction)
+                        self._launch_agent_resume(agent, disc, instruction, cwd=effective_cwd)
                     else:
                         full_prompt = f"{agent.system_prompt}\n\n{instruction}"
-                        self._launch_agent_with_prompt(agent, disc, full_prompt)
+                        self._launch_agent_with_prompt(agent, disc, full_prompt, cwd=effective_cwd)
 
     async def _run_facilitator_decide(
         self,
         disc: Discussion,
         goal: str,
-        agent_summaries: dict[str, str],
+        agent_names: list[str],
+        agent_outputs_file: str,
         round_num: int,
+        cwd: str | None = None,
     ) -> dict:
         """Facilitator decides: continue with instructions, or complete."""
-        summaries_text = "\n\n".join(
-            f"### {name}\n{summary}" for name, summary in agent_summaries.items()
-        )
-        agent_names = ", ".join(agent_summaries.keys())
+        names_str = ", ".join(agent_names)
 
         prompt = f"""\
 你是一场多角色讨论的协调者(Facilitator)。
@@ -406,16 +422,17 @@ Write in Chinese."""
 {goal}
 
 ## 当前参与角色
-{agent_names}
+{names_str}
 
-## 各角色最新产出
-{summaries_text}
+## 各角色的完整产出
+请阅读以下文件，里面包含每个角色的完整输出（不要跳过，仔细阅读）：
+{agent_outputs_file}
 
 ## 当前轮次
 第 {round_num} 轮（最多 {MAX_AUTO_ROUNDS} 轮）
 
 ## 你的任务
-分析各角色的产出，判断讨论目标是否已经达成。
+仔细阅读上述文件中各角色的完整产出，判断讨论目标是否已经达成。
 
 如果还需要继续：决定哪些角色需要继续工作，给每个角色**具体的下一步指令**。
 指令中要包含其他角色的关键观点（交叉分享），以及你希望该角色接下来重点分析的方向。
@@ -424,29 +441,31 @@ Write in Chinese."""
 如果目标已达成：生成最终产出，综合所有角色的分析。
 
 ## 输出格式
-只输出一个 JSON 对象，不要有其他文字：
+用以下 XML 标签输出你的决策，不要有其他文字：
 
 继续讨论：
-{{
-  "action": "continue",
-  "reason": "为什么需要继续，当前还缺什么",
-  "instructions": {{
-    "角色名1": "给该角色的具体指令，包含交叉分享的信息...",
-    "角色名2": "给该角色的具体指令..."
-  }}
-}}
+<decision>
+<action>continue</action>
+<reason>为什么需要继续，当前还缺什么</reason>
+<instructions>
+<role name="角色名1">给该角色的具体指令，包含交叉分享的信息...</role>
+<role name="角色名2">给该角色的具体指令...</role>
+</instructions>
+</decision>
 
 讨论完成：
-{{
-  "action": "complete",
-  "reason": "为什么判断目标已达成",
-  "final_output": "最终综合产出（Markdown格式，完整且可交付）"
-}}"""
+<decision>
+<action>complete</action>
+<reason>为什么判断目标已达成</reason>
+<final_output>
+最终综合产出（Markdown格式，完整且可交付）
+</final_output>
+</decision>"""
 
-        return await self._run_facilitator_structured(disc, prompt)
+        return await self._run_facilitator_structured(disc, prompt, cwd=cwd)
 
     async def _run_facilitator_process(
-        self, disc: Discussion, prompt: str
+        self, disc: Discussion, prompt: str, cwd: str | None = None
     ) -> list[str]:
         """Run facilitator subprocess, stream events, capture session_id. Returns collected text."""
         env = self._build_env()
@@ -477,6 +496,7 @@ Write in Chinese."""
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
+                cwd=cwd,
                 limit=10 * 1024 * 1024,
             )
 
@@ -541,46 +561,74 @@ Write in Chinese."""
         return collected_text
 
     async def _run_facilitator_structured(
-        self, disc: Discussion, prompt: str
+        self, disc: Discussion, prompt: str, cwd: str | None = None,
+        _retry: int = 0,
     ) -> dict:
-        """Run facilitator and parse structured JSON response."""
+        """Run facilitator and parse structured XML response. Retries once on parse failure."""
+        MAX_PARSE_RETRIES = 1
         try:
-            collected_text = await self._run_facilitator_process(disc, prompt)
+            collected_text = await self._run_facilitator_process(disc, prompt, cwd=cwd)
         except Exception as e:
             return {"action": "complete", "reason": f"Facilitator error: {e}"}
 
         raw = "\n".join(collected_text).strip()
-        return self._parse_json_response(raw)
+        result = self._parse_decision_xml(raw)
 
-    def _parse_json_response(self, raw: str) -> dict:
+        if result.get("reason") == "无法解析协调者输出" and _retry < MAX_PARSE_RETRIES:
+            logger.info("Facilitator output missing <decision> tags, asking to retry (attempt %d)", _retry + 1)
+            retry_prompt = (
+                "你刚才的输出缺少 <decision> 标签，我无法解析。"
+                "请严格按照之前要求的 XML 格式重新输出你的决策，"
+                "用 <decision>...</decision> 包裹。"
+            )
+            return await self._run_facilitator_structured(
+                disc, retry_prompt, cwd=cwd, _retry=_retry + 1
+            )
+
+        return result
+
+    @staticmethod
+    def _parse_decision_xml(raw: str) -> dict:
         text = raw.strip()
-        if text.startswith("```"):
-            lines = text.split("\n")
-            lines = [l for l in lines if not l.strip().startswith("```")]
-            text = "\n".join(lines).strip()
 
-        try:
-            data = json.loads(text)
-            if isinstance(data, dict) and "action" in data:
-                return data
-        except (json.JSONDecodeError, TypeError):
-            pass
+        decision_match = re.search(r"<decision>(.*?)</decision>", text, re.DOTALL)
+        if not decision_match:
+            decision_match = re.search(r"<decision>(.*)", text, re.DOTALL)
+        if not decision_match:
+            logger.warning("No <decision> tag found, defaulting to complete. Raw: %s", text[:300])
+            return {
+                "action": "complete",
+                "reason": "无法解析协调者输出",
+                "final_output": text if text else "讨论未能产生结构化结论。",
+            }
 
-        start = text.find("{")
-        end = text.rfind("}")
-        if start != -1 and end != -1:
-            try:
-                data = json.loads(text[start : end + 1])
-                if isinstance(data, dict) and "action" in data:
-                    return data
-            except (json.JSONDecodeError, TypeError):
-                pass
+        body = decision_match.group(1)
 
-        logger.warning("Could not parse facilitator decision, defaulting to complete. Raw: %s", text[:300])
+        action_m = re.search(r"<action>(.*?)</action>", body, re.DOTALL)
+        action = action_m.group(1).strip() if action_m else "complete"
+
+        reason_m = re.search(r"<reason>(.*?)</reason>", body, re.DOTALL)
+        reason = reason_m.group(1).strip() if reason_m else ""
+
+        if action == "continue":
+            instructions: dict[str, str] = {}
+            for role_m in re.finditer(
+                r'<role\s+name="([^"]+)">(.*?)</role>', body, re.DOTALL
+            ):
+                instructions[role_m.group(1).strip()] = role_m.group(2).strip()
+            return {
+                "action": "continue",
+                "reason": reason,
+                "instructions": instructions,
+            }
+
+        final_m = re.search(r"<final_output>(.*?)</final_output>", body, re.DOTALL)
+        final_output = final_m.group(1).strip() if final_m else text
+
         return {
             "action": "complete",
-            "reason": "无法解析协调者输出",
-            "final_output": text if text else "讨论未能产生结构化结论。",
+            "reason": reason,
+            "final_output": final_output,
         }
 
     # ------------------------------------------------------------------
@@ -591,7 +639,12 @@ Write in Chinese."""
         agent: DiscussionAgent,
         disc: Discussion,
         history_file: str,
+        cwd: str | None = None,
     ) -> None:
+        if cwd:
+            agent.last_cwd = cwd
+            asyncio.get_event_loop().create_task(self._persist_agent_cwd(agent.id, cwd))
+
         prompt = f"""\
 {agent.system_prompt}
 
@@ -605,17 +658,27 @@ Guidelines:
 
         self._launch_agent_with_prompt(agent, disc, prompt, history_file)
 
+    async def _persist_agent_cwd(self, agent_id: int, cwd: str) -> None:
+        async with self.db_factory() as db:
+            await db.execute(
+                update(DiscussionAgent)
+                .where(DiscussionAgent.id == agent_id)
+                .values(last_cwd=cwd)
+            )
+            await db.commit()
+
     def _launch_agent_resume(
         self,
         agent: DiscussionAgent,
         disc: Discussion,
         message: str,
+        cwd: str | None = None,
     ) -> None:
         cmd = self._build_cmd(disc.agent_model, resume_session_id=agent.session_id)
         cmd.extend(["-p", message])
 
         env = self._build_env()
-        cwd = agent.last_cwd
+        cwd = cwd or agent.last_cwd
 
         task = asyncio.get_event_loop().create_task(
             self._run_and_consume(agent.id, agent.discussion_id, cmd, env, cwd)
@@ -628,6 +691,7 @@ Guidelines:
         disc: Discussion,
         prompt: str,
         history_file: str | None = None,
+        cwd: str | None = None,
     ) -> None:
         cmd = self._build_cmd(disc.agent_model, resume_session_id=agent.session_id)
         cmd.extend(["-p", prompt])
@@ -637,7 +701,7 @@ Guidelines:
         task = asyncio.get_event_loop().create_task(
             self._run_and_consume(
                 agent.id, agent.discussion_id, cmd, env,
-                cwd=agent.last_cwd,
+                cwd=cwd or agent.last_cwd,
                 cleanup_file=history_file,
             )
         )
@@ -873,11 +937,48 @@ Guidelines:
             f.write("\n".join(lines))
         return path
 
+    async def _write_agent_outputs_file(
+        self, db: AsyncSession, discussion_id: int
+    ) -> str:
+        """Write all agents' full message outputs to a temp file for Facilitator to read."""
+        agents_result = await db.execute(
+            select(DiscussionAgent).where(
+                DiscussionAgent.discussion_id == discussion_id
+            )
+        )
+        lines = [f"# Discussion #{discussion_id} — Agent Outputs\n"]
+        for agent in agents_result.scalars().all():
+            lines.append(f"## {agent.role_name} (status: {agent.status})\n")
+            events_result = await db.execute(
+                select(DiscussionEvent)
+                .where(
+                    DiscussionEvent.agent_id == agent.id,
+                    DiscussionEvent.event_type.in_(["message", "result"]),
+                    DiscussionEvent.content.isnot(None),
+                    DiscussionEvent.content != "",
+                )
+                .order_by(DiscussionEvent.id)
+            )
+            events = events_result.scalars().all()
+            if events:
+                for evt in events:
+                    lines.append(evt.content)
+                    lines.append("")
+            else:
+                lines.append("(no output yet)\n")
+
+        fd, path = tempfile.mkstemp(
+            prefix=f"discussion_{discussion_id}_outputs_", suffix=".md"
+        )
+        with os.fdopen(fd, "w") as f:
+            f.write("\n".join(lines))
+        return path
+
     # ------------------------------------------------------------------
     # Facilitator: initial role assignment
     # ------------------------------------------------------------------
     async def _run_facilitator_init(
-        self, disc: Discussion, history_file: str
+        self, disc: Discussion, history_file: str, cwd: str | None = None
     ) -> list[dict]:
         prompt = f"""\
 You are a discussion facilitator. Your job is to analyze the conversation so far
@@ -904,7 +1005,7 @@ Rules:
 - ONLY output the JSON array"""
 
         try:
-            collected_text = await self._run_facilitator_process(disc, prompt)
+            collected_text = await self._run_facilitator_process(disc, prompt, cwd=cwd)
         except Exception as e:
             raise RuntimeError(f"Facilitator failed: {e}")
 
@@ -912,7 +1013,7 @@ Rules:
         return self._parse_facilitator_roles(raw, disc.max_agents)
 
     async def _run_facilitator_add_one(
-        self, disc: Discussion, history_file: str, existing_roles: list[str]
+        self, disc: Discussion, history_file: str, existing_roles: list[str], cwd: str | None = None
     ) -> dict:
         roles_str = ", ".join(existing_roles) if existing_roles else "(none)"
         prompt = f"""\
@@ -933,7 +1034,7 @@ Rules:
 - ONLY output the JSON object"""
 
         try:
-            collected_text = await self._run_facilitator_process(disc, prompt)
+            collected_text = await self._run_facilitator_process(disc, prompt, cwd=cwd)
         except Exception as e:
             raise RuntimeError(f"Facilitator failed: {e}")
 

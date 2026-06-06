@@ -72,7 +72,10 @@ class PoolAccount:
     __slots__ = ("id", "config_dir", "email", "role", "enabled")
 
     def __init__(self, data: dict):
-        self.id: str = data["id"]
+        account_id = data.get("id") or data.get("name")
+        if not account_id:
+            raise ValueError("Pool account requires 'id' or 'name'")
+        self.id: str = account_id
         self.config_dir: str = os.path.expandvars(os.path.expanduser(data["config_dir"]))
         self.email: str = data.get("email", "")
         self.role: str = data.get("role", "automation")

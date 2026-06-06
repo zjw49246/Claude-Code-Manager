@@ -1,4 +1,4 @@
-const CACHE_NAME = 'cc-manager-v2';
+const CACHE_NAME = 'cc-manager-v3';
 const STATIC_ASSETS = ['/icons/icon.svg'];
 
 self.addEventListener('install', (event) => {
@@ -19,6 +19,12 @@ self.addEventListener('activate', (event) => {
 
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
+
+  // The Cache API only supports GET requests. Let POST/PUT/etc. go straight
+  // to the network so API-like form submissions never throw in the worker.
+  if (event.request.method !== 'GET') {
+    return;
+  }
 
   // Network-first for API and WebSocket — let them fall through to the network.
   if (url.pathname.startsWith('/api') || url.pathname.startsWith('/ws')) {
