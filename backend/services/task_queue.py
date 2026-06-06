@@ -121,7 +121,7 @@ class TaskQueue:
         effective_provider = instance_provider or settings.default_provider or "claude"
         base = select(Task).where(
             Task.status == "pending",
-            ((Task.provider == effective_provider) | (Task.provider.is_(None))),
+            Task.provider == effective_provider,
         )
 
         # Normalize "default" to the actual default model name

@@ -254,3 +254,70 @@ async def test_dequeue_no_args_backward_compat(queue):
     task = await queue.dequeue()
     assert task is not None
     assert task.title == "null-task"
+
+
+# === Provider-based dequeue tests ===
+
+
+@pytest.mark.asyncio
+async def test_dequeue_claude_instance_picks_claude_tasks(queue):
+    """Claude instance picks up claude-provider tasks."""
+    await queue.create(title="claude-task", description="d", target_repo="/tmp", provider="claude")
+    task = await queue.dequeue(instance_provider="claude")
+    assert task is not None
+    assert task.title == "claude-task"
+
+
+@pytest.mark.asyncio
+async def test_dequeue_codex_instance_picks_codex_tasks(queue):
+    """Codex instance picks up codex-provider tasks."""
+    await queue.create(title="codex-task", description="d", target_repo="/tmp", provider="codex")
+    task = await queue.dequeue(instance_provider="codex")
+    assert task is not None
+    assert task.title == "codex-task"
+
+
+@pytest.mark.asyncio
+async def test_dequeue_claude_instance_skips_codex_tasks(queue):
+    """Claude instance does NOT pick up codex-provider tasks."""
+    await queue.create(title="codex-only", description="d", target_repo="/tmp", provider="codex")
+    task = await queue.dequeue(instance_provider="claude")
+    assert task is None
+
+
+@pytest.mark.asyncio
+async def test_dequeue_codex_instance_skips_claude_tasks(queue):
+    """Codex instance does NOT pick up claude-provider tasks."""
+    await queue.create(title="claude-only", description="d", target_repo="/tmp", provider="claude")
+    task = await queue.dequeue(instance_provider="codex")
+    assert task is None
+
+
+@pytest.mark.asyncio
+async def test_dequeue_provider_and_model_combined(queue):
+    """Provider and model filtering work together correctly."""
+    await queue.create(title="claude-opus", description="d", target_repo="/tmp", provider="claude", model="opus")
+    await queue.create(title="codex-gpt55", description="d", target_repo="/tmp", provider="codex", model="gpt-5.5")
+
+    task = await queue.dequeue(instance_provider="codex", instance_model="gpt-5.5")
+    assert task is not None
+    assert task.title == "codex-gpt55"
+
+    task2 = await queue.dequeue(instance_provider="claude", instance_model="opus")
+    assert task2 is not None
+    assert task2.title == "claude-opus"
+
+
+@pytest.mark.asyncio
+async def test_dequeue_codex_default_model_normalization(queue):
+    """Codex instance with 'default' model correctly normalizes to default_codex_model."""
+    from unittest.mock import patch
+    with patch("backend.services.task_queue.settings") as mock_settings:
+        mock_settings.default_codex_model = "gpt-5.5"
+        mock_settings.default_model = "claude-opus-4-6"
+        mock_settings.default_provider = "codex"
+
+        await queue.create(title="codex-default", description="d", target_repo="/tmp", provider="codex", model="gpt-5.5")
+        task = await queue.dequeue(instance_provider="codex", instance_model="default")
+        assert task is not None
+        assert task.title == "codex-default"

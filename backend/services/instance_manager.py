@@ -58,13 +58,12 @@ class InstanceManager:
             env.update(git_env)
 
         # Pool: inject CLAUDE_CONFIG_DIR so this subprocess uses a specific account
-        if config_dir:
+        if config_dir and provider == "claude":
             env["CLAUDE_CONFIG_DIR"] = config_dir
             self._config_dirs[instance_id] = config_dir
 
-        # Forward Extended Thinking budget. Claude Code reads MAX_THINKING_TOKENS
-        # to decide the per-turn thinking budget. Skip when 0 / negative / None.
-        if thinking_budget and thinking_budget > 0:
+        # Forward Extended Thinking budget (Claude-specific env var)
+        if thinking_budget and thinking_budget > 0 and provider == "claude":
             env["MAX_THINKING_TOKENS"] = str(thinking_budget)
 
         # Claude Code can output very large NDJSON lines (e.g. Read tool with big files).
@@ -192,7 +191,8 @@ class InstanceManager:
                     if provider == "claude":
                         events = self.parser.parse_line(text)
                     else:
-                        events = [self._parse_codex_line(text)]
+                        parsed = self._parse_codex_line(text)
+                        events = [parsed] if parsed else []
                     if not events:
                         continue
 
@@ -288,7 +288,7 @@ class InstanceManager:
             self.processes.pop(instance_id, None)
             self._tasks.pop(instance_id, None)
 
-    def _parse_codex_line(self, line: str) -> dict:
+    def _parse_codex_line(self, line: str) -> dict | None:
         """Normalize Codex CLI JSONL events into the same shape as Claude logs."""
         now = datetime.utcnow().isoformat()
         try:
@@ -368,6 +368,11 @@ class InstanceManager:
                 content = item.get("text") or item.get("command") or item.get("status")
             if isinstance(content, (dict, list)):
                 content = json.dumps(content, ensure_ascii=False)
+            # Skip events with no extractable content (heartbeats, metadata),
+            # but keep events that carry a session_id
+            session_id_present = bool(self._extract_codex_session_id(data))
+            if not content and not session_id_present and codex_type not in ("item.started", "item.completed"):
+                return None
             tool_input = data.get("tool_input") or data.get("input")
             tool_output = data.get("tool_output") or data.get("output")
             event.update({
