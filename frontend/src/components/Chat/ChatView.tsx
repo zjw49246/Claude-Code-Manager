@@ -101,6 +101,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(true);
   const [interrupting, setInterrupting] = useState(false);
   const [stillRunning, setStillRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -185,12 +186,13 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
   }, [task.id]);
 
   const fetchHistory = useCallback(() => {
+    setHistoryLoading(true);
     api.getTaskChatHistory(task.id).then((msgs) => {
       // Filter out empty text messages (partial streaming chunks), keep tool/thinking/system events
       setMessages(msgs.filter((m) =>
         !((m.event_type === 'message' || m.event_type === 'result') && !m.content)
       ));
-    }).catch(() => {});
+    }).catch(() => {}).finally(() => setHistoryLoading(false));
   }, [task.id]);
 
   // Re-fetch history when WebSocket reconnects to pick up any messages
@@ -476,7 +478,13 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
 
       {/* Messages */}
       <div ref={messagesContainerRef} className="flex-1 overflow-y-auto p-4 space-y-3 min-h-0">
-        {messages.length === 0 && (
+        {messages.length === 0 && historyLoading && (
+          <div className="flex items-center justify-center gap-2 text-gray-500 mt-20">
+            <Loader2 size={16} className="animate-spin" />
+            <span className="text-sm">Loading chat history...</span>
+          </div>
+        )}
+        {messages.length === 0 && !historyLoading && (
           <div className="text-center text-gray-600 mt-20">
             <p className="text-lg mb-2">Chat with this task</p>
             <p className="text-sm">

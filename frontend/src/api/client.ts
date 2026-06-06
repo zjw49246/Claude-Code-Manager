@@ -417,7 +417,7 @@ export const api = {
   // Chat (task-based)
   sendTaskChat: (taskId: number, message: string, filePaths?: string[], secretIds?: number[]) =>
     request<{ ok: boolean; pid: number; instance_id: number; session_id: string }>(`/api/tasks/${taskId}/chat`, { method: 'POST', body: JSON.stringify({ message, file_paths: filePaths, secret_ids: secretIds }) }),
-  getTaskChatHistory: (taskId: number, limit = 0) =>
+  getTaskChatHistory: (taskId: number, limit = 300) =>
     request<ChatMessage[]>(`/api/tasks/${taskId}/chat/history?limit=${limit}`),
 
   // Files (local)
