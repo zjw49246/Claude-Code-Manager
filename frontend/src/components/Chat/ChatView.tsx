@@ -475,7 +475,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
       {interrupting && (
         <div className="flex items-center gap-2 px-4 py-2 bg-yellow-500/10 border-b border-yellow-500/30 text-yellow-400 text-xs">
           <Loader2 size={14} className="animate-spin" />
-          Interrupting Claude... waiting for graceful shutdown
+          Interrupting {providerLabel}... waiting for graceful shutdown
         </div>
       )}
 
