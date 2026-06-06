@@ -404,6 +404,9 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
             <p className="text-foreground font-medium text-sm whitespace-nowrap">Task #{task.id}</p>
+            <span className={`text-xs px-1.5 rounded font-medium whitespace-nowrap ${task.provider === 'codex' ? 'bg-green-600/30 text-green-300' : 'bg-blue-600/30 text-blue-300'}`}>
+              {providerLabel}
+            </span>
             {projectName && (
               <span className="text-xs bg-emerald-600/30 text-emerald-300 px-1.5 rounded font-medium whitespace-nowrap">{projectName}</span>
             )}

@@ -211,7 +211,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
       <div className="flex gap-2">
         <textarea
           className="flex-1 bg-gray-700 text-foreground rounded px-3 py-2 text-sm h-24 resize-none focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          placeholder={mode === 'loop' ? 'Background / context (optional)' : 'Prompt / Description (this will be sent to Claude Code)'}
+          placeholder={mode === 'loop' ? 'Background / context (optional)' : `Prompt / Description (this will be sent to ${provider === 'codex' ? 'Codex' : 'Claude Code'})`}
           value={description}
           onChange={(e) => setDescription(e.target.value)}
           required={mode !== 'loop'}
