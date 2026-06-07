@@ -1187,6 +1187,7 @@ class GlobalDispatcher:
                 condition=task.goal_condition,
                 conversation_summary=conversation_summary,
                 model=task.goal_evaluator_model,
+                provider=task.provider or "claude",
             )
 
             turn += 1

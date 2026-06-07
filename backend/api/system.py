@@ -46,4 +46,5 @@ async def get_config():
         "codex_model_options": [m.strip() for m in settings.codex_model_options.split(",") if m.strip()],
         "default_effort": settings.default_effort,
         "effort_options": [e.strip() for e in settings.effort_options.split(",") if e.strip()],
+        "codex_effort_options": [e.strip() for e in settings.codex_effort_options.split(",") if e.strip()],
     }
