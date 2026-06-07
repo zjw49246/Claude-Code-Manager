@@ -18,6 +18,11 @@ interface ChatViewProps {
   onTaskUpdated?: () => void;
 }
 
+interface QueuedMessage {
+  text: string;
+  uploadResults?: UploadResult[];
+}
+
 type MessageGroup =
   | { type: 'tool-group'; messages: ChatMessage[] }
   | { type: 'single'; message: ChatMessage };
@@ -158,10 +163,16 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
   }, []);
 
   // Message queue: pre-queue messages to auto-send after current turn completes
-  const [messageQueue, setMessageQueue] = useState<string[]>(() => {
+  const [messageQueue, setMessageQueue] = useState<QueuedMessage[]>(() => {
     try {
       const saved = localStorage.getItem(`ccm-chat-queue-${task.id}`);
-      return saved ? JSON.parse(saved) : [];
+      if (!saved) return [];
+      const parsed = JSON.parse(saved);
+      // Migrate legacy string[] format
+      if (Array.isArray(parsed) && parsed.length > 0 && typeof parsed[0] === 'string') {
+        return (parsed as string[]).map(text => ({ text }));
+      }
+      return parsed;
     } catch { return []; }
   });
   const messageQueueRef = useRef(messageQueue);
@@ -170,8 +181,16 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
     localStorage.setItem(`ccm-chat-queue-${task.id}`, JSON.stringify(messageQueue));
   }, [messageQueue, task.id]);
 
-  const addToQueue = useCallback((text: string) => {
-    setMessageQueue(prev => [...prev, text]);
+  const addToQueue = useCallback(async (text: string, files?: File[]) => {
+    let uploadResults: UploadResult[] | undefined;
+    if (files && files.length > 0) {
+      try {
+        uploadResults = await api.uploadImages(files);
+      } catch {
+        // Upload failed — queue text only
+      }
+    }
+    setMessageQueue(prev => [...prev, { text, uploadResults }]);
   }, []);
 
   const removeFromQueue = useCallback((index: number) => {
@@ -179,9 +198,9 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
   }, []);
 
   const editQueueItem = useCallback((index: number) => {
-    const text = messageQueueRef.current[index];
-    if (!text) return;
-    setInput(prev => prev.trim() ? `${prev.trim()}\n\n${text}` : text);
+    const item = messageQueueRef.current[index];
+    if (!item) return;
+    setInput(prev => prev.trim() ? `${prev.trim()}\n\n${item.text}` : item.text);
     setMessageQueue(prev => prev.filter((_, i) => i !== index));
     requestAnimationFrame(() => textareaRef.current?.focus());
   }, []);
@@ -191,7 +210,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
     if (queued.length === 0) return;
     setInput(prev => {
       const current = prev.trim();
-      const merged = queued.join('\n\n');
+      const merged = queued.map(q => q.text).join('\n\n');
       return current ? `${current}\n\n${merged}` : merged;
     });
     setMessageQueue([]);
@@ -210,7 +229,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
 
   // Auto-dequeue: triggered by process_exit via flag increment
   const [autoDequeueFlag, setAutoDequeueFlag] = useState(0);
-  const handleSendRef = useRef<(text: string) => void>(() => {});
+  const handleSendRef = useRef<(text: string, uploadResults?: UploadResult[]) => void>(() => {});
 
   useEffect(() => {
     if (autoDequeueFlag === 0) return;
@@ -218,7 +237,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
     if (queue.length > 0) {
       const next = queue[0];
       setMessageQueue(prev => prev.slice(1));
-      setTimeout(() => handleSendRef.current(next), 200);
+      setTimeout(() => handleSendRef.current(next.text, next.uploadResults), 200);
     }
   }, [autoDequeueFlag]);
 
@@ -438,15 +457,21 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
     } catch { /* ignore */ }
   };
 
-  const handleSend = async (overrideText?: string, fromQueue?: boolean) => {
+  const handleSend = async (overrideText?: string, fromQueue?: boolean, preUploadedResults?: UploadResult[]) => {
     const text = (overrideText ?? input).trim();
-    if (!text && pendingFiles.length === 0) return;
+    if (!text && pendingFiles.length === 0 && !preUploadedResults?.length) return;
 
-    // If currently sending and not from auto-dequeue, add to queue
+    // If currently sending and not from auto-dequeue, add to queue (with files)
     if (isProcessing && !fromQueue) {
-      if (text) {
-        addToQueue(text);
+      if (text || pendingFiles.length > 0) {
+        const filesToQueue = pendingFiles.length > 0 ? [...pendingFiles] : undefined;
+        addToQueue(text, filesToQueue);
         setInput('');
+        if (filesToQueue) {
+          filePreviews.forEach(url => { if (url) URL.revokeObjectURL(url); });
+          setPendingFiles([]);
+          setFilePreviews([]);
+        }
       }
       return;
     }
@@ -465,7 +490,11 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
     try {
       let uploadedPaths: string[] | undefined;
       let attachments: FileAttachment[] | undefined;
-      if (snapshotFiles.length > 0) {
+
+      if (preUploadedResults && preUploadedResults.length > 0) {
+        uploadedPaths = preUploadedResults.map((r) => r.path);
+        attachments = preUploadedResults.map((r) => ({ url: r.url, name: r.filename || r.url.split('/').pop() || 'file', is_image: r.is_image }));
+      } else if (snapshotFiles.length > 0) {
         const results: UploadResult[] = await api.uploadImages(snapshotFiles);
         uploadedPaths = results.map((r) => r.path);
         attachments = results.map((r) => ({ url: r.url, name: r.filename || r.url.split('/').pop() || 'file', is_image: r.is_image }));
@@ -498,14 +527,14 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
       }
       setError(errMsg);
       // If from queue and failed, re-queue at front
-      if (fromQueue && text) {
-        setMessageQueue(prev => [text, ...prev]);
+      if (fromQueue && (text || preUploadedResults?.length)) {
+        setMessageQueue(prev => [{ text, uploadResults: preUploadedResults }, ...prev]);
       }
     }
   };
 
   // Keep ref updated for auto-dequeue effect
-  handleSendRef.current = (text: string) => handleSend(text, true);
+  handleSendRef.current = (text: string, uploadResults?: UploadResult[]) => handleSend(text, true, uploadResults);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.nativeEvent.isComposing) {
@@ -747,11 +776,17 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
               </div>
             </div>
             <div className="space-y-1 max-h-32 overflow-y-auto">
-              {messageQueue.map((msg, idx) => (
+              {messageQueue.map((item, idx) => (
                 <div key={idx} className="flex items-center gap-1.5 group/q">
                   <span className="text-[10px] text-gray-600 w-4 text-right shrink-0">{idx + 1}</span>
-                  <div className="flex-1 min-w-0 bg-gray-800/60 rounded px-2.5 py-1 text-xs text-gray-300 truncate">
-                    {msg}
+                  <div className="flex-1 min-w-0 bg-gray-800/60 rounded px-2.5 py-1 text-xs text-gray-300 truncate flex items-center gap-1.5">
+                    {item.uploadResults && item.uploadResults.length > 0 && (
+                      <span className="inline-flex items-center gap-0.5 text-amber-400 shrink-0" title={item.uploadResults.map(r => r.filename).join(', ')}>
+                        <Paperclip size={10} />
+                        <span className="text-[10px]">{item.uploadResults.length}</span>
+                      </span>
+                    )}
+                    <span className="truncate">{item.text}</span>
                   </div>
                   <div className="flex items-center gap-0.5 opacity-0 group-hover/q:opacity-100 transition-opacity shrink-0">
                     <button
