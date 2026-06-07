@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import time
 from pathlib import Path
 
@@ -144,7 +145,7 @@ class ClaudePool:
             "accounts": accounts,
         }
 
-    def select(self, *, exclude: set[str] | None = None) -> str | None:
+    def select(self, *, exclude: set[str] | None = None, validate: bool = False) -> str | None:
         """Pick the best available account config_dir, excluding specified IDs.
 
         Returns the config_dir path, or None if no account is available.
@@ -167,9 +168,49 @@ class ClaudePool:
         # Simple round-robin: pick the one whose cooldown expired earliest
         # (or never had one), which naturally distributes load
         candidates.sort(key=lambda a: self._cooldowns.get(a.id, 0))
-        chosen = candidates[0]
-        logger.info("Pool selected account %s (%s)", chosen.id, chosen.config_dir)
-        return chosen.config_dir
+        for chosen in candidates:
+            if validate and not self._probe_account(chosen):
+                continue
+            logger.info("Pool selected account %s (%s)", chosen.id, chosen.config_dir)
+            return chosen.config_dir
+
+        logger.warning("Pool has no healthy accounts after validation (exclude=%s)", exclude)
+        return None
+
+    def _probe_account(self, account: PoolAccount) -> bool:
+        """Run a small Claude CLI probe before assigning work to an account."""
+        env = {
+            **os.environ,
+            "CLAUDE_CONFIG_DIR": account.config_dir,
+        }
+        try:
+            proc = subprocess.run(
+                ["claude", "-p", "reply ok only"],
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=30,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning("Pool account %s probe timed out", account.id)
+            self.mark_rate_limited(account.config_dir, duration=60)
+            return False
+
+        combined = "\n".join([proc.stdout or "", proc.stderr or ""]).strip()
+        if proc.returncode == 0:
+            return True
+        if is_auth_failure(combined):
+            self.mark_auth_failure(account.config_dir)
+            return False
+        if is_rate_limited(combined):
+            self.mark_rate_limited(account.config_dir)
+            return False
+        logger.warning(
+            "Pool account %s probe failed with non-rotatable output: %s",
+            account.id,
+            combined[:300],
+        )
+        return False
 
     def account_id_from_config_dir(self, config_dir: str) -> str | None:
         for a in self._accounts:

@@ -1,5 +1,5 @@
-import json
 import os
+import json
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -138,7 +138,16 @@ async def send_chat_message(
     config_dir = None
     from backend.main import dispatcher
     if dispatcher and hasattr(dispatcher, 'pool') and dispatcher.pool and dispatcher.pool.enabled:
-        config_dir = dispatcher.pool.select()
+        config_dir = dispatcher.pool.select(validate=True)
+        if config_dir and task.session_id:
+            from backend.services.claude_pool import migrate_session
+            old_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+            if old_config_dir and old_config_dir != config_dir:
+                migrate_session(
+                    old_config_dir=old_config_dir,
+                    new_config_dir=config_dir,
+                    session_id=task.session_id,
+                )
 
     # Launch with --resume, using the task's cwd
     # Use task.model (the model that created the session) to maintain consistency,
