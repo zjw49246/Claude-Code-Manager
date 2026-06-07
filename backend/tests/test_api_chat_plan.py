@@ -29,54 +29,99 @@ async def test_chat_history_empty(client):
     assert resp.json() == []
 
 
-@pytest.mark.asyncio
-async def test_chat_history_returns_tool_fields(client, session_factory):
-    """Chat history should include tool_input and tool_output fields."""
-    # Create a task
+async def _create_task_with_tools(client, session_factory):
+    """Helper: create task + insert tool_use/tool_result log entries."""
+    from backend.models.log_entry import LogEntry
     create_resp = await client.post("/api/tasks", json={
         "title": "T", "description": "d", "target_repo": "/tmp",
     })
     task_id = create_resp.json()["id"]
-
-    # Insert log entries with tool_input/tool_output directly in DB
-    from backend.models.log_entry import LogEntry
     async with session_factory() as db:
-        # tool_use entry
         db.add(LogEntry(
-            instance_id=1,
-            task_id=task_id,
-            event_type="tool_use",
-            role="assistant",
-            tool_name="Edit",
+            instance_id=1, task_id=task_id, event_type="tool_use",
+            role="assistant", tool_name="Edit",
             tool_input='{"file_path": "/tmp/test.py", "old_string": "foo", "new_string": "bar"}',
             is_error=False,
         ))
-        # tool_result entry
         db.add(LogEntry(
-            instance_id=1,
-            task_id=task_id,
-            event_type="tool_result",
-            role="assistant",
-            tool_name="Edit",
+            instance_id=1, task_id=task_id, event_type="tool_result",
+            role="assistant", tool_name="Edit",
             tool_output="File updated successfully",
             is_error=False,
         ))
         await db.commit()
+    return task_id
 
+
+@pytest.mark.asyncio
+async def test_chat_history_compact_returns_summary(client, session_factory):
+    """Default compact mode: tool_input is a summary, tool_output is null."""
+    task_id = await _create_task_with_tools(client, session_factory)
     resp = await client.get(f"/api/tasks/{task_id}/chat/history")
     assert resp.status_code == 200
     msgs = resp.json()
     assert len(msgs) == 2
 
-    # tool_use should have tool_input
+    # tool_use: summary extracted from file_path
     assert msgs[0]["event_type"] == "tool_use"
     assert msgs[0]["tool_name"] == "Edit"
+    assert msgs[0]["tool_input"] == "/tmp/test.py"
+
+    # tool_result: output stripped in compact mode
+    assert msgs[1]["event_type"] == "tool_result"
+    assert msgs[1]["tool_output"] is None
+
+
+@pytest.mark.asyncio
+async def test_chat_history_full_returns_tool_fields(client, session_factory):
+    """compact=false: full tool_input/tool_output returned."""
+    task_id = await _create_task_with_tools(client, session_factory)
+    resp = await client.get(f"/api/tasks/{task_id}/chat/history?compact=false")
+    assert resp.status_code == 200
+    msgs = resp.json()
+    assert len(msgs) == 2
+
+    assert msgs[0]["event_type"] == "tool_use"
     assert msgs[0]["tool_input"] is not None
     assert "file_path" in msgs[0]["tool_input"]
 
-    # tool_result should have tool_output
     assert msgs[1]["event_type"] == "tool_result"
     assert msgs[1]["tool_output"] == "File updated successfully"
+
+
+@pytest.mark.asyncio
+async def test_message_detail_endpoint(client, session_factory):
+    """Detail endpoint returns full tool_input/tool_output for a single message."""
+    task_id = await _create_task_with_tools(client, session_factory)
+
+    # Get compact history first to find message ids
+    resp = await client.get(f"/api/tasks/{task_id}/chat/history")
+    msgs = resp.json()
+    tool_use_id = msgs[0]["id"]
+    tool_result_id = msgs[1]["id"]
+
+    # Fetch detail for tool_use
+    resp = await client.get(f"/api/tasks/{task_id}/chat/{tool_use_id}/detail")
+    assert resp.status_code == 200
+    detail = resp.json()
+    assert "file_path" in detail["tool_input"]
+
+    # Fetch detail for tool_result
+    resp = await client.get(f"/api/tasks/{task_id}/chat/{tool_result_id}/detail")
+    assert resp.status_code == 200
+    detail = resp.json()
+    assert detail["tool_output"] == "File updated successfully"
+
+
+@pytest.mark.asyncio
+async def test_message_detail_not_found(client):
+    """Detail for nonexistent message returns 404."""
+    create_resp = await client.post("/api/tasks", json={
+        "title": "T", "description": "d", "target_repo": "/tmp",
+    })
+    task_id = create_resp.json()["id"]
+    resp = await client.get(f"/api/tasks/{task_id}/chat/99999/detail")
+    assert resp.status_code == 404
 
 
 @pytest.mark.asyncio

@@ -98,6 +98,9 @@ function formatToolInput(input: string): string {
 
 function toolUseSummary(msg: ChatMessage): string {
   if (!msg.tool_input) return '';
+  if (!msg.tool_input.startsWith('{') && !msg.tool_input.startsWith('[')) {
+    return msg.tool_input;
+  }
   try {
     const parsed = JSON.parse(msg.tool_input);
     if (parsed.command) {
@@ -110,33 +113,62 @@ function toolUseSummary(msg: ChatMessage): string {
   return '';
 }
 
-function ToolItem({ message }: { message: ChatMessage }) {
+function ToolItem({ message, taskId }: { message: ChatMessage; taskId: number }) {
   const [expanded, setExpanded] = useState(false);
+  const [detail, setDetail] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
   const isToolUse = message.event_type === 'tool_use';
   const toolName = message.tool_name || (isToolUse ? 'tool' : 'result');
 
-  let detail: string | null = null;
-  if (isToolUse && message.tool_input) {
-    detail = formatToolInput(message.tool_input);
-  } else if (!isToolUse && (message.tool_output || message.content)) {
-    detail = message.tool_output || message.content;
-  } else if (message.content) {
-    detail = message.content;
-  }
+  const hasInlineDetail = isToolUse
+    ? !!(message.tool_input && (message.tool_input.startsWith('{') || message.tool_input.startsWith('[')))
+    : !!(message.tool_output || message.content);
+
+  const getInlineDetail = (): string | null => {
+    if (isToolUse && message.tool_input) return formatToolInput(message.tool_input);
+    if (!isToolUse && (message.tool_output || message.content)) return message.tool_output || message.content;
+    return message.content || null;
+  };
+
+  const handleExpand = async () => {
+    if (expanded) { setExpanded(false); return; }
+    setExpanded(true);
+    if (hasInlineDetail) { setDetail(getInlineDetail()); return; }
+    if (!detail && !loading) {
+      setLoading(true);
+      try {
+        const d = await api.getMessageDetail(taskId, message.id);
+        if (isToolUse && d.tool_input) {
+          setDetail(formatToolInput(d.tool_input));
+        } else if (!isToolUse && (d.tool_output || d.content)) {
+          setDetail(d.tool_output || d.content);
+        } else {
+          setDetail(d.content || '(empty)');
+        }
+      } catch {
+        setDetail('(failed to load)');
+      } finally {
+        setLoading(false);
+      }
+    }
+  };
 
   if (isToolUse) {
     const summary = toolUseSummary(message);
     return (
       <div>
         <button
-          onClick={() => setExpanded(!expanded)}
+          onClick={handleExpand}
           className="flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-400 py-0.5 max-w-full"
         >
           {expanded ? <ChevronDown size={10} className="shrink-0" /> : <ChevronRight size={10} className="shrink-0" />}
           <span className="text-gray-500 font-medium">{toolName}</span>
           {summary && <span className="text-gray-600 truncate">{summary}</span>}
         </button>
-        {expanded && detail && <div className="ml-4 mt-1 mb-1"><CollapsibleContent content={detail} /></div>}
+        {expanded && (loading
+          ? <div className="ml-4 mt-1 mb-1 text-xs text-gray-600">Loading...</div>
+          : detail && <div className="ml-4 mt-1 mb-1"><CollapsibleContent content={detail} /></div>
+        )}
       </div>
     );
   }
@@ -145,19 +177,22 @@ function ToolItem({ message }: { message: ChatMessage }) {
   return (
     <div>
       <button
-        onClick={() => setExpanded(!expanded)}
+        onClick={handleExpand}
         className="flex items-center gap-1.5 text-xs text-gray-600 hover:text-gray-400 py-0.5"
       >
         {expanded ? <ChevronDown size={10} className="shrink-0" /> : <ChevronRight size={10} className="shrink-0" />}
         <span className={statusColor}>{message.is_error ? '✗' : '✓'}</span>
         <span className="text-gray-600">{toolName}</span>
       </button>
-      {expanded && detail && <div className="ml-4 mt-1 mb-1"><CollapsibleContent content={detail} /></div>}
+      {expanded && (loading
+        ? <div className="ml-4 mt-1 mb-1 text-xs text-gray-600">Loading...</div>
+        : detail && <div className="ml-4 mt-1 mb-1"><CollapsibleContent content={detail} /></div>
+      )}
     </div>
   );
 }
 
-function ToolGroup({ messages }: { messages: ChatMessage[] }) {
+function ToolGroup({ messages, taskId }: { messages: ChatMessage[]; taskId: number }) {
   const [expanded, setExpanded] = useState(false);
   const hasError = messages.some((m) => m.is_error);
   const toolUseCount = messages.filter((m) => m.event_type === 'tool_use').length;
@@ -172,7 +207,7 @@ function ToolGroup({ messages }: { messages: ChatMessage[] }) {
       </button>
       {expanded && (
         <div className="ml-3 border-l border-gray-800 pl-3 space-y-1 mt-1">
-          {messages.map((msg) => <ToolItem key={msg.id} message={msg} />)}
+          {messages.map((msg) => <ToolItem key={msg.id} message={msg} taskId={taskId} />)}
         </div>
       )}
     </div>
@@ -270,7 +305,7 @@ interface IterationPanelProps {
   defaultOpen: boolean;
 }
 
-function IterationPanel({ iteration, messages, meta, isActive, defaultOpen }: IterationPanelProps) {
+function IterationPanel({ iteration, messages, meta, isActive, defaultOpen, taskId }: IterationPanelProps & { taskId: number }) {
   const [open, setOpen] = useState(defaultOpen || isActive);
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -303,7 +338,7 @@ function IterationPanel({ iteration, messages, meta, isActive, defaultOpen }: It
         <div className="p-3 space-y-2 bg-gray-900/30">
           {grouped.map((group, i) =>
             group.type === 'tool-group' ? (
-              <ToolGroup key={i} messages={group.messages} />
+              <ToolGroup key={i} messages={group.messages} taskId={taskId} />
             ) : (
               <MessageBubble key={group.message.id} message={group.message} />
             )
@@ -484,6 +519,7 @@ export function LoopChatView({ task, onBack }: LoopChatViewProps) {
             meta={iterMeta.get(iter) ?? null}
             isActive={isRunning && iter === (activeIteration ?? maxIteration)}
             defaultOpen={iter === maxIteration}
+            taskId={task.id}
           />
         ))}
         <div ref={scrollBottomRef} />

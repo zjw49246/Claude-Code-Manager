@@ -419,8 +419,10 @@ export const api = {
   // Chat (task-based)
   sendTaskChat: (taskId: number, message: string, filePaths?: string[], secretIds?: number[]) =>
     request<{ ok: boolean; pid: number; instance_id: number; session_id: string }>(`/api/tasks/${taskId}/chat`, { method: 'POST', body: JSON.stringify({ message, file_paths: filePaths, secret_ids: secretIds }) }),
-  getTaskChatHistory: (taskId: number, limit = 300) =>
-    request<ChatMessage[]>(`/api/tasks/${taskId}/chat/history?limit=${limit}`),
+  getTaskChatHistory: (taskId: number, compact = true) =>
+    request<ChatMessage[]>(`/api/tasks/${taskId}/chat/history?compact=${compact}`),
+  getMessageDetail: (taskId: number, messageId: number) =>
+    request<{ id: number; tool_input: string | null; tool_output: string | null; content: string | null }>(`/api/tasks/${taskId}/chat/${messageId}/detail`),
 
   // Files (local)
   listDir: (path: string) =>
