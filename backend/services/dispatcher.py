@@ -417,7 +417,7 @@ class GlobalDispatcher:
         """Select a pool account config_dir, or None if pool is off / exhausted."""
         if not self.pool:
             return None
-        return self.pool.select(exclude=exclude)
+        return self.pool.select(exclude=exclude, validate=True)
 
     async def _check_rate_limit_and_rotate(
         self,
