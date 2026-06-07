@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm';
 import { api } from '../../api/client';
 import type { ChatMessage, FileAttachment, Task, Project, UploadResult } from '../../api/client';
 import { useWebSocket } from '../../hooks/useWebSocket';
-import { Send, ArrowLeft, Loader2, ChevronDown, ChevronRight, Copy, Check, Paperclip, X, StopCircle, Pencil, ArrowDown, Star } from 'lucide-react';
+import { Send, ArrowLeft, Loader2, ChevronDown, ChevronRight, Copy, Check, Paperclip, X, StopCircle, Pencil, ArrowDown, Star, ListPlus, Trash2 } from 'lucide-react';
 import { SecretPicker } from '../Secrets/SecretPicker';
 import { QuickPhraseDropdown } from '../QuickPhrases/QuickPhraseDropdown';
 import { ExpandableText } from '../ExpandableText';
@@ -125,6 +125,51 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
   const [showScrollBottom, setShowScrollBottom] = useState(false);
   const [starred, setStarred] = useState(task.starred);
 
+  // Message queue: pre-queue messages to auto-send after current turn completes
+  const [messageQueue, setMessageQueue] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem(`ccm-chat-queue-${task.id}`);
+      return saved ? JSON.parse(saved) : [];
+    } catch { return []; }
+  });
+  const messageQueueRef = useRef(messageQueue);
+  useEffect(() => {
+    messageQueueRef.current = messageQueue;
+    localStorage.setItem(`ccm-chat-queue-${task.id}`, JSON.stringify(messageQueue));
+  }, [messageQueue, task.id]);
+
+  const addToQueue = useCallback((text: string) => {
+    setMessageQueue(prev => [...prev, text]);
+  }, []);
+
+  const removeFromQueue = useCallback((index: number) => {
+    setMessageQueue(prev => prev.filter((_, i) => i !== index));
+  }, []);
+
+  const moveQueueItem = useCallback((index: number, direction: 'up' | 'down') => {
+    setMessageQueue(prev => {
+      const next = [...prev];
+      const target = direction === 'up' ? index - 1 : index + 1;
+      if (target < 0 || target >= next.length) return prev;
+      [next[index], next[target]] = [next[target], next[index]];
+      return next;
+    });
+  }, []);
+
+  // Auto-dequeue: triggered by process_exit via flag increment
+  const [autoDequeueFlag, setAutoDequeueFlag] = useState(0);
+  const handleSendRef = useRef<(text: string) => void>(() => {});
+
+  useEffect(() => {
+    if (autoDequeueFlag === 0) return;
+    const queue = messageQueueRef.current;
+    if (queue.length > 0) {
+      const next = queue[0];
+      setMessageQueue(prev => prev.slice(1));
+      setTimeout(() => handleSendRef.current(next), 200);
+    }
+  }, [autoDequeueFlag]);
+
   useEffect(() => {
     const prev = document.title;
     const label = task.title || task.description || '';
@@ -144,7 +189,10 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
     if (eventType === 'process_exit') {
       // Small delay so any final output messages queued just before
       // process_exit are rendered before the "thinking" indicator hides.
-      setTimeout(() => setSending(false), 500);
+      setTimeout(() => {
+        setSending(false);
+        setAutoDequeueFlag(f => f + 1);
+      }, 500);
       return;
     }
 
@@ -270,12 +318,12 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
     pendingFiles,
     setPendingFiles,
     setFilePreviews,
-    disabled: sending || !task.session_id,
+    disabled: !task.session_id,
     onError: (msg) => setDropError(msg),
   });
 
   useEffect(() => {
-    if (sending || !task.session_id) return;
+    if (!task.session_id) return;
     const handlePaste = (e: ClipboardEvent) => {
       const items = e.clipboardData?.items;
       if (!items) return;
@@ -293,7 +341,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
     };
     document.addEventListener('paste', handlePaste);
     return () => document.removeEventListener('paste', handlePaste);
-  }, [sending, task.session_id, addFiles]);
+  }, [task.session_id, addFiles]);
 
   useEffect(() => {
     if (dropError) {
@@ -338,16 +386,27 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
     } catch { /* ignore */ }
   };
 
-  const handleSend = async (overrideText?: string) => {
+  const handleSend = async (overrideText?: string, fromQueue?: boolean) => {
     const text = (overrideText ?? input).trim();
-    if ((!text && pendingFiles.length === 0) || sending) return;
+    if (!text && pendingFiles.length === 0) return;
 
-    const snapshotFiles = [...pendingFiles];
-    const snapshotPreviews = [...filePreviews];
+    // If currently sending and not from auto-dequeue, add to queue
+    if (sending && !fromQueue) {
+      if (text) {
+        addToQueue(text);
+        setInput('');
+      }
+      return;
+    }
 
-    setInput('');
-    setPendingFiles([]);
-    setFilePreviews([]);
+    const snapshotFiles = fromQueue ? [] : [...pendingFiles];
+    const snapshotPreviews = fromQueue ? [] : [...filePreviews];
+
+    if (!fromQueue) {
+      setInput('');
+      setPendingFiles([]);
+      setFilePreviews([]);
+    }
     setSending(true);
     setError(null);
 
@@ -386,8 +445,15 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
         setStillRunning(true);
       }
       setError(errMsg);
+      // If from queue and failed, re-queue at front
+      if (fromQueue && text) {
+        setMessageQueue(prev => [text, ...prev]);
+      }
     }
   };
+
+  // Keep ref updated for auto-dequeue effect
+  handleSendRef.current = (text: string) => handleSend(text, true);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.nativeEvent.isComposing) {
@@ -575,6 +641,61 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
         </div>
       )}
 
+      {/* Message Queue Display */}
+      {messageQueue.length > 0 && (
+        <div className="border-t border-gray-800 bg-gray-900/50 px-4 py-2">
+          <div className="max-w-3xl mx-auto">
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-xs text-amber-400 font-medium flex items-center gap-1.5">
+                <ListPlus size={12} />
+                Queued messages ({messageQueue.length})
+              </span>
+              <button
+                onClick={() => setMessageQueue([])}
+                className="text-xs text-gray-500 hover:text-red-400 transition-colors"
+              >
+                Clear all
+              </button>
+            </div>
+            <div className="space-y-1 max-h-32 overflow-y-auto">
+              {messageQueue.map((msg, idx) => (
+                <div key={idx} className="flex items-center gap-1.5 group/q">
+                  <span className="text-[10px] text-gray-600 w-4 text-right shrink-0">{idx + 1}</span>
+                  <div className="flex-1 min-w-0 bg-gray-800/60 rounded px-2.5 py-1 text-xs text-gray-300 truncate">
+                    {msg}
+                  </div>
+                  <div className="flex items-center gap-0.5 opacity-0 group-hover/q:opacity-100 transition-opacity shrink-0">
+                    <button
+                      onClick={() => moveQueueItem(idx, 'up')}
+                      disabled={idx === 0}
+                      className="p-0.5 text-gray-500 hover:text-gray-300 disabled:opacity-30"
+                      title="Move up"
+                    >
+                      <ChevronDown size={12} className="rotate-180" />
+                    </button>
+                    <button
+                      onClick={() => moveQueueItem(idx, 'down')}
+                      disabled={idx === messageQueue.length - 1}
+                      className="p-0.5 text-gray-500 hover:text-gray-300 disabled:opacity-30"
+                      title="Move down"
+                    >
+                      <ChevronDown size={12} />
+                    </button>
+                    <button
+                      onClick={() => removeFromQueue(idx)}
+                      className="p-0.5 text-gray-500 hover:text-red-400"
+                      title="Remove"
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Input */}
       <div className="border-t border-gray-800 bg-gray-900 p-3">
         <div className="flex flex-col gap-2 max-w-3xl mx-auto">
@@ -615,14 +736,14 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              disabled={sending || !task.session_id || pendingFiles.length >= 10}
+              disabled={!task.session_id || pendingFiles.length >= 10}
               className="p-2.5 text-gray-500 hover:text-gray-300 disabled:opacity-40 disabled:cursor-not-allowed"
               title="Attach files"
             >
               <Paperclip size={18} />
             </button>
-            <SecretPicker selectedIds={selectedSecretIds} onChange={setSelectedSecretIds} disabled={sending || !task.session_id} />
-            <QuickPhraseDropdown onSelect={(text) => handleSend(text)} disabled={sending || !task.session_id} />
+            <SecretPicker selectedIds={selectedSecretIds} onChange={setSelectedSecretIds} disabled={!task.session_id} />
+            <QuickPhraseDropdown onSelect={(text) => handleSend(text)} disabled={!task.session_id} />
             <textarea
               ref={textareaRef}
               value={input}
@@ -632,21 +753,21 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
                 !task.session_id
                   ? 'Run the task first to start a session...'
                   : sending
-                    ? 'Waiting for response...'
+                    ? 'Type next message to queue...'
                     : 'Type a follow-up message...'
               }
-              disabled={sending || !task.session_id}
+              disabled={!task.session_id}
               rows={1}
               className="flex-1 bg-gray-800 text-foreground rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-none disabled:opacity-50 max-h-48 overflow-y-auto"
               style={{ minHeight: '40px' }}
             />
             <button
               onClick={() => handleSend()}
-              disabled={(!input.trim() && pendingFiles.length === 0) || sending || !task.session_id}
-              title="Send (Ctrl+Enter)"
-              className="p-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg disabled:opacity-40 disabled:cursor-not-allowed"
+              disabled={(!input.trim() && pendingFiles.length === 0) || !task.session_id}
+              title={sending ? 'Add to queue (Ctrl+Enter)' : 'Send (Ctrl+Enter)'}
+              className={`p-2.5 text-white rounded-lg disabled:opacity-40 disabled:cursor-not-allowed ${sending ? 'bg-amber-600 hover:bg-amber-700' : 'bg-indigo-600 hover:bg-indigo-700'}`}
             >
-              <Send size={18} />
+              {sending ? <ListPlus size={18} /> : <Send size={18} />}
             </button>
           </div>
         </div>
