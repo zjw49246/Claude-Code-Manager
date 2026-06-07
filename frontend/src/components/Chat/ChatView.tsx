@@ -124,6 +124,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [showScrollBottom, setShowScrollBottom] = useState(false);
   const [starred, setStarred] = useState(task.starred);
+  const isProcessing = sending || ['in_progress', 'executing'].includes(task.status);
 
   // Message queue: pre-queue messages to auto-send after current turn completes
   const [messageQueue, setMessageQueue] = useState<string[]>(() => {
@@ -391,7 +392,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
     if (!text && pendingFiles.length === 0) return;
 
     // If currently sending and not from auto-dequeue, add to queue
-    if (sending && !fromQueue) {
+    if (isProcessing && !fromQueue) {
       if (text) {
         addToQueue(text);
         setInput('');
@@ -752,7 +753,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
               placeholder={
                 !task.session_id
                   ? 'Run the task first to start a session...'
-                  : sending
+                  : isProcessing
                     ? 'Type next message to queue...'
                     : 'Type a follow-up message...'
               }
@@ -764,10 +765,10 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
             <button
               onClick={() => handleSend()}
               disabled={(!input.trim() && pendingFiles.length === 0) || !task.session_id}
-              title={sending ? 'Add to queue (Ctrl+Enter)' : 'Send (Ctrl+Enter)'}
-              className={`p-2.5 text-white rounded-lg disabled:opacity-40 disabled:cursor-not-allowed ${sending ? 'bg-amber-600 hover:bg-amber-700' : 'bg-indigo-600 hover:bg-indigo-700'}`}
+              title={isProcessing ? 'Add to queue (Ctrl+Enter)' : 'Send (Ctrl+Enter)'}
+              className={`p-2.5 text-white rounded-lg disabled:opacity-40 disabled:cursor-not-allowed ${isProcessing ? 'bg-amber-600 hover:bg-amber-700' : 'bg-indigo-600 hover:bg-indigo-700'}`}
             >
-              {sending ? <ListPlus size={18} /> : <Send size={18} />}
+              {isProcessing ? <ListPlus size={18} /> : <Send size={18} />}
             </button>
           </div>
         </div>
