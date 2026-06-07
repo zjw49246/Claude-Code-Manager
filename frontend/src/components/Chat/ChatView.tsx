@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm';
 import { api } from '../../api/client';
 import type { ChatMessage, FileAttachment, Task, Project, UploadResult } from '../../api/client';
 import { useWebSocket } from '../../hooks/useWebSocket';
-import { Send, ArrowLeft, Loader2, ChevronDown, ChevronRight, Copy, Check, Paperclip, X, StopCircle, Pencil, ArrowDown, Star, ListPlus, Trash2 } from 'lucide-react';
+import { Send, ArrowLeft, Loader2, ChevronDown, ChevronRight, ChevronUp, Copy, Check, Paperclip, X, StopCircle, Pencil, ArrowDown, Star, ListPlus, Trash2 } from 'lucide-react';
 import { SecretPicker } from '../Secrets/SecretPicker';
 import { QuickPhraseDropdown } from '../QuickPhrases/QuickPhraseDropdown';
 import { ExpandableText } from '../ExpandableText';
@@ -125,6 +125,37 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
   const [showScrollBottom, setShowScrollBottom] = useState(false);
   const [starred, setStarred] = useState(task.starred);
   const isProcessing = sending || ['in_progress', 'executing'].includes(task.status);
+
+  const userMsgCount = useMemo(() => {
+    const chatUserMsgs = messages.filter((m) => m.role === 'user').length;
+    return (task.description ? 1 : 0) + chatUserMsgs;
+  }, [messages, task.description]);
+
+  const navigateUserMessage = useCallback((direction: 'up' | 'down') => {
+    const container = messagesContainerRef.current;
+    if (!container) return;
+    const nodes = Array.from(container.querySelectorAll<HTMLElement>('[data-user-msg]'));
+    if (nodes.length === 0) return;
+
+    const scrollTop = container.scrollTop;
+    const threshold = 5;
+
+    if (direction === 'up') {
+      for (let i = nodes.length - 1; i >= 0; i--) {
+        if (nodes[i].offsetTop < scrollTop - threshold) {
+          nodes[i].scrollIntoView({ behavior: 'smooth', block: 'start' });
+          return;
+        }
+      }
+    } else {
+      for (const node of nodes) {
+        if (node.offsetTop > scrollTop + threshold) {
+          node.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          return;
+        }
+      }
+    }
+  }, []);
 
   // Message queue: pre-queue messages to auto-send after current turn completes
   const [messageQueue, setMessageQueue] = useState<string[]>(() => {
@@ -591,7 +622,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
         )}
         {/* Initial prompt bubble */}
         {task.description && (
-          <div>
+          <div data-user-msg>
             <div className="text-center text-xs text-gray-600 py-1 mb-1">— Initial Prompt —</div>
             <div className="flex justify-end">
               <div className="max-w-[85%] group">
@@ -640,7 +671,34 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
         )}
         <div ref={bottomRef} />
       </div>
-      {showScrollBottom && (
+      {userMsgCount >= 2 && (
+        <div className="absolute bottom-28 right-6 z-10 flex flex-col gap-1.5">
+          <button
+            onClick={() => navigateUserMessage('up')}
+            className="p-2 bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-white rounded-full shadow-lg transition-all"
+            title="Previous user message"
+          >
+            <ChevronUp size={18} />
+          </button>
+          <button
+            onClick={() => navigateUserMessage('down')}
+            className="p-2 bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-white rounded-full shadow-lg transition-all"
+            title="Next user message"
+          >
+            <ChevronDown size={18} />
+          </button>
+          {showScrollBottom && (
+            <button
+              onClick={() => bottomRef.current?.scrollIntoView({ behavior: 'smooth' })}
+              className="p-2 bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-white rounded-full shadow-lg transition-all"
+              title="Scroll to bottom"
+            >
+              <ArrowDown size={18} />
+            </button>
+          )}
+        </div>
+      )}
+      {userMsgCount < 2 && showScrollBottom && (
         <button
           onClick={() => bottomRef.current?.scrollIntoView({ behavior: 'smooth' })}
           className="absolute bottom-28 right-6 z-10 p-2.5 bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-white rounded-full shadow-lg transition-all"
@@ -1179,7 +1237,7 @@ const MessageBubble = memo(function MessageBubble({ message }: { message: ChatMe
   }
 
   return (
-    <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'}`}>
+    <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'}`} {...(isUser ? { 'data-user-msg': '' } : {})}>
       <div className="max-w-[85%] group">
         <div
           className={`rounded-2xl px-4 py-2.5 text-sm ${

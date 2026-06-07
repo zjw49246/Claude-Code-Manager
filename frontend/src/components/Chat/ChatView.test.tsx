@@ -259,4 +259,224 @@ describe('ChatView', () => {
       expect(typeof capturedOnReconnect).toBe('function');
     });
   });
+
+  describe('User message navigation', () => {
+    function makeChatMessages(count: number): ChatMessage[] {
+      const msgs: ChatMessage[] = [];
+      for (let i = 0; i < count; i++) {
+        msgs.push({
+          id: i * 2 + 1,
+          role: 'user',
+          event_type: 'user_message',
+          content: `User message ${i + 1}`,
+          tool_name: null,
+          tool_input: null,
+          tool_output: null,
+          is_error: false,
+          loop_iteration: null,
+          timestamp: '2024-01-01T00:00:00Z',
+          image_urls: null,
+          attachments: null,
+        });
+        msgs.push({
+          id: i * 2 + 2,
+          role: 'assistant',
+          event_type: 'message',
+          content: `Assistant response ${i + 1}`,
+          tool_name: null,
+          tool_input: null,
+          tool_output: null,
+          is_error: false,
+          loop_iteration: null,
+          timestamp: '2024-01-01T00:01:00Z',
+          image_urls: null,
+          attachments: null,
+        });
+      }
+      return msgs;
+    }
+
+    it('does not show navigation buttons when fewer than 2 user messages', async () => {
+      const msgs = makeChatMessages(0);
+      (api.getTaskChatHistory as ReturnType<typeof vi.fn>).mockResolvedValue(msgs);
+      const task = makeTask({ description: 'Only one user msg' });
+      render(<ChatView task={task} projects={projects} onBack={onBack} />);
+
+      await waitFor(() => {
+        expect(api.getTaskChatHistory).toHaveBeenCalled();
+      });
+
+      expect(screen.queryByTitle('Previous user message')).not.toBeInTheDocument();
+      expect(screen.queryByTitle('Next user message')).not.toBeInTheDocument();
+    });
+
+    it('shows navigation buttons when 2+ user messages exist (description + 1 chat msg)', async () => {
+      const msgs = makeChatMessages(1);
+      (api.getTaskChatHistory as ReturnType<typeof vi.fn>).mockResolvedValue(msgs);
+      const task = makeTask({ description: 'Initial prompt' });
+      render(<ChatView task={task} projects={projects} onBack={onBack} />);
+
+      await waitFor(() => {
+        expect(screen.getByTitle('Previous user message')).toBeInTheDocument();
+      });
+      expect(screen.getByTitle('Next user message')).toBeInTheDocument();
+    });
+
+    it('shows navigation buttons when 2+ chat user messages exist (no description)', async () => {
+      const msgs = makeChatMessages(2);
+      (api.getTaskChatHistory as ReturnType<typeof vi.fn>).mockResolvedValue(msgs);
+      const task = makeTask({ description: null });
+      render(<ChatView task={task} projects={projects} onBack={onBack} />);
+
+      await waitFor(() => {
+        expect(screen.getByTitle('Previous user message')).toBeInTheDocument();
+      });
+      expect(screen.getByTitle('Next user message')).toBeInTheDocument();
+    });
+
+    it('marks initial prompt with data-user-msg attribute', async () => {
+      (api.getTaskChatHistory as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      const task = makeTask({ description: 'Initial prompt text' });
+      const { container } = render(<ChatView task={task} projects={projects} onBack={onBack} />);
+
+      await waitFor(() => {
+        expect(api.getTaskChatHistory).toHaveBeenCalled();
+      });
+
+      const userMsgNodes = container.querySelectorAll('[data-user-msg]');
+      expect(userMsgNodes.length).toBe(1);
+    });
+
+    it('marks user chat messages with data-user-msg attribute', async () => {
+      const msgs = makeChatMessages(3);
+      (api.getTaskChatHistory as ReturnType<typeof vi.fn>).mockResolvedValue(msgs);
+      const task = makeTask({ description: 'Prompt' });
+      const { container } = render(<ChatView task={task} projects={projects} onBack={onBack} />);
+
+      await waitFor(() => {
+        expect(container.querySelectorAll('[data-user-msg]').length).toBe(4);
+      });
+    });
+
+    it('does not mark assistant messages with data-user-msg attribute', async () => {
+      const msgs = makeChatMessages(2);
+      (api.getTaskChatHistory as ReturnType<typeof vi.fn>).mockResolvedValue(msgs);
+      const task = makeTask({ description: null });
+      const { container } = render(<ChatView task={task} projects={projects} onBack={onBack} />);
+
+      await waitFor(() => {
+        expect(container.querySelectorAll('[data-user-msg]').length).toBe(2);
+      });
+
+      const allMsgDivs = container.querySelectorAll('.items-start');
+      allMsgDivs.forEach((div) => {
+        expect(div).not.toHaveAttribute('data-user-msg');
+      });
+    });
+
+    it('clicking "Previous user message" calls scrollIntoView on a user message element', async () => {
+      const msgs = makeChatMessages(3);
+      (api.getTaskChatHistory as ReturnType<typeof vi.fn>).mockResolvedValue(msgs);
+      const task = makeTask({ description: 'Prompt' });
+      const { container } = render(<ChatView task={task} projects={projects} onBack={onBack} />);
+
+      await waitFor(() => {
+        expect(screen.getByTitle('Previous user message')).toBeInTheDocument();
+      });
+
+      const scrollContainer = container.querySelector('.overflow-y-auto')!;
+      const userMsgNodes = scrollContainer.querySelectorAll('[data-user-msg]');
+
+      const scrollIntoViewMock = vi.fn();
+      userMsgNodes.forEach((node) => {
+        (node as HTMLElement).scrollIntoView = scrollIntoViewMock;
+        Object.defineProperty(node, 'offsetTop', { value: 0, configurable: true });
+      });
+
+      Object.defineProperty(userMsgNodes[2], 'offsetTop', { value: 500, configurable: true });
+      Object.defineProperty(scrollContainer, 'scrollTop', { value: 600, configurable: true, writable: true });
+
+      await userEvent.click(screen.getByTitle('Previous user message'));
+
+      expect(scrollIntoViewMock).toHaveBeenCalledWith({ behavior: 'smooth', block: 'start' });
+    });
+
+    it('clicking "Next user message" calls scrollIntoView on the next user message', async () => {
+      const msgs = makeChatMessages(3);
+      (api.getTaskChatHistory as ReturnType<typeof vi.fn>).mockResolvedValue(msgs);
+      const task = makeTask({ description: 'Prompt' });
+      const { container } = render(<ChatView task={task} projects={projects} onBack={onBack} />);
+
+      await waitFor(() => {
+        expect(screen.getByTitle('Next user message')).toBeInTheDocument();
+      });
+
+      const scrollContainer = container.querySelector('.overflow-y-auto')!;
+      const userMsgNodes = scrollContainer.querySelectorAll('[data-user-msg]');
+
+      const scrollIntoViewMock = vi.fn();
+      userMsgNodes.forEach((node, i) => {
+        (node as HTMLElement).scrollIntoView = scrollIntoViewMock;
+        Object.defineProperty(node, 'offsetTop', { value: i * 300, configurable: true });
+      });
+
+      Object.defineProperty(scrollContainer, 'scrollTop', { value: 10, configurable: true, writable: true });
+
+      await userEvent.click(screen.getByTitle('Next user message'));
+
+      expect(scrollIntoViewMock).toHaveBeenCalledWith({ behavior: 'smooth', block: 'start' });
+    });
+
+    it('does nothing when already at the top and clicking up', async () => {
+      const msgs = makeChatMessages(2);
+      (api.getTaskChatHistory as ReturnType<typeof vi.fn>).mockResolvedValue(msgs);
+      const task = makeTask({ description: 'Prompt' });
+      const { container } = render(<ChatView task={task} projects={projects} onBack={onBack} />);
+
+      await waitFor(() => {
+        expect(screen.getByTitle('Previous user message')).toBeInTheDocument();
+      });
+
+      const scrollContainer = container.querySelector('.overflow-y-auto')!;
+      const userMsgNodes = scrollContainer.querySelectorAll('[data-user-msg]');
+
+      const scrollIntoViewMock = vi.fn();
+      userMsgNodes.forEach((node, i) => {
+        (node as HTMLElement).scrollIntoView = scrollIntoViewMock;
+        Object.defineProperty(node, 'offsetTop', { value: i * 300 + 100, configurable: true });
+      });
+
+      Object.defineProperty(scrollContainer, 'scrollTop', { value: 0, configurable: true, writable: true });
+
+      await userEvent.click(screen.getByTitle('Previous user message'));
+
+      expect(scrollIntoViewMock).not.toHaveBeenCalled();
+    });
+
+    it('does nothing when already at the last user message and clicking down', async () => {
+      const msgs = makeChatMessages(2);
+      (api.getTaskChatHistory as ReturnType<typeof vi.fn>).mockResolvedValue(msgs);
+      const task = makeTask({ description: 'Prompt' });
+      const { container } = render(<ChatView task={task} projects={projects} onBack={onBack} />);
+
+      await waitFor(() => {
+        expect(screen.getByTitle('Next user message')).toBeInTheDocument();
+      });
+
+      const scrollContainer = container.querySelector('.overflow-y-auto')!;
+      const userMsgNodes = scrollContainer.querySelectorAll('[data-user-msg]');
+
+      const scrollIntoViewMock = vi.fn();
+      userMsgNodes.forEach((node, i) => {
+        (node as HTMLElement).scrollIntoView = scrollIntoViewMock;
+        Object.defineProperty(node, 'offsetTop', { value: i * 100, configurable: true });
+      });
+
+      Object.defineProperty(scrollContainer, 'scrollTop', { value: 9999, configurable: true, writable: true });
+
+      await userEvent.click(screen.getByTitle('Next user message'));
+
+      expect(scrollIntoViewMock).not.toHaveBeenCalled();
+    });
+  });
 });
