@@ -179,13 +179,39 @@ async def send_chat_message(
     return {"ok": True, "pid": pid, "instance_id": inst.id, "session_id": task.session_id}
 
 
+def _tool_summary(tool_input: str | None) -> str:
+    """Extract a short one-line summary from tool_input JSON."""
+    if not tool_input:
+        return ""
+    try:
+        parsed = json.loads(tool_input)
+        if isinstance(parsed, dict):
+            if cmd := parsed.get("command"):
+                return cmd[:120] + "..." if len(cmd) > 120 else cmd
+            if fp := parsed.get("file_path"):
+                return fp
+            if pat := parsed.get("pattern"):
+                path = parsed.get("path", "")
+                return f"{pat} in {path}" if path else pat
+            if q := parsed.get("query"):
+                return q[:120] + "..." if len(q) > 120 else q
+    except (json.JSONDecodeError, TypeError):
+        pass
+    return ""
+
+
 @router.get("/{task_id}/chat/history")
 async def get_chat_history(
     task_id: int,
     limit: int = 0,
+    compact: bool = True,
     db: AsyncSession = Depends(get_db),
 ):
-    """Get chat-formatted history for a task (user messages + assistant responses)."""
+    """Get chat-formatted history for a task.
+
+    compact=True (default): tool_input/tool_output replaced with short summary.
+    compact=False: full tool_input/tool_output included (truncated at 20k chars).
+    """
     task = await db.get(Task, task_id)
     if not task:
         raise HTTPException(404, "Task not found")
@@ -222,12 +248,20 @@ async def get_chat_history(
         # Skip noisy system events (heartbeats, telemetry subtypes)
         if row.event_type == "system_event" and row.content in ("task_progress", "thinking_tokens", "token_usage", "api_request", "api_response"):
             continue
+
         tool_input = row.tool_input
         tool_output = row.tool_output
-        if tool_input and len(tool_input) > _TRUNCATE:
-            tool_input = tool_input[:_TRUNCATE] + "\n…(truncated)"
-        if tool_output and len(tool_output) > _TRUNCATE:
-            tool_output = tool_output[:_TRUNCATE] + "\n…(truncated)"
+
+        if compact and row.event_type in ("tool_use", "tool_result"):
+            summary = _tool_summary(tool_input) if row.event_type == "tool_use" else None
+            tool_input = summary or None
+            tool_output = None
+        else:
+            if tool_input and len(tool_input) > _TRUNCATE:
+                tool_input = tool_input[:_TRUNCATE] + "\n…(truncated)"
+            if tool_output and len(tool_output) > _TRUNCATE:
+                tool_output = tool_output[:_TRUNCATE] + "\n…(truncated)"
+
         attachments = None
         image_urls = None
         if row.raw_json:
@@ -258,3 +292,36 @@ async def get_chat_history(
         })
 
     return messages
+
+
+@router.get("/{task_id}/chat/{message_id}/detail")
+async def get_message_detail(
+    task_id: int,
+    message_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Get full tool_input/tool_output for a single message (lazy-load on expand)."""
+    _TRUNCATE = 20_000
+
+    stmt = (
+        select(LogEntry.id, LogEntry.tool_input, LogEntry.tool_output, LogEntry.content)
+        .where(LogEntry.id == message_id, LogEntry.task_id == task_id)
+    )
+    result = await db.execute(stmt)
+    row = result.one_or_none()
+    if not row:
+        raise HTTPException(404, "Message not found")
+
+    tool_input = row.tool_input
+    tool_output = row.tool_output
+    if tool_input and len(tool_input) > _TRUNCATE:
+        tool_input = tool_input[:_TRUNCATE] + "\n…(truncated)"
+    if tool_output and len(tool_output) > _TRUNCATE:
+        tool_output = tool_output[:_TRUNCATE] + "\n…(truncated)"
+
+    return {
+        "id": row.id,
+        "tool_input": tool_input,
+        "tool_output": tool_output,
+        "content": row.content,
+    }
