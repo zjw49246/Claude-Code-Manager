@@ -1,5 +1,6 @@
 """Tests for InstanceManager — subprocess lifecycle management."""
 import asyncio
+import json
 import os
 import signal
 import pytest
@@ -8,6 +9,225 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from backend.services.instance_manager import InstanceManager
 from backend.models.instance import Instance
 from backend.models.task import Task
+
+
+def test_parse_codex_agent_message():
+    im = InstanceManager(MagicMock(), MagicMock())
+    event = im._parse_codex_line(json.dumps({
+        "type": "item.completed",
+        "item": {"id": "item_1", "type": "agent_message", "text": "Done"},
+    }))
+
+    assert event["event_type"] == "message"
+    assert event["role"] == "assistant"
+    assert event["content"] == "Done"
+    assert event["is_error"] is False
+
+
+def test_parse_codex_command_started():
+    im = InstanceManager(MagicMock(), MagicMock())
+    event = im._parse_codex_line(json.dumps({
+        "type": "item.started",
+        "item": {
+            "id": "item_2",
+            "type": "command_execution",
+            "command": "npm run build",
+            "status": "in_progress",
+        },
+    }))
+
+    assert event["event_type"] == "tool_use"
+    assert event["role"] == "assistant"
+    assert event["tool_name"] == "Shell"
+    assert json.loads(event["tool_input"]) == {"command": "npm run build"}
+    assert event["content"] is None
+
+
+def test_parse_codex_command_completed():
+    im = InstanceManager(MagicMock(), MagicMock())
+    event = im._parse_codex_line(json.dumps({
+        "type": "item.completed",
+        "item": {
+            "id": "item_3",
+            "type": "command_execution",
+            "command": "git status",
+            "aggregated_output": "nothing to commit\n",
+            "exit_code": 0,
+            "status": "completed",
+        },
+    }))
+
+    assert event["event_type"] == "tool_result"
+    assert event["role"] == "tool"
+    assert event["tool_name"] == "Shell"
+    assert json.loads(event["tool_input"]) == {"command": "git status"}
+    assert event["tool_output"] == "nothing to commit\n"
+    assert event["content"] is None
+    assert event["is_error"] is False
+
+
+def test_parse_codex_turn_completed_usage():
+    im = InstanceManager(MagicMock(), MagicMock())
+    event = im._parse_codex_line(json.dumps({
+        "type": "turn.completed",
+        "usage": {
+            "input_tokens": 100,
+            "cached_input_tokens": 40,
+            "output_tokens": 20,
+            "reasoning_output_tokens": 5,
+        },
+    }))
+
+    assert event["event_type"] == "system_event"
+    assert event["context_usage"] == {
+        "input_tokens": 60,
+        "cache_read_input_tokens": 40,
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 20,
+        "total_input_tokens": 100,
+    }
+    assert event["content"] == "turn.completed"
+
+
+def test_parse_codex_thread_started_session_id():
+    im = InstanceManager(MagicMock(), MagicMock())
+    event = im._parse_codex_line(json.dumps({
+        "type": "thread.started",
+        "thread_id": "test-thread-123",
+    }))
+
+    assert event["event_type"] == "system_event"
+    assert event["content"] == "thread.started"
+    assert event["session_id"] == "test-thread-123"
+
+
+# === _build_command tests ===
+
+
+def test_build_command_claude_basic():
+    im = InstanceManager(MagicMock(), MagicMock())
+    cmd = im._build_command(provider="claude", prompt="do stuff", model=None, resume_session_id=None, effort_level=None)
+    assert cmd[0] == "claude"
+    assert "-p" in cmd
+    assert "do stuff" in cmd
+    assert "--dangerously-skip-permissions" in cmd
+    assert "--output-format" in cmd
+    assert "--verbose" in cmd
+
+
+def test_build_command_claude_with_resume_and_model():
+    im = InstanceManager(MagicMock(), MagicMock())
+    cmd = im._build_command(provider="claude", prompt="follow up", model="opus", resume_session_id="sess-1", effort_level="high")
+    assert "--resume" in cmd
+    assert "sess-1" in cmd
+    assert "--model" in cmd
+    assert "opus" in cmd
+    assert "--effort" in cmd
+    assert "high" in cmd
+
+
+def test_build_command_codex_basic():
+    im = InstanceManager(MagicMock(), MagicMock())
+    cmd = im._build_command(provider="codex", prompt="do stuff", model=None, resume_session_id=None, effort_level=None)
+    assert cmd[1] == "exec"
+    assert "--json" in cmd
+    assert "--dangerously-bypass-approvals-and-sandbox" in cmd
+    assert "do stuff" in cmd
+    assert "resume" not in cmd
+
+
+def test_build_command_codex_with_resume():
+    im = InstanceManager(MagicMock(), MagicMock())
+    cmd = im._build_command(provider="codex", prompt="continue", model="gpt-5.5", resume_session_id="thread-abc", effort_level=None)
+    assert cmd[1] == "exec"
+    assert cmd[2] == "resume"
+    assert "--model" in cmd
+    assert "gpt-5.5" in cmd
+    assert "thread-abc" in cmd
+    assert "continue" in cmd
+
+
+def test_build_command_codex_default_model_not_passed():
+    im = InstanceManager(MagicMock(), MagicMock())
+    cmd = im._build_command(provider="codex", prompt="hi", model="default", resume_session_id=None, effort_level=None)
+    assert "--model" not in cmd
+
+
+def test_build_command_unsupported_provider():
+    im = InstanceManager(MagicMock(), MagicMock())
+    with pytest.raises(ValueError, match="Unsupported CLI provider"):
+        im._build_command(provider="unknown", prompt="hi", model=None, resume_session_id=None, effort_level=None)
+
+
+# === Codex parser edge cases ===
+
+
+def test_parse_codex_malformed_json():
+    im = InstanceManager(MagicMock(), MagicMock())
+    event = im._parse_codex_line("this is not json")
+    assert event["event_type"] == "message"
+    assert event["content"] == "this is not json"
+    assert event["is_error"] is False
+
+
+def test_parse_codex_error_event():
+    im = InstanceManager(MagicMock(), MagicMock())
+    event = im._parse_codex_line(json.dumps({
+        "type": "error",
+        "message": "rate limit exceeded",
+    }))
+    assert event["event_type"] == "system_event"
+    assert event["is_error"] is True
+    assert "rate limit exceeded" in event["content"]
+
+
+def test_parse_codex_heartbeat_returns_none():
+    """Heartbeat-like events with no meaningful content return None."""
+    im = InstanceManager(MagicMock(), MagicMock())
+    result = im._parse_codex_line(json.dumps({
+        "type": "heartbeat",
+    }))
+    assert result is None
+
+
+def test_parse_codex_unknown_event_with_content():
+    """Unknown event type with content is preserved as system_event."""
+    im = InstanceManager(MagicMock(), MagicMock())
+    event = im._parse_codex_line(json.dumps({
+        "type": "custom.event",
+        "content": "something happened",
+    }))
+    assert event is not None
+    assert event["event_type"] == "system_event"
+    assert event["content"] == "something happened"
+
+
+def test_parse_codex_command_with_nonzero_exit():
+    """Command execution with non-zero exit code sets is_error=True."""
+    im = InstanceManager(MagicMock(), MagicMock())
+    event = im._parse_codex_line(json.dumps({
+        "type": "item.completed",
+        "item": {
+            "type": "command_execution",
+            "command": "npm test",
+            "exit_code": 1,
+            "status": "failed",
+            "aggregated_output": "test failed",
+        },
+    }))
+    assert event["event_type"] == "tool_result"
+    assert event["is_error"] is True
+
+
+def test_parse_codex_session_id_from_nested_session():
+    """Session ID extracted from nested session.id field."""
+    im = InstanceManager(MagicMock(), MagicMock())
+    event = im._parse_codex_line(json.dumps({
+        "type": "session.started",
+        "session": {"id": "nested-sess-456"},
+    }))
+    assert event is not None
+    assert event.get("session_id") == "nested-sess-456"
 
 
 def _make_mock_process(pid=12345, returncode=0):
@@ -287,6 +507,58 @@ async def test_launch_with_effort_level(db_factory):
     assert "--effort" in cmd_args
     idx = cmd_args.index("--effort")
     assert cmd_args[idx + 1] == "high"
+    await asyncio.sleep(0.1)
+
+
+@pytest.mark.asyncio
+async def test_launch_codex_provider_command(db_factory):
+    """launch(provider='codex') constructs codex exec command."""
+    async with db_factory() as db:
+        inst = Instance(name="codex-inst")
+        db.add(inst)
+        await db.commit()
+        await db.refresh(inst)
+        inst_id = inst.id
+
+    mock_proc = _make_mock_process()
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    im = InstanceManager(db_factory, broadcaster)
+
+    with patch("backend.services.instance_manager.asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=mock_proc) as mock_exec:
+        await im.launch(instance_id=inst_id, prompt="do stuff", cwd="/tmp", provider="codex")
+
+    cmd_args = mock_exec.call_args[0]
+    assert cmd_args[1] == "exec"
+    assert "--json" in cmd_args
+    assert "--dangerously-bypass-approvals-and-sandbox" in cmd_args
+    assert "do stuff" in cmd_args
+    # Should NOT have Claude-specific flags
+    assert "--output-format" not in cmd_args
+    assert "--verbose" not in cmd_args
+    await asyncio.sleep(0.1)
+
+
+@pytest.mark.asyncio
+async def test_launch_codex_no_thinking_budget_env(db_factory):
+    """launch(provider='codex', thinking_budget=N) does NOT set MAX_THINKING_TOKENS."""
+    async with db_factory() as db:
+        inst = Instance(name="codex-think-inst")
+        db.add(inst)
+        await db.commit()
+        await db.refresh(inst)
+        inst_id = inst.id
+
+    mock_proc = _make_mock_process()
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    im = InstanceManager(db_factory, broadcaster)
+
+    with patch("backend.services.instance_manager.asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=mock_proc) as mock_exec:
+        await im.launch(instance_id=inst_id, prompt="hi", cwd="/tmp", provider="codex", thinking_budget=12000)
+
+    env = mock_exec.call_args[1]["env"]
+    assert "MAX_THINKING_TOKENS" not in env
     await asyncio.sleep(0.1)
 
 

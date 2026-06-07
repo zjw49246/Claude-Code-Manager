@@ -114,27 +114,41 @@ class TaskQueue:
         await self.db.commit()
         return True
 
-    async def dequeue(self, instance_model: str | None = None) -> Task | None:
-        """Get the highest-priority pending task matching the instance model.
+    async def dequeue(self, instance_model: str | None = None, instance_provider: str | None = "claude") -> Task | None:
+        """Get the highest-priority pending task matching instance provider/model.
 
         Matching rules:
+        - Tasks are first constrained by provider.
         - Tasks with no model (None) can be picked by any instance.
         - Tasks with a specific model are only picked by instances with that model.
         - Prefer model-matching tasks over unspecified tasks.
         - "default" is treated as equivalent to the configured default_model.
         """
-        base = select(Task).where(Task.status == "pending")
+        effective_provider = instance_provider or settings.default_provider or "claude"
+        base = select(Task).where(
+            Task.status == "pending",
+            Task.provider == effective_provider,
+        )
 
         # Normalize "default" to the actual default model name
         effective_model = instance_model
         if effective_model == "default":
-            effective_model = settings.default_model
+            effective_model = (
+                settings.default_codex_model
+                if effective_provider == "codex"
+                else settings.default_model
+            )
+        default_model = (
+            settings.default_codex_model
+            if effective_provider == "codex"
+            else settings.default_model
+        )
 
         if effective_model:
             # First try exact model match, then fall back to tasks with no model specified
             # Also match tasks with "default" if this instance uses the default model
             model_match = Task.model == effective_model
-            if effective_model == settings.default_model:
+            if effective_model == default_model:
                 model_match = (Task.model == effective_model) | (Task.model == "default")
             stmt = (
                 base

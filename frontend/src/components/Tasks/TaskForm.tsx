@@ -22,11 +22,16 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   const [newProjectUrl, setNewProjectUrl] = useState('');
   const [priority, setPriority] = useState(0);
   const [mode, setMode] = useState('auto');
+  const [provider, setProvider] = useState('claude');
   const [model, setModel] = useState('');
+  const [providerOptions, setProviderOptions] = useState<string[]>(['claude', 'codex']);
   const [effort, setEffort] = useState('');
   const [defaultModel, setDefaultModel] = useState('claude-opus-4-6');
   const [modelOptions, setModelOptions] = useState<string[]>([]);
+  const [defaultCodexModel, setDefaultCodexModel] = useState('gpt-5.1-codex-max');
+  const [codexModelOptions, setCodexModelOptions] = useState<string[]>([]);
   const [effortOptions, setEffortOptions] = useState<string[]>([]);
+  const [codexEffortOptions, setCodexEffortOptions] = useState<string[]>([]);
   const [defaultEffort, setDefaultEffort] = useState('medium');
   const [todoFilePath, setTodoFilePath] = useState('');
   const [maxIterations, setMaxIterations] = useState('50');
@@ -54,12 +59,21 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   useEffect(() => {
     loadProjects();
     api.config().then((c) => {
+      setProvider(c.default_provider || 'claude');
+      setProviderOptions(c.provider_options.length ? c.provider_options : ['claude', 'codex']);
       setDefaultModel(c.default_model);
       setModelOptions(c.model_options.filter((m) => m !== 'default'));
+      setDefaultCodexModel(c.default_codex_model);
+      setCodexModelOptions(c.codex_model_options.filter((m) => m !== 'default'));
       setDefaultEffort(c.default_effort);
       setEffortOptions(c.effort_options);
+      setCodexEffortOptions(c.codex_effort_options || ['low', 'medium', 'high', 'xhigh']);
     }).catch(() => {});
   }, []);
+
+  const activeDefaultModel = provider === 'codex' ? defaultCodexModel : defaultModel;
+  const activeModelOptions = provider === 'codex' ? codexModelOptions : modelOptions;
+  const activeEffortOptions = provider === 'codex' ? codexEffortOptions : effortOptions;
 
   const handleProjectChange = (val: string) => {
     if (val === NEW_PROJECT_VALUE) {
@@ -157,7 +171,8 @@ export function TaskForm({ onCreated }: TaskFormProps) {
         ...(uploadedPaths.length > 0 ? { file_paths: uploadedPaths } : {}),
         ...(attachments.length > 0 ? { attachments } : {}),
         ...(selectedSecretIds.length > 0 ? { secret_ids: selectedSecretIds } : {}),
-        model: model || defaultModel,
+        provider,
+        model: model || activeDefaultModel,
         ...(effort ? { effort_level: effort } : {}),
         ...(starOnCreate ? { starred: true } : {}),
       });
@@ -199,7 +214,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
       <div className="flex gap-2">
         <textarea
           className="flex-1 bg-gray-700 text-foreground rounded px-3 py-2 text-sm h-24 resize-none focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          placeholder={mode === 'loop' ? 'Background / context (optional)' : 'Prompt / Description (this will be sent to Claude Code)'}
+          placeholder={mode === 'loop' ? 'Background / context (optional)' : `Prompt / Description (this will be sent to ${provider === 'codex' ? 'Codex' : 'Claude Code'})`}
           value={description}
           onChange={(e) => setDescription(e.target.value)}
           required={mode !== 'loop'}
@@ -340,14 +355,28 @@ export function TaskForm({ onCreated }: TaskFormProps) {
           <option value="loop">Loop (todo list)</option>
           <option value="goal">Goal (condition-based)</option>
         </select>
+        <label className="text-sm text-gray-400 ml-2">CLI:</label>
+        <select
+          className="w-[110px] bg-gray-700 text-foreground rounded px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          value={provider}
+          onChange={(e) => {
+            setProvider(e.target.value);
+            setModel('');
+            setEffort('');
+          }}
+        >
+          {providerOptions.map((p) => (
+            <option key={p} value={p}>{p === 'claude' ? 'Claude' : p === 'codex' ? 'Codex' : p}</option>
+          ))}
+        </select>
         <label className="text-sm text-gray-400 ml-2">Model:</label>
         <select
           className="w-[180px] bg-gray-700 text-foreground rounded px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
           value={model}
           onChange={(e) => setModel(e.target.value)}
         >
-          <option value="">{defaultModel} (default)</option>
-          {modelOptions.map((m) => (
+          <option value="">{activeDefaultModel} (default)</option>
+          {activeModelOptions.map((m) => (
             <option key={m} value={m}>{m}</option>
           ))}
         </select>
@@ -358,7 +387,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
           onChange={(e) => setEffort(e.target.value)}
         >
           <option value="">{defaultEffort} (default)</option>
-          {effortOptions.filter((e) => e !== defaultEffort).map((e) => (
+          {activeEffortOptions.filter((e) => e !== defaultEffort).map((e) => (
             <option key={e} value={e}>{e}</option>
           ))}
         </select>

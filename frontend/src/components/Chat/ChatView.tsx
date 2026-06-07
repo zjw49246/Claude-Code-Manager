@@ -62,32 +62,36 @@ function formatTokenCount(n: number): string {
 }
 
 function ContextUsageIndicator({ usage }: { usage: ContextUsage }) {
-  const contextWindow = usage.context_window || 200_000; // default fallback
+  const contextWindow = usage.context_window;
   const totalUsed = usage.total_input_tokens + usage.output_tokens;
-  const percentage = Math.min((totalUsed / contextWindow) * 100, 100);
+  const percentage = contextWindow ? Math.min((totalUsed / contextWindow) * 100, 100) : null;
 
   // Color based on usage level
   let barColor = 'bg-emerald-500';
   let textColor = 'text-emerald-400';
-  if (percentage > 80) {
+  if (percentage !== null && percentage > 80) {
     barColor = 'bg-red-500';
     textColor = 'text-red-400';
-  } else if (percentage > 50) {
+  } else if (percentage !== null && percentage > 50) {
     barColor = 'bg-amber-500';
     textColor = 'text-amber-400';
   }
 
   return (
-    <div className="flex items-center gap-2 text-xs shrink-0" title={`Input: ${formatTokenCount(usage.input_tokens)} | Cache read: ${formatTokenCount(usage.cache_read_input_tokens)} | Cache create: ${formatTokenCount(usage.cache_creation_input_tokens)} | Output: ${formatTokenCount(usage.output_tokens)}`}>
+    <div className="flex items-center gap-2 text-xs shrink-0" title={`Input: ${formatTokenCount(usage.input_tokens)} | Cache read: ${formatTokenCount(usage.cache_read_input_tokens)} | Cache create: ${formatTokenCount(usage.cache_creation_input_tokens)} | Output: ${formatTokenCount(usage.output_tokens)}${contextWindow ? ` | Context window: ${formatTokenCount(contextWindow)}` : ' | Context window: unknown'}`}>
       <div className="flex items-center gap-1.5">
         <span className={`${textColor} font-medium`}>{formatTokenCount(totalUsed)}</span>
         <span className="text-gray-600">/</span>
-        <span className="text-gray-500">{formatTokenCount(contextWindow)}</span>
+        <span className="text-gray-500">{contextWindow ? formatTokenCount(contextWindow) : 'unknown'}</span>
       </div>
-      <div className="w-16 h-1.5 bg-gray-700 rounded-full overflow-hidden">
-        <div className={`h-full ${barColor} rounded-full transition-all duration-300`} style={{ width: `${percentage}%` }} />
-      </div>
-      <span className={`${textColor} w-8 text-right`}>{percentage.toFixed(0)}%</span>
+      {percentage !== null && (
+        <>
+          <div className="w-16 h-1.5 bg-gray-700 rounded-full overflow-hidden">
+            <div className={`h-full ${barColor} rounded-full transition-all duration-300`} style={{ width: `${percentage}%` }} />
+          </div>
+          <span className={`${textColor} w-8 text-right`}>{percentage.toFixed(0)}%</span>
+        </>
+      )}
     </div>
   );
 }
@@ -98,6 +102,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
     const p = projects.find((p) => p.id === task.project_id);
     return p?.name ?? null;
   }, [task.project_id, projects]);
+  const providerLabel = task.provider === 'codex' ? 'Codex' : 'Claude';
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
@@ -401,6 +406,9 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
             <p className="text-foreground font-medium text-sm whitespace-nowrap">Task #{task.id}</p>
+            <span className={`text-xs px-1.5 rounded font-medium whitespace-nowrap ${task.provider === 'codex' ? 'bg-green-600/30 text-green-300' : 'bg-blue-600/30 text-blue-300'}`}>
+              {providerLabel}
+            </span>
             {projectName && (
               <span className="text-xs bg-emerald-600/30 text-emerald-300 px-1.5 rounded font-medium whitespace-nowrap">{projectName}</span>
             )}
@@ -472,7 +480,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
       {interrupting && (
         <div className="flex items-center gap-2 px-4 py-2 bg-yellow-500/10 border-b border-yellow-500/30 text-yellow-400 text-xs">
           <Loader2 size={14} className="animate-spin" />
-          Interrupting Claude... waiting for graceful shutdown
+          Interrupting {providerLabel}... waiting for graceful shutdown
         </div>
       )}
 
@@ -540,7 +548,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
         {sending && (
           <div className="flex gap-2 items-center text-gray-500 text-sm px-3">
             <Loader2 size={14} className="animate-spin" />
-            <span>Claude is thinking...</span>
+            <span>{providerLabel} is thinking...</span>
           </div>
         )}
         <div ref={bottomRef} />

@@ -16,6 +16,7 @@ class Instance(Base):
     current_task_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     worktree_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     worktree_branch: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    provider: Mapped[str] = mapped_column(String(20), default="claude", server_default="claude")
     model: Mapped[str] = mapped_column(String(50), default="default")
     effort_level: Mapped[str | None] = mapped_column(String(20), nullable=True)
     # Optional Extended Thinking budget (max tokens). Forwarded to Claude Code
