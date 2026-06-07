@@ -22,6 +22,7 @@ async def list_instances(db: AsyncSession = Depends(get_db)):
 async def create_instance(body: InstanceCreate, db: AsyncSession = Depends(get_db)):
     instance = Instance(
         name=body.name,
+        provider=body.provider,
         model=body.model,
         effort_level=body.effort_level,
         thinking_budget=body.thinking_budget,
@@ -99,6 +100,7 @@ async def run_task_on_instance(
         task_id=task_id,
         cwd=cwd,
         model=instance.model,
+        provider=instance.provider,
         thinking_budget=instance.thinking_budget,
         effort_level=instance.effort_level,
     )

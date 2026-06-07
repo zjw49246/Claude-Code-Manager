@@ -18,12 +18,16 @@ const statusColors: Record<string, string> = {
 
 export function InstanceGrid({ instances, onRefresh, onViewLogs }: InstanceGridProps) {
   const [newName, setNewName] = useState('');
+  const [newProvider, setNewProvider] = useState('claude');
   const [newModel, setNewModel] = useState('');
   const [newEffort, setNewEffort] = useState('');
   const [newThinkingBudget, setNewThinkingBudget] = useState('');
   const [dispatcherRunning, setDispatcherRunning] = useState(false);
   const [modelOptions, setModelOptions] = useState<string[]>([]);
   const [defaultModel, setDefaultModel] = useState('');
+  const [providerOptions, setProviderOptions] = useState<string[]>(['claude', 'codex']);
+  const [codexModelOptions, setCodexModelOptions] = useState<string[]>([]);
+  const [defaultCodexModel, setDefaultCodexModel] = useState('');
   const [effortOptions, setEffortOptions] = useState<string[]>([]);
   const [defaultEffort, setDefaultEffort] = useState('');
 
@@ -32,16 +36,29 @@ export function InstanceGrid({ instances, onRefresh, onViewLogs }: InstanceGridP
       .then((s) => setDispatcherRunning(s.running))
       .catch(() => {});
     api.config()
-      .then((c) => { setModelOptions(c.model_options); setDefaultModel(c.default_model); setEffortOptions(c.effort_options); setDefaultEffort(c.default_effort); })
+      .then((c) => {
+        setNewProvider(c.default_provider || 'claude');
+        setProviderOptions(c.provider_options.length ? c.provider_options : ['claude', 'codex']);
+        setModelOptions(c.model_options);
+        setDefaultModel(c.default_model);
+        setCodexModelOptions(c.codex_model_options);
+        setDefaultCodexModel(c.default_codex_model);
+        setEffortOptions(c.effort_options);
+        setDefaultEffort(c.default_effort);
+      })
       .catch(() => {});
   }, []);
+
+  const activeDefaultModel = newProvider === 'codex' ? defaultCodexModel : defaultModel;
+  const activeModelOptions = newProvider === 'codex' ? codexModelOptions : modelOptions;
 
   const handleCreate = async () => {
     const name = newName || `worker-${instances.length + 1}`;
     const parsedBudget = newThinkingBudget.trim() === '' ? null : Number(newThinkingBudget);
     const thinking_budget = parsedBudget !== null && Number.isFinite(parsedBudget) && parsedBudget > 0 ? parsedBudget : null;
-    await api.createInstance({ name, model: newModel || 'default', effort_level: newEffort || null, thinking_budget });
+    await api.createInstance({ name, provider: newProvider, model: newModel || 'default', effort_level: newEffort || null, thinking_budget });
     setNewName('');
+    setNewProvider(newProvider);
     setNewModel('');
     setNewEffort('');
     setNewThinkingBudget('');
@@ -78,13 +95,25 @@ export function InstanceGrid({ instances, onRefresh, onViewLogs }: InstanceGridP
           onChange={(e) => setNewName(e.target.value)}
         />
         <select
+          className="w-[120px] bg-gray-700 text-foreground rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          value={newProvider}
+          onChange={(e) => {
+            setNewProvider(e.target.value);
+            setNewModel('');
+          }}
+        >
+          {providerOptions.map((p) => (
+            <option key={p} value={p}>{p === 'claude' ? 'Claude' : p === 'codex' ? 'Codex' : p}</option>
+          ))}
+        </select>
+        <select
           className="w-[180px] bg-gray-700 text-foreground rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
           value={newModel}
           onChange={(e) => setNewModel(e.target.value)}
         >
-          <option value="">{defaultModel ? `Model (default: ${defaultModel})` : 'Model (default)'}</option>
-          {modelOptions.map((m) => (
-            <option key={m} value={m}>{m === 'default' && defaultModel ? `default (${defaultModel})` : m}</option>
+          <option value="">{activeDefaultModel ? `Model (default: ${activeDefaultModel})` : 'Model (default)'}</option>
+          {activeModelOptions.map((m) => (
+            <option key={m} value={m}>{m === 'default' && activeDefaultModel ? `default (${activeDefaultModel})` : m}</option>
           ))}
         </select>
         <select
@@ -139,7 +168,8 @@ export function InstanceGrid({ instances, onRefresh, onViewLogs }: InstanceGridP
 
             <div className="text-xs text-gray-400 space-y-0.5">
               <p>Status: <span className="text-gray-300">{inst.status}</span></p>
-              <p>Model: <span className="text-gray-300">{inst.model}{inst.model === 'default' && defaultModel ? ` (${defaultModel})` : ''}</span></p>
+              <p>CLI: <span className="text-gray-300">{inst.provider === 'codex' ? 'Codex' : 'Claude'}</span></p>
+              <p>Model: <span className="text-gray-300">{inst.model}{inst.model === 'default' ? ` (${inst.provider === 'codex' ? defaultCodexModel : defaultModel})` : ''}</span></p>
               <p>Effort: <span className="text-gray-300">{inst.effort_level || defaultEffort || 'medium'}</span></p>
               {inst.thinking_budget && inst.thinking_budget > 0 && (
                 <p>Thinking: <span className="text-gray-300">{inst.thinking_budget.toLocaleString()} tok</span></p>

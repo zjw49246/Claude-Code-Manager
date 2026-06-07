@@ -1,9 +1,11 @@
 import asyncio
+import json
 import logging
 import os
 import re
 import signal
 from datetime import datetime
+from pathlib import Path
 
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -32,27 +34,21 @@ class InstanceManager:
         self._last_stderr: dict[int, str] = {}  # instance_id -> stderr from last run
         self._launch_params: dict[int, dict] = {}  # instance_id -> params for re-launch on rotation
 
-    async def launch(self, instance_id: int, prompt: str, task_id: int | None = None, cwd: str | None = None, model: str | None = None, resume_session_id: str | None = None, loop_iteration: int | None = None, git_env: dict | None = None, thinking_budget: int | None = None, effort_level: str | None = None, chat_initiated: bool = False, config_dir: str | None = None) -> int:
+    async def launch(self, instance_id: int, prompt: str, task_id: int | None = None, cwd: str | None = None, model: str | None = None, resume_session_id: str | None = None, loop_iteration: int | None = None, git_env: dict | None = None, thinking_budget: int | None = None, effort_level: str | None = None, chat_initiated: bool = False, config_dir: str | None = None, provider: str = "claude") -> int:
         """Launch a Claude Code subprocess for the given instance.
 
         If resume_session_id is provided, uses --resume to continue the conversation.
         loop_iteration is recorded on every LogEntry produced by this invocation so
         that loop-task chat history can be grouped by iteration in the frontend.
         """
-        cmd = [
-            settings.claude_binary,
-            "-p",
-            "--dangerously-skip-permissions",
-            "--output-format", "stream-json",
-            "--verbose",
-        ]
-        if resume_session_id:
-            cmd.extend(["--resume", resume_session_id])
-        if model:
-            cmd.extend(["--model", model])
-        if effort_level:
-            cmd.extend(["--effort", effort_level])
-        cmd.extend(["--", prompt])
+        provider = (provider or "claude").lower()
+        cmd = self._build_command(
+            provider=provider,
+            prompt=prompt,
+            model=model,
+            resume_session_id=resume_session_id,
+            effort_level=effort_level,
+        )
 
         # Must unset CLAUDE_CODE env var to avoid nested session detection
         env = {k: v for k, v in os.environ.items() if k.upper() not in ("CLAUDECODE", "CLAUDE_CODE")}
@@ -63,13 +59,12 @@ class InstanceManager:
             env.update(git_env)
 
         # Pool: inject CLAUDE_CONFIG_DIR so this subprocess uses a specific account
-        if config_dir:
+        if config_dir and provider == "claude":
             env["CLAUDE_CONFIG_DIR"] = config_dir
             self._config_dirs[instance_id] = config_dir
 
-        # Forward Extended Thinking budget. Claude Code reads MAX_THINKING_TOKENS
-        # to decide the per-turn thinking budget. Skip when 0 / negative / None.
-        if thinking_budget and thinking_budget > 0:
+        # Forward Extended Thinking budget (Claude-specific env var)
+        if thinking_budget and thinking_budget > 0 and provider == "claude":
             env["MAX_THINKING_TOKENS"] = str(thinking_budget)
 
         # Claude Code can output very large NDJSON lines (e.g. Read tool with big files).
@@ -122,13 +117,76 @@ class InstanceManager:
 
         # Start consuming stdout
         consumer = asyncio.create_task(
-            self._consume_output(instance_id, task_id, process, loop_iteration, chat_initiated)
+            self._consume_output(instance_id, task_id, process, loop_iteration, chat_initiated, provider)
         )
         self._tasks[instance_id] = consumer
 
         return process.pid
 
-    async def _consume_output(self, instance_id: int, task_id: int | None, process: asyncio.subprocess.Process, loop_iteration: int | None = None, chat_initiated: bool = False):
+    def _build_command(
+        self,
+        provider: str,
+        prompt: str,
+        model: str | None,
+        resume_session_id: str | None,
+        effort_level: str | None,
+    ) -> list[str]:
+        """Build the subprocess command for a supported coding-agent CLI."""
+        if provider == "claude":
+            cmd = [
+                settings.claude_binary,
+                "-p", prompt,
+                "--dangerously-skip-permissions",
+                "--output-format", "stream-json",
+                "--verbose",
+            ]
+            if resume_session_id:
+                cmd.extend(["--resume", resume_session_id])
+            if model:
+                cmd.extend(["--model", model])
+            if effort_level:
+                cmd.extend(["--effort", effort_level])
+            return cmd
+
+        if provider == "codex":
+            codex_binary = self._resolve_codex_binary()
+            if resume_session_id:
+                cmd = [codex_binary, "exec", "resume"]
+            else:
+                cmd = [codex_binary, "exec"]
+            cmd.extend([
+                "--json",
+                "--skip-git-repo-check",
+                "--dangerously-bypass-approvals-and-sandbox",
+            ])
+            if model and model != "default":
+                cmd.extend(["--model", model])
+            if effort_level and effort_level != "max":
+                cmd.extend(["-c", f'model_reasoning_effort="{effort_level}"'])
+            if resume_session_id:
+                cmd.append(resume_session_id)
+            cmd.append(prompt)
+            return cmd
+
+        raise ValueError(f"Unsupported CLI provider: {provider}")
+
+    def _resolve_codex_binary(self) -> str:
+        """Resolve Codex CLI without relying on the WindowsApps execution alias."""
+        configured = settings.codex_binary
+        if configured and configured.lower() != "codex":
+            return configured
+
+        local_appdata = os.environ.get("LOCALAPPDATA")
+        if local_appdata:
+            bin_root = Path(local_appdata) / "OpenAI" / "Codex" / "bin"
+            candidates = list(bin_root.glob("*/codex.exe"))
+            if candidates:
+                newest = max(candidates, key=lambda p: p.stat().st_mtime)
+                return str(newest)
+
+        return configured or "codex"
+
+    async def _consume_output(self, instance_id: int, task_id: int | None, process: asyncio.subprocess.Process, loop_iteration: int | None = None, chat_initiated: bool = False, provider: str = "claude"):
         """Read NDJSON lines from stdout, parse, store, and broadcast.
 
         This method MUST keep running until the process closes stdout (EOF).
@@ -145,7 +203,11 @@ class InstanceManager:
                     if not text:
                         continue
 
-                    events = self.parser.parse_line(text)
+                    if provider == "claude":
+                        events = self.parser.parse_line(text)
+                    else:
+                        parsed = self._parse_codex_line(text)
+                        events = [parsed] if parsed else []
                     if not events:
                         continue
 
@@ -335,6 +397,146 @@ class InstanceManager:
         except Exception:
             logger.exception("Chat pool rotation failed for task %d", task_id)
             return False
+
+    def _parse_codex_line(self, line: str) -> dict | None:
+        """Normalize Codex CLI JSONL events into the same shape as Claude logs."""
+        now = datetime.utcnow().isoformat()
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            return {
+                "event_type": "message",
+                "role": "assistant",
+                "content": line,
+                "tool_name": None,
+                "tool_input": None,
+                "tool_output": None,
+                "raw_json": None,
+                "is_error": False,
+                "timestamp": now,
+            }
+
+        codex_type = data.get("type") or data.get("event") or data.get("event_type") or "codex_event"
+        item = data.get("item") if isinstance(data.get("item"), dict) else {}
+        item_type = item.get("type")
+
+        event = self._base_codex_event(line, now)
+
+        if codex_type == "item.completed" and item_type == "agent_message":
+            event.update({
+                "event_type": "message",
+                "role": "assistant",
+                "content": item.get("text") or "",
+            })
+        elif codex_type == "item.started" and item_type == "command_execution":
+            command = item.get("command") or ""
+            event.update({
+                "event_type": "tool_use",
+                "role": "assistant",
+                "content": None,
+                "tool_name": "Shell",
+                "tool_input": json.dumps({"command": command}, ensure_ascii=False),
+            })
+        elif codex_type == "item.completed" and item_type == "command_execution":
+            command = item.get("command") or ""
+            output = item.get("aggregated_output") or ""
+            exit_code = item.get("exit_code")
+            status = item.get("status") or "completed"
+            summary = f"Command {status}"
+            if exit_code is not None:
+                summary += f" with exit code {exit_code}"
+            if output:
+                summary += f"\n{output}"
+            event.update({
+                "event_type": "tool_result",
+                "role": "tool",
+                "content": None,
+                "tool_name": "Shell",
+                "tool_input": json.dumps({"command": command}, ensure_ascii=False),
+                "tool_output": output or summary,
+                "is_error": bool(exit_code not in (None, 0)),
+            })
+        elif codex_type == "turn.completed":
+            usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+            event.update({
+                "event_type": "system_event",
+                "content": "turn.completed",
+                "context_usage": self._codex_context_usage(usage) if usage else None,
+            })
+        elif "error" in codex_type.lower() or data.get("error"):
+            message = data.get("message") or data.get("error") or codex_type
+            if isinstance(message, (dict, list)):
+                message = json.dumps(message, ensure_ascii=False)
+            event.update({
+                "event_type": "system_event",
+                "content": str(message),
+                "is_error": True,
+            })
+        else:
+            content = data.get("content") or data.get("message") or data.get("text")
+            if content is None and item:
+                content = item.get("text") or item.get("command") or item.get("status")
+            if isinstance(content, (dict, list)):
+                content = json.dumps(content, ensure_ascii=False)
+            # Skip events with no extractable content (heartbeats, metadata),
+            # but keep events that carry a session_id
+            session_id_present = bool(self._extract_codex_session_id(data))
+            if not content and not session_id_present and codex_type not in ("item.started", "item.completed"):
+                return None
+            tool_input = data.get("tool_input") or data.get("input")
+            tool_output = data.get("tool_output") or data.get("output")
+            event.update({
+                "event_type": "system_event",
+                "role": data.get("role") or ("assistant" if "message" in codex_type else None),
+                "content": content or codex_type,
+                "tool_name": data.get("tool_name") or data.get("name"),
+                "tool_input": json.dumps(tool_input, ensure_ascii=False) if isinstance(tool_input, (dict, list)) else tool_input,
+                "tool_output": json.dumps(tool_output, ensure_ascii=False) if isinstance(tool_output, (dict, list)) else tool_output,
+                "is_error": bool(data.get("is_error") or data.get("error") or "error" in codex_type.lower()),
+            })
+
+        session_id = self._extract_codex_session_id(data)
+        if session_id:
+            event["session_id"] = session_id
+        return event
+
+    def _base_codex_event(self, line: str, timestamp: str) -> dict:
+        return {
+            "event_type": "system_event",
+            "role": None,
+            "content": None,
+            "tool_name": None,
+            "tool_input": None,
+            "tool_output": None,
+            "raw_json": line,
+            "is_error": False,
+            "timestamp": timestamp,
+        }
+
+    def _extract_codex_session_id(self, data: dict) -> str | None:
+        session_id = (
+            data.get("session_id")
+            or data.get("sessionId")
+            or data.get("conversation_id")
+            or data.get("thread_id")
+        )
+        if not session_id and isinstance(data.get("session"), dict):
+            session_id = data["session"].get("id")
+        if not session_id and isinstance(data.get("thread"), dict):
+            session_id = data["thread"].get("id")
+        return session_id
+
+    def _codex_context_usage(self, usage: dict) -> dict:
+        input_tokens = int(usage.get("input_tokens") or 0)
+        cached_tokens = int(usage.get("cached_input_tokens") or 0)
+        output_tokens = int(usage.get("output_tokens") or 0)
+        return {
+            "input_tokens": max(input_tokens - cached_tokens, 0),
+            "cache_read_input_tokens": cached_tokens,
+            "cache_creation_input_tokens": 0,
+            "output_tokens": output_tokens,
+            "total_input_tokens": input_tokens,
+        }
 
     async def _process_event(self, instance_id: int, task_id: int | None, event: dict, loop_iteration: int | None = None):
         """Process a single parsed event: save to DB and broadcast."""

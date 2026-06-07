@@ -30,8 +30,13 @@ class GoalEvaluator:
         condition: str,
         conversation_summary: str,
         model: str | None = None,
+        provider: str = "claude",
     ) -> GoalEvalResult:
-        eval_model = model or settings.default_goal_evaluator_model
+        provider = (provider or "claude").lower()
+        if provider == "codex":
+            eval_model = model or settings.default_codex_goal_evaluator_model
+        else:
+            eval_model = model or settings.default_goal_evaluator_model
 
         prompt = self._build_eval_prompt(condition, conversation_summary)
 
@@ -41,14 +46,7 @@ class GoalEvaluator:
             if k.upper() not in ("CLAUDECODE", "CLAUDE_CODE")
         }
 
-        cmd = [
-            settings.claude_binary,
-            "-p", prompt,
-            "--dangerously-skip-permissions",
-            "--output-format", "json",
-            "--model", eval_model,
-            "--max-turns", "1",
-        ]
+        cmd = self._build_eval_command(provider, prompt, eval_model)
 
         try:
             process = await asyncio.create_subprocess_exec(
@@ -68,7 +66,31 @@ class GoalEvaluator:
             logger.error(f"Goal evaluation failed: {e}")
             return GoalEvalResult(achieved=False, reason=f"Evaluation error: {e}")
 
-        return self._parse_response(stdout.decode("utf-8", errors="replace"))
+        raw = stdout.decode("utf-8", errors="replace")
+        if provider == "codex":
+            return self._parse_codex_response(raw)
+        return self._parse_response(raw)
+
+    def _build_eval_command(self, provider: str, prompt: str, model: str) -> list[str]:
+        if provider == "codex":
+            return [
+                settings.codex_binary,
+                "exec",
+                "--json",
+                "--skip-git-repo-check",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--ephemeral",
+                "--model", model,
+                prompt,
+            ]
+        return [
+            settings.claude_binary,
+            "-p", prompt,
+            "--dangerously-skip-permissions",
+            "--output-format", "json",
+            "--model", model,
+            "--max-turns", "1",
+        ]
 
     def _build_eval_prompt(self, condition: str, conversation_summary: str) -> str:
         return f"""\
@@ -93,6 +115,21 @@ If NOT achieved:
 
 Respond with ONLY the JSON object, nothing else."""
 
+    def _parse_codex_response(self, raw: str) -> GoalEvalResult:
+        """Parse Codex JSONL output — extract the last agent_message text."""
+        text = ""
+        for line in raw.strip().splitlines():
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            item = data.get("item") if isinstance(data.get("item"), dict) else {}
+            if item.get("type") == "agent_message" and item.get("text"):
+                text = item["text"]
+        if not text:
+            text = raw
+        return self._extract_eval_json(text)
+
     def _parse_response(self, raw: str) -> GoalEvalResult:
         text = raw.strip()
 
@@ -106,7 +143,10 @@ Respond with ONLY the JSON object, nothing else."""
         except (json.JSONDecodeError, TypeError):
             pass
 
-        # Extract JSON from the text (may be wrapped in markdown code blocks)
+        return self._extract_eval_json(text)
+
+    def _extract_eval_json(self, text) -> GoalEvalResult:
+        """Extract {achieved, reason} JSON from text (may be wrapped in markdown)."""
         if isinstance(text, str):
             cleaned = text.strip()
             if cleaned.startswith("```"):
@@ -124,8 +164,8 @@ Respond with ONLY the JSON object, nothing else."""
             except (json.JSONDecodeError, TypeError):
                 pass
 
-        logger.warning(f"Could not parse evaluator response: {text[:200]}")
+        logger.warning(f"Could not parse evaluator response: {str(text)[:200]}")
         return GoalEvalResult(
             achieved=False,
-            reason=f"Could not parse evaluator response",
+            reason="Could not parse evaluator response",
         )

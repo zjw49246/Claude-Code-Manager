@@ -39,6 +39,7 @@ class Task(Base):
     session_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
     last_cwd: Mapped[str | None] = mapped_column(String(500), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    provider: Mapped[str] = mapped_column(String(20), default="claude", server_default="claude")
     model: Mapped[str | None] = mapped_column(String(100), nullable=True)
     effort_level: Mapped[str | None] = mapped_column(String(20), nullable=True)
     tags: Mapped[dict | None] = mapped_column(JSON, nullable=True)
