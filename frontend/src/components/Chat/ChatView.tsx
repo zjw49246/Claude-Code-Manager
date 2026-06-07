@@ -147,6 +147,26 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
     setMessageQueue(prev => prev.filter((_, i) => i !== index));
   }, []);
 
+  const editQueueItem = useCallback((index: number) => {
+    const text = messageQueueRef.current[index];
+    if (!text) return;
+    setInput(prev => prev.trim() ? `${prev.trim()}\n\n${text}` : text);
+    setMessageQueue(prev => prev.filter((_, i) => i !== index));
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  }, []);
+
+  const mergeQueueToInput = useCallback(() => {
+    const queued = messageQueueRef.current;
+    if (queued.length === 0) return;
+    setInput(prev => {
+      const current = prev.trim();
+      const merged = queued.join('\n\n');
+      return current ? `${current}\n\n${merged}` : merged;
+    });
+    setMessageQueue([]);
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  }, []);
+
   const moveQueueItem = useCallback((index: number, direction: 'up' | 'down') => {
     setMessageQueue(prev => {
       const next = [...prev];
@@ -651,12 +671,22 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
                 <ListPlus size={12} />
                 Queued messages ({messageQueue.length})
               </span>
-              <button
-                onClick={() => setMessageQueue([])}
-                className="text-xs text-gray-500 hover:text-red-400 transition-colors"
-              >
-                Clear all
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={mergeQueueToInput}
+                  className="inline-flex items-center gap-1 text-xs text-gray-500 hover:text-amber-300 transition-colors"
+                  title="Merge queued messages into input"
+                >
+                  <Copy size={11} />
+                  Merge
+                </button>
+                <button
+                  onClick={() => setMessageQueue([])}
+                  className="text-xs text-gray-500 hover:text-red-400 transition-colors"
+                >
+                  Clear all
+                </button>
+              </div>
             </div>
             <div className="space-y-1 max-h-32 overflow-y-auto">
               {messageQueue.map((msg, idx) => (
@@ -666,6 +696,13 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
                     {msg}
                   </div>
                   <div className="flex items-center gap-0.5 opacity-0 group-hover/q:opacity-100 transition-opacity shrink-0">
+                    <button
+                      onClick={() => editQueueItem(idx)}
+                      className="p-0.5 text-gray-500 hover:text-amber-300"
+                      title="Edit in input"
+                    >
+                      <Pencil size={12} />
+                    </button>
                     <button
                       onClick={() => moveQueueItem(idx, 'up')}
                       disabled={idx === 0}
