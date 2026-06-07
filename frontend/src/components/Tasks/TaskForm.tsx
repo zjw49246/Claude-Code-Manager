@@ -31,6 +31,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   const [defaultCodexModel, setDefaultCodexModel] = useState('gpt-5.1-codex-max');
   const [codexModelOptions, setCodexModelOptions] = useState<string[]>([]);
   const [effortOptions, setEffortOptions] = useState<string[]>([]);
+  const [codexEffortOptions, setCodexEffortOptions] = useState<string[]>([]);
   const [defaultEffort, setDefaultEffort] = useState('medium');
   const [todoFilePath, setTodoFilePath] = useState('');
   const [maxIterations, setMaxIterations] = useState('50');
@@ -66,11 +67,13 @@ export function TaskForm({ onCreated }: TaskFormProps) {
       setCodexModelOptions(c.codex_model_options.filter((m) => m !== 'default'));
       setDefaultEffort(c.default_effort);
       setEffortOptions(c.effort_options);
+      setCodexEffortOptions(c.codex_effort_options || ['low', 'medium', 'high', 'xhigh']);
     }).catch(() => {});
   }, []);
 
   const activeDefaultModel = provider === 'codex' ? defaultCodexModel : defaultModel;
   const activeModelOptions = provider === 'codex' ? codexModelOptions : modelOptions;
+  const activeEffortOptions = provider === 'codex' ? codexEffortOptions : effortOptions;
 
   const handleProjectChange = (val: string) => {
     if (val === NEW_PROJECT_VALUE) {
@@ -359,6 +362,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
           onChange={(e) => {
             setProvider(e.target.value);
             setModel('');
+            setEffort('');
           }}
         >
           {providerOptions.map((p) => (
@@ -383,7 +387,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
           onChange={(e) => setEffort(e.target.value)}
         >
           <option value="">{defaultEffort} (default)</option>
-          {effortOptions.filter((e) => e !== defaultEffort).map((e) => (
+          {activeEffortOptions.filter((e) => e !== defaultEffort).map((e) => (
             <option key={e} value={e}>{e}</option>
           ))}
         </select>

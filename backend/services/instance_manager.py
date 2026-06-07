@@ -148,6 +148,8 @@ class InstanceManager:
             ])
             if model and model != "default":
                 cmd.extend(["--model", model])
+            if effort_level and effort_level != "max":
+                cmd.extend(["-c", f'model_reasoning_effort="{effort_level}"'])
             if resume_session_id:
                 cmd.append(resume_session_id)
             cmd.append(prompt)
