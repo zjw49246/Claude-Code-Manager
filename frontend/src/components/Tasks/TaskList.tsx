@@ -107,79 +107,32 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat }: TaskListPro
   return (
     <div className="space-y-2">
       {tasks.map((t) => (
-        <div key={t.id} className={`rounded-lg p-3 flex items-start gap-3 ${t.has_unread ? 'bg-indigo-900/50 ring-1 ring-indigo-500/50' : 'bg-gray-800'}`}>
-          <span className={`mt-1 w-2.5 h-2.5 rounded-full shrink-0 ${statusColors[t.status] || 'bg-gray-500'}`} />
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2">
+        <div key={t.id} className={`rounded-lg p-3 ${t.has_unread ? 'bg-indigo-900/50 ring-1 ring-indigo-500/50' : 'bg-gray-800'}`}>
+          {/* Row 1: status dot + badges + action buttons */}
+          <div className="flex items-center gap-2">
+            <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${statusColors[t.status] || 'bg-gray-500'}`} />
+            <div className="flex items-center gap-2 flex-wrap flex-1 min-w-0">
               <span className="text-xs text-gray-500">#{t.id}</span>
               {t.project_id && projectMap[t.project_id] && (() => {
                 const proj = projectMap[t.project_id!];
                 const colorDef = TAG_COLOR_OPTIONS.find((c) => c.key === proj.color);
                 const bg = colorDef ? colorDef.bg : 'bg-emerald-600/30';
                 const text = colorDef ? colorDef.text : 'text-emerald-300';
-                return <span className={`text-xs ${bg} ${text} px-1.5 rounded font-medium`}>{proj.name}</span>;
+                return <span className={`text-xs ${bg} ${text} px-1.5 rounded font-medium whitespace-nowrap`}>{proj.name}</span>;
               })()}
               {t.priority > 0 && (
                 <span className="text-xs bg-indigo-600/30 text-indigo-300 px-1.5 rounded">P{t.priority}</span>
               )}
-              <span className="text-xs text-gray-500 capitalize">{t.status.replace('_', ' ')}</span>
-              <span className={`text-xs px-1.5 rounded font-medium ${t.provider === 'codex' ? 'bg-green-600/30 text-green-300' : 'bg-blue-600/30 text-blue-300'}`}>
+              <span className="hidden sm:inline text-xs text-gray-500 capitalize">{t.status.replace('_', ' ')}</span>
+              <span className={`hidden sm:inline text-xs px-1.5 rounded font-medium ${t.provider === 'codex' ? 'bg-green-600/30 text-green-300' : 'bg-blue-600/30 text-blue-300'}`}>
                 {t.provider === 'codex' ? 'Codex' : 'Claude'}
               </span>
               {t.model && (
                 <span className="hidden sm:inline text-xs bg-gray-700 text-gray-300 px-1.5 rounded">{t.model}</span>
               )}
             </div>
-            {/* Title (editable) */}
-            {editingTitleId === t.id ? (
-              <input
-                ref={titleInputRef}
-                value={titleDraft}
-                onChange={(e) => setTitleDraft(e.target.value)}
-                onBlur={() => handleTitleSave(t)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') handleTitleSave(t);
-                  if (e.key === 'Escape') setEditingTitleId(null);
-                }}
-                className="w-full bg-gray-700 text-foreground text-sm rounded px-2 py-0.5 mt-0.5 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-                placeholder="Enter title..."
-              />
-            ) : (
-              t.title ? (
-                <p className="text-foreground text-sm font-medium mt-0.5 line-clamp-1">{t.title}</p>
-              ) : null
-            )}
-            {/* Description (expandable) */}
-            {t.mode === 'loop' && !t.description ? (
-              <p className="text-sm mt-0.5 text-gray-500 italic">{t.todo_file_path}</p>
-            ) : t.description ? (
-              <ExpandableText
-                text={t.description}
-                collapsedLines={2}
-                className={`text-sm mt-0.5 ${t.title ? 'text-gray-400' : 'text-foreground'}`}
-              />
-            ) : null}
-            {t.mode === 'goal' && t.goal_condition && (
-              <p className="text-emerald-500/70 text-xs mt-0.5 line-clamp-1">Goal: {t.goal_condition}</p>
-            )}
-            {t.mode === 'loop' && t.loop_progress && (
-              <p className="text-indigo-400 text-xs mt-0.5">⟳ {t.loop_progress}</p>
-            )}
-            {t.mode === 'goal' && t.goal_turns_used > 0 && (
-              <p className="text-emerald-400 text-xs mt-0.5">
-                ◎ Turn {t.goal_turns_used}/{t.goal_max_turns}
-                {t.goal_last_reason && <span className="text-gray-500 ml-1">— {t.goal_last_reason}</span>}
-              </p>
-            )}
-            {t.target_repo && (
-              <p className="text-gray-600 text-xs mt-0.5 truncate">{t.target_repo}</p>
-            )}
-            {t.error_message && (
-              <p className="text-red-400 text-xs mt-1">{t.error_message}</p>
-            )}
-          </div>
-          {/* Action buttons: primary inline + overflow menu */}
-          <div className="flex gap-1 shrink-0 items-center">
+            {/* Action buttons */}
+            <div className="flex gap-1 shrink-0 items-center">
             <button
               onClick={() => handleStar(t.id)}
               className={`p-1.5 transition-colors ${t.starred ? 'text-yellow-400 hover:text-yellow-300' : 'text-gray-600 hover:text-yellow-400'}`}
@@ -261,6 +214,57 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat }: TaskListPro
                 </div>
               )}
             </div>
+          </div>
+          </div>
+          {/* Row 2: title + description (full width) */}
+          <div className="mt-1 pl-[1.125rem]">
+            {/* Title (editable) */}
+            {editingTitleId === t.id ? (
+              <input
+                ref={titleInputRef}
+                value={titleDraft}
+                onChange={(e) => setTitleDraft(e.target.value)}
+                onBlur={() => handleTitleSave(t)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') handleTitleSave(t);
+                  if (e.key === 'Escape') setEditingTitleId(null);
+                }}
+                className="w-full bg-gray-700 text-foreground text-sm rounded px-2 py-0.5 mt-0.5 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                placeholder="Enter title..."
+              />
+            ) : (
+              t.title ? (
+                <p className="text-foreground text-sm font-medium mt-0.5 line-clamp-1">{t.title}</p>
+              ) : null
+            )}
+            {/* Description (expandable) */}
+            {t.mode === 'loop' && !t.description ? (
+              <p className="text-sm mt-0.5 text-gray-500 italic">{t.todo_file_path}</p>
+            ) : t.description ? (
+              <ExpandableText
+                text={t.description}
+                collapsedLines={2}
+                className={`text-sm mt-0.5 ${t.title ? 'text-gray-400' : 'text-foreground'}`}
+              />
+            ) : null}
+            {t.mode === 'goal' && t.goal_condition && (
+              <p className="text-emerald-500/70 text-xs mt-0.5 line-clamp-1">Goal: {t.goal_condition}</p>
+            )}
+            {t.mode === 'loop' && t.loop_progress && (
+              <p className="text-indigo-400 text-xs mt-0.5">⟳ {t.loop_progress}</p>
+            )}
+            {t.mode === 'goal' && t.goal_turns_used > 0 && (
+              <p className="text-emerald-400 text-xs mt-0.5">
+                ◎ Turn {t.goal_turns_used}/{t.goal_max_turns}
+                {t.goal_last_reason && <span className="text-gray-500 ml-1">— {t.goal_last_reason}</span>}
+              </p>
+            )}
+            {t.target_repo && (
+              <p className="text-gray-600 text-xs mt-0.5 truncate">{t.target_repo}</p>
+            )}
+            {t.error_message && (
+              <p className="text-red-400 text-xs mt-1">{t.error_message}</p>
+            )}
           </div>
         </div>
       ))}
