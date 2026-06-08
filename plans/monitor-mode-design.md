@@ -75,7 +75,7 @@ class TaskCreate(BaseModel):
     # ... 现有字段 ...
     monitor_enabled: bool = False
     monitor_interval: int | None = None      # 秒，如 300 = 5 分钟
-    monitor_model: str | None = None         # 默认 claude-haiku-4-5
+    monitor_model: str | None = None         # 默认 claude-opus-4-6
     monitor_max_checks: int = 100
 
     @model_validator(mode="after")
@@ -119,9 +119,11 @@ async def _execute_task_on_instance(self, instance_id, task, ...):
     monitor_task = None
 
     # 如果开启了监控，启动并行轮询
+    # session_log_path 从 instance_manager 获取（启动主 Session 后即可得知）
     if task.monitor_enabled and task.monitor_interval:
+        session_log_path = self.instance_manager.get_session_log_path(instance_id)
         monitor_task = asyncio.create_task(
-            self._run_monitor_loop(task)
+            self._run_monitor_loop(task, instance_id, session_log_path)
         )
 
     # 按原有模式执行主任务
@@ -170,10 +172,17 @@ async def _run_monitor_main_session(self, instance_id, task, cwd, ...):
 #### 3. Monitor 轮询循环（核心）
 
 ```python
-async def _run_monitor_loop(self, task: Task):
+async def _run_monitor_loop(self, task: Task, instance_id: str, session_log_path: str):
     """独立的监控轮询循环，与主任务并行运行。
-    每隔 interval 秒启动一个新的 Claude session 检查进度。"""
+    每隔 interval 秒启动一个新的 Claude session 检查进度。
 
+    Args:
+        task: 任务对象
+        instance_id: 主 Session 的 instance ID，用于检查主进程存活状态
+        session_log_path: 主 Session 的 JSONL 日志路径，传给 monitor prompt
+    """
+
+    cwd = task.last_cwd or task.target_repo
     signal_path = Path(cwd) / ".claude-manager" / f"monitor_signal_{task.id}.json"
     signal_path.parent.mkdir(parents=True, exist_ok=True)
     checks_done = 0
@@ -187,34 +196,39 @@ async def _run_monitor_loop(self, task: Task):
             if not t or t.status in ("cancelled", "completed", "failed"):
                 return
 
+        # 检查主进程是否还在运行
+        process = self.instance_manager.processes.get(instance_id)
+        main_alive = process is not None and process.returncode is None
+
         # 清除 signal file
         signal_path.unlink(missing_ok=True)
 
-        # 构建轮询 prompt
-        prompt = self._build_monitor_check_prompt(task, checks_done, signal_path)
+        # 构建轮询 prompt（根据主进程状态使用不同策略）
+        prompt = self._build_monitor_check_prompt(
+            task, checks_done, signal_path,
+            main_alive=main_alive,
+            session_log_path=session_log_path,
+        )
 
-        # 启动独立 Claude 进程（不复用主 session）
-        monitor_model = task.monitor_model or "claude-haiku-4-5"
-        # 用 instance_manager 或直接起子进程
-        # 这里需要一个不占用 instance 的轻量调用方式
+        # 启动独立 Claude 进程（不复用主 session，不占用 instance）
         result = await self._run_monitor_subprocess(
             prompt=prompt,
-            cwd=task.last_cwd or task.target_repo,
-            model=monitor_model,
+            cwd=cwd,
+            model=task.monitor_model or "claude-opus-4-6",
             task_id=task.id,
         )
 
         checks_done += 1
 
-        # 读取 signal file 判断是否完成（仅 monitor 模式）
-        if task.mode == "monitor":
-            signal = self._read_monitor_signal(signal_path)
+        # 读取 signal file
+        signal = self._read_monitor_signal(signal_path)
+
+        # 判断是否完成（仅 monitor 模式，且仅主 Session 已退出时才信任 done）
+        if task.mode == "monitor" and not main_alive:
             if signal.get("status") == "done":
-                # 标记任务完成
                 async with self.db_factory() as db:
                     queue = TaskQueue(db)
                     await queue.mark_completed(task.id)
-                # 广播
                 await self.broadcaster.broadcast("tasks", {
                     "event": "status_change",
                     "task_id": task.id,
@@ -223,13 +237,14 @@ async def _run_monitor_loop(self, task: Task):
                 return
 
         # 更新检查计数和摘要
+        summary = signal.get("summary", "")
         async with self.db_factory() as db:
             await db.execute(
                 update(Task)
                 .where(Task.id == task.id)
                 .values(
                     monitor_checks_done=checks_done,
-                    monitor_last_summary=signal.get("summary", ""),
+                    monitor_last_summary=summary,
                 )
             )
             await db.commit()
@@ -238,8 +253,9 @@ async def _run_monitor_loop(self, task: Task):
         await self.broadcaster.broadcast(f"task:{task.id}", {
             "event_type": "monitor_check",
             "check_number": checks_done,
-            "summary": signal.get("summary", ""),
+            "summary": summary,
             "status": signal.get("status", "running"),
+            "main_alive": main_alive,
         })
 ```
 
@@ -296,21 +312,47 @@ def _build_monitor_main_prompt(self, task: Task) -> str:
 
 #### Monitor 轮询 Prompt
 
+Monitor 的检查策略按主进程状态分两套 prompt，信息源优先级：
+1. **Claude Code session JSONL 日志** — 最有价值，能看到主 Session 的完整操作链（一读一写，无并发安全问题）
+2. **git status / git diff** — 了解文件变更结果
+3. **ps aux** — 确认进程存活状态
+4. **用户任务产生的日志文件** — 如果有的话
+
+JSONL 日志路径由 dispatcher 传入（启动主 Session 时已知 session ID 和路径），不让 monitor 自己去找。
+
 ```python
-def _build_monitor_check_prompt(self, task, check_number, signal_path):
-    return (
+def _build_monitor_check_prompt(self, task, check_number, signal_path, main_alive, session_log_path):
+    base = (
         f"你是一个监控进程，这是第 {check_number + 1} 次检查。\n\n"
         f"需要监控的任务:\n{task.description}\n\n"
-        "请检查这个任务的执行进展：\n"
-        "1. 检查相关进程是否还在运行（ps aux）\n"
-        "2. 查看日志文件的最新内容\n"
-        "3. 判断任务完成度\n\n"
-        "【重要】你是只读的监控者，不要修改任何文件或执行任何会影响任务的操作。\n\n"
+    )
+
+    if main_alive:
+        base += (
+            "主 Session 仍在运行中，请通过以下方式了解进展：\n"
+            f"1. 读取主 Session 的日志文件 {session_log_path}（JSONL 格式，读最后 200 行即可）了解当前操作\n"
+            "2. 运行 git status / git diff 查看已有的文件变更\n"
+            "3. 不要修改任何文件，不要干扰主 Session 的工作\n"
+            "4. 不需要判断任务是否完成，只需汇报当前进展\n"
+        )
+    else:
+        base += (
+            "主 Session 已退出。请检查：\n"
+            "1. 是否有后台进程仍在运行（ps aux 检查相关进程）\n"
+            f"2. 查看主 Session 日志 {session_log_path} 了解最终状态\n"
+            "3. 查看 git diff 了解最终变更\n"
+            "4. 判断任务是已完成还是异常退出\n"
+        )
+
+    base += (
+        "\n【重要】你是只读的监控者，除了写 signal file 外不要修改任何文件或执行任何会影响任务的操作。\n\n"
+        "用中文写一句话摘要（不超过 200 字）。\n"
         "检查完毕后，将结果写入 signal file：\n"
         f"echo '{{\"status\": \"running 或 done\", \"summary\": \"简短进度摘要\"}}' > {signal_path}\n"
-        "- status: 任务还在进行写 running，已完成写 done\n"
-        "- summary: 一句话描述当前进度"
+        "- status: 任务还在进行写 running，已完成写 done（仅主 Session 已退出时才可写 done）\n"
+        "- summary: 中文一句话描述当前进度\n"
     )
+    return base
 ```
 
 #### Loop/Goal + 监控的额外提示
@@ -426,20 +468,75 @@ interface MonitorCheckEvent {
     check_number: number;
     summary: string;
     status: "running" | "done";
+    main_alive: boolean;
 }
 ```
 
 前端在 `task:{id}` channel 上监听此事件，更新折叠面板内容。
 
+## 数据存储
+
+### MonitorCheck 模型（新表）
+
+每次 monitor 检查的完整记录，支持前端"展开详情"查看历史汇报。
+
+```python
+# backend/models/monitor_check.py
+
+class MonitorCheck(Base):
+    __tablename__ = "monitor_checks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_id: Mapped[int] = mapped_column(Integer, ForeignKey("tasks.id"), index=True)
+    check_number: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(20))       # "running" | "done"
+    summary: Mapped[str] = mapped_column(Text)             # 中文摘要
+    full_output: Mapped[str | None] = mapped_column(Text, nullable=True)  # monitor session 完整输出
+    main_alive: Mapped[bool] = mapped_column(Boolean)      # 检查时主进程是否在运行
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+```
+
+在 `_run_monitor_loop` 中每次检查完成后写入：
+
+```python
+# 写入 monitor_checks 表
+async with self.db_factory() as db:
+    check_record = MonitorCheck(
+        task_id=task.id,
+        check_number=checks_done,
+        status=signal.get("status", "running"),
+        summary=summary,
+        full_output=result,  # _run_monitor_subprocess 的完整输出
+        main_alive=main_alive,
+    )
+    db.add(check_record)
+    await db.commit()
+```
+
+### API 端点
+
+```python
+# 获取某个任务的所有 monitor 检查记录
+@router.get("/tasks/{task_id}/monitor-checks")
+async def get_monitor_checks(task_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(MonitorCheck)
+        .where(MonitorCheck.task_id == task_id)
+        .order_by(MonitorCheck.check_number.desc())
+    )
+    return result.scalars().all()
+```
+
 ## Alembic Migration
 
 ```python
-"""add monitor fields to task
+"""add monitor fields and monitor_checks table
 
 Revision ID: xxxx
 """
 
 def upgrade():
+    # Task 表新增字段
     op.add_column('tasks', sa.Column('monitor_enabled', sa.Boolean(), default=False))
     op.add_column('tasks', sa.Column('monitor_interval', sa.Integer(), nullable=True))
     op.add_column('tasks', sa.Column('monitor_model', sa.String(100), nullable=True))
@@ -447,7 +544,21 @@ def upgrade():
     op.add_column('tasks', sa.Column('monitor_checks_done', sa.Integer(), default=0))
     op.add_column('tasks', sa.Column('monitor_last_summary', sa.Text(), nullable=True))
 
+    # 新建 monitor_checks 表
+    op.create_table(
+        'monitor_checks',
+        sa.Column('id', sa.Integer(), primary_key=True, autoincrement=True),
+        sa.Column('task_id', sa.Integer(), sa.ForeignKey('tasks.id'), nullable=False, index=True),
+        sa.Column('check_number', sa.Integer(), nullable=False),
+        sa.Column('status', sa.String(20), nullable=False),
+        sa.Column('summary', sa.Text(), nullable=False),
+        sa.Column('full_output', sa.Text(), nullable=True),
+        sa.Column('main_alive', sa.Boolean(), nullable=False),
+        sa.Column('created_at', sa.DateTime(), server_default=sa.func.now()),
+    )
+
 def downgrade():
+    op.drop_table('monitor_checks')
     op.drop_column('tasks', 'monitor_last_summary')
     op.drop_column('tasks', 'monitor_checks_done')
     op.drop_column('tasks', 'monitor_max_checks')
