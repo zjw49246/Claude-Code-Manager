@@ -86,8 +86,9 @@ class TaskCreate(BaseModel):
                 raise ValueError("monitor 模式必须配置 monitor_interval")
         if self.monitor_enabled and not self.monitor_interval:
             raise ValueError("开启监控必须配置 monitor_interval")
-        if self.monitor_enabled and self.mode == "auto":
-            raise ValueError("auto 模式不支持开启监控")
+        # Plan/Auto 模式不在前端展示监控选项，此处做兜底校验
+        if self.monitor_enabled and self.mode in ("auto", "plan"):
+            raise ValueError("该模式不支持开启监控")
         return self
 ```
 
@@ -116,30 +117,39 @@ class TaskResponse(BaseModel):
 # dispatcher.py
 
 async def _execute_task_on_instance(self, instance_id, task, ...):
-    monitor_task = None
+    # 先启动主 Session，拿到 session log 路径后再启动 monitor
+    # （主 Session launch 后 session ID 和日志路径才确定）
+    if task.mode == "monitor":
+        await self._launch_monitor_main_session(instance_id, task, cwd, ...)
+    elif task.mode == "loop":
+        self._launch_loop_session(instance_id, task, cwd, ...)
+    elif task.mode == "goal":
+        self._launch_goal_session(instance_id, task, cwd, ...)
+    else:
+        # auto / plan
+        ...
 
-    # 如果开启了监控，启动并行轮询
-    # session_log_path 从 instance_manager 获取（启动主 Session 后即可得知）
+    # 主 Session 已 launch，现在可以拿到日志路径，启动 monitor 并行轮询
     if task.monitor_enabled and task.monitor_interval:
         session_log_path = self.instance_manager.get_session_log_path(instance_id)
         monitor_task = asyncio.create_task(
             self._run_monitor_loop(task, instance_id, session_log_path)
         )
+        # 注册到 _monitor_tasks，供 cancel_task 使用
+        self._monitor_tasks[task.id] = monitor_task
 
-    # 按原有模式执行主任务
+    # 等待主任务执行完成
     if task.mode == "monitor":
-        await self._run_monitor_main_session(instance_id, task, cwd, ...)
+        await self._wait_monitor_main_session(instance_id, task)
     elif task.mode == "loop":
         await self._run_loop_lifecycle(instance_id, task, cwd, ...)
     elif task.mode == "goal":
         await self._run_goal_lifecycle(instance_id, task, cwd, ...)
-    else:
-        # auto / plan
-        ...
 
     # 主任务结束后，如果是 loop/goal 模式，取消 monitor
-    if monitor_task and task.mode != "monitor":
-        monitor_task.cancel()
+    if task.id in self._monitor_tasks and task.mode != "monitor":
+        self._monitor_tasks[task.id].cancel()
+        del self._monitor_tasks[task.id]
 ```
 
 #### 2. Monitor 模式主 Session
@@ -257,6 +267,25 @@ async def _run_monitor_loop(self, task: Task, instance_id: str, session_log_path
             "status": signal.get("status", "running"),
             "main_alive": main_alive,
         })
+
+    # while 循环正常退出 = max_checks 耗尽
+    # 仅 monitor 模式需要处理（loop/goal 的 monitor 会被 cancel，不会走到这里）
+    if task.mode == "monitor":
+        async with self.db_factory() as db:
+            queue = TaskQueue(db)
+            await queue.mark_failed(
+                task.id,
+                error=f"监控已达最大检查次数 {task.monitor_max_checks}，未能判断任务完成"
+            )
+        await self.broadcaster.broadcast("tasks", {
+            "event": "status_change",
+            "task_id": task.id,
+            "new_status": "failed",
+            "reason": "monitor_max_checks_exhausted",
+        })
+
+    # 清理 _monitor_tasks 注册
+    self._monitor_tasks.pop(task.id, None)
 ```
 
 #### 4. Monitor 轮询子进程
@@ -264,7 +293,8 @@ async def _run_monitor_loop(self, task: Task, instance_id: str, session_log_path
 ```python
 async def _run_monitor_subprocess(self, prompt, cwd, model, task_id):
     """启动一个独立的轻量 Claude 进程进行监控检查。
-    不占用 instance，不使用 --resume。"""
+    不占用 instance，不使用 --resume。
+    通过 --allowedTools 限制为只读工具 + Bash(写 signal file)。"""
 
     cmd = [
         settings.claude_binary,
@@ -272,6 +302,8 @@ async def _run_monitor_subprocess(self, prompt, cwd, model, task_id):
         "--model", model,
         "--output-format", "stream-json",
         "--dangerously-skip-permissions",
+        # 禁止写操作工具，只保留 Read + Bash（Bash 中写 signal file 由 prompt 控制）
+        "--disallowedTools", "Edit", "Write", "NotebookEdit",
     ]
 
     env = {
