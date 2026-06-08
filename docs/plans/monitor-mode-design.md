@@ -144,15 +144,15 @@ if action == "continue":
     if signal.get("needs_monitor"):
         monitor_context = signal.get("monitor_context", "")
 
-        # 创建 MonitorSession 记录
+        # 创建 MonitorSession 记录（使用默认配置）
         async with self.db_factory() as db:
             monitor_session = MonitorSession(
                 task_id=task.id,
                 description=f"Loop 迭代 {iteration} 后台任务监控",
                 monitor_context=monitor_context,
-                interval=task.monitor_interval or 300,
-                max_checks=task.monitor_max_checks or 100,
-                model=task.monitor_model,
+                interval=300,       # 默认 5 分钟
+                max_checks=100,     # 默认最多 100 次
+                model="claude-opus-4-6",
                 source="loop",
             )
             db.add(monitor_session)
@@ -170,12 +170,9 @@ if action == "continue":
         completed = await self._run_monitor_session(monitor_session, task)
 
         if not completed:
-            # monitor 达到 max_checks 仍未完成，标记任务失败
-            await self._mark_task_failed(
-                task.id,
-                f"监控达到最大检查次数 {monitor_session.max_checks}，后台任务未完成"
-            )
-            return
+            # monitor 被用户删除或达到 max_checks
+            # 不标记任务失败，跳过监控直接进入下一轮迭代
+            pass
 
     iteration += 1
     continue
@@ -478,9 +475,14 @@ async def _consume_monitor_output(self, process, task_id, monitor_session_id) ->
     return "\n".join(full_text_parts)
 ```
 
-### 7. Signal File 读取
+### 7. Signal File 路径与读取
 
 ```python
+def _get_monitor_signal_path(self, monitor_session: MonitorSession) -> Path:
+    """获取 monitor session 的 signal file 路径。"""
+    cwd = monitor_session.task.last_cwd or monitor_session.task.target_repo
+    return Path(cwd) / ".claude-manager" / f"monitor_signal_{monitor_session.id}.json"
+
 def _read_monitor_signal(self, signal_path: Path) -> dict:
     """读取 signal file，容错处理。"""
     if not signal_path.exists():
@@ -546,36 +548,26 @@ async def cancel_task(self, task_id: int):
 ### 用户删除单个 Monitor Session 时
 
 通过 `DELETE /tasks/{task_id}/monitor-sessions/{session_id}` API。
-对于 loop 模式的 gate monitor，删除会导致 `_run_monitor_session` 返回 False，触发任务失败。
+对于 loop 模式的 gate monitor，删除会导致 `_run_monitor_session` 返回 False。
+此时 dispatcher 应跳过监控等待，直接开始下一轮迭代（而非标记任务失败）。
 
 ## 前端变更
 
-### 1. 监控列表面板
+### 1. Chat 界面顶部按钮
 
-每个 task/chat 详情页下方新增可折叠的监控列表：
+所有模式的 chat 界面顶部增加两个按钮：
 
 ```
 ┌──────────────────────────────────────────────┐
+│  Task #12: 训练模型      [+ 新建监控] [监控列表(2)] │
+├──────────────────────────────────────────────┤
 │  Chat 主区域                                  │
 │  ...                                         │
-├──────────────────────────────────────────────┤
-│  ▼ 监控 (2 个运行中)          [+ 新建监控]     │
-│                                              │
-│  ┌────────────────────────────────────────┐  │
-│  │ Monitor #1: "监控训练进度"         [🗑️] │  │
-│  │ 来源: loop 迭代 3 | 已检查 5 次        │  │
-│  │ 最新: epoch 45/100, loss=0.23         │  │
-│  │ [查看详情 ▸]                           │  │
-│  └────────────────────────────────────────┘  │
-│                                              │
-│  ┌────────────────────────────────────────┐  │
-│  │ Monitor #2: "监控磁盘空间"        [🗑️] │  │
-│  │ 来源: 手动 | 已检查 1 次               │  │
-│  │ 最新: 磁盘使用率 72%                   │  │
-│  │ [查看详情 ▸]                           │  │
-│  └────────────────────────────────────────┘  │
 └──────────────────────────────────────────────┘
 ```
+
+- **[+ 新建监控]**：所有模式都有，点击弹出创建对话框
+- **[监控列表(N)]**：显示当前 task 下的 monitor 数量，点击打开监控列表面板
 
 ### 2. 新建监控对话框
 
@@ -597,9 +589,71 @@ async def cancel_task(self, task_id: int):
 └────────────────────────────────────────┘
 ```
 
-### 3. Monitor 详情页
+### 3. 监控列表面板
 
-点击 [查看详情] 展开/跳转，显示该 monitor session 的所有检查记录和完整输出。
+点击 [监控列表] 打开侧面板或抽屉，显示该 task 下所有 monitor sessions：
+
+```
+┌────────────────────────────────────────┐
+│ 监控列表                          [×]  │
+│                                        │
+│ ┌────────────────────────────────────┐ │
+│ │ ● Monitor #1: "监控训练进度"  [🗑️] │ │
+│ │   来源: loop 迭代 3 | 已检查 5 次   │ │
+│ │   最新: epoch 45/100, loss=0.23    │ │
+│ └────────────────────────────────────┘ │
+│                                        │
+│ ┌────────────────────────────────────┐ │
+│ │ ● Monitor #2: "监控磁盘空间" [🗑️] │ │
+│ │   来源: 手动 | 已检查 1 次          │ │
+│ │   最新: 磁盘使用率 72%              │ │
+│ └────────────────────────────────────┘ │
+│                                        │
+│ ┌────────────────────────────────────┐ │
+│ │ ✓ Monitor #3: "迭代1监控"          │ │
+│ │   来源: loop 迭代 1 | 已完成        │ │
+│ │   结果: 训练完成，accuracy=0.95     │ │
+│ └────────────────────────────────────┘ │
+└────────────────────────────────────────┘
+```
+
+- 运行中的 monitor 显示 ● 绿点 + 🗑️ 删除按钮
+- 已完成的 monitor 显示 ✓ + 无删除按钮
+- 点击任意一条进入详情页
+
+### 4. Monitor 详情页
+
+点击某个 monitor session 进入详情页，显示所有检查记录：
+
+```
+┌────────────────────────────────────────┐
+│ ← 返回列表     Monitor #1: "监控训练进度" │
+│ 状态: 运行中 | 间隔: 300秒 | 5/100 次   │
+├────────────────────────────────────────┤
+│                                        │
+│ ▼ 检查 #5  2024-01-15 14:30           │
+│   状态: running                        │
+│   摘要: epoch 45/100, loss=0.23        │
+│   ┌──────────────────────────────────┐ │
+│   │ (完整 monitor session 输出)       │ │
+│   │ $ ps aux | grep train            │ │
+│   │ root 1234 ... python train.py    │ │
+│   │ $ tail -20 /tmp/train.log        │ │
+│   │ Epoch 45/100, loss=0.2312...     │ │
+│   └──────────────────────────────────┘ │
+│                                        │
+│ ▶ 检查 #4  2024-01-15 14:25           │
+│   摘要: epoch 38/100, loss=0.28        │
+│                                        │
+│ ▶ 检查 #3  2024-01-15 14:20           │
+│   摘要: epoch 30/100, loss=0.31        │
+│                                        │
+└────────────────────────────────────────┘
+```
+
+- 最新的检查在最上面
+- 每条检查默认折叠，显示摘要
+- 点击展开显示完整的 monitor session 输出（来自 MonitorCheck.full_output）
 
 ### 4. WebSocket 事件
 
