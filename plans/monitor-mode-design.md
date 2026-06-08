@@ -276,6 +276,8 @@ async def _run_monitor_loop(self, task: Task, instance_id: str, session_log_path
                 "task_id": task.id,
                 "new_status": "completed",
             })
+            # kill 主进程，让 _wait_monitor_main_session 返回、释放 instance
+            await self._kill_main_process(instance_id)
             self._monitor_tasks.pop(task.id, None)
             return
 
@@ -294,9 +296,21 @@ async def _run_monitor_loop(self, task: Task, instance_id: str, session_log_path
             "new_status": "failed",
             "reason": "monitor_max_checks_exhausted",
         })
+        # kill 主进程，让 _wait_monitor_main_session 返回、释放 instance
+        await self._kill_main_process(instance_id)
 
     # 清理 _monitor_tasks 注册
     self._monitor_tasks.pop(task.id, None)
+
+async def _kill_main_process(self, instance_id: str):
+    """终止主 Session 进程，释放 instance。"""
+    process = self.instance_manager.processes.get(instance_id)
+    if process and process.returncode is None:
+        process.terminate()
+        try:
+            await asyncio.wait_for(process.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            process.kill()
 ```
 
 #### 4. Monitor 轮询子进程
