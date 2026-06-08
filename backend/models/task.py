@@ -42,6 +42,7 @@ class Task(Base):
     provider: Mapped[str] = mapped_column(String(20), default="claude", server_default="claude")
     model: Mapped[str | None] = mapped_column(String(100), nullable=True)
     effort_level: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    thinking_budget: Mapped[int | None] = mapped_column(Integer, nullable=True)
     tags: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     metadata_: Mapped[dict | None] = mapped_column("metadata", JSON, nullable=True)
     context_window_usage: Mapped[dict | None] = mapped_column(JSON, nullable=True)

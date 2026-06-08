@@ -462,9 +462,8 @@ async def test_chat_send_uses_task_model_not_instance_model(client, session_fact
         model="claude-opus-4-6",  # task was created with opus 4.6
     )
 
-    # Create an idle instance with a DIFFERENT model
     async with session_factory() as db:
-        inst = Instance(name="inst-diff-model", status="idle", model="claude-opus-4-7")
+        inst = Instance(name="inst-diff-model", status="idle")
         db.add(inst)
         await db.commit()
 
@@ -485,45 +484,16 @@ async def test_chat_send_uses_task_model_not_instance_model(client, session_fact
 
 
 @pytest.mark.asyncio
-async def test_chat_send_falls_back_to_instance_model_when_task_has_none(client, session_factory):
-    """When task.model is None, chat resume should fall back to instance.model."""
+async def test_chat_send_effort_uses_task_effort(client, session_factory):
+    """Chat resume effort_level should use task's effort_level."""
     task_id = await _create_task_with_session(
         client, session_factory,
         last_cwd="/tmp",
-        # no model set on task
+        effort_level="high",
     )
 
     async with session_factory() as db:
-        inst = Instance(name="inst-fallback", status="idle", model="claude-sonnet-4-6")
-        db.add(inst)
-        await db.commit()
-
-    mock_im = MagicMock()
-    mock_im.processes = {}
-    mock_im.launch = AsyncMock(return_value=43)
-    mock_broadcaster = MagicMock()
-    mock_broadcaster.broadcast = AsyncMock()
-
-    with patch("backend.main.instance_manager", mock_im), \
-         patch("backend.main.broadcaster", mock_broadcaster):
-        resp = await client.post(f"/api/tasks/{task_id}/chat", json={"message": "hi"})
-    assert resp.status_code == 200
-
-    call_kwargs = mock_im.launch.call_args.kwargs
-    assert call_kwargs["model"] == "claude-sonnet-4-6"
-
-
-@pytest.mark.asyncio
-async def test_chat_send_effort_uses_task_effort_over_instance(client, session_factory):
-    """Chat resume effort_level should follow: task → instance → settings default."""
-    task_id = await _create_task_with_session(
-        client, session_factory,
-        last_cwd="/tmp",
-        effort_level="high",  # task-level effort
-    )
-
-    async with session_factory() as db:
-        inst = Instance(name="inst-effort", status="idle", effort_level="low")
+        inst = Instance(name="inst-effort", status="idle")
         db.add(inst)
         await db.commit()
 
@@ -539,34 +509,4 @@ async def test_chat_send_effort_uses_task_effort_over_instance(client, session_f
     assert resp.status_code == 200
 
     call_kwargs = mock_im.launch.call_args.kwargs
-    # Task's effort should take priority over instance's
     assert call_kwargs["effort_level"] == "high"
-
-
-@pytest.mark.asyncio
-async def test_chat_send_effort_falls_back_to_instance(client, session_factory):
-    """When task has no effort_level, should use instance's effort_level."""
-    task_id = await _create_task_with_session(
-        client, session_factory,
-        last_cwd="/tmp",
-        # no effort_level on task
-    )
-
-    async with session_factory() as db:
-        inst = Instance(name="inst-effort-fb", status="idle", effort_level="max")
-        db.add(inst)
-        await db.commit()
-
-    mock_im = MagicMock()
-    mock_im.processes = {}
-    mock_im.launch = AsyncMock(return_value=45)
-    mock_broadcaster = MagicMock()
-    mock_broadcaster.broadcast = AsyncMock()
-
-    with patch("backend.main.instance_manager", mock_im), \
-         patch("backend.main.broadcaster", mock_broadcaster):
-        resp = await client.post(f"/api/tasks/{task_id}/chat", json={"message": "hi"})
-    assert resp.status_code == 200
-
-    call_kwargs = mock_im.launch.call_args.kwargs
-    assert call_kwargs["effort_level"] == "max"

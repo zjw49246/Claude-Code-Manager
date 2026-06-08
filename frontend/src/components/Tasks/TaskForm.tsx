@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { api } from '../../api/client';
-import type { Project, TagItem, UploadResult } from '../../api/client';
+import type { Project, TagItem, Task, UploadResult } from '../../api/client';
 import { Plus, Paperclip, X, Star } from 'lucide-react';
 import { ProjectSelect } from '../ProjectSelect';
 import { resolveTagColor } from '../TagColors';
@@ -38,6 +38,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   const [mustComplete, setMustComplete] = useState(false);
   const [goalCondition, setGoalCondition] = useState('');
   const [goalMaxTurns, setGoalMaxTurns] = useState('30');
+  const [thinkingBudget, setThinkingBudget] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [projects, setProjects] = useState<Project[]>([]);
@@ -48,6 +49,8 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   const [selectedSecretIds, setSelectedSecretIds] = useState<number[]>([]);
   const [dropError, setDropError] = useState('');
   const [starOnCreate, setStarOnCreate] = useState(false);
+  const [cloneFromTaskId, setCloneFromTaskId] = useState<number | ''>('');
+  const [contextTasks, setContextTasks] = useState<Task[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
 
@@ -70,6 +73,17 @@ export function TaskForm({ onCreated }: TaskFormProps) {
       setCodexEffortOptions(c.codex_effort_options || ['low', 'medium', 'high', 'xhigh']);
     }).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    if (!projectId) {
+      setContextTasks([]);
+      setCloneFromTaskId('');
+      return;
+    }
+    api.listTasks(undefined, true, projectId as number, undefined, 100)
+      .then((tasks) => setContextTasks(tasks.filter((t) => t.session_id)))
+      .catch(() => setContextTasks([]));
+  }, [projectId]);
 
   const activeDefaultModel = provider === 'codex' ? defaultCodexModel : defaultModel;
   const activeModelOptions = provider === 'codex' ? codexModelOptions : modelOptions;
@@ -174,7 +188,9 @@ export function TaskForm({ onCreated }: TaskFormProps) {
         provider,
         model: model || activeDefaultModel,
         ...(effort ? { effort_level: effort } : {}),
+        ...(thinkingBudget ? { thinking_budget: parseInt(thinkingBudget) || null } : {}),
         ...(starOnCreate ? { starred: true } : {}),
+        ...(cloneFromTaskId ? { clone_from_task_id: cloneFromTaskId as number } : {}),
       });
       setDescription('');
       setPriority(0);
@@ -184,6 +200,8 @@ export function TaskForm({ onCreated }: TaskFormProps) {
       setSelectedSecretIds([]);
       setModel('');
       setEffort('');
+      setThinkingBudget('');
+      setCloneFromTaskId('');
       onCreated();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create task');
@@ -336,28 +354,49 @@ export function TaskForm({ onCreated }: TaskFormProps) {
           </div>
         )}
       </div>
+      {contextTasks.length > 0 && (
+        <div className="flex items-center gap-2">
+          <label className="text-sm text-gray-400 whitespace-nowrap">Copy context from:</label>
+          <select
+            className="flex-1 bg-gray-700 text-foreground rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            value={cloneFromTaskId}
+            onChange={(e) => setCloneFromTaskId(e.target.value ? Number(e.target.value) : '')}
+          >
+            <option value="">None (start fresh)</option>
+            {contextTasks.map((t) => (
+              <option key={t.id} value={t.id}>
+                #{t.id} {t.description ? t.description.slice(0, 60) : t.title || '(no description)'}
+                {t.description && t.description.length > 60 ? '…' : ''}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
       <div className="flex items-center gap-3 flex-wrap">
         <label className="text-sm text-gray-400">Priority:</label>
-        <input
-          type="number"
-          className="w-20 bg-gray-700 text-foreground rounded px-2 py-1 text-sm"
+        <select
+          className="w-[52px] bg-gray-700 text-foreground rounded px-1 py-1.5 text-sm"
           value={priority}
           onChange={(e) => setPriority(Number(e.target.value))}
-        />
-        <label className="text-sm text-gray-400 ml-2">Mode:</label>
+        >
+          {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((p) => (
+            <option key={p} value={p}>{p}</option>
+          ))}
+        </select>
+        <label className="text-sm text-gray-400 ml-1">Mode:</label>
         <select
-          className="bg-gray-700 text-foreground rounded px-2 py-1 text-sm"
+          className="w-[70px] bg-gray-700 text-foreground rounded px-1 py-1.5 text-sm"
           value={mode}
           onChange={(e) => setMode(e.target.value)}
         >
-          <option value="auto">Auto (direct execute)</option>
-          <option value="plan">Plan (review first)</option>
-          <option value="loop">Loop (todo list)</option>
-          <option value="goal">Goal (condition-based)</option>
+          <option value="auto">Auto</option>
+          <option value="plan">Plan</option>
+          <option value="loop">Loop</option>
+          <option value="goal">Goal</option>
         </select>
-        <label className="text-sm text-gray-400 ml-2">CLI:</label>
+        <label className="text-sm text-gray-400 ml-1">CLI:</label>
         <select
-          className="w-[110px] bg-gray-700 text-foreground rounded px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          className="w-[75px] bg-gray-700 text-foreground rounded px-1 py-1.5 text-sm"
           value={provider}
           onChange={(e) => {
             setProvider(e.target.value);
@@ -369,9 +408,9 @@ export function TaskForm({ onCreated }: TaskFormProps) {
             <option key={p} value={p}>{p === 'claude' ? 'Claude' : p === 'codex' ? 'Codex' : p}</option>
           ))}
         </select>
-        <label className="text-sm text-gray-400 ml-2">Model:</label>
+        <label className="text-sm text-gray-400 ml-1">Model:</label>
         <select
-          className="w-[180px] bg-gray-700 text-foreground rounded px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          className="w-[140px] bg-gray-700 text-foreground rounded px-1 py-1.5 text-sm"
           value={model}
           onChange={(e) => setModel(e.target.value)}
         >
@@ -380,9 +419,9 @@ export function TaskForm({ onCreated }: TaskFormProps) {
             <option key={m} value={m}>{m}</option>
           ))}
         </select>
-        <label className="text-sm text-gray-400 ml-2">Effort:</label>
+        <label className="text-sm text-gray-400 ml-1">Effort:</label>
         <select
-          className="w-[120px] bg-gray-700 text-foreground rounded px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          className="w-[80px] bg-gray-700 text-foreground rounded px-1 py-1.5 text-sm"
           value={effort}
           onChange={(e) => setEffort(e.target.value)}
         >
@@ -390,6 +429,20 @@ export function TaskForm({ onCreated }: TaskFormProps) {
           {activeEffortOptions.filter((e) => e !== defaultEffort).map((e) => (
             <option key={e} value={e}>{e}</option>
           ))}
+        </select>
+        <label className="text-sm text-gray-400 ml-1">Thinking:</label>
+        <select
+          className="w-[80px] bg-gray-700 text-foreground rounded px-1 py-1.5 text-sm"
+          value={thinkingBudget}
+          onChange={(e) => setThinkingBudget(e.target.value)}
+        >
+          <option value="">default</option>
+          <option value="4096">4k</option>
+          <option value="8192">8k</option>
+          <option value="16384">16k</option>
+          <option value="32768">32k</option>
+          <option value="65536">64k</option>
+          <option value="131072">128k</option>
         </select>
         {mode === 'loop' && (
           <>

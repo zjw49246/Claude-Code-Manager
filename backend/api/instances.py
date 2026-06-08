@@ -22,10 +22,6 @@ async def list_instances(db: AsyncSession = Depends(get_db)):
 async def create_instance(body: InstanceCreate, db: AsyncSession = Depends(get_db)):
     instance = Instance(
         name=body.name,
-        provider=body.provider,
-        model=body.model,
-        effort_level=body.effort_level,
-        thinking_budget=body.thinking_budget,
         config=body.config,
     )
     db.add(instance)
@@ -53,6 +49,21 @@ async def delete_instance(instance_id: int, db: AsyncSession = Depends(get_db)):
     await db.delete(instance)
     await db.commit()
     return {"ok": True}
+
+
+@router.delete("/cleanup")
+async def cleanup_instances(db: AsyncSession = Depends(get_db)):
+    from backend.main import instance_manager
+    result = await db.execute(
+        select(Instance).where(Instance.status.in_(["error", "stopped"]))
+    )
+    targets = list(result.scalars().all())
+    for inst in targets:
+        if instance_manager.is_running(inst.id):
+            await instance_manager.stop(inst.id)
+        await db.delete(inst)
+    await db.commit()
+    return {"ok": True, "deleted": len(targets)}
 
 
 @router.post("/{instance_id}/stop")
@@ -94,15 +105,21 @@ async def run_task_on_instance(
     else:
         raise HTTPException(400, "Must provide task_id or prompt")
 
+    from backend.config import settings as app_settings
+    task_model = task.model if task_id and task else None
+    task_provider = task.provider if task_id and task else "claude"
+    task_effort = (task.effort_level if task_id and task else None) or app_settings.default_effort
+    task_thinking = task.thinking_budget if task_id and task else None
+
     pid = await instance_manager.launch(
         instance_id=instance_id,
         prompt=actual_prompt,
         task_id=task_id,
         cwd=cwd,
-        model=instance.model,
-        provider=instance.provider,
-        thinking_budget=instance.thinking_budget,
-        effort_level=instance.effort_level,
+        model=task_model,
+        provider=task_provider,
+        thinking_budget=task_thinking,
+        effort_level=task_effort,
     )
     return {"ok": True, "pid": pid}
 

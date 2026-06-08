@@ -21,11 +21,13 @@ class TaskCreate(BaseModel):
     provider: str = "claude"
     model: str | None = None
     effort_level: str | None = None
+    thinking_budget: int | None = None
     tags: list[str] | None = None
     image_paths: list[str] | None = None  # kept for backwards compat
     file_paths: list[str] | None = None
     attachments: list[dict] | None = None  # [{url, name, is_image}, ...]
     secret_ids: list[int] | None = None
+    clone_from_task_id: int | None = None
     starred: bool = False
 
     @model_validator(mode='after')
@@ -88,6 +90,7 @@ class TaskResponse(BaseModel):
     provider: str
     model: str | None
     effort_level: str | None
+    thinking_budget: int | None
     starred: bool
     archived: bool
     has_unread: bool

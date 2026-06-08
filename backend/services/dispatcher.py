@@ -294,63 +294,13 @@ class GlobalDispatcher:
 
         needed = settings.max_concurrent_instances - len(existing)
         if needed > 0:
-            provider = _default_worker_provider()
-            model = _default_worker_model(provider)
             async with self.db_factory() as db:
                 for i in range(needed):
                     name = f"worker-{len(existing) + i + 1}"
-                    instance = Instance(
-                        name=name,
-                        provider=provider,
-                        model=model,
-                    )
+                    instance = Instance(name=name)
                     db.add(instance)
                 await db.commit()
             logger.info(f"Created {needed} worker instances")
-
-    async def _ensure_instances_for_pending_tasks(self):
-        """Auto-create instances for pending tasks whose required model has no instance."""
-        async with self.db_factory() as db:
-            # Get distinct provider/model pairs required by pending tasks (excluding None/empty)
-            result = await db.execute(
-                select(Task.provider, Task.model).where(
-                    Task.status == "pending",
-                    Task.model.isnot(None),
-                    Task.model != "",
-                ).distinct()
-            )
-            required_pairs = [
-                (provider or _default_provider(), model)
-                for provider, model in result.all()
-            ]
-
-            if not required_pairs:
-                return
-
-            # Get existing provider/model pairs
-            result = await db.execute(select(Instance.provider, Instance.model))
-            existing_pairs = {(provider or "claude", model) for provider, model in result.all()}
-
-            # Create instances for models that have no instance at all
-            for provider, model in required_pairs:
-                default_model = (
-                    settings.default_codex_model
-                    if provider == "codex"
-                    else settings.default_model
-                )
-                provider_models = {m for p, m in existing_pairs if p == provider}
-                has_default = "default" in provider_models or default_model in provider_models
-                # "default" and the default_model (e.g. "opus") are equivalent
-                if model in ("default", default_model) and has_default:
-                    continue
-                if (provider, model) not in existing_pairs:
-                    name = f"worker-{model}-1" if provider == "claude" else f"{provider}-{model}-1"
-                    instance = Instance(name=name, provider=provider, model=model)
-                    db.add(instance)
-                    existing_pairs.add((provider, model))
-                    logger.info(f"Auto-created instance '{name}' for provider '{provider}' model '{model}'")
-
-            await db.commit()
 
     async def _dispatch_loop(self):
         """Poll for idle instances + pending tasks and dispatch."""
@@ -368,13 +318,9 @@ class GlobalDispatcher:
                     if instance.id in self._running_tasks and not self._running_tasks[instance.id].done():
                         continue
 
-                    # Dequeue a task matching this instance's model
                     async with self.db_factory() as db:
                         queue = TaskQueue(db)
-                        task = await queue.dequeue(
-                            instance_model=instance.model,
-                            instance_provider=instance.provider,
-                        )
+                        task = await queue.dequeue()
 
                     if not task:
                         continue  # No matching task for this instance, try next
@@ -401,9 +347,6 @@ class GlobalDispatcher:
                     self._running_tasks[instance.id] = asyncio.create_task(
                         self._run_task_lifecycle(instance.id, task, git_env)
                     )
-
-                # Auto-create instances for pending tasks whose model has no instance
-                await self._ensure_instances_for_pending_tasks()
 
                 await asyncio.sleep(2)
 
@@ -497,18 +440,6 @@ class GlobalDispatcher:
             "excluded": excluded,
         }
 
-    async def _get_thinking_budget(self, instance_id: int) -> int | None:
-        """Look up the configured Extended Thinking budget for an instance."""
-        async with self.db_factory() as db:
-            inst = await db.get(Instance, instance_id)
-            return inst.thinking_budget if inst else None
-
-    async def _get_effort_level(self, instance_id: int) -> str:
-        """Look up the configured effort level for an instance, with fallback."""
-        async with self.db_factory() as db:
-            inst = await db.get(Instance, instance_id)
-            return (inst.effort_level if inst else None) or settings.default_effort
-
     async def _run_task_lifecycle(self, instance_id: int, task: Task, git_env: dict | None = None):
         """Execute the task lifecycle: assign → Claude Code → judge result.
 
@@ -526,27 +457,14 @@ class GlobalDispatcher:
             })
 
             # === Step 2: Determine cwd and update task ===
-            cwd = task.target_repo or "."
-            thinking_budget: int | None = None
-            effort_level: str | None = None
+            cwd = task.last_cwd or task.target_repo or "."
+            thinking_budget = task.thinking_budget
+            effort_level = task.effort_level or settings.default_effort
             async with self.db_factory() as db:
-                instance = await db.get(Instance, instance_id)
-                if instance:
-                    thinking_budget = instance.thinking_budget
-                # Resolve effort: task.effort_level → instance.effort_level → settings.default_effort
-                effort_level = task.effort_level or (instance.effort_level if instance else None) or settings.default_effort
-                # Resolve actual model: task's own model, or fall back to instance's model
-                if not task.model and instance:
-                    resolved_model = instance.model if instance.model != "default" else None
-                    if resolved_model:
-                        task.model = resolved_model
-                update_values: dict = {"status": "executing", "instance_id": instance_id}
-                if task.model:
-                    update_values["model"] = task.model
                 await db.execute(
                     update(Task)
                     .where(Task.id == task.id)
-                    .values(**update_values)
+                    .values(status="executing", instance_id=instance_id)
                 )
                 await db.commit()
             await self.broadcaster.broadcast("tasks", {
@@ -595,6 +513,7 @@ class GlobalDispatcher:
                 task_id=task.id,
                 cwd=cwd,
                 model=task.model,
+                resume_session_id=task.session_id,
                 git_env=git_env or {},
                 thinking_budget=thinking_budget,
                 effort_level=effort_level,
@@ -953,7 +872,7 @@ class GlobalDispatcher:
                 model=task.model,
                 loop_iteration=iteration,
                 git_env=git_env or {},
-                thinking_budget=await self._get_thinking_budget(instance_id),
+                thinking_budget=task.thinking_budget,
                 effort_level=effort_level,
                 provider=task.provider,
             )
@@ -1133,7 +1052,7 @@ class GlobalDispatcher:
                     model=task.model,
                     loop_iteration=turn,
                     git_env=git_env or {},
-                    thinking_budget=await self._get_thinking_budget(instance_id),
+                    thinking_budget=task.thinking_budget,
                     effort_level=effort_level,
                     provider=task.provider,
                 )
@@ -1148,7 +1067,7 @@ class GlobalDispatcher:
                     resume_session_id=session_id,
                     loop_iteration=turn,
                     git_env=git_env or {},
-                    thinking_budget=await self._get_thinking_budget(instance_id),
+                    thinking_budget=task.thinking_budget,
                     effort_level=effort_level,
                     provider=task.provider,
                 )
@@ -1509,7 +1428,7 @@ class GlobalDispatcher:
             resume_session_id=resume_sid,
             loop_iteration=iteration,
             git_env=git_env,
-            thinking_budget=await self._get_thinking_budget(instance_id),
+            thinking_budget=task.thinking_budget,
             effort_level=effort_level,
             provider=task.provider,
         )
@@ -1538,7 +1457,7 @@ class GlobalDispatcher:
             cwd=cwd,
             model=task.model,
             git_env=git_env or {},
-            thinking_budget=await self._get_thinking_budget(instance_id),
+            thinking_budget=task.thinking_budget,
             effort_level=effort_level,
             provider=task.provider,
         )
