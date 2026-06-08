@@ -106,34 +106,6 @@ async def test_ensure_instances_creates_workers(db_factory):
     assert len(instances) == 3
     assert instances[0].name == "worker-1"
     assert instances[2].name == "worker-3"
-    assert {inst.provider for inst in instances} == {"claude"}
-    assert {inst.model for inst in instances} == {"sonnet"}
-
-
-@pytest.mark.asyncio
-async def test_ensure_instances_uses_codex_when_claude_cli_missing(db_factory):
-    """Auto-created workers use Codex when Claude is unavailable and Codex exists."""
-    d = _make_dispatcher(db_factory)
-
-    def provider_available(provider: str) -> bool:
-        return provider == "codex"
-
-    with patch("backend.services.dispatcher.settings") as mock_settings, \
-         patch("backend.services.dispatcher._provider_available", side_effect=provider_available):
-        mock_settings.max_concurrent_instances = 2
-        mock_settings.default_provider = "claude"
-        mock_settings.default_model = "claude-opus-4-6"
-        mock_settings.default_codex_model = "gpt-5.5"
-        await d._ensure_instances()
-
-    async with db_factory() as db:
-        from sqlalchemy import select
-        result = await db.execute(select(Instance))
-        instances = list(result.scalars().all())
-
-    assert len(instances) == 2
-    assert {inst.provider for inst in instances} == {"codex"}
-    assert {inst.model for inst in instances} == {"gpt-5.5"}
 
 
 @pytest.mark.asyncio
@@ -1838,104 +1810,6 @@ async def test_lifecycle_prompt_empty_image_paths(db_factory):
     assert "参考图片" not in prompt_used
 
 
-# === _ensure_instances_for_pending_tasks tests ===
-
-
-@pytest.mark.asyncio
-async def test_ensure_instances_for_pending_tasks_creates_missing(db_factory):
-    """Auto-creates an instance when a pending task requires a model with no instance."""
-    from sqlalchemy import select as sa_select
-    d = _make_dispatcher(db_factory)
-
-    async with db_factory() as db:
-        db.add(Task(title="t", description="d", target_repo="/tmp", status="pending", model="haiku"))
-        await db.commit()
-
-    await d._ensure_instances_for_pending_tasks()
-
-    async with db_factory() as db:
-        result = await db.execute(sa_select(Instance).where(Instance.model == "haiku"))
-        instances = list(result.scalars().all())
-    assert len(instances) == 1
-    assert instances[0].name == "worker-haiku-1"
-
-
-@pytest.mark.asyncio
-async def test_ensure_instances_for_pending_tasks_skips_if_instance_exists(db_factory):
-    """Does not create a duplicate instance when one already exists for that model."""
-    from sqlalchemy import select as sa_select
-    d = _make_dispatcher(db_factory)
-
-    async with db_factory() as db:
-        db.add(Instance(name="existing-opus", model="opus"))
-        db.add(Task(title="t", description="d", target_repo="/tmp", status="pending", model="opus"))
-        await db.commit()
-
-    await d._ensure_instances_for_pending_tasks()
-
-    async with db_factory() as db:
-        result = await db.execute(sa_select(Instance).where(Instance.model == "opus"))
-        instances = list(result.scalars().all())
-    assert len(instances) == 1
-
-
-@pytest.mark.asyncio
-async def test_ensure_instances_for_pending_tasks_ignores_null_model(db_factory):
-    """Tasks with model=None do not trigger auto-instance creation."""
-    from sqlalchemy import select as sa_select
-    d = _make_dispatcher(db_factory)
-
-    async with db_factory() as db:
-        db.add(Task(title="t", description="d", target_repo="/tmp", status="pending"))
-        await db.commit()
-
-    await d._ensure_instances_for_pending_tasks()
-
-    async with db_factory() as db:
-        result = await db.execute(sa_select(Instance))
-        instances = list(result.scalars().all())
-    assert len(instances) == 0
-
-
-@pytest.mark.asyncio
-async def test_ensure_instances_for_pending_tasks_ignores_non_pending(db_factory):
-    """Completed/cancelled tasks do not trigger auto-instance creation."""
-    from sqlalchemy import select as sa_select
-    d = _make_dispatcher(db_factory)
-
-    async with db_factory() as db:
-        db.add(Task(title="done", description="d", target_repo="/tmp", status="completed", model="sonnet"))
-        db.add(Task(title="cancelled", description="d", target_repo="/tmp", status="cancelled", model="sonnet"))
-        await db.commit()
-
-    await d._ensure_instances_for_pending_tasks()
-
-    async with db_factory() as db:
-        result = await db.execute(sa_select(Instance))
-        instances = list(result.scalars().all())
-    assert len(instances) == 0
-
-
-@pytest.mark.asyncio
-async def test_ensure_instances_for_pending_tasks_multiple_models(db_factory):
-    """Creates one instance per missing model."""
-    from sqlalchemy import select as sa_select
-    d = _make_dispatcher(db_factory)
-
-    async with db_factory() as db:
-        db.add(Task(title="t1", description="d", target_repo="/tmp", status="pending", model="opus"))
-        db.add(Task(title="t2", description="d", target_repo="/tmp", status="pending", model="sonnet"))
-        await db.commit()
-
-    await d._ensure_instances_for_pending_tasks()
-
-    async with db_factory() as db:
-        result = await db.execute(sa_select(Instance))
-        instances = list(result.scalars().all())
-    models = {i.model for i in instances}
-    assert models == {"opus", "sonnet"}
-
-
 # === Effort level tests ===
 
 
@@ -1945,7 +1819,7 @@ async def test_lifecycle_passes_effort_level_from_task(db_factory):
     d = _make_dispatcher(db_factory)
 
     async with db_factory() as db:
-        inst = Instance(name="worker-1", effort_level="low")
+        inst = Instance(name="worker-1")
         db.add(inst)
         task = Task(title="effort-task", description="d", target_repo="/repo", effort_level="max")
         db.add(task)
@@ -1963,40 +1837,12 @@ async def test_lifecycle_passes_effort_level_from_task(db_factory):
     await d._run_task_lifecycle(inst_id, task_obj)
 
     call_kwargs = d.instance_manager.launch.call_args.kwargs
-    # Task effort should take precedence over instance effort
     assert call_kwargs["effort_level"] == "max"
 
 
 @pytest.mark.asyncio
-async def test_lifecycle_falls_back_to_instance_effort(db_factory):
-    """When task has no effort_level, instance effort_level is used."""
-    d = _make_dispatcher(db_factory)
-
-    async with db_factory() as db:
-        inst = Instance(name="worker-effort", effort_level="xhigh")
-        db.add(inst)
-        task = Task(title="no-effort-task", description="d", target_repo="/repo")
-        db.add(task)
-        await db.commit()
-        await db.refresh(inst)
-        await db.refresh(task)
-        inst_id = inst.id
-        task_obj = task
-
-    mock_proc = MagicMock()
-    mock_proc.returncode = 0
-    mock_proc.wait = AsyncMock(return_value=0)
-    d.instance_manager.processes = {inst_id: mock_proc}
-
-    await d._run_task_lifecycle(inst_id, task_obj)
-
-    call_kwargs = d.instance_manager.launch.call_args.kwargs
-    assert call_kwargs["effort_level"] == "xhigh"
-
-
-@pytest.mark.asyncio
 async def test_lifecycle_falls_back_to_default_effort(db_factory):
-    """When neither task nor instance has effort_level, settings.default_effort is used."""
+    """When task has no effort_level, settings.default_effort is used."""
     d = _make_dispatcher(db_factory)
 
     async with db_factory() as db:
@@ -2022,39 +1868,6 @@ async def test_lifecycle_falls_back_to_default_effort(db_factory):
 
     call_kwargs = d.instance_manager.launch.call_args.kwargs
     assert call_kwargs["effort_level"] == "medium"
-
-
-@pytest.mark.asyncio
-async def test_get_effort_level_from_instance(db_factory):
-    """_get_effort_level returns instance's effort_level when set."""
-    d = _make_dispatcher(db_factory)
-
-    async with db_factory() as db:
-        inst = Instance(name="effort-inst", effort_level="high")
-        db.add(inst)
-        await db.commit()
-        await db.refresh(inst)
-        inst_id = inst.id
-
-    result = await d._get_effort_level(inst_id)
-    assert result == "high"
-
-
-@pytest.mark.asyncio
-async def test_get_effort_level_falls_back_to_default(db_factory):
-    """_get_effort_level returns default_effort when instance has no effort_level."""
-    d = _make_dispatcher(db_factory)
-
-    async with db_factory() as db:
-        inst = Instance(name="no-effort-inst")
-        db.add(inst)
-        await db.commit()
-        await db.refresh(inst)
-        inst_id = inst.id
-
-    result = await d._get_effort_level(inst_id)
-    from backend.config import settings
-    assert result == settings.default_effort
 
 
 # === Goal mode lifecycle tests ===

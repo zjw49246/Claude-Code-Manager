@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { api } from '../../api/client';
 import type { Instance } from '../../api/client';
-import { Square, Trash2, Plus, Zap, ZapOff } from 'lucide-react';
+import { Square, Trash2, Plus, Zap, ZapOff, Eraser } from 'lucide-react';
 
 interface InstanceGridProps {
   instances: Instance[];
@@ -18,50 +18,18 @@ const statusColors: Record<string, string> = {
 
 export function InstanceGrid({ instances, onRefresh, onViewLogs }: InstanceGridProps) {
   const [newName, setNewName] = useState('');
-  const [newProvider, setNewProvider] = useState('claude');
-  const [newModel, setNewModel] = useState('');
-  const [newEffort, setNewEffort] = useState('');
-  const [newThinkingBudget, setNewThinkingBudget] = useState('');
   const [dispatcherRunning, setDispatcherRunning] = useState(false);
-  const [modelOptions, setModelOptions] = useState<string[]>([]);
-  const [defaultModel, setDefaultModel] = useState('');
-  const [providerOptions, setProviderOptions] = useState<string[]>(['claude', 'codex']);
-  const [codexModelOptions, setCodexModelOptions] = useState<string[]>([]);
-  const [defaultCodexModel, setDefaultCodexModel] = useState('');
-  const [effortOptions, setEffortOptions] = useState<string[]>([]);
-  const [defaultEffort, setDefaultEffort] = useState('');
 
   useEffect(() => {
     api.dispatcherStatus()
       .then((s) => setDispatcherRunning(s.running))
       .catch(() => {});
-    api.config()
-      .then((c) => {
-        setNewProvider(c.default_provider || 'claude');
-        setProviderOptions(c.provider_options.length ? c.provider_options : ['claude', 'codex']);
-        setModelOptions(c.model_options);
-        setDefaultModel(c.default_model);
-        setCodexModelOptions(c.codex_model_options);
-        setDefaultCodexModel(c.default_codex_model);
-        setEffortOptions(c.effort_options);
-        setDefaultEffort(c.default_effort);
-      })
-      .catch(() => {});
   }, []);
-
-  const activeDefaultModel = newProvider === 'codex' ? defaultCodexModel : defaultModel;
-  const activeModelOptions = newProvider === 'codex' ? codexModelOptions : modelOptions;
 
   const handleCreate = async () => {
     const name = newName || `worker-${instances.length + 1}`;
-    const parsedBudget = newThinkingBudget.trim() === '' ? null : Number(newThinkingBudget);
-    const thinking_budget = parsedBudget !== null && Number.isFinite(parsedBudget) && parsedBudget > 0 ? parsedBudget : null;
-    await api.createInstance({ name, provider: newProvider, model: newModel || 'default', effort_level: newEffort || null, thinking_budget });
+    await api.createInstance({ name });
     setNewName('');
-    setNewProvider(newProvider);
-    setNewModel('');
-    setNewEffort('');
-    setNewThinkingBudget('');
     onRefresh();
   };
 
@@ -72,6 +40,14 @@ export function InstanceGrid({ instances, onRefresh, onViewLogs }: InstanceGridP
 
   const handleStop = async (id: number) => {
     await api.stopInstance(id);
+    onRefresh();
+  };
+
+  const handleCleanup = async () => {
+    const deadCount = instances.filter((i) => i.status === 'error' || i.status === 'stopped').length;
+    if (deadCount === 0) return;
+    if (!window.confirm(`Remove ${deadCount} error/stopped instance(s)?`)) return;
+    await api.cleanupInstances();
     onRefresh();
   };
 
@@ -94,48 +70,6 @@ export function InstanceGrid({ instances, onRefresh, onViewLogs }: InstanceGridP
           value={newName}
           onChange={(e) => setNewName(e.target.value)}
         />
-        <select
-          className="w-[120px] bg-gray-700 text-foreground rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          value={newProvider}
-          onChange={(e) => {
-            setNewProvider(e.target.value);
-            setNewModel('');
-          }}
-        >
-          {providerOptions.map((p) => (
-            <option key={p} value={p}>{p === 'claude' ? 'Claude' : p === 'codex' ? 'Codex' : p}</option>
-          ))}
-        </select>
-        <select
-          className="w-[180px] bg-gray-700 text-foreground rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          value={newModel}
-          onChange={(e) => setNewModel(e.target.value)}
-        >
-          <option value="">{activeDefaultModel ? `Model (default: ${activeDefaultModel})` : 'Model (default)'}</option>
-          {activeModelOptions.map((m) => (
-            <option key={m} value={m}>{m === 'default' && activeDefaultModel ? `default (${activeDefaultModel})` : m}</option>
-          ))}
-        </select>
-        <select
-          className="w-[140px] bg-gray-700 text-foreground rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          value={newEffort}
-          onChange={(e) => setNewEffort(e.target.value)}
-        >
-          <option value="">{defaultEffort ? `Effort (${defaultEffort})` : 'Effort'}</option>
-          {effortOptions.map((e) => (
-            <option key={e} value={e}>{e}</option>
-          ))}
-        </select>
-        <input
-          type="number"
-          inputMode="numeric"
-          min={0}
-          className="w-[140px] bg-gray-700 text-foreground rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          placeholder="Thinking tokens"
-          title="Optional Extended Thinking max tokens (MAX_THINKING_TOKENS). Leave empty for CLI default."
-          value={newThinkingBudget}
-          onChange={(e) => setNewThinkingBudget(e.target.value)}
-        />
         <button
           onClick={handleCreate}
           className="flex items-center gap-1 bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-2 rounded text-sm font-medium whitespace-nowrap"
@@ -153,6 +87,13 @@ export function InstanceGrid({ instances, onRefresh, onViewLogs }: InstanceGridP
           {dispatcherRunning ? <ZapOff size={16} /> : <Zap size={16} />}
           {dispatcherRunning ? 'Stop' : 'Start'} Dispatcher
         </button>
+        <button
+          onClick={handleCleanup}
+          disabled={!instances.some((i) => i.status === 'error' || i.status === 'stopped')}
+          className="flex items-center gap-1 px-3 py-2 rounded text-sm font-medium whitespace-nowrap bg-red-600/20 text-red-400 hover:bg-red-600/30 disabled:opacity-30 disabled:cursor-not-allowed"
+        >
+          <Eraser size={16} /> Clean Up
+        </button>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
@@ -168,12 +109,6 @@ export function InstanceGrid({ instances, onRefresh, onViewLogs }: InstanceGridP
 
             <div className="text-xs text-gray-400 space-y-0.5">
               <p>Status: <span className="text-gray-300">{inst.status}</span></p>
-              <p>CLI: <span className="text-gray-300">{inst.provider === 'codex' ? 'Codex' : 'Claude'}</span></p>
-              <p>Model: <span className="text-gray-300">{inst.model}{inst.model === 'default' ? ` (${inst.provider === 'codex' ? defaultCodexModel : defaultModel})` : ''}</span></p>
-              <p>Effort: <span className="text-gray-300">{inst.effort_level || defaultEffort || 'medium'}</span></p>
-              {inst.thinking_budget && inst.thinking_budget > 0 && (
-                <p>Thinking: <span className="text-gray-300">{inst.thinking_budget.toLocaleString()} tok</span></p>
-              )}
               <p>Completed: <span className="text-gray-300">{inst.total_tasks_completed}</span></p>
               {inst.current_task_id && <p>Task: <span className="text-indigo-400">#{inst.current_task_id}</span></p>}
               {inst.pid && <p>PID: <span className="text-gray-300">{inst.pid}</span></p>}

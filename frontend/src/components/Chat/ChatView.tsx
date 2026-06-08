@@ -142,19 +142,21 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
     const nodes = Array.from(container.querySelectorAll<HTMLElement>('[data-user-msg]'));
     if (nodes.length === 0) return;
 
-    const scrollTop = container.scrollTop;
-    const threshold = 5;
+    const containerRect = container.getBoundingClientRect();
+    const threshold = 30;
 
     if (direction === 'up') {
       for (let i = nodes.length - 1; i >= 0; i--) {
-        if (nodes[i].offsetTop < scrollTop - threshold) {
+        const rect = nodes[i].getBoundingClientRect();
+        if (rect.top < containerRect.top - threshold) {
           nodes[i].scrollIntoView({ behavior: 'smooth', block: 'start' });
           return;
         }
       }
     } else {
       for (const node of nodes) {
-        if (node.offsetTop > scrollTop + threshold) {
+        const rect = node.getBoundingClientRect();
+        if (rect.top > containerRect.top + threshold) {
           node.scrollIntoView({ behavior: 'smooth', block: 'start' });
           return;
         }

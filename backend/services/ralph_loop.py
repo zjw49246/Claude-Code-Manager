@@ -75,17 +75,13 @@ class RalphLoop:
 
                 cwd = task.target_repo or "."
 
-                # Update task with instance assignment, fetch instance budget
-                thinking_budget: int | None = None
+                thinking_budget = task.thinking_budget
                 async with self.db_factory() as db:
                     await db.execute(
                         update(Task)
                         .where(Task.id == task.id)
                         .values(instance_id=instance_id)
                     )
-                    inst = await db.get(Instance, instance_id)
-                    if inst:
-                        thinking_budget = inst.thinking_budget
                     await db.commit()
 
                 # Plan mode handling

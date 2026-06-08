@@ -1,3 +1,8 @@
+import os
+import shutil
+import uuid
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -8,6 +13,26 @@ from backend.schemas.task import TaskCreate, TaskUpdate, TaskResponse
 from backend.services.task_queue import TaskQueue
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
+
+
+async def _clone_session(source_task_id: int, db: AsyncSession) -> dict | None:
+    """Clone a Claude Code session file from a source task, returning new session_id and last_cwd."""
+    source = await db.get(Task, source_task_id)
+    if not source or not source.session_id or not source.last_cwd:
+        return None
+
+    config_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR", os.path.expanduser("~/.claude")))
+    encoded_cwd = source.last_cwd.replace("/", "-")
+    source_jsonl = config_dir / "projects" / encoded_cwd / f"{source.session_id}.jsonl"
+
+    if not source_jsonl.exists():
+        return None
+
+    new_session_id = str(uuid.uuid4())
+    dest_jsonl = source_jsonl.parent / f"{new_session_id}.jsonl"
+    shutil.copy2(source_jsonl, dest_jsonl)
+
+    return {"session_id": new_session_id, "last_cwd": source.last_cwd}
 
 
 def _get_queue(db: AsyncSession = Depends(get_db)) -> TaskQueue:
@@ -55,12 +80,13 @@ async def list_tasks(
 
 
 @router.post("", response_model=TaskResponse, status_code=201)
-async def create_task(body: TaskCreate, queue: TaskQueue = Depends(_get_queue)):
+async def create_task(body: TaskCreate, queue: TaskQueue = Depends(_get_queue), db: AsyncSession = Depends(get_db)):
     data = body.model_dump()
     image_paths = data.pop("image_paths", None)
     file_paths = data.pop("file_paths", None)
     attachments = data.pop("attachments", None)
     secret_ids = data.pop("secret_ids", None)
+    clone_from_task_id = data.pop("clone_from_task_id", None)
     meta = data.get("metadata_") or {}
     all_paths = file_paths or image_paths
     if all_paths:
@@ -71,6 +97,13 @@ async def create_task(body: TaskCreate, queue: TaskQueue = Depends(_get_queue)):
         meta["secret_ids"] = secret_ids
     if meta:
         data["metadata_"] = meta
+
+    if clone_from_task_id:
+        cloned = await _clone_session(clone_from_task_id, db)
+        if cloned:
+            data["session_id"] = cloned["session_id"]
+            data["last_cwd"] = cloned["last_cwd"]
+
     return await queue.create(**data)
 
 

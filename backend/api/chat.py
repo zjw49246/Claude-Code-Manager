@@ -21,11 +21,11 @@ class ChatMessage(BaseModel):
     secret_ids: list[int] | None = None
 
 
-async def _find_idle_instance(db: AsyncSession, provider: str) -> Instance | None:
+async def _find_idle_instance(db: AsyncSession) -> Instance | None:
     """Find an idle instance to run a chat message."""
     result = await db.execute(
         select(Instance)
-        .where(Instance.status == "idle", Instance.provider == provider)
+        .where(Instance.status == "idle")
         .order_by(Instance.id)
         .limit(1)
     )
@@ -60,7 +60,7 @@ async def send_chat_message(
         raise HTTPException(409, "Task is currently being processed. Use Interrupt to stop it first.")
 
     # Find an idle instance
-    inst = await _find_idle_instance(db, task.provider)
+    inst = await _find_idle_instance(db)
     if not inst:
         raise HTTPException(400, "No idle instance available. Create one or wait.")
 
@@ -132,7 +132,7 @@ async def send_chat_message(
 
     # Resolve effort: task.effort_level → instance.effort_level → settings.default_effort
     from backend.config import settings as app_settings
-    effort_level = task.effort_level or inst.effort_level or app_settings.default_effort
+    effort_level = task.effort_level or app_settings.default_effort
 
     # Pool: select an account for the chat launch
     config_dir = None
@@ -157,10 +157,10 @@ async def send_chat_message(
         prompt=prompt,
         task_id=task_id,
         cwd=cwd,
-        model=task.model or inst.model,
+        model=task.model,
         resume_session_id=task.session_id,
         git_env=git_env,
-        thinking_budget=inst.thinking_budget,
+        thinking_budget=task.thinking_budget,
         effort_level=effort_level,
         chat_initiated=True,
         config_dir=config_dir,

@@ -114,61 +114,14 @@ class TaskQueue:
         await self.db.commit()
         return True
 
-    async def dequeue(self, instance_model: str | None = None, instance_provider: str | None = "claude") -> Task | None:
-        """Get the highest-priority pending task matching instance provider/model.
-
-        Matching rules:
-        - Tasks are first constrained by provider.
-        - Tasks with no model (None) can be picked by any instance.
-        - Tasks with a specific model are only picked by instances with that model.
-        - Prefer model-matching tasks over unspecified tasks.
-        - "default" is treated as equivalent to the configured default_model.
-        """
-        effective_provider = instance_provider or settings.default_provider or "claude"
-        base = select(Task).where(
-            Task.status == "pending",
-            Task.provider == effective_provider,
+    async def dequeue(self) -> Task | None:
+        """Get the highest-priority pending task."""
+        stmt = (
+            select(Task)
+            .where(Task.status == "pending")
+            .order_by(Task.priority.asc(), Task.created_at.asc())
+            .limit(1)
         )
-
-        # Normalize "default" to the actual default model name
-        effective_model = instance_model
-        if effective_model == "default":
-            effective_model = (
-                settings.default_codex_model
-                if effective_provider == "codex"
-                else settings.default_model
-            )
-        default_model = (
-            settings.default_codex_model
-            if effective_provider == "codex"
-            else settings.default_model
-        )
-
-        if effective_model:
-            # First try exact model match, then fall back to tasks with no model specified
-            # Also match tasks with "default" if this instance uses the default model
-            model_match = Task.model == effective_model
-            if effective_model == default_model:
-                model_match = (Task.model == effective_model) | (Task.model == "default")
-            stmt = (
-                base
-                .where(model_match | (Task.model.is_(None)))
-                .order_by(
-                    # Prefer tasks that explicitly match this model
-                    model_match.desc(),
-                    Task.priority.asc(),
-                    Task.created_at.asc(),
-                )
-                .limit(1)
-            )
-        else:
-            # No model instance: only pick tasks with no model specified
-            stmt = (
-                base
-                .where(Task.model.is_(None))
-                .order_by(Task.priority.asc(), Task.created_at.asc())
-                .limit(1)
-            )
 
         result = await self.db.execute(stmt)
         task = result.scalar_one_or_none()

@@ -373,7 +373,7 @@ export const api = {
     request<Task>(`/api/tasks/${id}/unread`, { method: 'POST' }),
   stopTaskSession: (id: number) =>
     request<{ ok: boolean }>(`/api/tasks/${id}/stop-session`, { method: 'POST' }),
-  createTask: (data: { title?: string; description?: string; project_id?: number; priority?: number; target_branch?: string; mode?: string; todo_file_path?: string; max_iterations?: number; goal_condition?: string; goal_max_turns?: number; goal_evaluator_model?: string; image_paths?: string[]; file_paths?: string[]; attachments?: { url: string; name: string; is_image: boolean }[]; secret_ids?: number[]; provider?: string; model?: string; effort_level?: string; starred?: boolean }) =>
+  createTask: (data: { title?: string; description?: string; project_id?: number; priority?: number; target_branch?: string; mode?: string; todo_file_path?: string; max_iterations?: number; goal_condition?: string; goal_max_turns?: number; goal_evaluator_model?: string; image_paths?: string[]; file_paths?: string[]; attachments?: { url: string; name: string; is_image: boolean }[]; secret_ids?: number[]; provider?: string; model?: string; effort_level?: string; thinking_budget?: number | null; starred?: boolean; clone_from_task_id?: number }) =>
     request<Task>('/api/tasks', { method: 'POST', body: JSON.stringify(data) }),
   updateTask: (id: number, data: { title?: string; description?: string; priority?: number }) =>
     request<Task>(`/api/tasks/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
@@ -389,10 +389,12 @@ export const api = {
     request<Task>(`/api/tasks/${id}/plan/reject`, { method: 'POST' }),
   // Instances
   listInstances: () => request<Instance[]>('/api/instances'),
-  createInstance: (data: { name: string; provider?: string; model?: string; effort_level?: string | null; thinking_budget?: number | null }) =>
+  createInstance: (data: { name: string }) =>
     request<Instance>('/api/instances', { method: 'POST', body: JSON.stringify(data) }),
   deleteInstance: (id: number) =>
     request<{ ok: boolean }>(`/api/instances/${id}`, { method: 'DELETE' }),
+  cleanupInstances: () =>
+    request<{ ok: boolean; deleted: number }>('/api/instances/cleanup', { method: 'DELETE' }),
   stopInstance: (id: number) =>
     request<{ ok: boolean }>(`/api/instances/${id}/stop`, { method: 'POST' }),
   runOnInstance: (id: number, params: { task_id?: number; prompt?: string }) =>
