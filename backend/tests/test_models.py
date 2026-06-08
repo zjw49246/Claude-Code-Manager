@@ -22,6 +22,7 @@ async def test_task_defaults(db_session):
     assert task.merge_status == "pending"
     assert task.project_id is None
     assert task.target_repo is not None  # defaults to ""
+    assert task.disable_workflows is True
 
 
 @pytest.mark.asyncio

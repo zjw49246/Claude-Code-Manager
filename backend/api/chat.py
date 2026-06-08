@@ -165,6 +165,7 @@ async def send_chat_message(
         chat_initiated=True,
         config_dir=config_dir,
         provider=task.provider,
+        disable_workflows=task.disable_workflows,
     )
 
     task.status = "executing"

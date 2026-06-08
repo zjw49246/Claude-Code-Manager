@@ -48,6 +48,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   const [filePreviews, setFilePreviews] = useState<string[]>([]);
   const [selectedSecretIds, setSelectedSecretIds] = useState<number[]>([]);
   const [dropError, setDropError] = useState('');
+  const [disableWorkflows, setDisableWorkflows] = useState(true);
   const [starOnCreate, setStarOnCreate] = useState(false);
   const [cloneFromTaskId, setCloneFromTaskId] = useState<number | ''>('');
   const [contextTasks, setContextTasks] = useState<Task[]>([]);
@@ -189,6 +190,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
         model: model || activeDefaultModel,
         ...(effort ? { effort_level: effort } : {}),
         ...(thinkingBudget ? { thinking_budget: parseInt(thinkingBudget) || null } : {}),
+        disable_workflows: disableWorkflows,
         ...(starOnCreate ? { starred: true } : {}),
         ...(cloneFromTaskId ? { clone_from_task_id: cloneFromTaskId as number } : {}),
       });
@@ -498,6 +500,17 @@ export function TaskForm({ onCreated }: TaskFormProps) {
               }}
             />
           </>
+        )}
+        {provider === 'claude' && (
+          <label className="flex items-center gap-1 text-sm text-gray-400 whitespace-nowrap cursor-pointer" title="Disable Workflow tool to save tokens">
+            <input
+              type="checkbox"
+              checked={disableWorkflows}
+              onChange={(e) => setDisableWorkflows(e.target.checked)}
+              className="accent-indigo-500"
+            />
+            No Workflows
+          </label>
         )}
         <label className="flex items-center gap-1.5 text-sm text-gray-400 ml-auto whitespace-nowrap cursor-pointer">
           <Star size={14} className={starOnCreate ? 'text-yellow-400' : 'text-gray-600'} fill={starOnCreate ? 'currentColor' : 'none'} />
