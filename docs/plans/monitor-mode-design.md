@@ -170,9 +170,12 @@ if action == "continue":
         completed = await self._run_monitor_session(monitor_session, task)
 
         if not completed:
-            # monitor 被用户删除或达到 max_checks
-            # 不标记任务失败，跳过监控直接进入下一轮迭代
-            pass
+            # max_checks 耗尽或任务被取消（loop monitor 不允许用户删除）
+            await self._mark_task_failed(
+                task.id,
+                f"监控达到最大检查次数 {monitor_session.max_checks}，后台任务未完成"
+            )
+            return
 
     iteration += 1
     continue
@@ -198,11 +201,11 @@ async def _run_monitor_session(self, monitor_session: MonitorSession, task: Task
             if not t or t.status in ("cancelled", "completed", "failed"):
                 return False
 
-        # 检查 monitor session 是否已被用户删除
+        # 检查 monitor session 是否已被取消（用户取消了整个任务，或手动删除了 manual monitor）
         async with self.db_factory() as db:
             ms = await db.get(MonitorSession, monitor_session.id)
             if not ms or ms.status == "cancelled":
-                return False
+                return False  # loop monitor: 任务已被取消; manual monitor: 被用户删除
 
         # 清除 signal file
         signal_path.unlink(missing_ok=True)
@@ -548,15 +551,25 @@ async def cancel_task(self, task_id: int):
 ### 用户删除单个 Monitor Session 时
 
 通过 `DELETE /tasks/{task_id}/monitor-sessions/{session_id}` API。
-对于 loop 模式的 gate monitor，删除会导致 `_run_monitor_session` 返回 False。
-此时 dispatcher 应跳过监控等待，直接开始下一轮迭代（而非标记任务失败）。
+仅限 `source="manual"` 的 monitor session 可以被删除。
+`source="loop"` 或 `source="goal"` 的系统创建 monitor 不允许删除，前端不显示删除按钮，后端 API 校验拒绝。
+
+```python
+@router.delete("/tasks/{task_id}/monitor-sessions/{session_id}")
+async def delete_monitor_session(...):
+    ms = await db.get(MonitorSession, session_id)
+    if ms.source != "manual":
+        raise HTTPException(400, "系统创建的监控不允许删除，请取消整个任务")
+    ...
+```
 
 ## 前端变更
 
 ### 1. Chat 界面顶部按钮
 
-所有模式的 chat 界面顶部增加两个按钮：
+按钮因模式而异：
 
+**Auto 模式：**
 ```
 ┌──────────────────────────────────────────────┐
 │  Task #12: 训练模型      [+ 新建监控] [监控列表(2)] │
@@ -566,8 +579,18 @@ async def cancel_task(self, task_id: int):
 └──────────────────────────────────────────────┘
 ```
 
-- **[+ 新建监控]**：所有模式都有，点击弹出创建对话框
-- **[监控列表(N)]**：显示当前 task 下的 monitor 数量，点击打开监控列表面板
+**Loop / Goal 模式：**
+```
+┌──────────────────────────────────────────────┐
+│  Task #12: 训练模型               [监控列表(2)] │
+├──────────────────────────────────────────────┤
+│  Chat 主区域                                  │
+│  ...                                         │
+└──────────────────────────────────────────────┘
+```
+
+- **[+ 新建监控]**：仅 Auto 模式显示，点击弹出创建对话框
+- **[监控列表(N)]**：所有模式都有，显示当前 task 下的 monitor 数量，点击打开监控列表面板
 
 ### 2. 新建监控对话框
 
@@ -598,7 +621,7 @@ async def cancel_task(self, task_id: int):
 │ 监控列表                          [×]  │
 │                                        │
 │ ┌────────────────────────────────────┐ │
-│ │ ● Monitor #1: "监控训练进度"  [🗑️] │ │
+│ │ ● Monitor #1: "迭代3后台任务监控"    │ │
 │ │   来源: loop 迭代 3 | 已检查 5 次   │ │
 │ │   最新: epoch 45/100, loss=0.23    │ │
 │ └────────────────────────────────────┘ │
@@ -610,15 +633,17 @@ async def cancel_task(self, task_id: int):
 │ └────────────────────────────────────┘ │
 │                                        │
 │ ┌────────────────────────────────────┐ │
-│ │ ✓ Monitor #3: "迭代1监控"          │ │
+│ │ ✓ Monitor #3: "迭代1后台任务监控"    │ │
 │ │   来源: loop 迭代 1 | 已完成        │ │
 │ │   结果: 训练完成，accuracy=0.95     │ │
 │ └────────────────────────────────────┘ │
 └────────────────────────────────────────┘
 ```
 
-- 运行中的 monitor 显示 ● 绿点 + 🗑️ 删除按钮
-- 已完成的 monitor 显示 ✓ + 无删除按钮
+- 运行中的 monitor 显示 ● 绿点
+- 仅 `source="manual"` 的 monitor 显示 🗑️ 删除按钮
+- `source="loop"/"goal"` 的系统 monitor 不显示删除按钮（只能通过取消整个任务来终止）
+- 已完成的 monitor 显示 ✓
 - 点击任意一条进入详情页
 
 ### 4. Monitor 详情页
