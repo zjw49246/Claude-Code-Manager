@@ -1316,3 +1316,78 @@ async def test_launch_default_disables_workflows(db_factory):
     cmd_args = mock_exec.call_args[0]
     assert "--disallowedTools" in cmd_args
     await asyncio.sleep(0.1)
+
+
+@pytest.mark.asyncio
+async def test_launch_chat_initiated_stores_enable_workflows_in_params(db_factory):
+    """chat_initiated launch stores enable_workflows in _launch_params for pool rotation."""
+    async with db_factory() as db:
+        inst = Instance(name="params-wf-inst")
+        db.add(inst)
+        task = Task(title="params task", description="d")
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_id = task.id
+
+    mock_proc = _make_mock_process()
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    im = InstanceManager(db_factory, broadcaster)
+
+    with patch("backend.services.instance_manager.asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=mock_proc):
+        await im.launch(instance_id=inst_id, prompt="hi", task_id=task_id, cwd="/tmp", chat_initiated=True, enable_workflows=True)
+
+    assert inst_id in im._launch_params
+    assert im._launch_params[inst_id]["enable_workflows"] is True
+    await asyncio.sleep(0.1)
+
+
+@pytest.mark.asyncio
+async def test_launch_chat_initiated_stores_enable_workflows_false_in_params(db_factory):
+    """chat_initiated launch stores enable_workflows=False in _launch_params."""
+    async with db_factory() as db:
+        inst = Instance(name="params-wf-false-inst")
+        db.add(inst)
+        task = Task(title="params task", description="d")
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_id = task.id
+
+    mock_proc = _make_mock_process()
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    im = InstanceManager(db_factory, broadcaster)
+
+    with patch("backend.services.instance_manager.asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=mock_proc):
+        await im.launch(instance_id=inst_id, prompt="hi", task_id=task_id, cwd="/tmp", chat_initiated=True, enable_workflows=False)
+
+    assert im._launch_params[inst_id]["enable_workflows"] is False
+    await asyncio.sleep(0.1)
+
+
+@pytest.mark.asyncio
+async def test_launch_non_chat_does_not_store_params(db_factory):
+    """Non-chat launch does not store _launch_params."""
+    async with db_factory() as db:
+        inst = Instance(name="no-params-inst")
+        db.add(inst)
+        await db.commit()
+        await db.refresh(inst)
+        inst_id = inst.id
+
+    mock_proc = _make_mock_process()
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    im = InstanceManager(db_factory, broadcaster)
+
+    with patch("backend.services.instance_manager.asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=mock_proc):
+        await im.launch(instance_id=inst_id, prompt="hi", cwd="/tmp", enable_workflows=True)
+
+    assert inst_id not in im._launch_params
+    await asyncio.sleep(0.1)

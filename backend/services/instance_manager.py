@@ -91,6 +91,7 @@ class InstanceManager:
                 "git_env": git_env,
                 "thinking_budget": thinking_budget,
                 "effort_level": effort_level,
+                "enable_workflows": enable_workflows,
             }
 
         # Update instance record
@@ -395,6 +396,7 @@ class InstanceManager:
                 effort_level=params.get("effort_level"),
                 chat_initiated=True,
                 config_dir=new_config_dir,
+                enable_workflows=params.get("enable_workflows", False),
             )
             return True
 
