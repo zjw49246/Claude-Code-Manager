@@ -1058,12 +1058,12 @@ async def test_no_unread_filter_returns_all(client, session_factory):
     assert len(resp.json()) == 2
 
 
-# === disable_workflows tests ===
+# === enable_workflows tests ===
 
 
 @pytest.mark.asyncio
-async def test_create_task_disable_workflows_default(client):
-    """Task created without disable_workflows defaults to True."""
+async def test_create_task_enable_workflows_default(client):
+    """Task created without enable_workflows defaults to False."""
     resp = await client.post("/api/tasks", json={
         "title": "Default WF",
         "description": "test default",
@@ -1071,70 +1071,70 @@ async def test_create_task_disable_workflows_default(client):
     })
     assert resp.status_code == 201
     data = resp.json()
-    assert data["disable_workflows"] is True
+    assert data["enable_workflows"] is False
 
 
 @pytest.mark.asyncio
-async def test_create_task_disable_workflows_false(client):
-    """Task created with disable_workflows=False stores it correctly."""
+async def test_create_task_enable_workflows_true(client):
+    """Task created with enable_workflows=True stores it correctly."""
     resp = await client.post("/api/tasks", json={
         "title": "WF Enabled",
         "description": "workflows enabled",
         "target_repo": "/tmp",
-        "disable_workflows": False,
+        "enable_workflows": True,
     })
     assert resp.status_code == 201
     data = resp.json()
-    assert data["disable_workflows"] is False
+    assert data["enable_workflows"] is True
 
 
 @pytest.mark.asyncio
-async def test_create_task_disable_workflows_true(client):
-    """Task created with disable_workflows=True stores it correctly."""
+async def test_create_task_enable_workflows_false(client):
+    """Task created with enable_workflows=False stores it correctly."""
     resp = await client.post("/api/tasks", json={
         "title": "WF Disabled",
         "description": "workflows disabled",
         "target_repo": "/tmp",
-        "disable_workflows": True,
+        "enable_workflows": False,
     })
     assert resp.status_code == 201
     data = resp.json()
-    assert data["disable_workflows"] is True
+    assert data["enable_workflows"] is False
 
 
 @pytest.mark.asyncio
-async def test_update_task_disable_workflows(client):
-    """PUT /api/tasks/{id} can update disable_workflows."""
+async def test_update_task_enable_workflows(client):
+    """PUT /api/tasks/{id} can update enable_workflows."""
     create_resp = await client.post("/api/tasks", json={
         "title": "WF Toggle",
         "description": "toggle test",
         "target_repo": "/tmp",
-        "disable_workflows": True,
+        "enable_workflows": False,
     })
     task_id = create_resp.json()["id"]
-    assert create_resp.json()["disable_workflows"] is True
+    assert create_resp.json()["enable_workflows"] is False
 
     update_resp = await client.put(f"/api/tasks/{task_id}", json={
-        "disable_workflows": False,
+        "enable_workflows": True,
     })
     assert update_resp.status_code == 200
-    assert update_resp.json()["disable_workflows"] is False
+    assert update_resp.json()["enable_workflows"] is True
 
 
 @pytest.mark.asyncio
-async def test_create_task_disable_workflows_persisted_in_db(client, session_factory):
-    """disable_workflows value is persisted in the database."""
+async def test_create_task_enable_workflows_persisted_in_db(client, session_factory):
+    """enable_workflows value is persisted in the database."""
     from backend.models.task import Task
 
     resp = await client.post("/api/tasks", json={
         "title": "DB Check",
         "description": "check db",
         "target_repo": "/tmp",
-        "disable_workflows": False,
+        "enable_workflows": True,
     })
     assert resp.status_code == 201
     task_id = resp.json()["id"]
 
     async with session_factory() as db:
         task = await db.get(Task, task_id)
-    assert task.disable_workflows is False
+    assert task.enable_workflows is True

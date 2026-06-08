@@ -519,7 +519,7 @@ class GlobalDispatcher:
                 effort_level=effort_level,
                 provider=task.provider,
                 config_dir=pool_config_dir,
-                disable_workflows=task.disable_workflows,
+                enable_workflows=task.enable_workflows,
             )
 
             # Wait for process to finish (with timeout)
@@ -694,7 +694,7 @@ class GlobalDispatcher:
                 effort_level=effort_level,
                 provider=task.provider,
                 config_dir=config_dir,
-                disable_workflows=task.disable_workflows,
+                enable_workflows=task.enable_workflows,
             )
         else:
             # No session to resume — re-launch from scratch
@@ -722,7 +722,7 @@ class GlobalDispatcher:
                 effort_level=effort_level,
                 provider=task.provider,
                 config_dir=config_dir,
-                disable_workflows=task.disable_workflows,
+                enable_workflows=task.enable_workflows,
             )
 
         # Wait for process
@@ -878,7 +878,7 @@ class GlobalDispatcher:
                 thinking_budget=task.thinking_budget,
                 effort_level=effort_level,
                 provider=task.provider,
-                disable_workflows=task.disable_workflows,
+                enable_workflows=task.enable_workflows,
             )
 
             process = self.instance_manager.processes.get(instance_id)
@@ -1059,7 +1059,7 @@ class GlobalDispatcher:
                     thinking_budget=task.thinking_budget,
                     effort_level=effort_level,
                     provider=task.provider,
-                    disable_workflows=task.disable_workflows,
+                    enable_workflows=task.enable_workflows,
                 )
             else:
                 follow_up = self._build_goal_followup_prompt(last_reason, turn, max_turns)
@@ -1075,7 +1075,7 @@ class GlobalDispatcher:
                     thinking_budget=task.thinking_budget,
                     effort_level=effort_level,
                     provider=task.provider,
-                    disable_workflows=task.disable_workflows,
+                    enable_workflows=task.enable_workflows,
                 )
 
             # Wait for process to finish
@@ -1437,7 +1437,7 @@ class GlobalDispatcher:
             thinking_budget=task.thinking_budget,
             effort_level=effort_level,
             provider=task.provider,
-            disable_workflows=task.disable_workflows,
+            enable_workflows=task.enable_workflows,
         )
 
         fix_proc = self.instance_manager.processes.get(instance_id)
@@ -1467,7 +1467,7 @@ class GlobalDispatcher:
             thinking_budget=task.thinking_budget,
             effort_level=effort_level,
             provider=task.provider,
-            disable_workflows=task.disable_workflows,
+            enable_workflows=task.enable_workflows,
         )
         process = self.instance_manager.processes.get(instance_id)
         if process:

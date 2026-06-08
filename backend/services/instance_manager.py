@@ -34,7 +34,7 @@ class InstanceManager:
         self._last_stderr: dict[int, str] = {}  # instance_id -> stderr from last run
         self._launch_params: dict[int, dict] = {}  # instance_id -> params for re-launch on rotation
 
-    async def launch(self, instance_id: int, prompt: str, task_id: int | None = None, cwd: str | None = None, model: str | None = None, resume_session_id: str | None = None, loop_iteration: int | None = None, git_env: dict | None = None, thinking_budget: int | None = None, effort_level: str | None = None, chat_initiated: bool = False, config_dir: str | None = None, provider: str = "claude", disable_workflows: bool = True) -> int:
+    async def launch(self, instance_id: int, prompt: str, task_id: int | None = None, cwd: str | None = None, model: str | None = None, resume_session_id: str | None = None, loop_iteration: int | None = None, git_env: dict | None = None, thinking_budget: int | None = None, effort_level: str | None = None, chat_initiated: bool = False, config_dir: str | None = None, provider: str = "claude", enable_workflows: bool = False) -> int:
         """Launch a Claude Code subprocess for the given instance.
 
         If resume_session_id is provided, uses --resume to continue the conversation.
@@ -48,7 +48,7 @@ class InstanceManager:
             model=model,
             resume_session_id=resume_session_id,
             effort_level=effort_level,
-            disable_workflows=disable_workflows,
+            enable_workflows=enable_workflows,
         )
 
         # Must unset CLAUDE_CODE env var to avoid nested session detection
@@ -131,7 +131,7 @@ class InstanceManager:
         model: str | None,
         resume_session_id: str | None,
         effort_level: str | None,
-        disable_workflows: bool = True,
+        enable_workflows: bool = False,
     ) -> list[str]:
         """Build the subprocess command for a supported coding-agent CLI."""
         if provider == "claude":
@@ -148,7 +148,7 @@ class InstanceManager:
                 cmd.extend(["--model", model])
             if effort_level:
                 cmd.extend(["--effort", effort_level])
-            if disable_workflows:
+            if not enable_workflows:
                 cmd.extend(["--disallowedTools", "Workflow"])
             return cmd
 

@@ -1212,11 +1212,11 @@ async def test_consume_output_chat_initiated_no_override_cancelled(db_factory):
     assert task.status == "cancelled"
 
 
-# === disable_workflows tests ===
+# === enable_workflows tests ===
 
 
-def test_build_command_claude_disable_workflows_default():
-    """_build_command defaults to disable_workflows=True, adding --disallowedTools Workflow."""
+def test_build_command_claude_enable_workflows_default():
+    """_build_command defaults to enable_workflows=False, adding --disallowedTools Workflow."""
     im = InstanceManager(MagicMock(), MagicMock())
     cmd = im._build_command(provider="claude", prompt="hi", model=None, resume_session_id=None, effort_level=None)
     assert "--disallowedTools" in cmd
@@ -1224,32 +1224,32 @@ def test_build_command_claude_disable_workflows_default():
     assert cmd[idx + 1] == "Workflow"
 
 
-def test_build_command_claude_disable_workflows_true():
-    """_build_command with disable_workflows=True includes --disallowedTools Workflow."""
+def test_build_command_claude_enable_workflows_true():
+    """_build_command with enable_workflows=True does NOT include --disallowedTools."""
     im = InstanceManager(MagicMock(), MagicMock())
-    cmd = im._build_command(provider="claude", prompt="hi", model=None, resume_session_id=None, effort_level=None, disable_workflows=True)
+    cmd = im._build_command(provider="claude", prompt="hi", model=None, resume_session_id=None, effort_level=None, enable_workflows=True)
+    assert "--disallowedTools" not in cmd
+
+
+def test_build_command_claude_enable_workflows_false():
+    """_build_command with enable_workflows=False includes --disallowedTools Workflow."""
+    im = InstanceManager(MagicMock(), MagicMock())
+    cmd = im._build_command(provider="claude", prompt="hi", model=None, resume_session_id=None, effort_level=None, enable_workflows=False)
     assert "--disallowedTools" in cmd
     idx = cmd.index("--disallowedTools")
     assert cmd[idx + 1] == "Workflow"
 
 
-def test_build_command_claude_disable_workflows_false():
-    """_build_command with disable_workflows=False does NOT include --disallowedTools."""
+def test_build_command_codex_ignores_enable_workflows():
+    """Codex provider does not include --disallowedTools regardless of enable_workflows."""
     im = InstanceManager(MagicMock(), MagicMock())
-    cmd = im._build_command(provider="claude", prompt="hi", model=None, resume_session_id=None, effort_level=None, disable_workflows=False)
-    assert "--disallowedTools" not in cmd
-
-
-def test_build_command_codex_ignores_disable_workflows():
-    """Codex provider does not include --disallowedTools regardless of disable_workflows."""
-    im = InstanceManager(MagicMock(), MagicMock())
-    cmd = im._build_command(provider="codex", prompt="hi", model=None, resume_session_id=None, effort_level=None, disable_workflows=True)
+    cmd = im._build_command(provider="codex", prompt="hi", model=None, resume_session_id=None, effort_level=None, enable_workflows=False)
     assert "--disallowedTools" not in cmd
 
 
 @pytest.mark.asyncio
-async def test_launch_disable_workflows_true_includes_flag(db_factory):
-    """launch(disable_workflows=True) generates command with --disallowedTools Workflow."""
+async def test_launch_enable_workflows_false_includes_flag(db_factory):
+    """launch(enable_workflows=False) generates command with --disallowedTools Workflow."""
     async with db_factory() as db:
         inst = Instance(name="wf-disabled-inst")
         db.add(inst)
@@ -1263,7 +1263,7 @@ async def test_launch_disable_workflows_true_includes_flag(db_factory):
     im = InstanceManager(db_factory, broadcaster)
 
     with patch("backend.services.instance_manager.asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=mock_proc) as mock_exec:
-        await im.launch(instance_id=inst_id, prompt="hi", cwd="/tmp", disable_workflows=True)
+        await im.launch(instance_id=inst_id, prompt="hi", cwd="/tmp", enable_workflows=False)
 
     cmd_args = mock_exec.call_args[0]
     assert "--disallowedTools" in cmd_args
@@ -1273,8 +1273,8 @@ async def test_launch_disable_workflows_true_includes_flag(db_factory):
 
 
 @pytest.mark.asyncio
-async def test_launch_disable_workflows_false_omits_flag(db_factory):
-    """launch(disable_workflows=False) generates command without --disallowedTools."""
+async def test_launch_enable_workflows_true_omits_flag(db_factory):
+    """launch(enable_workflows=True) generates command without --disallowedTools."""
     async with db_factory() as db:
         inst = Instance(name="wf-enabled-inst")
         db.add(inst)
@@ -1288,7 +1288,7 @@ async def test_launch_disable_workflows_false_omits_flag(db_factory):
     im = InstanceManager(db_factory, broadcaster)
 
     with patch("backend.services.instance_manager.asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=mock_proc) as mock_exec:
-        await im.launch(instance_id=inst_id, prompt="hi", cwd="/tmp", disable_workflows=False)
+        await im.launch(instance_id=inst_id, prompt="hi", cwd="/tmp", enable_workflows=True)
 
     cmd_args = mock_exec.call_args[0]
     assert "--disallowedTools" not in cmd_args
@@ -1297,7 +1297,7 @@ async def test_launch_disable_workflows_false_omits_flag(db_factory):
 
 @pytest.mark.asyncio
 async def test_launch_default_disables_workflows(db_factory):
-    """launch() without explicit disable_workflows defaults to True (workflows disabled)."""
+    """launch() without explicit enable_workflows defaults to False (workflows disabled)."""
     async with db_factory() as db:
         inst = Instance(name="wf-default-inst")
         db.add(inst)
