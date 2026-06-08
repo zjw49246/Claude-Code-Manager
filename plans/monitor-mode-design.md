@@ -156,9 +156,9 @@ async def _execute_task_on_instance(self, instance_id, task, ...):
 #### 2. Monitor 模式主 Session
 
 ```python
-async def _run_monitor_main_session(self, instance_id, task, cwd, ...):
-    """Monitor 模式：执行用户的任务（启动脚本等），主 session 结束后
-    不标记 completed，等轮询 session 判断。"""
+async def _launch_monitor_main_session(self, instance_id, task, cwd, ...):
+    """Monitor 模式：启动主 Session 执行用户任务。
+    仅 launch，不等待完成（等待在 _wait_monitor_main_session 中）。"""
 
     prompt = self._build_monitor_main_prompt(task)
 
@@ -171,13 +171,13 @@ async def _run_monitor_main_session(self, instance_id, task, cwd, ...):
         ...
     )
 
-    # 等待主进程结束
+async def _wait_monitor_main_session(self, instance_id, task):
+    """等待 Monitor 模式主 Session 进程结束。
+    不标记 completed，任务完成由 _run_monitor_loop 判断。"""
+
     process = self.instance_manager.processes.get(instance_id)
     if process:
         await process.wait()
-
-    # 注意：不标记 completed，保持 executing 状态
-    # 任务完成由 _run_monitor_loop 中的轮询 session 判断
 ```
 
 #### 3. Monitor 轮询循环（核心）
@@ -233,23 +233,20 @@ async def _run_monitor_loop(self, task: Task, instance_id: str, session_log_path
 
         # 读取 signal file
         signal = self._read_monitor_signal(signal_path)
-
-        # 判断是否完成（仅 monitor 模式，且仅主 Session 已退出时才信任 done）
-        if task.mode == "monitor" and not main_alive:
-            if signal.get("status") == "done":
-                async with self.db_factory() as db:
-                    queue = TaskQueue(db)
-                    await queue.mark_completed(task.id)
-                await self.broadcaster.broadcast("tasks", {
-                    "event": "status_change",
-                    "task_id": task.id,
-                    "new_status": "completed",
-                })
-                return
-
-        # 更新检查计数和摘要
         summary = signal.get("summary", "")
+
+        # 写入 monitor_checks 表（持久化每次检查的完整记录）
         async with self.db_factory() as db:
+            check_record = MonitorCheck(
+                task_id=task.id,
+                check_number=checks_done,
+                status=signal.get("status", "running"),
+                summary=summary,
+                full_output=result,
+                main_alive=main_alive,
+            )
+            db.add(check_record)
+            # 同时更新 Task 表的检查计数和摘要
             await db.execute(
                 update(Task)
                 .where(Task.id == task.id)
@@ -268,6 +265,19 @@ async def _run_monitor_loop(self, task: Task, instance_id: str, session_log_path
             "status": signal.get("status", "running"),
             "main_alive": main_alive,
         })
+
+        # 判断是否完成（仅 monitor 模式）
+        if task.mode == "monitor" and signal.get("status") == "done":
+            async with self.db_factory() as db:
+                queue = TaskQueue(db)
+                await queue.mark_completed(task.id)
+            await self.broadcaster.broadcast("tasks", {
+                "event": "status_change",
+                "task_id": task.id,
+                "new_status": "completed",
+            })
+            self._monitor_tasks.pop(task.id, None)
+            return
 
     # while 循环正常退出 = max_checks 耗尽
     # 仅 monitor 模式需要处理（loop/goal 的 monitor 会被 cancel，不会走到这里）
@@ -292,10 +302,10 @@ async def _run_monitor_loop(self, task: Task, instance_id: str, session_log_path
 #### 4. Monitor 轮询子进程
 
 ```python
-async def _run_monitor_subprocess(self, prompt, cwd, model, task_id):
-    """启动一个独立的轻量 Claude 进程进行监控检查。
+async def _run_monitor_subprocess(self, prompt, cwd, model, task_id) -> str:
+    """启动一个独立的 Claude 进程进行监控检查。
     不占用 instance，不使用 --resume。
-    通过 --allowedTools 限制为只读工具 + Bash(写 signal file)。"""
+    返回 monitor session 的完整文本输出（用于存入 monitor_checks.full_output）。"""
 
     cmd = [
         settings.claude_binary,
@@ -320,10 +330,66 @@ async def _run_monitor_subprocess(self, prompt, cwd, model, task_id):
         env=env,
     )
 
-    # 消费输出并广播到前端（标记为 monitor 输出）
-    await self._consume_monitor_output(process, task_id)
+    # 消费输出：收集完整文本 + 实时广播到前端
+    full_output = await self._consume_monitor_output(process, task_id)
 
     await asyncio.wait_for(process.wait(), timeout=120)
+    return full_output
+
+async def _consume_monitor_output(self, process, task_id) -> str:
+    """解析 monitor 子进程的 stream-json 输出。
+    - 实时广播每条消息到前端（通过 task:{id} channel，标记 source="monitor"）
+    - 收集 assistant 文本并返回完整输出
+
+    stream-json 格式：每行一个 JSON，包含 type 字段（如 "assistant", "tool_use", "tool_result" 等）。
+    """
+    full_text_parts = []
+
+    async for line in process.stdout:
+        line = line.decode().strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        # 提取 assistant 文本
+        if event.get("type") == "assistant" and "content" in event:
+            for block in event["content"]:
+                if block.get("type") == "text":
+                    full_text_parts.append(block["text"])
+
+        # 实时广播到前端，标记为 monitor 输出以区分主 Session
+        await self.broadcaster.broadcast(f"task:{task_id}", {
+            "event_type": "monitor_output",
+            "data": event,
+        })
+
+    return "\n".join(full_text_parts)
+```
+
+#### 5. Signal File 读取
+
+```python
+def _read_monitor_signal(self, signal_path: Path) -> dict:
+    """读取 monitor 写入的 signal file，返回解析后的 dict。
+    容错处理：文件不存在、JSON 格式错误、字段缺失时返回安全默认值。"""
+
+    if not signal_path.exists():
+        return {"status": "running", "summary": "（signal file 未生成）"}
+
+    try:
+        text = signal_path.read_text().strip()
+        data = json.loads(text)
+    except (json.JSONDecodeError, OSError):
+        return {"status": "running", "summary": "（signal file 解析失败）"}
+
+    # 确保必要字段存在
+    return {
+        "status": data.get("status", "running"),
+        "summary": data.get("summary", ""),
+    }
 ```
 
 ### Prompt 构建
@@ -382,7 +448,7 @@ def _build_monitor_check_prompt(self, task, check_number, signal_path, main_aliv
         "用中文写一句话摘要（不超过 200 字）。\n"
         "检查完毕后，将结果写入 signal file：\n"
         f"echo '{{\"status\": \"running 或 done\", \"summary\": \"简短进度摘要\"}}' > {signal_path}\n"
-        "- status: 任务还在进行写 running，已完成写 done（仅主 Session 已退出时才可写 done）\n"
+        "- status: 任务还在进行写 running，已完成写 done\n"
         "- summary: 中文一句话描述当前进度\n"
     )
     return base
@@ -496,6 +562,7 @@ Mode: [auto] [plan] [loop] [goal] [monitor]  ← 新增
 新增 `monitor_check` 事件类型：
 
 ```typescript
+// 每次检查完成后的汇报摘要
 interface MonitorCheckEvent {
     event_type: "monitor_check";
     check_number: number;
@@ -503,9 +570,17 @@ interface MonitorCheckEvent {
     status: "running" | "done";
     main_alive: boolean;
 }
+
+// monitor 子进程的实时流式输出（用于"展开详情"）
+interface MonitorOutputEvent {
+    event_type: "monitor_output";
+    data: object;  // stream-json 的原始事件
+}
 ```
 
-前端在 `task:{id}` channel 上监听此事件，更新折叠面板内容。
+前端在 `task:{id}` channel 上监听这两类事件：
+- `monitor_check`：更新折叠面板的摘要列表
+- `monitor_output`：实时填充当前正在进行的检查的详情内容
 
 ## 数据存储
 
@@ -529,22 +604,7 @@ class MonitorCheck(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 ```
 
-在 `_run_monitor_loop` 中每次检查完成后写入：
-
-```python
-# 写入 monitor_checks 表
-async with self.db_factory() as db:
-    check_record = MonitorCheck(
-        task_id=task.id,
-        check_number=checks_done,
-        status=signal.get("status", "running"),
-        summary=summary,
-        full_output=result,  # _run_monitor_subprocess 的完整输出
-        main_alive=main_alive,
-    )
-    db.add(check_record)
-    await db.commit()
-```
+写入逻辑已集成在 `_run_monitor_loop` 主循环中（每次检查完成后同时写入 monitor_checks 和更新 Task 表）。
 
 ### API 端点
 
