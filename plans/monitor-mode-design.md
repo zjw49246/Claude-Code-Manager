@@ -39,12 +39,13 @@ Monitor 包含两个层面：
 | **Loop + 监控** | Signal file（原逻辑不变） | 仅汇报，不影响流程 | "已开启监控，请保持充分日志输出" |
 | **Goal + 监控** | 评估器（原逻辑不变） | 仅汇报，不影响流程 | "已开启监控，请保持充分日志输出" |
 | **Auto 模式** | 不可开启监控 | — | — |
+| **Plan 模式** | 不可开启监控 | — | — |
 
 ### 监控开启规则
 
 - **Monitor 模式**：默认开启监控，必须配置 `monitor_interval`
 - **Loop / Goal 模式**：可选开启，开启后需配置 `monitor_interval`
-- **Auto 模式**：不允许开启监控（单轮执行，无长任务语义）
+- **Auto / Plan 模式**：不允许开启监控（前端不展示监控选项，后端做兜底校验）
 
 ## 数据模型变更
 
@@ -60,7 +61,7 @@ mode: Mapped[str] = mapped_column(String(20), default="auto")
 # Monitor 相关字段
 monitor_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
 monitor_interval: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 轮询间隔（秒）
-monitor_model: Mapped[str | None] = mapped_column(String(100), nullable=True)  # 轮询用模型（默认 haiku）
+monitor_model: Mapped[str | None] = mapped_column(String(100), nullable=True)  # 轮询用模型（默认 opus）
 monitor_max_checks: Mapped[int] = mapped_column(Integer, default=100)  # 最大检查次数（兜底）
 monitor_checks_done: Mapped[int] = mapped_column(Integer, default=0)  # 已完成检查次数
 monitor_last_summary: Mapped[str | None] = mapped_column(Text, nullable=True)  # 最近一次汇报摘要
@@ -444,7 +445,7 @@ Mode: [auto] [plan] [loop] [goal] [monitor]  ← 新增
 ```
 ┌─────────────────────────────────────┐
 │ 轮询间隔:  [300] 秒 (5 分钟)         │
-│ 监控模型:  [claude-haiku-4-5  ▼]    │
+│ 监控模型:  [claude-opus-4-6   ▼]    │
 │ 最大检查次数: [100]                   │
 └─────────────────────────────────────┘
 ```
