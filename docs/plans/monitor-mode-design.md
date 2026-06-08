@@ -167,14 +167,11 @@ if action == "continue":
         })
 
         # 阻塞等待 monitor 确认完成
+        # loop gate monitor 不设 max_checks 上限，只要后台进程还活着就一直检查
         completed = await self._run_monitor_session(monitor_session, task)
 
         if not completed:
-            # max_checks 耗尽或任务被取消（loop monitor 不允许用户删除）
-            await self._mark_task_failed(
-                task.id,
-                f"监控达到最大检查次数 {monitor_session.max_checks}，后台任务未完成"
-            )
+            # 任务被用户取消，退出 loop
             return
 
     iteration += 1
@@ -186,13 +183,23 @@ if action == "continue":
 ```python
 async def _run_monitor_session(self, monitor_session: MonitorSession, task: Task) -> bool:
     """执行 monitor session 的轮询循环。
-    返回 True 表示后台任务完成，False 表示 max_checks 耗尽未完成。"""
+    返回 True 表示后台任务完成，False 表示被取消或 max_checks 耗尽。
+
+    循环策略：
+    - source="loop"/"goal"（系统 monitor）：无 max_checks 限制，一直检查直到 done 或任务取消
+    - source="manual"（用户 monitor）：受 max_checks 限制
+    """
 
     cwd = task.last_cwd or task.target_repo
     signal_path = Path(cwd) / ".claude-manager" / f"monitor_signal_{monitor_session.id}.json"
     signal_path.parent.mkdir(parents=True, exist_ok=True)
+    has_limit = monitor_session.source == "manual"
 
-    while monitor_session.checks_done < monitor_session.max_checks:
+    while True:
+        # manual monitor 有次数限制
+        if has_limit and monitor_session.checks_done >= monitor_session.max_checks:
+            break
+
         await asyncio.sleep(monitor_session.interval)
 
         # 检查 task 是否已被取消
@@ -201,11 +208,11 @@ async def _run_monitor_session(self, monitor_session: MonitorSession, task: Task
             if not t or t.status in ("cancelled", "completed", "failed"):
                 return False
 
-        # 检查 monitor session 是否已被取消（用户取消了整个任务，或手动删除了 manual monitor）
+        # 检查 monitor session 是否已被取消（用户取消整个任务，或手动删除 manual monitor）
         async with self.db_factory() as db:
             ms = await db.get(MonitorSession, monitor_session.id)
             if not ms or ms.status == "cancelled":
-                return False  # loop monitor: 任务已被取消; manual monitor: 被用户删除
+                return False
 
         # 清除 signal file
         signal_path.unlink(missing_ok=True)
@@ -269,7 +276,7 @@ async def _run_monitor_session(self, monitor_session: MonitorSession, task: Task
                 await db.commit()
             return True
 
-    # max_checks 耗尽
+    # max_checks 耗尽（仅 manual monitor 会走到这里）
     async with self.db_factory() as db:
         await db.execute(
             update(MonitorSession)
