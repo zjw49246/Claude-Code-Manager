@@ -242,11 +242,11 @@ class MonitorCheckResponse(BaseModel):
 
 ### 2.1 安装依赖
 
-- [ ] 在 `pyproject.toml` 的 `dependencies` 中添加:
+- [x] 在 `pyproject.toml` 的 `dependencies` 中添加:
   ```
   "mcp>=1.0.0",
   ```
-- [ ] `uv sync`（或 `pip install mcp`）
+- [x] `uv sync`（或 `pip install mcp`）
 
 ### 2.2 创建 MCP Server
 
@@ -258,7 +258,7 @@ class MonitorCheckResponse(BaseModel):
 
 **新建文件**: `backend/mcp/ccm_skills_server.py`
 
-- [ ] 完整实现:
+- [x] 完整实现:
 
 ```python
 """CCM Skills MCP Server — 给 Task 的 Claude 主 session 注入工具能力。
@@ -412,7 +412,7 @@ if __name__ == "__main__":
 
 **新建文件**: `backend/services/mcp_config.py`
 
-- [ ] 创建:
+- [x] 创建:
 
 ```python
 """MCP config 动态生成 — 根据 task 的 enabled_skills 生成 MCP server 配置。
@@ -500,7 +500,7 @@ def cleanup_mcp_config(task_id: int):
 
 **修改文件**: `backend/services/instance_manager.py`
 
-- [ ] `_build_command()` 方法（搜索 `def _build_command`，当前在 line 128）新增参数 `mcp_config_path`:
+- [x] `_build_command()` 方法（搜索 `def _build_command`，当前在 line 128）新增参数 `mcp_config_path`:
 
   ```python
   def _build_command(
@@ -527,12 +527,12 @@ def cleanup_mcp_config(task_id: int):
 
 **修改文件**: `backend/services/instance_manager.py`
 
-- [ ] `launch()` 方法签名（搜索 `async def launch`，当前在 line 37）新增参数:
+- [x] `launch()` 方法签名（搜索 `async def launch`，当前在 line 37）新增参数:
   ```python
   enabled_skills: dict | None = None,  # ← 新增
   ```
 
-- [ ] 在 `launch()` 方法体中，`cmd = self._build_command(...)` 调用前，生成 MCP config:
+- [x] 在 `launch()` 方法体中，`cmd = self._build_command(...)` 调用前，生成 MCP config:
   ```python
   # Generate MCP config for enabled skills
   mcp_config_path = None
@@ -541,7 +541,7 @@ def cleanup_mcp_config(task_id: int):
       mcp_config_path = generate_mcp_config(task_id, enabled_skills)
   ```
 
-- [ ] 将 `mcp_config_path` 传入 `_build_command()`:
+- [x] 将 `mcp_config_path` 传入 `_build_command()`:
   ```python
   cmd = self._build_command(
       provider=provider,
@@ -554,12 +554,12 @@ def cleanup_mcp_config(task_id: int):
   )
   ```
 
-- [ ] 在 `_launch_params` 存储中（搜索 `self._launch_params[instance_id]`）添加:
+- [x] 在 `_launch_params` 存储中（搜索 `self._launch_params[instance_id]`）添加:
   ```python
   "enabled_skills": enabled_skills,
   ```
 
-- [ ] MCP config 清理: 在 dispatcher 的 `_run_task_lifecycle()` 的 `finally` 块中（搜索 `finally:` in `_run_task_lifecycle`），添加:
+- [x] MCP config 清理: 在 dispatcher 的 `_run_task_lifecycle()` 的 `finally` 块中（搜索 `finally:` in `_run_task_lifecycle`），添加:
   ```python
   from backend.services.mcp_config import cleanup_mcp_config
   cleanup_mcp_config(task.id)
@@ -571,7 +571,7 @@ def cleanup_mcp_config(task_id: int):
 
 **修改文件**: `backend/services/dispatcher.py`
 
-- [ ] 在所有 `self.instance_manager.launch(...)` 调用中，添加 `enabled_skills=task.enabled_skills`。
+- [x] 在所有 `self.instance_manager.launch(...)` 调用中，添加 `enabled_skills=task.enabled_skills`。
 
   共 8 个调用点（搜索 `enable_workflows=task.enable_workflows` 找到每个位置，在其下方添加）:
   - Auto 模式首次启动（约 line 522）
