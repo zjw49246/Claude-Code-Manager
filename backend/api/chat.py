@@ -51,7 +51,9 @@ async def send_chat_message(
         if task.enabled_skills:
             for skill_name, enabled in task.enabled_skills.items():
                 if enabled and skill_name in COMMAND_REGISTRY:
-                    prompt_parts.append(COMMAND_REGISTRY[skill_name].prompt_template)
+                    cmd = COMMAND_REGISTRY[skill_name]
+                    if not cmd.always_available:
+                        prompt_parts.append(cmd.prompt_template)
     if body.secret_ids:
         from backend.services.dispatcher import _build_secrets_block
         from backend.database import async_session
