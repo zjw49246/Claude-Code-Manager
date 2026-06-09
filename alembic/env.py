@@ -20,7 +20,6 @@ from backend.models.tag import Tag                     # noqa: F401
 from backend.models.global_settings import GlobalSettings  # noqa: F401
 from backend.models.discussion import Discussion, DiscussionMessage, DiscussionAgent, DiscussionEvent  # noqa: F401
 from backend.models.quick_phrase import QuickPhrase  # noqa: F401
-from backend.models.monitor_session import MonitorSession, MonitorCheck  # noqa: F401
 from backend.database import Base, _async_url_to_sync, _is_sqlite
 
 target_metadata = Base.metadata

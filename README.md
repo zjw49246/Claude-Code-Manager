@@ -15,7 +15,6 @@ Web 端调度和管理多个 Claude Code 实例并行工作。灵感来自胡渊
 - **Git Worktree** — 每个实例在独立的 worktree 中工作，互不干扰
 - **多轮对话** — 任务完成后可通过 Chat 界面继续追问，自动 `--resume` 同一 session
 - **实时日志** — WebSocket 推送，实时查看每个实例的执行过程
-- **Monitor Session** — Auto 模式支持手动创建监控会话，Loop 模式自动创建 gate monitor 监控后台任务，定时检查进程状态和日志
 - **Plan Mode** — 敏感任务先生成计划，人工审批后再执行
 - **语音输入** — 通过 OpenAI Whisper API 语音转文字创建任务
 - **PWA** — 手机浏览器 Add to Home Screen，原生 App 体验

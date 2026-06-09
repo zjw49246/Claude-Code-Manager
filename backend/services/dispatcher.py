@@ -192,7 +192,6 @@ class GlobalDispatcher:
         self.broadcaster = broadcaster
         self._dispatch_task: asyncio.Task | None = None
         self._running_tasks: dict[int, asyncio.Task] = {}  # instance_id -> lifecycle task
-        self._monitor_tasks: dict[int, asyncio.Task] = {}  # monitor_session_id -> asyncio task
         self._running = False
 
         # Pool: initialized lazily on start() if pool_enabled
@@ -257,17 +256,6 @@ class GlobalDispatcher:
                 logger.warning(f"Resetting stuck task {t.id} from '{t.status}' to 'completed'")
                 t.status = "completed"
                 t.error_message = None
-
-            from backend.models.monitor_session import MonitorSession
-            from sqlalchemy import func
-            ms_result = await db.execute(
-                select(MonitorSession).where(MonitorSession.status == "running")
-            )
-            for ms in ms_result.scalars().all():
-                logger.warning(f"Cleaning up stale monitor session {ms.id}")
-                ms.status = "failed"
-                ms.completed_at = func.now()
-
             await db.commit()
 
     async def stop(self):
@@ -976,37 +964,6 @@ class GlobalDispatcher:
                     continue
 
             if action == "continue":
-                # Gate monitor: if Claude started a background task, monitor it before continuing
-                if signal.get("needs_monitor"):
-                    from backend.models.monitor_session import MonitorSession as MonitorSessionModel
-                    monitor_context = signal.get("monitor_context", "")
-                    async with self.db_factory() as db:
-                        ms = MonitorSessionModel(
-                            task_id=task.id,
-                            description=f"Loop iteration {iteration + 1} background task",
-                            monitor_context=monitor_context,
-                            interval=300,
-                            source="loop",
-                        )
-                        db.add(ms)
-                        await db.commit()
-                        await db.refresh(ms)
-
-                    await self.broadcaster.broadcast(f"task:{task.id}", {
-                        "event": "monitor_session_created",
-                        "monitor_session_id": ms.id,
-                        "source": "loop",
-                    })
-
-                    self._monitor_tasks[ms.id] = asyncio.current_task()
-                    try:
-                        monitor_result = await self._run_monitor_session(ms, task)
-                    finally:
-                        self._monitor_tasks.pop(ms.id, None)
-
-                    if not monitor_result:
-                        break
-
                 iteration += 1
                 continue
 
@@ -1287,16 +1244,6 @@ class GlobalDispatcher:
             summary = summary[-15000:]
         return summary
 
-    def _get_loop_monitor_hint(self) -> str:
-        return (
-            "\n\n=== 后台任务监控 ===\n"
-            "如果你在本轮启动了后台任务（如服务、构建等），请在 signal file 中额外设置：\n"
-            '  "needs_monitor": true,\n'
-            '  "monitor_context": "描述后台任务的类型和如何判断其完成"\n'
-            "注意：一次迭代只启动一个需要独占资源的任务，避免资源争用。\n"
-            "=== 后台任务监控结束 ===\n"
-        )
-
     def _build_loop_prompt(self, task: Task, iteration: int, signal_path: str,
                            history: list[dict] | None = None, anchored_total: int | None = None,
                            plan: str | None = None) -> str:
@@ -1429,7 +1376,6 @@ class GlobalDispatcher:
 {{"action": "abort", "reason": "具体原因", "progress": "{progress_hint}", "summary": "本轮做了什么（一句话）"}}
 {total_note}
 """)
-        parts.append(self._get_loop_monitor_hint())
         return "\n".join(parts)
 
     def _read_loop_signal(self, signal_path) -> dict:
@@ -1560,249 +1506,3 @@ class GlobalDispatcher:
             "task_id": task.id,
             "instance_id": instance_id,
         })
-
-    # ── Monitor Session ──────────────────────────────────────────────
-
-    def _get_monitor_signal_path(self, monitor_session_id: int, cwd: str) -> Path:
-        return Path(cwd) / ".claude-manager" / f"monitor_signal_{monitor_session_id}.json"
-
-    def _read_monitor_signal(self, signal_path: Path) -> dict:
-        import json
-        try:
-            return json.loads(signal_path.read_text(encoding="utf-8"))
-        except Exception:
-            return {}
-
-    def _build_monitor_session_prompt(self, monitor_session, task, signal_path: str) -> str:
-        parts = [
-            f"你是一个后台监控进程，这是第 {monitor_session.checks_done + 1} 次检查。",
-            f"监控描述: {monitor_session.description}",
-        ]
-        if monitor_session.monitor_context:
-            parts.append(f"监控上下文: {monitor_session.monitor_context}")
-        parts.append(f"""
-你的职责:
-1. 使用 `ps aux` 检查相关进程是否在运行
-2. 使用 `tail` 查看最新日志
-3. 判断后台任务是否仍在运行、是否完成、是否出错
-
-完成检查后，将以下 JSON 写入 {signal_path}：
-
-任务仍在运行:
-{{"status": "running", "summary": "当前状态的一句话描述"}}
-
-任务已完成:
-{{"status": "done", "summary": "完成情况的一句话描述"}}
-""")
-        return "\n".join(parts)
-
-    async def _run_monitor_subprocess(self, prompt: str, cwd: str, model: str | None, task_id: int, monitor_session_id: int) -> str:
-        from backend.services.stream_parser import StreamParser
-
-        effective_model = model or settings.default_model
-        cmd = [
-            settings.claude_binary,
-            "-p", prompt,
-            "--model", effective_model,
-            "--output-format", "stream-json",
-            "--dangerously-skip-permissions",
-            "--disallowedTools", "Edit,Write,NotebookEdit",
-        ]
-
-        env = {k: v for k, v in os.environ.items() if k.upper() not in ("CLAUDECODE", "CLAUDE_CODE")}
-
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=cwd,
-            env=env,
-            limit=10 * 1024 * 1024,
-        )
-
-        parser = StreamParser()
-        full_output_parts = []
-        try:
-            async def consume():
-                while True:
-                    line = await process.stdout.readline()
-                    if not line:
-                        break
-                    decoded = line.decode("utf-8", errors="replace").strip()
-                    if decoded:
-                        events = parser.parse_line(decoded)
-                        for evt in events:
-                            if evt.get("content"):
-                                full_output_parts.append(evt["content"])
-
-            await asyncio.wait_for(consume(), timeout=300)
-        except asyncio.TimeoutError:
-            process.kill()
-            await process.wait()
-            raise
-        except asyncio.CancelledError:
-            process.kill()
-            await process.wait()
-            raise
-
-        await process.wait()
-        return "\n".join(full_output_parts)
-
-    async def _run_monitor_session(self, monitor_session, task) -> bool:
-        from sqlalchemy import func
-
-        cwd = task.last_cwd or task.target_repo or os.getcwd()
-        signal_path = self._get_monitor_signal_path(monitor_session.id, cwd)
-        signal_path.parent.mkdir(parents=True, exist_ok=True)
-
-        is_system = monitor_session.source == "loop"
-
-        while True:
-            if not is_system and monitor_session.checks_done >= monitor_session.max_checks:
-                async with self.db_factory() as db:
-                    ms = await db.get(type(monitor_session), monitor_session.id)
-                    if ms:
-                        ms.status = "completed"
-                        ms.completed_at = func.now()
-                        await db.commit()
-                await self.broadcaster.broadcast(f"task:{task.id}", {
-                    "event": "monitor_session_status",
-                    "monitor_session_id": monitor_session.id,
-                    "status": "completed",
-                })
-                signal_path.unlink(missing_ok=True)
-                return True
-
-            await asyncio.sleep(monitor_session.interval)
-
-            # Check task status
-            async with self.db_factory() as db:
-                t = await db.get(Task, task.id)
-                if not t or t.status in ("completed", "failed", "cancelled"):
-                    ms = await db.get(type(monitor_session), monitor_session.id)
-                    if ms and ms.status == "running":
-                        ms.status = "completed" if (t and t.status == "completed") else "cancelled"
-                        ms.completed_at = func.now()
-                        await db.commit()
-                    await self.broadcaster.broadcast(f"task:{task.id}", {
-                        "event": "monitor_session_status",
-                        "monitor_session_id": monitor_session.id,
-                        "status": "completed" if (t and t.status == "completed") else "cancelled",
-                    })
-                    signal_path.unlink(missing_ok=True)
-                    return False
-
-            # Check monitor session status (may have been cancelled via API)
-            async with self.db_factory() as db:
-                ms = await db.get(type(monitor_session), monitor_session.id)
-                if not ms or ms.status != "running":
-                    signal_path.unlink(missing_ok=True)
-                    return False
-
-            # Clear old signal
-            signal_path.unlink(missing_ok=True)
-
-            prompt = self._build_monitor_session_prompt(monitor_session, task, str(signal_path))
-
-            try:
-                full_output = await self._run_monitor_subprocess(
-                    prompt, cwd, monitor_session.model, task.id, monitor_session.id,
-                )
-            except asyncio.CancelledError:
-                signal_path.unlink(missing_ok=True)
-                raise
-            except (asyncio.TimeoutError, Exception) as exc:
-                logger.warning(f"Monitor session {monitor_session.id} check failed: {exc}")
-                async with self.db_factory() as db:
-                    from backend.models.monitor_session import MonitorCheck
-                    check = MonitorCheck(
-                        monitor_session_id=monitor_session.id,
-                        check_number=monitor_session.checks_done + 1,
-                        status="failed",
-                        summary=str(exc),
-                        full_output=None,
-                    )
-                    db.add(check)
-                    ms = await db.get(type(monitor_session), monitor_session.id)
-                    if ms:
-                        ms.checks_done += 1
-                    await db.commit()
-                    monitor_session.checks_done += 1
-                await self.broadcaster.broadcast(f"task:{task.id}", {
-                    "event": "monitor_check",
-                    "monitor_session_id": monitor_session.id,
-                    "check_number": monitor_session.checks_done,
-                    "status": "failed",
-                })
-                continue
-
-            # Read signal
-            signal = self._read_monitor_signal(signal_path)
-            summary = signal.get("summary", "")
-            status = signal.get("status", "running")
-
-            # Write MonitorCheck
-            async with self.db_factory() as db:
-                from backend.models.monitor_session import MonitorCheck
-                check = MonitorCheck(
-                    monitor_session_id=monitor_session.id,
-                    check_number=monitor_session.checks_done + 1,
-                    status="completed",
-                    summary=summary,
-                    full_output=full_output,
-                )
-                db.add(check)
-                ms = await db.get(type(monitor_session), monitor_session.id)
-                if ms:
-                    ms.checks_done += 1
-                    ms.last_summary = summary
-                await db.commit()
-                monitor_session.checks_done += 1
-                monitor_session.last_summary = summary
-
-            await self.broadcaster.broadcast(f"task:{task.id}", {
-                "event": "monitor_check",
-                "monitor_session_id": monitor_session.id,
-                "check_number": monitor_session.checks_done,
-                "status": "completed",
-                "summary": summary,
-            })
-
-            if status == "done":
-                async with self.db_factory() as db:
-                    ms = await db.get(type(monitor_session), monitor_session.id)
-                    if ms:
-                        ms.status = "completed"
-                        ms.completed_at = func.now()
-                        await db.commit()
-                await self.broadcaster.broadcast(f"task:{task.id}", {
-                    "event": "monitor_session_status",
-                    "monitor_session_id": monitor_session.id,
-                    "status": "completed",
-                })
-                signal_path.unlink(missing_ok=True)
-                return True
-
-    async def _run_monitor_session_background(self, monitor_session, task_id: int):
-        from sqlalchemy import func
-
-        async with self.db_factory() as db:
-            task = await db.get(Task, task_id)
-            if not task:
-                return
-
-        self._monitor_tasks[monitor_session.id] = asyncio.current_task()
-        try:
-            await self._run_monitor_session(monitor_session, task)
-        except asyncio.CancelledError:
-            pass
-        except Exception as exc:
-            logger.error(f"Monitor session {monitor_session.id} unexpected error: {exc}")
-            async with self.db_factory() as db:
-                ms = await db.get(type(monitor_session), monitor_session.id)
-                if ms and ms.status == "running":
-                    ms.status = "failed"
-                    ms.completed_at = func.now()
-                    await db.commit()
-        finally:
-            self._monitor_tasks.pop(monitor_session.id, None)
