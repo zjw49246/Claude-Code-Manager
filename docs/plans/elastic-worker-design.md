@@ -335,6 +335,13 @@ async def _dispatch_loop(self):
                         .values(status="in_progress")
                     )
                     await db.commit()
+                # 广播到前端（与本地 task 一致，避免 UI 延迟等 Worker relay 回传）
+                await self.broadcaster.broadcast("tasks", {
+                    "event": "status_change",
+                    "task_id": task.id,
+                    "old_status": "pending",
+                    "new_status": "in_progress",
+                })
                 asyncio.create_task(self._safe_forward_to_worker(task))
 
         # 路径 2: 本地 task — 现有逻辑不变，需要空闲 instance
@@ -615,13 +622,22 @@ class WorkerRelay:
     async def _backfill_missing_logs(self, worker, task_ids):
         """从 Worker 拉取缺失的日志补入 Manager DB。
         使用条数对比（而非时间戳）避免时钟不一致导致的丢失/重复。
+
+        关键：必须排除 user_message 进行对比。原因：
+        user_message 由 _send_worker_chat 通过 HTTP 直接存入 Manager DB（不经过 relay），
+        而 relay 收到 Worker 回传的 user_message 时会 skip。如果 relay 断连期间用户
+        发送了新 Chat，Manager 和 Worker 的 user_message 位置会错位，导致 count 不匹配，
+        backfill 会把 Worker 的 user_message 重复存入 Manager。
         """
         async with httpx.AsyncClient() as client:
             for tid in task_ids:
-                # 获取 Manager 上已有的日志条数
+                # 只计算非 user_message 的条数（user_message 由 _send_worker_chat 存入）
                 async with self.db_factory() as db:
                     count_result = await db.execute(
-                        select(func.count()).where(LogEntry.task_id == tid)
+                        select(func.count()).where(
+                            LogEntry.task_id == tid,
+                            LogEntry.event_type != "user_message",
+                        )
                     )
                     local_count = count_result.scalar() or 0
 
@@ -634,8 +650,11 @@ class WorkerRelay:
                     continue
 
                 remote_msgs = resp.json()
-                # 跳过已有的前 N 条，补入剩余的
-                missing = remote_msgs[local_count:]
+                # 过滤掉 user_message（Manager 已通过 _send_worker_chat 存入），
+                # 只对比非 user_message 条数
+                remote_non_user = [m for m in remote_msgs
+                                   if m.get("event_type") != "user_message"]
+                missing = remote_non_user[local_count:]
                 async with self.db_factory() as db:
                     for msg in missing:
                         log = LogEntry(
@@ -1149,7 +1168,10 @@ async def _recover_worker_relays():
 ### 12.2 日志补全
 
 重连后，`_backfill_missing_logs()` 从 Worker 拉取 Manager 重启期间产生的日志，
-通过条数对比（Manager 已有 N 条 → 从 Worker 第 N+1 条开始补入）避免重复。
+通过**非 user_message 条数**对比避免重复。必须排除 user_message 的原因：
+user_message 由 `_send_worker_chat` 通过 HTTP 直接存入 Manager DB（不经过 relay），
+如果断连期间用户发送了新 Chat，Manager 和 Worker 的 user_message 位置会错位，
+按总条数对比会导致重复存入。
 
 ---
 
