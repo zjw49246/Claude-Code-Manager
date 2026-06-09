@@ -274,6 +274,11 @@ async def _run_monitor_session(self, monitor_session: MonitorSession, task: Task
                     .values(status="completed", completed_at=func.now())
                 )
                 await db.commit()
+            await self.broadcaster.broadcast(f"task:{task.id}", {
+                "event_type": "monitor_session_status",
+                "monitor_session_id": monitor_session.id,
+                "status": "completed",
+            })
             return True
 
     # max_checks 耗尽（仅 manual monitor 会走到这里）
@@ -284,6 +289,11 @@ async def _run_monitor_session(self, monitor_session: MonitorSession, task: Task
             .values(status="failed")
         )
         await db.commit()
+    await self.broadcaster.broadcast(f"task:{task.id}", {
+        "event_type": "monitor_session_status",
+        "monitor_session_id": monitor_session.id,
+        "status": "failed",
+    })
     return False
 ```
 
@@ -326,7 +336,14 @@ async def delete_monitor_session(
     session_id: int,
     db: AsyncSession = Depends(get_db),
 ):
-    """用户删除 monitor session"""
+    """用户删除 monitor session（仅限 manual monitor）"""
+    # 校验归属 + 来源
+    ms = await db.get(MonitorSession, session_id)
+    if not ms or ms.task_id != task_id:
+        raise HTTPException(404, "Monitor session not found")
+    if ms.source != "manual":
+        raise HTTPException(403, "System monitor cannot be deleted")
+
     await db.execute(
         update(MonitorSession)
         .where(MonitorSession.id == session_id)
@@ -418,7 +435,7 @@ def _build_monitor_session_prompt(self, monitor_session: MonitorSession, task: T
         "用中文写一句话摘要。\n"
         "检查完毕后，将结果写入 signal file：\n"
         f"echo '{{\"status\": \"running 或 done\", \"summary\": \"简短进度摘要\"}}' > "
-        f"{self._get_monitor_signal_path(monitor_session)}\n"
+        f"{self._get_monitor_signal_path(monitor_session.id, task.last_cwd or task.target_repo)}\n"
         "- status: 任务还在进行写 running，已完成写 done\n"
         "- summary: 中文一句话描述当前进度\n"
     )
@@ -488,10 +505,9 @@ async def _consume_monitor_output(self, process, task_id, monitor_session_id) ->
 ### 7. Signal File 路径与读取
 
 ```python
-def _get_monitor_signal_path(self, monitor_session: MonitorSession) -> Path:
+def _get_monitor_signal_path(self, monitor_session_id: int, cwd: str) -> Path:
     """获取 monitor session 的 signal file 路径。"""
-    cwd = monitor_session.task.last_cwd or monitor_session.task.target_repo
-    return Path(cwd) / ".claude-manager" / f"monitor_signal_{monitor_session.id}.json"
+    return Path(cwd) / ".claude-manager" / f"monitor_signal_{monitor_session_id}.json"
 
 def _read_monitor_signal(self, signal_path: Path) -> dict:
     """读取 signal file，容错处理。"""
@@ -660,7 +676,9 @@ async def delete_monitor_session(...):
 ```
 ┌────────────────────────────────────────┐
 │ ← 返回列表     Monitor #1: "监控训练进度" │
-│ 状态: 运行中 | 间隔: 300秒 | 5/100 次   │
+│ 状态: 运行中 | 间隔: 300秒 | 已检查 5 次  │
+│ （manual monitor 显示 "5/100 次"，      │
+│   system monitor 显示 "已检查 5 次"）    │
 ├────────────────────────────────────────┤
 │                                        │
 │ ▼ 检查 #5  2024-01-15 14:30           │
