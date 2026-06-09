@@ -199,10 +199,19 @@ async def _run_monitor_session(self, monitor_session: MonitorSession, task: Task
 
         await asyncio.sleep(monitor_session.interval)
 
-        # 检查 task 是否已被取消
+        # 检查 task 是否已被取消或已完成
         async with self.db_factory() as db:
             t = await db.get(Task, task.id)
             if not t or t.status in ("cancelled", "completed", "failed"):
+                # 更新 monitor session 状态（task 取消时 TaskQueue.cancel() 已处理，
+                # 但 task 正常完成/失败时需要在这里更新）
+                await db.execute(
+                    update(MonitorSession)
+                    .where(MonitorSession.id == monitor_session.id)
+                    .where(MonitorSession.status == "running")
+                    .values(status="completed" if t and t.status == "completed" else "cancelled")
+                )
+                await db.commit()
                 return False
 
         # 检查 monitor session 是否已被取消（用户取消整个任务，或手动删除 manual monitor）
@@ -412,6 +421,16 @@ async def _run_monitor_session_background(self, monitor_session, task_id):
         await self._run_monitor_session(monitor_session, task)
     except asyncio.CancelledError:
         pass
+    except Exception:
+        # 未预期异常 — 确保 DB 状态不会永远卡在 "running"
+        async with self.db_factory() as db:
+            await db.execute(
+                update(MonitorSession)
+                .where(MonitorSession.id == monitor_session.id)
+                .where(MonitorSession.status == "running")
+                .values(status="failed")
+            )
+            await db.commit()
     finally:
         self._monitor_tasks.pop(monitor_session.id, None)
 ```
