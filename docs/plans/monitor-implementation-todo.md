@@ -10,7 +10,7 @@
 
 ### 1.1 创建 MonitorSession & MonitorCheck Model
 - [ ] 新建 `backend/models/monitor_session.py`
-  - MonitorSession 表: id, task_id(FK→tasks.id), description, monitor_context, interval(default=300), max_checks(default=100), model, status(running/completed/failed/cancelled), checks_done(default=0), last_summary, source(manual/loop/goal), created_at, completed_at
+  - MonitorSession 表: id, task_id(FK→tasks.id), description, monitor_context, interval(default=300), max_checks(default=100), model, status(running/completed/failed/cancelled), checks_done(default=0), last_summary, source(manual/loop), created_at, completed_at
   - MonitorCheck 表: id, monitor_session_id(FK→monitor_sessions.id), check_number, status, summary, full_output, created_at
   - 参考: `backend/models/task.py` 的写法（使用 Mapped[] 类型注解）
 
@@ -54,7 +54,7 @@
 
 ### 2.5 Monitor Session 主循环
 - [ ] `_run_monitor_session(self, monitor_session, task) -> bool`
-  - system monitor (source=loop/goal): `while True` 无限循环，不受 max_checks 限制
+  - system monitor (source=loop): `while True` 无限循环，不受 max_checks 限制
   - manual monitor (source=manual): `while checks_done < max_checks`
   - 每轮: sleep(interval) → 检查 task status → 检查 monitor status → 清理旧 signal → 运行子进程 → 读 signal → 写 DB(MonitorCheck) → 广播 monitor_check 事件 → 判断 done
   - 完成时广播 `monitor_session_status` 事件（completed/failed）
