@@ -1,10 +1,20 @@
 # Monitor Session v2 — MCP 驱动的 Agent 监控
 
+> ## ⚠️ 执行环境（必读）
+>
+> **工作目录**: `/home/ubuntu/Claude-Code-Manager-dev`
+> **工作分支**: `dev`
+> **所有代码修改必须在上述目录和分支中进行。**
+> **禁止修改生产环境** `/home/ubuntu/Claude-Code-Manager`（端口 8002，main 分支）。
+>
+> 执行前请先确认：
+> 1. `cd /home/ubuntu/Claude-Code-Manager-dev`
+> 2. `git branch --show-current` 输出为 `dev`
+> 3. 如不在 dev 分支：`git checkout dev`
+
 > **设计理念**: 从"CCM 从外部控制监控"变为"给 Agent 注入 MCP 工具，Agent 自主决定何时监控"。
 > Monitor 是 Agent 的第一个 Skill，为未来多 Agent 协作架构奠基。
 >
-> **开发环境**: `/home/ubuntu/Claude-Code-Manager-dev`，`dev` 分支
-> **生产环境**: `/home/ubuntu/Claude-Code-Manager`，端口 8002，不可影响
 > **范围**: 先做 Auto 模式，Loop 模式后续扩展
 >
 > **参考项目**:
