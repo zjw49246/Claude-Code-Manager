@@ -10,8 +10,9 @@
 
 ### 1.1 创建 MonitorSession & MonitorCheck Model
 - [ ] 新建 `backend/models/monitor_session.py`
-  - MonitorSession 表: id, task_id(FK→tasks.id), description, monitor_context, interval(default=300), max_checks(default=100), model, status(running/completed/failed/cancelled), checks_done(default=0), last_summary, source(manual/loop), created_at, completed_at
-  - MonitorCheck 表: id, monitor_session_id(FK→monitor_sessions.id), check_number, status, summary, full_output, created_at
+  - MonitorSession 表: id, task_id(Integer, index=True, 逻辑关联 tasks.id), description, monitor_context, interval(default=300), max_checks(default=100), model, status(running/completed/failed/cancelled), checks_done(default=0), last_summary, source(manual/loop), created_at, completed_at
+  - MonitorCheck 表: id, monitor_session_id(Integer, index=True, 逻辑关联 monitor_sessions.id), check_number, status, summary, full_output, created_at
+  - 注意: 项目不使用 SQLAlchemy ForeignKey，所有关联字段均为纯 Integer + index（参考 task.project_id, task.instance_id）
   - 参考: `backend/models/task.py` 的写法（使用 Mapped[] 类型注解）
 
 ### 1.2 注册 Model（用于 Alembic autogenerate）
@@ -124,6 +125,10 @@
 ### 4.3 任务取消时清理 Monitor
 - [ ] 在 `backend/services/task_queue.py` 的 `cancel()` 方法中追加:
   - 批量更新该 task 下所有 running 的 MonitorSession 为 cancelled
+- [ ] 在 `backend/services/task_queue.py` 的 `delete()` 方法中追加（参考 LogEntry 的清理模式）:
+  - 先删除该 task 下所有 MonitorCheck（通过 MonitorSession.task_id 关联）
+  - 再删除该 task 下所有 MonitorSession
+  - 注意: 项目无 FK CASCADE，必须手动清理，否则产生孤儿数据
 - [ ] 在 `backend/api/tasks.py` 的 `cancel_task` endpoint（line 166）中追加:
   - `from backend.main import dispatcher` 获取 dispatcher
   - 查询该 task 下所有 running 的 MonitorSession ID
@@ -175,7 +180,9 @@
 - [ ] 测试 `_run_monitor_session` 的 done 判断、max_checks 耗尽、取消检测
 - [ ] 测试 API 权限（manual 可删除，system 不可删除，task_id 归属校验，非 auto 模式拒绝创建，已完成 task 拒绝创建）
 - [ ] 测试 Loop 集成: needs_monitor → gate → 完成后继续
+- [ ] 测试子进程失败恢复: subprocess 超时 → 记录 failed MonitorCheck → 继续下一轮
 - [ ] 测试取消流程: 取消 task → monitor sessions 全部 cancelled
+- [ ] 测试删除 task: 关联的 MonitorSession 和 MonitorCheck 全部清理，无孤儿数据
 - [ ] 测试服务重启: running 的 monitor session 被清理为 failed
 
 ### 6.2 文档更新
