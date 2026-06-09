@@ -1935,9 +1935,10 @@ class GlobalDispatcher:
             if msg.command_skills:
                 has_temp_skills = True
                 effective_skills.update(msg.command_skills)
-                # Temporarily write to DB so API-level checks pass
+                # Write to DB before launch so API-level checks pass
+                # (MCP server may call API immediately after process starts)
                 task.enabled_skills = effective_skills
-                await db.flush()
+                await db.commit()
 
             # Capture launch params before closing DB session
             launch_kwargs = dict(
