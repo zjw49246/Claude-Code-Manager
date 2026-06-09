@@ -27,6 +27,7 @@ from backend.api.tags import router as tags_router
 from backend.api.files import router as files_router
 from backend.api.pool import router as pool_router
 from backend.api.monitor import router as monitor_router
+from backend.api.sub_agents import router as sub_agents_router
 from backend.api.discussions import router as discussions_router
 from backend.api.quick_phrases import router as quick_phrases_router
 from backend.middleware.auth import TokenAuthMiddleware
@@ -160,6 +161,7 @@ app.include_router(pool_router)
 app.include_router(discussions_router)
 app.include_router(quick_phrases_router)
 app.include_router(monitor_router)
+app.include_router(sub_agents_router)
 
 # Serve frontend static files in production
 FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"

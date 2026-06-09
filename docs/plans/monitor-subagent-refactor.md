@@ -178,7 +178,7 @@ Task 卡片上的可展开工具权限指示器。
   - 外观: lucide `Users` 图标 + 数量，加 `animate-pulse`
   - 样式: `text-xs bg-teal-600/30 text-teal-300 px-1.5 rounded`
 
-- [ ] **7.4** 点击展开子 agent 详情
+- [x] **7.4** 点击展开子 agent 详情
   - 需要新 API: `GET /api/tasks/{task_id}/sub-agents/summary`
   - 返回: `{"by_type": {"monitor": {"running": 1, "completed": 3}}}`
   - 在 `backend/api/sub_agents.py` 实现（新文件，为后续子 agent 类型预留）
