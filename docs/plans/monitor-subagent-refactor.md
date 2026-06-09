@@ -173,7 +173,7 @@ Task 卡片上的可展开工具权限指示器。
 
 - [x] **7.2** 前端 `client.ts`: Task interface 新增 `active_sub_agents: number`
 
-- [ ] **7.3** `TaskList.tsx` 新增子 agent 徽章
+- [x] **7.3** `TaskList.tsx` 新增子 agent 徽章
   - 条件: `t.active_sub_agents > 0`
   - 外观: lucide `Users` 图标 + 数量，加 `animate-pulse`
   - 样式: `text-xs bg-teal-600/30 text-teal-300 px-1.5 rounded`
