@@ -18,20 +18,27 @@ def generate_mcp_config(task_id: int, enabled_skills: dict, api_base: str | None
     if not enabled_skills:
         return None
 
+    from backend.config import settings
+
     if api_base is None:
-        from backend.config import settings
-        api_base = f"http://{settings.host}:{settings.port}"
+        host = settings.host if settings.host != "0.0.0.0" else "127.0.0.1"
+        api_base = f"http://{host}:{settings.port}"
+
+    auth_token = getattr(settings, "auth_token", "") or ""
 
     servers = {}
 
     if enabled_skills.get("monitor"):
+        args = [
+            "-m", "backend.mcp.ccm_skills_server",
+            "--task-id", str(task_id),
+            "--api-base", api_base,
+        ]
+        if auth_token:
+            args.extend(["--auth-token", auth_token])
         servers["ccm_skills"] = {
             "command": sys.executable,
-            "args": [
-                "-m", "backend.mcp.ccm_skills_server",
-                "--task-id", str(task_id),
-                "--api-base", api_base,
-            ],
+            "args": args,
             "cwd": _CCM_ROOT,
         }
 

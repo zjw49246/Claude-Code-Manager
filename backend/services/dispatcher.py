@@ -1715,6 +1715,7 @@ class GlobalDispatcher:
             settings.claude_binary,
             "-p", prompt,
             "--output-format", "stream-json",
+            "--verbose",
             "--dangerously-skip-permissions",
             "--disallowedTools", "Edit,Write,NotebookEdit",
         ]
