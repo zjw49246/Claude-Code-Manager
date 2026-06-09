@@ -1959,6 +1959,28 @@ class GlobalDispatcher:
             )
             inst_id = inst.id
 
+            # Write a log entry for monitor-sourced messages so frontend can track source
+            if msg.source and msg.source.startswith("monitor:"):
+                import json as _json
+                monitor_log = LogEntry(
+                    instance_id=inst.id,
+                    task_id=task_id,
+                    event_type="user_message",
+                    role="user",
+                    content=msg.user_message_text or msg.prompt,
+                    raw_json=_json.dumps({"source": "monitor"}),
+                    is_error=False,
+                )
+                db.add(monitor_log)
+                await db.flush()
+
+                await self.broadcaster.broadcast(f"task:{task_id}", {
+                    "event_type": "user_message",
+                    "role": "user",
+                    "content": msg.user_message_text or msg.prompt,
+                    "source": "monitor",
+                })
+
             await self.instance_manager.launch(**launch_kwargs)
 
             task.status = "executing"
