@@ -102,13 +102,13 @@ Task (主 Agent Session)
   - 进程退出后: 如果 session 仍为 running（子 agent 异常退出未调 mark_complete），标记 failed
   - 保留: CancelledError 处理（kill 进程）、异常处理（标记 failed）
 
-- [ ] **4.2** 新方法 `_launch_monitor_agent()` 替代旧 `_run_monitor_subprocess()`
+- [x] **4.2** 新方法 `_launch_monitor_agent()` 替代旧 `_run_monitor_subprocess()`
   - 构建 Claude CLI 命令（含 `--mcp-config`）
   - stdout 写入日志文件 `/tmp/ccm_monitor_{session_id}.log`（不用 PIPE 防阻塞）
   - `start_new_session=True` 隔离进程组
   - 返回 `asyncio.subprocess.Process`
 
-- [ ] **4.3** 新方法 `_build_monitor_agent_prompt()` 替代旧 `_build_monitor_prompt()`
+- [x] **4.3** 新方法 `_build_monitor_agent_prompt()` 替代旧 `_build_monitor_prompt()`
   - Agent 风格 prompt:
     ```
     你是一个自主监控 Agent，持续监控目标并在有变化时主动汇报。
@@ -136,7 +136,7 @@ Task (主 Agent Session)
     先做一次初始状态检查，然后持续观察。
     ```
 
-- [ ] **4.4** 删除旧的 `_build_monitor_prompt()` 和 `_run_monitor_subprocess()`
+- [x] **4.4** 删除旧的 `_build_monitor_prompt()` 和 `_run_monitor_subprocess()`
 
 ### Phase 5: 停止机制
 

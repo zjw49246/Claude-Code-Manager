@@ -1660,17 +1660,28 @@ class GlobalDispatcher:
             self._monitor_tasks.pop(monitor_session_id, None)
             self._monitor_processes.pop(monitor_session_id, None)
 
-    async def _run_monitor_subprocess(self, prompt: str, cwd: str, model: str | None, monitor_session_id: int) -> str:
-        import json as _json
-        from backend.services.stream_parser import StreamParser
+    async def _launch_monitor_agent(
+        self,
+        prompt: str,
+        cwd: str,
+        model: str | None,
+        monitor_session_id: int,
+        mcp_config_path: Path,
+    ) -> asyncio.subprocess.Process:
+        """Launch a persistent Claude subprocess for a monitor sub-agent.
 
+        Stdout is written to a log file (not PIPE) to prevent buffer blocking.
+        The process runs in its own session (start_new_session=True) so it can
+        be killed independently without affecting the parent process group.
+        """
         cmd = [
             settings.claude_binary,
             "-p", prompt,
             "--output-format", "stream-json",
             "--verbose",
             "--dangerously-skip-permissions",
-            "--disallowedTools", "Edit,Write,NotebookEdit",
+            "--disallowedTools", "Edit,Write,NotebookEdit,Workflow",
+            "--mcp-config", str(mcp_config_path),
         ]
         if model:
             cmd.extend(["--model", model])
@@ -1680,51 +1691,56 @@ class GlobalDispatcher:
         env = {k: v for k, v in os.environ.items()
                if k.upper() not in ("CLAUDECODE", "CLAUDE_CODE")}
 
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=cwd,
-            env=env,
-            limit=10 * 1024 * 1024,
-        )
-        self._monitor_processes[monitor_session_id] = process
-
+        log_path = Path(f"/tmp/ccm_monitor_{monitor_session_id}.log")
+        log_fh = open(log_path, "wb")
         try:
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
-                timeout=300,
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=log_fh,
+                stderr=log_fh,
+                cwd=cwd,
+                env=env,
+                start_new_session=True,
             )
-        except asyncio.TimeoutError:
-            process.kill()
-            await process.wait()
+        except Exception:
+            log_fh.close()
             raise
-        finally:
-            self._monitor_processes.pop(monitor_session_id, None)
+        log_fh.close()
 
-        parser = StreamParser()
-        text_parts = []
-        for line in stdout.decode(errors="replace").splitlines():
-            if not line.strip():
-                continue
-            events = parser.parse_line(line)
-            for event in events:
-                if event["event_type"] == "message" and event.get("content"):
-                    text_parts.append(event["content"])
+        self._monitor_processes[monitor_session_id] = process
+        logger.info(
+            f"Monitor agent launched: session={monitor_session_id} pid={process.pid} "
+            f"log={log_path}"
+        )
+        return process
 
-        return "\n".join(text_parts)
-
-    def _build_monitor_prompt(self, checks_done: int, description: str, context: str | None) -> str:
+    def _build_monitor_agent_prompt(self, description: str, context: str | None) -> str:
+        """Build the system prompt for a monitor sub-agent."""
         parts = [
-            f"你是一个后台监控进程，这是第 {checks_done + 1} 次检查。",
-            f"监控目标: {description}",
+            "你是一个自主监控 Agent，持续监控目标并在有变化时主动汇报。",
+            "",
+            "## 监控目标",
+            description,
         ]
         if context:
-            parts.append(f"上下文: {context}")
-        parts.append(
-            "\n检查并报告当前状态。使用 Bash 工具执行 ps aux、tail 日志等命令。"
-            "\n\n最后两行必须严格遵循以下格式:"
-            "\nSUMMARY: <一句话概括当前状态>"
-            "\nSTATUS: running|done|error"
-        )
+            parts.append("")
+            parts.append("## 上下文")
+            parts.append(context)
+        parts.append("")
+        parts.append("""\
+## 你的 MCP 工具
+- report_status(summary, is_important): 报告状态。重要变化设 is_important=True
+- mark_complete(reason): 监控目标完成时调用，然后立即停止所有活动
+- get_context(): 获取最新监控配置
+
+## 行为准则
+1. 用 Bash 执行 ps、tail、cat 等命令检查状态
+2. 自主判断频率：初期密集，稳定后放宽
+3. 重要变化立即 report_status，平时间隔较长
+4. 任务完成/失败/异常 → mark_complete 并说明原因
+5. 你是只读观察者，不要修改任何文件
+6. 检查间用 sleep，不要无间断轮询
+7. 调用 mark_complete 后，你的工作就结束了，不要再做任何事
+
+先做一次初始状态检查，然后持续观察。""")
         return "\n".join(parts)
