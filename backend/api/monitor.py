@@ -29,6 +29,9 @@ async def create_monitor_session(
     task = await db.get(Task, task_id)
     if not task:
         raise HTTPException(404, "Task not found")
+    skills = task.enabled_skills or {}
+    if not skills.get("monitor"):
+        raise HTTPException(403, "Monitor skill not enabled for this task")
     if task.status not in ("in_progress", "executing"):
         raise HTTPException(400, "Cannot create monitor for inactive task")
 
