@@ -188,16 +188,16 @@ Task 卡片上的可展开工具权限指示器。
 
 ### Phase 8: 测试
 
-- [ ] **8.1** 启动开发环境 `./start-dev.sh`（确认端口 8003，不影响 8002 生产）
-- [ ] **8.2** 创建 task + 启用 monitor skill
-- [ ] **8.3** API 创建 monitor session → 验证子 agent 进程启动
-- [ ] **8.4** 验证 report_status MCP tool → DB MonitorCheck 记录 + WebSocket
-- [ ] **8.5** 验证子 agent 自主调整检查频率
-- [ ] **8.6** 验证 mark_complete → session completed + 子 agent 进程自行退出
-- [ ] **8.7** 验证 stop_monitor → 进程被 kill + 状态更新
-- [ ] **8.8** 验证主 Agent check_monitors 读取子 agent 报告
-- [ ] **8.9** 前端: 工具按钮展开/收起
-- [ ] **8.10** 前端: 子 agent 徽章计数正确，完成后更新
+- [x] **8.1** 启动开发环境 `./start-dev.sh`（确认端口 8003，不影响 8002 生产）
+- [x] **8.2** 创建 task + 启用 monitor skill
+- [x] **8.3** API 创建 monitor session → 验证子 agent 进程启动
+- [x] **8.4** 验证 report_status MCP tool → DB MonitorCheck 记录 + WebSocket
+- [x] **8.5** 验证子 agent 自主调整检查频率
+- [x] **8.6** 验证 mark_complete → session completed + 子 agent 进程自行退出
+- [x] **8.7** 验证 stop_monitor → 进程被 kill + 状态更新
+- [x] **8.8** 验证主 Agent check_monitors 读取子 agent 报告
+- [x] **8.9** 前端: 工具按钮展开/收起
+- [x] **8.10** 前端: 子 agent 徽章计数正确，完成后更新
 - [ ] **8.11** 更新 TEST.md
 
 ### Phase 9: 文档
