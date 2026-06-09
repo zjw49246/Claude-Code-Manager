@@ -332,7 +332,7 @@ async def _dispatch_loop(self):
                         .values(status="in_progress")
                     )
                     await db.commit()
-                asyncio.create_task(self._forward_task_to_worker(task))
+                asyncio.create_task(self._safe_forward_to_worker(task))
 
         # 路径 2: 本地 task — 现有逻辑不变，需要空闲 instance
         idle_instance = await self._find_idle_instance()
@@ -342,6 +342,18 @@ async def _dispatch_loop(self):
                 await self._run_task_locally(local_task, idle_instance)
 
         await asyncio.sleep(2)
+
+async def _safe_forward_to_worker(self, task):
+    """包装 _forward_task_to_worker，失败时回退 task 状态。"""
+    try:
+        await self._forward_task_to_worker(task)
+    except Exception as e:
+        async with self.db_factory() as db:
+            await db.execute(
+                update(Task).where(Task.id == task.id)
+                .values(status="failed", error_message=f"转发到 Worker 失败: {e}")
+            )
+            await db.commit()
 
 async def _forward_task_to_worker(self, task):
     worker = await self._get_worker(task.worker_id)
@@ -421,7 +433,10 @@ class WorkerRelay:
         if worker.id in self._worker_ws:
             return
         ws_url = f"ws://{worker.public_ip}:{worker.ccm_port}/ws"
-        ws = await websockets.connect(ws_url)
+        ws = await websockets.connect(
+            ws_url,
+            additional_headers={"Authorization": f"Bearer {worker.auth_token}"}
+        )
         # 订阅 `tasks` 全局 channel（接收 status_change 事件）
         await ws.send(json.dumps({
             "action": "subscribe",
@@ -460,6 +475,11 @@ class WorkerRelay:
                     continue
 
                 # 1. 存入 Manager DB（保留完整日志副本）
+                # 跳过 user_message：由 _send_worker_chat 在转发前已存入，
+                # 避免 Worker 回传时重复存储
+                if event_type == "user_message":
+                    await self.broadcaster.broadcast(f"task:{task_id}", data)
+                    continue
                 if event_type in CHAT_EVENT_TYPES:
                     async with self.db_factory() as db:
                         log = LogEntry(
@@ -479,21 +499,28 @@ class WorkerRelay:
                         await db.commit()
 
                 # 2. 同步 task 状态 + 元数据变化
+                # 注意：Dispatcher 广播用 "new_status" 而非 "status"
                 if event_type == "status_change":
                     async with self.db_factory() as db:
                         task_obj = await db.get(Task, task_id)
                         if task_obj:
-                            task_obj.status = data.get("status", task_obj.status)
+                            new_status = data.get("new_status")
+                            if new_status:
+                                task_obj.status = new_status
                             if data.get("session_id"):
                                 task_obj.session_id = data["session_id"]
                             await db.commit()
 
                 # 3. 同步 cost / context_window_usage
+                # 实际广播格式: {input_tokens, output_tokens, cache_read_input_tokens, ...}
                 if event_type == "context_usage":
                     async with self.db_factory() as db:
                         task_obj = await db.get(Task, task_id)
                         if task_obj:
-                            task_obj.context_window_usage = data.get("usage")
+                            task_obj.context_window_usage = {
+                                k: v for k, v in data.items()
+                                if k not in ("event_type", "task_id")
+                            }
                             await db.commit()
 
                 # 4. 同步 Plan 模式（plan_content + 状态变为 plan_review）
@@ -524,6 +551,10 @@ class WorkerRelay:
 
                 # 7. 广播到 Manager 前端（格式和本地 task 完全一致）
                 await self.broadcaster.broadcast(f"task:{task_id}", data)
+                # status_change 还需要广播到 tasks 全局 channel，
+                # 否则 Manager 前端 task 列表不会实时更新
+                if event_type == "status_change":
+                    await self.broadcaster.broadcast("tasks", data)
 
         except websockets.ConnectionClosed:
             # Worker 断线 → 尝试重连
@@ -750,15 +781,20 @@ CCM 支持 `clone_from_task_id` 克隆任务（复制 session + cwd）。Worker 
 
 ```python
 # Task 创建逻辑中
-if body.clone_from_task_id and body.worker_id:
+if body.clone_from_task_id:
     source_task = await db.get(Task, body.clone_from_task_id)
-    if source_task.worker_id and source_task.worker_id != body.worker_id:
+
+    # 禁止跨 Worker 克隆
+    if (source_task.worker_id and body.worker_id
+            and source_task.worker_id != body.worker_id):
         raise HTTPException(400, "不支持跨 Worker 克隆，请先将源 task 切回本机")
+
+    # 源在 Worker → 先把 session 拉回 Manager（无论目标是本机还是 Worker）
     if source_task.worker_id:
-        # 源在 Worker → rsync session 到本机
         await _rsync_session_from_worker(source_task)
+
+    # 目标在 Worker → 把 session 推到 Worker
     if body.worker_id:
-        # 目标在 Worker → rsync session 到 Worker
         await _rsync_session_to_worker(body.worker_id, source_task.session_id)
 ```
 
@@ -1058,17 +1094,23 @@ async def _recover_worker_relays():
                 Task.status.in_(["executing", "in_progress", "plan_review"])
             )
         )
+        # 按 worker 分组，每个 worker 只需一次连接 + 一次 backfill
+        worker_task_map = {}
         for task in active_tasks.scalars():
             worker = await db.get(Worker, task.worker_id)
             if worker and worker.status == "ready":
                 await worker_relay.subscribe_task(worker, task)
-                # 补全 Manager 重启期间丢失的日志
+                worker_task_map.setdefault(worker, set()).add(task.id)
+
+        # 补全 Manager 重启期间丢失的日志
+        for worker, task_ids in worker_task_map.items():
+            await worker_relay._backfill_missing_logs(worker, task_ids)
 ```
 
 ### 12.2 日志补全
 
 重连后，`_backfill_missing_logs()` 从 Worker 拉取 Manager 重启期间产生的日志，
-通过时间戳对比补入 Manager DB。
+通过条数对比（Manager 已有 N 条 → 从 Worker 第 N+1 条开始补入）避免重复。
 
 ---
 
@@ -1173,18 +1215,25 @@ Manager 定期（每 30s）检查所有 ready 状态的 Worker：
 
 ```python
 async def _health_check_loop(self):
+    _fail_counts: dict[int, int] = {}
     while True:
-        for worker in await self._get_ready_workers():
-            try:
-                resp = await httpx.get(
-                    f"http://{worker.public_ip}:{worker.ccm_port}/api/system/health",
-                    headers={"Authorization": f"Bearer {worker.auth_token}"},
-                    timeout=10
-                )
-                worker.last_heartbeat = datetime.utcnow()
-            except Exception:
-                # 连续 3 次失败 → worker status = error
-                pass
+        async with self.db_factory() as db:
+            workers = await self._get_ready_workers(db)
+            for worker in workers:
+                try:
+                    resp = await httpx.AsyncClient().get(
+                        f"http://{worker.public_ip}:{worker.ccm_port}/api/system/health",
+                        headers={"Authorization": f"Bearer {worker.auth_token}"},
+                        timeout=10
+                    )
+                    worker.last_heartbeat = datetime.utcnow()
+                    _fail_counts.pop(worker.id, None)
+                except Exception:
+                    _fail_counts[worker.id] = _fail_counts.get(worker.id, 0) + 1
+                    if _fail_counts[worker.id] >= 3:
+                        worker.status = "error"
+                        worker.bootstrap_error = "健康检查连续 3 次失败"
+            await db.commit()
         await asyncio.sleep(30)
 ```
 
