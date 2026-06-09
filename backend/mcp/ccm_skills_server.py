@@ -31,6 +31,41 @@ def _headers() -> dict[str, str]:
 
 
 @mcp.tool()
+async def ccm_command_help() -> str:
+    """列出所有可用的 CCM 命令和工具。
+
+    返回每个命令的名称、描述、以及当前 task 是否已启用该工具。
+    用户可以通过 $command_name 语法临时使用未启用的工具。
+    """
+    try:
+        from backend.services.command_registry import COMMAND_REGISTRY
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(_api_url(""), headers=_headers())
+            resp.raise_for_status()
+            task_data = resp.json()
+            enabled_skills = task_data.get("enabled_skills") or {}
+
+        commands = []
+        for cmd in COMMAND_REGISTRY.values():
+            is_enabled = cmd.always_available
+            if not is_enabled and cmd.required_skills:
+                is_enabled = all(enabled_skills.get(k) for k in cmd.required_skills)
+            commands.append({
+                "command": f"${cmd.name}",
+                "description": cmd.description,
+                "enabled": is_enabled,
+                "always_available": cmd.always_available,
+            })
+        return json.dumps({
+            "success": True,
+            "commands": commands,
+            "usage": "在聊天中输入 $命令名 即可使用，例如 $monitor 监控某个进程",
+        }, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+
+
+@mcp.tool()
 async def create_monitor(
     description: str,
     context: str = "",

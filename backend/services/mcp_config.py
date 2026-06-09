@@ -10,16 +10,12 @@ _CCM_ROOT = str(Path(__file__).resolve().parent.parent.parent)
 _VENV_PYTHON = str(Path(_CCM_ROOT) / ".venv" / "bin" / "python3")
 
 
-def generate_mcp_config(task_id: int, enabled_skills: dict, api_base: str | None = None) -> Path | None:
+def generate_mcp_config(task_id: int, enabled_skills: dict | None = None, api_base: str | None = None) -> Path:
     """为指定 task 生成 MCP config JSON 文件。
 
-    Returns:
-        临时文件路径，进程结束后由调用方清理。
-        如果没有需要注入的 skill，返回 None。
+    ccm_skills server 始终包含（提供 $help 等默认命令）。
+    Returns: 临时文件路径，进程结束后由调用方清理。
     """
-    if not enabled_skills:
-        return None
-
     from backend.config import settings
 
     if api_base is None:
@@ -28,24 +24,21 @@ def generate_mcp_config(task_id: int, enabled_skills: dict, api_base: str | None
 
     auth_token = getattr(settings, "auth_token", "") or ""
 
-    servers = {}
+    args = [
+        "-m", "backend.mcp.ccm_skills_server",
+        "--task-id", str(task_id),
+        "--api-base", api_base,
+    ]
+    if auth_token:
+        args.extend(["--auth-token", auth_token])
 
-    if enabled_skills.get("monitor"):
-        args = [
-            "-m", "backend.mcp.ccm_skills_server",
-            "--task-id", str(task_id),
-            "--api-base", api_base,
-        ]
-        if auth_token:
-            args.extend(["--auth-token", auth_token])
-        servers["ccm_skills"] = {
+    servers = {
+        "ccm_skills": {
             "command": _VENV_PYTHON,
             "args": args,
             "cwd": _CCM_ROOT,
         }
-
-    if not servers:
-        return None
+    }
 
     config = {"mcpServers": servers}
     config_path = Path(tempfile.gettempdir()) / f"ccm_mcp_{task_id}.json"

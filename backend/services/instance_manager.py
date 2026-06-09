@@ -14,11 +14,6 @@ from backend.config import settings
 from backend.models.instance import Instance
 from backend.models.task import Task
 
-# When a skill is enabled, these built-in Claude Code tools are disallowed
-# for the main agent, forcing it to use the skill's MCP tools instead.
-SKILL_DISALLOWED_BUILTINS: dict[str, list[str]] = {
-    "monitor": ["Agent", "Monitor"],
-}
 from backend.models.log_entry import LogEntry
 from backend.services.stream_parser import StreamParser
 from backend.services.ws_broadcaster import WebSocketBroadcaster
@@ -166,13 +161,14 @@ class InstanceManager:
                 cmd.extend(["--model", model])
             if effort_level:
                 cmd.extend(["--effort", effort_level])
+            from backend.services.command_registry import COMMAND_REGISTRY
             disallowed = []
             if not enable_workflows:
                 disallowed.append("Workflow")
             if enabled_skills:
                 for skill, enabled in enabled_skills.items():
-                    if enabled and skill in SKILL_DISALLOWED_BUILTINS:
-                        disallowed.extend(SKILL_DISALLOWED_BUILTINS[skill])
+                    if enabled and skill in COMMAND_REGISTRY:
+                        disallowed.extend(COMMAND_REGISTRY[skill].disallowed_builtins)
             if disallowed:
                 cmd.extend(["--disallowedTools", ",".join(sorted(set(disallowed)))])
             if mcp_config_path and Path(mcp_config_path).exists():
