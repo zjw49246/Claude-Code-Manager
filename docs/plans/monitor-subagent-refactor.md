@@ -95,7 +95,7 @@ Task (主 Agent Session)
 
 ### Phase 4: 重构 Dispatcher
 
-- [ ] **4.1** 重写 `_monitor_session_lifecycle()`
+- [x] **4.1** 重写 `_monitor_session_lifecycle()`
   - 删除 while True 轮询循环
   - 新流程: 读 DB → 构建 prompt → 生成 MCP config → 启动持久子进程 → `wait_for(proc.wait(), timeout=MAX_HOURS)` → 检查 session 状态 → 清理
   - 超时兜底: 最大 4 小时，超时 kill

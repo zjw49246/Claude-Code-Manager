@@ -1554,8 +1554,23 @@ class GlobalDispatcher:
         self._monitor_tasks[monitor_session.id] = task
 
     async def _monitor_session_lifecycle(self, monitor_session_id: int):
-        import json as _json
-        from backend.models.monitor_session import MonitorSession, MonitorCheck
+        """Run a persistent monitor sub-agent process.
+
+        New flow: read DB → build prompt → generate MCP config → launch
+        persistent Claude subprocess → wait for process exit (up to 4h) →
+        check session status → cleanup.
+
+        The sub-agent communicates via its own MCP tools (report_status,
+        mark_complete, get_context) which call back into the CCM API.
+        """
+        from backend.models.monitor_session import MonitorSession
+        from backend.services.mcp_config import (
+            generate_monitor_agent_mcp_config,
+            cleanup_monitor_agent_mcp_config,
+        )
+
+        _MAX_MONITOR_HOURS = 4
+        task_id: int | None = None
 
         try:
             async with self.db_factory() as db:
@@ -1564,124 +1579,61 @@ class GlobalDispatcher:
                 if not ms or not task:
                     return
                 task_id = ms.task_id
-                interval = ms.interval
-                max_checks = ms.max_checks
+                ms_description = ms.description
+                ms_context = ms.monitor_context
                 model = ms.model
+                task_cwd = task.last_cwd or task.target_repo or os.getcwd()
 
-            while True:
-                async with self.db_factory() as db:
-                    ms = await db.get(MonitorSession, monitor_session_id)
-                    task = await db.get(Task, task_id)
-                    if not ms or ms.status != "running":
-                        break
-                    checks_done = ms.checks_done
-                    ms_description = ms.description
-                    ms_context = ms.monitor_context
-                    task_status = task.status
-                    task_cwd = task.last_cwd or task.target_repo or os.getcwd()
+            prompt = self._build_monitor_agent_prompt(
+                description=ms_description,
+                context=ms_context,
+            )
 
-                if task_status in ("completed", "failed", "cancelled"):
-                    final_status = "completed" if task_status == "completed" else "cancelled"
-                    async with self.db_factory() as db:
-                        ms = await db.get(MonitorSession, monitor_session_id)
-                        ms.status = final_status
-                        ms.completed_at = datetime.utcnow()
-                        await db.commit()
-                    await self.broadcaster.broadcast(
-                        f"task:{task_id}",
-                        {"event": "monitor_session_status", "monitor_session_id": monitor_session_id, "status": final_status},
-                    )
-                    break
+            mcp_config_path = generate_monitor_agent_mcp_config(
+                monitor_session_id=monitor_session_id,
+                task_id=task_id,
+            )
 
-                if checks_done >= max_checks:
-                    async with self.db_factory() as db:
-                        ms = await db.get(MonitorSession, monitor_session_id)
-                        ms.status = "completed"
-                        ms.completed_at = datetime.utcnow()
-                        await db.commit()
-                    await self.broadcaster.broadcast(
-                        f"task:{task_id}",
-                        {"event": "monitor_session_status", "monitor_session_id": monitor_session_id, "status": "completed"},
-                    )
-                    break
+            proc = await self._launch_monitor_agent(
+                prompt=prompt,
+                cwd=task_cwd,
+                model=model,
+                monitor_session_id=monitor_session_id,
+                mcp_config_path=mcp_config_path,
+            )
 
-                prompt = self._build_monitor_prompt(
-                    checks_done=checks_done,
-                    description=ms_description,
-                    context=ms_context,
+            try:
+                await asyncio.wait_for(
+                    proc.wait(),
+                    timeout=_MAX_MONITOR_HOURS * 3600,
                 )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"Monitor session {monitor_session_id} timed out after {_MAX_MONITOR_HOURS}h, killing"
+                )
+                proc.kill()
+                await proc.wait()
 
-                check_status = "success"
-                summary = ""
-                full_output = ""
-                is_done = False
-
-                try:
-                    full_output = await self._run_monitor_subprocess(
-                        prompt=prompt,
-                        cwd=task_cwd,
-                        model=model,
-                        monitor_session_id=monitor_session_id,
-                    )
-                    for line in full_output.splitlines():
-                        line_stripped = line.strip()
-                        if line_stripped.startswith("STATUS:"):
-                            status_val = line_stripped[7:].strip().lower()
-                            if status_val == "done":
-                                is_done = True
-                            elif status_val == "error":
-                                check_status = "failed"
-                        elif line_stripped.startswith("SUMMARY:"):
-                            summary = line_stripped[8:].strip()
-                except asyncio.TimeoutError:
-                    check_status = "failed"
-                    summary = "Monitor check timed out"
-                except asyncio.CancelledError:
-                    raise
-                except Exception as e:
-                    check_status = "failed"
-                    summary = f"Monitor check error: {e}"
-
-                async with self.db_factory() as db:
-                    ms = await db.get(MonitorSession, monitor_session_id)
-                    ms.checks_done += 1
-                    ms.last_summary = summary
-                    new_checks_done = ms.checks_done
-                    check = MonitorCheck(
-                        monitor_session_id=monitor_session_id,
-                        check_number=new_checks_done,
-                        status=check_status,
-                        summary=summary,
-                        full_output=full_output[:10000] if full_output else None,
-                    )
-                    db.add(check)
-
-                    if is_done:
-                        ms.status = "completed"
-                        ms.completed_at = datetime.utcnow()
-
+            # If session is still running after process exit, the sub-agent
+            # exited abnormally without calling mark_complete → mark failed
+            async with self.db_factory() as db:
+                ms = await db.get(MonitorSession, monitor_session_id)
+                if ms and ms.status == "running":
+                    ms.status = "failed"
+                    ms.completed_at = datetime.utcnow()
                     await db.commit()
-
-                await self.broadcaster.broadcast(
-                    f"task:{task_id}",
-                    {
-                        "event": "monitor_check",
-                        "monitor_session_id": monitor_session_id,
-                        "check_number": new_checks_done,
-                        "status": check_status,
-                        "summary": summary,
-                        "is_monitor": True,
-                    },
-                )
-
-                if is_done:
                     await self.broadcaster.broadcast(
                         f"task:{task_id}",
-                        {"event": "monitor_session_status", "monitor_session_id": monitor_session_id, "status": "completed"},
+                        {
+                            "event": "monitor_session_status",
+                            "monitor_session_id": monitor_session_id,
+                            "status": "failed",
+                        },
                     )
-                    break
-
-                await asyncio.sleep(interval)
+                    logger.warning(
+                        f"Monitor session {monitor_session_id} process exited "
+                        f"(rc={proc.returncode}) without calling mark_complete, marked failed"
+                    )
 
         except asyncio.CancelledError:
             proc = self._monitor_processes.get(monitor_session_id)
@@ -1704,6 +1656,7 @@ class GlobalDispatcher:
             except Exception:
                 pass
         finally:
+            cleanup_monitor_agent_mcp_config(monitor_session_id)
             self._monitor_tasks.pop(monitor_session_id, None)
             self._monitor_processes.pop(monitor_session_id, None)
 
