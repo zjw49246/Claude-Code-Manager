@@ -580,21 +580,25 @@ export function TaskForm({ onCreated }: TaskFormProps) {
             </button>
             {showToolsDropdown && (
               <div className="absolute bottom-full mb-1 left-0 bg-gray-800 border border-gray-600 rounded shadow-lg z-20 min-w-[180px]">
-                {AVAILABLE_TOOLS.map((tool) => (
-                  <label
-                    key={tool.key}
-                    className="flex items-center gap-2 px-3 py-2 text-xs text-gray-300 hover:bg-gray-700 cursor-pointer transition-colors"
-                    title={tool.description}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={!!enabledTools[tool.key]}
-                      onChange={(e) => setEnabledTools((prev) => ({ ...prev, [tool.key]: e.target.checked }))}
-                      className="accent-indigo-500"
-                    />
-                    {tool.label}
-                  </label>
-                ))}
+                {AVAILABLE_TOOLS.map((tool) => {
+                  const locked = tool.key === 'help';
+                  return (
+                    <label
+                      key={tool.key}
+                      className={`flex items-center gap-2 px-3 py-2 text-xs transition-colors ${locked ? 'text-gray-500 cursor-default' : 'text-gray-300 hover:bg-gray-700 cursor-pointer'}`}
+                      title={tool.description}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={!!enabledTools[tool.key]}
+                        onChange={(e) => !locked && setEnabledTools((prev) => ({ ...prev, [tool.key]: e.target.checked }))}
+                        disabled={locked}
+                        className="accent-indigo-500"
+                      />
+                      {tool.label}
+                    </label>
+                  );
+                })}
               </div>
             )}
           </div>
