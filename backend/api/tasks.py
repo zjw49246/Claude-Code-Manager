@@ -169,6 +169,21 @@ async def cancel_task(task_id: int, queue: TaskQueue = Depends(_get_queue), db: 
     if not task:
         raise HTTPException(400, "Cannot cancel task")
     await _stop_task_process(task_id, db)
+
+    from backend.main import dispatcher
+    from backend.models.monitor_session import MonitorSession
+    from sqlalchemy import select
+    result = await db.execute(
+        select(MonitorSession.id).where(
+            MonitorSession.task_id == task_id,
+            MonitorSession.status == "running",
+        )
+    )
+    for (ms_id,) in result:
+        atask = dispatcher._monitor_tasks.get(ms_id)
+        if atask and not atask.done():
+            atask.cancel()
+
     return task
 
 

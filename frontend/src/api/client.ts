@@ -262,6 +262,32 @@ export interface DiscussionDetail {
   agents: DiscussionAgentInfo[];
 }
 
+export interface MonitorSession {
+  id: number;
+  task_id: number;
+  description: string;
+  monitor_context: string | null;
+  interval: number;
+  max_checks: number;
+  model: string | null;
+  status: string;
+  checks_done: number;
+  last_summary: string | null;
+  source: string;
+  created_at: string;
+  completed_at: string | null;
+}
+
+export interface MonitorCheck {
+  id: number;
+  monitor_session_id: number;
+  check_number: number;
+  status: string;
+  summary: string | null;
+  full_output: string | null;
+  created_at: string;
+}
+
 export const api = {
   // Projects
   listProjects: () => request<Project[]>('/api/projects'),
@@ -490,6 +516,16 @@ export const api = {
     request<QuickPhrase>(`/api/quick-phrases/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteQuickPhrase: (id: number) =>
     request<{ ok: boolean }>(`/api/quick-phrases/${id}`, { method: 'DELETE' }),
+
+  // Monitor Sessions
+  listMonitorSessions: (taskId: number) =>
+    request<MonitorSession[]>(`/api/tasks/${taskId}/monitor-sessions`),
+  createMonitorSession: (taskId: number, data: { description: string; monitor_context?: string; interval?: number; max_checks?: number; model?: string }) =>
+    request<MonitorSession>(`/api/tasks/${taskId}/monitor-sessions`, { method: 'POST', body: JSON.stringify(data) }),
+  deleteMonitorSession: (taskId: number, sessionId: number) =>
+    request<{ status: string }>(`/api/tasks/${taskId}/monitor-sessions/${sessionId}`, { method: 'DELETE' }),
+  getMonitorChecks: (taskId: number, sessionId: number) =>
+    request<MonitorCheck[]>(`/api/tasks/${taskId}/monitor-sessions/${sessionId}/checks`),
 
   // System
   health: () => request<{ status: string }>('/api/system/health'),
