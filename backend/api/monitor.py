@@ -10,7 +10,9 @@ from backend.models.monitor_session import MonitorSession, MonitorCheck
 from backend.schemas.monitor_session import (
     MonitorSessionCreate,
     MonitorSessionResponse,
+    MonitorCheckCreate,
     MonitorCheckResponse,
+    MonitorCompleteRequest,
 )
 
 router = APIRouter(prefix="/api/tasks/{task_id}/monitor-sessions", tags=["monitor"])
@@ -129,3 +131,110 @@ async def get_monitor_checks(
         .order_by(MonitorCheck.created_at.desc())
     )
     return list(result.scalars().all())
+
+
+@router.post("/{session_id}/checks", response_model=MonitorCheckResponse)
+async def create_monitor_check(
+    task_id: int,
+    session_id: int,
+    body: MonitorCheckCreate,
+    db: AsyncSession = Depends(get_db),
+):
+    """Sub-agent reports a status check via MCP tool."""
+    ms = await db.get(MonitorSession, session_id)
+    if not ms or ms.task_id != task_id:
+        raise HTTPException(404, "Monitor session not found")
+    if ms.status != "running":
+        raise HTTPException(400, "Monitor session is not running")
+
+    ms.checks_done += 1
+    ms.last_summary = body.summary
+    new_checks_done = ms.checks_done
+
+    auto_complete = new_checks_done >= ms.max_checks
+
+    check = MonitorCheck(
+        monitor_session_id=session_id,
+        check_number=new_checks_done,
+        status=body.status,
+        summary=body.summary,
+    )
+    db.add(check)
+
+    if auto_complete:
+        ms.status = "completed"
+        ms.completed_at = datetime.utcnow()
+
+    await db.commit()
+    await db.refresh(check)
+
+    from backend.main import dispatcher
+    await dispatcher.broadcaster.broadcast(
+        f"task:{task_id}",
+        {
+            "event": "monitor_check",
+            "monitor_session_id": session_id,
+            "check_number": new_checks_done,
+            "status": body.status,
+            "summary": body.summary,
+            "is_important": body.is_important,
+            "is_monitor": True,
+        },
+    )
+
+    if auto_complete:
+        await dispatcher.broadcaster.broadcast(
+            f"task:{task_id}",
+            {"event": "monitor_session_status", "monitor_session_id": session_id, "status": "completed"},
+        )
+
+    return check
+
+
+@router.post("/{session_id}/complete")
+async def complete_monitor_session(
+    task_id: int,
+    session_id: int,
+    body: MonitorCompleteRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Sub-agent marks itself as complete."""
+    ms = await db.get(MonitorSession, session_id)
+    if not ms or ms.task_id != task_id:
+        raise HTTPException(404, "Monitor session not found")
+    if ms.status != "running":
+        raise HTTPException(400, "Monitor session is not running")
+
+    ms.status = "completed"
+    ms.completed_at = datetime.utcnow()
+    ms.last_summary = body.reason
+    ms.checks_done += 1
+
+    check = MonitorCheck(
+        monitor_session_id=session_id,
+        check_number=ms.checks_done,
+        status="completed",
+        summary=body.reason,
+    )
+    db.add(check)
+    await db.commit()
+
+    from backend.main import dispatcher
+    await dispatcher.broadcaster.broadcast(
+        f"task:{task_id}",
+        {
+            "event": "monitor_check",
+            "monitor_session_id": session_id,
+            "check_number": ms.checks_done,
+            "status": "completed",
+            "summary": body.reason,
+            "is_important": True,
+            "is_monitor": True,
+        },
+    )
+    await dispatcher.broadcaster.broadcast(
+        f"task:{task_id}",
+        {"event": "monitor_session_status", "monitor_session_id": session_id, "status": "completed"},
+    )
+
+    return {"ok": True, "message": "Session completed. Your task is done — stop all activity now."}

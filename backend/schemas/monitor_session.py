@@ -27,6 +27,16 @@ class MonitorSessionResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class MonitorCheckCreate(BaseModel):
+    summary: str
+    status: str = "success"
+    is_important: bool = False
+
+
+class MonitorCompleteRequest(BaseModel):
+    reason: str
+
+
 class MonitorCheckResponse(BaseModel):
     id: int
     monitor_session_id: int
