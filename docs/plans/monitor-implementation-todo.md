@@ -1,8 +1,8 @@
 # Monitor Session 实施计划
 
-> 基于 `docs/plans/monitor-mode-design.md` V2 方案。
 > 分支: `feature/monitor-session`
 > 约束: 仅本地修改，不 push，不影响部署。
+> 范围: 仅 Auto 模式和 Loop 模式，Goal 模式不支持监控。
 
 ---
 
@@ -57,6 +57,7 @@
   - system monitor (source=loop): `while True` 无限循环，不受 max_checks 限制
   - manual monitor (source=manual): `while checks_done < max_checks`
   - 每轮: sleep(interval) → 检查 task status → 检查 monitor status → 清理旧 signal → 运行子进程 → 读 signal → 写 DB(MonitorCheck) → 广播 monitor_check 事件 → 判断 done
+  - 检查 task status 时: 如果 task 已 completed/failed/cancelled，**必须更新 MonitorSession 状态**（completed→completed, 其他→cancelled），然后 return False。否则 MonitorSession 会永远卡在 "running"
   - 完成时广播 `monitor_session_status` 事件（completed/failed）
   - 返回 True=完成，False=取消或耗尽
 
@@ -64,7 +65,10 @@
 - [ ] `_run_monitor_session_background(self, monitor_session, task_id)`
   - 从 DB 获取 task
   - 注册 `asyncio.current_task()` 到 `self._monitor_tasks[monitor_session.id]`
-  - try/finally 清理 `_monitor_tasks`
+  - try: 运行 `_run_monitor_session`
+  - except CancelledError: pass（DELETE API 已提前更新 DB 状态）
+  - except Exception: 更新 MonitorSession 状态为 "failed"（防止未预期异常导致状态卡在 "running"）
+  - finally: 清理 `_monitor_tasks`
 
 ---
 
@@ -77,7 +81,7 @@
 - [ ] 在 `_build_loop_prompt` 返回值中追加此 hint
 
 ### 3.2 Gate Monitor 插入
-- [ ] 在 `_run_loop_lifecycle` 的 `action == "continue"` 分支中（约 line 946+）:
+- [ ] 在 `_run_loop_lifecycle` 的 `action == "continue"` 分支中（约 line 966）:
   - 读取 signal 的 `needs_monitor` 和 `monitor_context` 字段
   - 如果 `needs_monitor == true`:
     - 创建 MonitorSession 记录（source="loop", interval=300）
@@ -93,6 +97,7 @@
 ### 4.1 创建 API 文件
 - [ ] 新建 `backend/api/monitor.py`（项目路由在 `backend/api/` 目录，不是 `backend/routers/`）
   - `POST /tasks/{task_id}/monitor-sessions` — 创建 manual monitor session
+    - 通过 `from backend.main import dispatcher` 获取 dispatcher 实例（参考 chat.py/pool.py 的模式）
     - 校验 task 存在（404 if not found）
     - 创建 MonitorSession(source="manual")
     - 调用 `asyncio.create_task(dispatcher._run_monitor_session_background(...))`
@@ -111,8 +116,10 @@
 ### 4.3 任务取消时清理 Monitor
 - [ ] 在 `backend/services/task_queue.py` 的 `cancel()` 方法中追加:
   - 批量更新该 task 下所有 running 的 MonitorSession 为 cancelled
-- [ ] 在 `backend/api/tasks.py` 的 `cancel_task` endpoint 中追加:
-  - 遍历 `dispatcher._monitor_tasks`，cancel 对应的 asyncio task（立即中断 sleep）
+- [ ] 在 `backend/api/tasks.py` 的 `cancel_task` endpoint（line 166）中追加:
+  - `from backend.main import dispatcher` 获取 dispatcher
+  - 查询该 task 下所有 running 的 MonitorSession ID
+  - 遍历 `dispatcher._monitor_tasks`，cancel 匹配的 asyncio task（立即中断 sleep）
 
 ### 4.4 服务重启清理
 - [ ] 在 `dispatcher.py` 的 `_cleanup_stale_state()` 末尾追加:
