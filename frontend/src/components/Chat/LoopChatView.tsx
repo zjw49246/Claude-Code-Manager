@@ -2,9 +2,10 @@ import { useState, useEffect, useRef, useMemo, useCallback, memo } from 'react';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { api } from '../../api/client';
-import type { ChatMessage, Task } from '../../api/client';
+import type { ChatMessage, Task, MonitorSession } from '../../api/client';
 import { useWebSocket } from '../../hooks/useWebSocket';
 import { ArrowLeft, ChevronDown, ChevronRight, Copy, Check, XCircle, ArrowDown } from 'lucide-react';
+import { MonitorPanel } from './MonitorPanel';
 
 interface LoopChatViewProps {
   task: Task;
@@ -360,6 +361,7 @@ export function LoopChatView({ task, onBack }: LoopChatViewProps) {
   const [iterMeta, setIterMeta] = useState<Map<number, IterationMeta>>(new Map());
   const [activeIteration, setActiveIteration] = useState<number | null>(null);
   const [showScrollBottom, setShowScrollBottom] = useState(false);
+  const [monitorSessions, setMonitorSessions] = useState<MonitorSession[]>([]);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const scrollBottomRef = useRef<HTMLDivElement>(null);
   const historyLoadedRef = useRef(false);
@@ -376,6 +378,28 @@ export function LoopChatView({ task, onBack }: LoopChatViewProps) {
   const handleWsMessage = useCallback((raw: Record<string, unknown>) => {
     const msg = raw as { channel?: string; data?: Record<string, unknown> };
     if (msg.channel !== `task:${task.id}` || !msg.data) return;
+
+    const event = msg.data.event as string;
+
+    if (event === 'monitor_session_created') {
+      api.listMonitorSessions(task.id).then(setMonitorSessions).catch(() => {});
+      return;
+    }
+    if (event === 'monitor_check') {
+      const msId = msg.data.monitor_session_id as number;
+      setMonitorSessions(prev => prev.map(s =>
+        s.id === msId ? { ...s, checks_done: (msg.data.check_number as number) || s.checks_done + 1, last_summary: (msg.data.summary as string) || s.last_summary } : s
+      ));
+      return;
+    }
+    if (event === 'monitor_session_status') {
+      const msId = msg.data.monitor_session_id as number;
+      const newStatus = msg.data.status as string;
+      setMonitorSessions(prev => prev.map(s =>
+        s.id === msId ? { ...s, status: newStatus } : s
+      ));
+      return;
+    }
 
     const eventType = msg.data.event_type as string;
 
@@ -501,6 +525,12 @@ export function LoopChatView({ task, onBack }: LoopChatViewProps) {
             {task.loop_progress && <span className="ml-2 text-indigo-400">{task.loop_progress}</span>}
           </p>
         </div>
+        <MonitorPanel
+          taskId={task.id}
+          taskMode={task.mode}
+          monitorSessions={monitorSessions}
+          onSessionsChange={setMonitorSessions}
+        />
       </div>
 
       {/* Iteration panels */}

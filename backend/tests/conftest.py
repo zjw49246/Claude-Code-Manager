@@ -18,6 +18,7 @@ import backend.models.worktree  # noqa: F401
 import backend.models.global_settings  # noqa: F401
 import backend.models.tag  # noqa: F401
 import backend.models.discussion  # noqa: F401
+import backend.models.monitor_session  # noqa: F401
 
 # Use in-memory SQLite for tests
 TEST_DB_URL = "sqlite+aiosqlite:///:memory:"
