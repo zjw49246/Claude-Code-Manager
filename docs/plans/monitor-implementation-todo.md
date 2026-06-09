@@ -59,9 +59,10 @@
 - [ ] `_run_monitor_session(self, monitor_session, task) -> bool`
   - system monitor (source=loop): `while True` 无限循环，不受 max_checks 限制
   - manual monitor (source=manual): `while checks_done < max_checks`
-  - 每轮: sleep(interval) → 检查 task status → 检查 monitor status → 清理旧 signal → 运行子进程 → 读 signal → 写 DB(MonitorCheck) → 广播 monitor_check 事件 → 判断 done
+  - 每轮: sleep(interval) → 检查 task status → 检查 monitor status → 清理旧 signal → 运行子进程 → 读 signal → 写 DB(MonitorCheck) → 更新 MonitorSession(checks_done+1, last_summary) → 广播 monitor_check 事件 → 判断 done
   - 子进程调用需 try/except: 捕获 TimeoutError 和其他非 CancelledError 异常，记录一条 status="failed" 的 MonitorCheck 后 **继续下一轮**（单次超时/失败不应终止整个 session）
   - 检查 task status 时: 如果 task 已 completed/failed/cancelled，**必须更新 MonitorSession 状态**（completed→completed, 其他→cancelled），然后 return False。否则 MonitorSession 会永远卡在 "running"
+  - 所有终态转换时设置 `completed_at=func.now()`（done/cancelled/耗尽都算结束）
   - 完成时广播 `monitor_session_status` 事件（completed/failed）
   - 所有退出路径（done/cancelled/耗尽）都要 `signal_path.unlink(missing_ok=True)` 清理 signal file
   - 返回 True=完成，False=取消或耗尽
