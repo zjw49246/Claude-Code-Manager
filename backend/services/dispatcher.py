@@ -1657,6 +1657,8 @@ class GlobalDispatcher:
                 pass
         finally:
             cleanup_monitor_agent_mcp_config(monitor_session_id)
+            log_path = Path(f"/tmp/ccm_monitor_{monitor_session_id}.log")
+            log_path.unlink(missing_ok=True)
             self._monitor_tasks.pop(monitor_session_id, None)
             self._monitor_processes.pop(monitor_session_id, None)
 

@@ -110,6 +110,9 @@ async def delete_monitor_session(
     if proc and proc.returncode is None:
         proc.kill()
 
+    from backend.services.mcp_config import cleanup_monitor_agent_mcp_config
+    cleanup_monitor_agent_mcp_config(session_id)
+
     await dispatcher.broadcaster.broadcast(
         f"task:{task_id}",
         {"event": "monitor_session_status", "monitor_session_id": session_id, "status": "cancelled"},

@@ -140,11 +140,11 @@ Task (主 Agent Session)
 
 ### Phase 5: 停止机制
 
-- [ ] **5.1** 更新 `delete_monitor_session()` API
+- [x] **5.1** 更新 `delete_monitor_session()` API
   - 现有逻辑不变: cancel asyncio task + kill process
   - 新增: `cleanup_monitor_agent_mcp_config(session_id)`
 
-- [ ] **5.2** `_monitor_session_lifecycle` 的 finally 块
+- [x] **5.2** `_monitor_session_lifecycle` 的 finally 块
   - 清理 MCP config 文件
   - 清理日志文件（可选保留）
   - 清理进程引用
