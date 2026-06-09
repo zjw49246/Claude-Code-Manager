@@ -42,12 +42,6 @@ Dispatcher 读 monitor signal，开始迭代 N+1
 
 **Prompt 引导**：loop prompt 中告知 Claude——如果启动了后台任务（训练、构建等），在 signal 中设置 `needs_monitor: true` 和 `monitor_context`（描述启动了什么进程、PID、日志路径等）。
 
-### Goal 模式 — evaluation 间门控
-
-**注意：Goal 模式没有 signal file 机制**，与 Loop 完全不同。Goal 模式使用 `--resume` 保持同一 session，由 GoalEvaluator 读 conversation transcript 判断目标是否达成。
-
-因此 Goal 模式的 monitor 集成需要不同方式：在 GoalEvaluator 评估结果中识别"后台任务已启动但未完成"的状态，或扩展 evaluator 返回一个 `needs_monitor` 标志。具体设计在 Phase 6 中细化，实现优先级低于 Loop 和 Auto。
-
 ### Auto 模式 — 用户手动创建
 
 ```
@@ -90,7 +84,7 @@ class MonitorSession(Base):
 
     # 来源
     source: Mapped[str] = mapped_column(String(20), default="manual")
-    # 可选值: "manual"（用户手动创建）, "loop"（loop 迭代间自动创建）, "goal"（goal 间自动创建）
+    # 可选值: "manual"（用户手动创建）, "loop"（loop 迭代间自动创建）
 
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -188,7 +182,7 @@ async def _run_monitor_session(self, monitor_session: MonitorSession, task: Task
     返回 True 表示后台任务完成，False 表示被取消或 max_checks 耗尽。
 
     循环策略：
-    - source="loop"/"goal"（系统 monitor）：无 max_checks 限制，一直检查直到 done 或任务取消
+    - source="loop"（系统 monitor）：无 max_checks 限制，一直检查直到 done 或任务取消
     - source="manual"（用户 monitor）：受 max_checks 限制
     """
 
@@ -579,7 +573,7 @@ def _get_loop_monitor_hint(self) -> str:
 
 项目中没有 `cancel_task` 方法。任务取消流程：
 1. API (`POST /tasks/{task_id}/cancel`) 调用 `TaskQueue.cancel()` 设置 DB status="cancelled"
-2. 生命周期方法（loop/goal）在每轮迭代开始时检测到 status=="cancelled"，自行退出
+2. 生命周期方法（loop）在每轮迭代开始时检测到 status=="cancelled"，自行退出
 3. Loop gate monitor 在 `_run_monitor_session` 的 `asyncio.sleep` 后检测 task status，自行退出
 
 **新增：monitor 清理逻辑**
@@ -638,7 +632,7 @@ for ms_id in ms_ids:
 
 通过 `DELETE /tasks/{task_id}/monitor-sessions/{session_id}` API。
 仅限 `source="manual"` 的 monitor session 可以被删除。
-`source="loop"` 或 `source="goal"` 的系统创建 monitor 不允许删除，前端不显示删除按钮，后端 API 校验拒绝。
+`source="loop"` 的系统创建 monitor 不允许删除，前端不显示删除按钮，后端 API 校验拒绝。
 
 ```python
 @router.delete("/tasks/{task_id}/monitor-sessions/{session_id}")
@@ -682,7 +676,7 @@ await db.commit()
 └──────────────────────────────────────────────┘
 ```
 
-**Loop / Goal 模式：**
+**Loop 模式：**
 ```
 ┌──────────────────────────────────────────────┐
 │  Task #12: 训练模型               [监控列表(2)] │
@@ -745,7 +739,7 @@ await db.commit()
 
 - 运行中的 monitor 显示 ● 绿点
 - 仅 `source="manual"` 的 monitor 显示 🗑️ 删除按钮
-- `source="loop"/"goal"` 的系统 monitor 不显示删除按钮（只能通过取消整个任务来终止）
+- `source="loop"` 的系统 monitor 不显示删除按钮（只能通过取消整个任务来终止）
 - 已完成的 monitor 显示 ✓
 - 点击任意一条进入详情页
 
@@ -902,5 +896,4 @@ def downgrade():
 3. **Phase 3 — Loop 集成**：扩展 loop signal file + `_run_loop_lifecycle` 中插入 monitor 门控
 4. **Phase 4 — API**：Monitor Session CRUD 端点（创建/删除/列表/详情）
 5. **Phase 5 — 前端**：监控列表面板 + 新建对话框 + 详情页 + WebSocket 事件
-6. **Phase 6 — Goal 集成**：需要单独设计（Goal 模式无 signal file，需扩展 GoalEvaluator）
-7. **Phase 7 — 测试**：loop + monitor 门控、手动创建/删除、各种边界情况
+6. **Phase 6 — 测试**：loop + monitor 门控、手动创建/删除、各种边界情况

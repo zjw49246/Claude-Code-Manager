@@ -132,7 +132,8 @@
   - 在 Task 详情页（ChatView/LoopChatView）添加 [监控列表(N)] 按钮
   - 侧面板/抽屉展示所有 monitor session
   - Auto 模式: 显示 [+ 新建监控] 按钮
-  - Loop/Goal 模式: 不显示新建按钮
+  - Loop 模式: 不显示新建按钮
+  - 其他模式（Plan/Goal）: 不显示监控相关 UI
   - manual monitor 显示删除按钮，system monitor 不显示
 
 ### 5.3 新建监控对话框（仅 Auto 模式）
@@ -153,25 +154,9 @@
 
 ---
 
-## Phase 6 — Goal 模式集成（可选，需单独设计）
+## Phase 6 — 测试 & 文档
 
-**注意：Goal 模式没有 signal file**，不能照搬 Loop 的 `needs_monitor` 机制。
-Goal 模式使用 `--resume` + GoalEvaluator 评估 conversation transcript。
-
-可选方案：
-- [ ] 方案 A: 扩展 GoalEvaluator 返回值，增加 `needs_monitor` + `monitor_context` 字段
-  - evaluator 从 conversation transcript 中识别"启动了后台任务"
-  - `_run_goal_lifecycle` 在 eval_result.needs_monitor 时插入 gate monitor
-- [ ] 方案 B: 在 goal prompt 中引导 Claude 写一个 monitor signal file（类似 loop）
-  - 需要在 `_build_goal_initial_prompt` / `_build_goal_followup_prompt` 中添加引导
-  - 每轮执行完后检查该 signal file 是否存在
-- [ ] 确定方案后实现
-
----
-
-## Phase 7 — 测试 & 文档
-
-### 7.1 测试
+### 6.1 测试
 - [ ] 测试 MonitorSession / MonitorCheck CRUD（model 层）
 - [ ] 测试 `_run_monitor_session` 的 done 判断、max_checks 耗尽、取消检测
 - [ ] 测试 API 权限（manual 可删除，system 不可删除，task_id 归属校验）
@@ -179,7 +164,7 @@ Goal 模式使用 `--resume` + GoalEvaluator 评估 conversation transcript。
 - [ ] 测试取消流程: 取消 task → monitor sessions 全部 cancelled
 - [ ] 测试服务重启: running 的 monitor session 被清理为 failed
 
-### 7.2 文档更新
+### 6.2 文档更新
 - [ ] 更新 CLAUDE.md（如有架构变化）
 - [ ] 更新 README.md（新增 Monitor 功能说明）
 - [ ] 更新 TEST.md（新增测试用例）
