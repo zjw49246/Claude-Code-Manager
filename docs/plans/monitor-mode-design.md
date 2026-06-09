@@ -152,7 +152,7 @@ if action == "continue":
                 monitor_context=monitor_context,
                 interval=300,       # 默认 5 分钟
                 max_checks=100,     # 默认最多 100 次
-                model="claude-opus-4-6",
+                model=settings.default_model,  # 使用项目配置，不要硬编码
                 source="loop",
             )
             db.add(monitor_session)
@@ -224,7 +224,7 @@ async def _run_monitor_session(self, monitor_session: MonitorSession, task: Task
         result = await self._run_monitor_subprocess(
             prompt=prompt,
             cwd=cwd,
-            model=monitor_session.model or "claude-opus-4-6",
+            model=monitor_session.model or settings.default_model,
             task_id=task.id,
             monitor_session_id=monitor_session.id,
         )
@@ -279,6 +279,7 @@ async def _run_monitor_session(self, monitor_session: MonitorSession, task: Task
                 "monitor_session_id": monitor_session.id,
                 "status": "completed",
             })
+            signal_path.unlink(missing_ok=True)  # 清理 signal file
             return True
 
     # max_checks 耗尽（仅 manual monitor 会走到这里）
@@ -294,6 +295,7 @@ async def _run_monitor_session(self, monitor_session: MonitorSession, task: Task
         "monitor_session_id": monitor_session.id,
         "status": "failed",
     })
+    signal_path.unlink(missing_ok=True)  # 清理 signal file
     return False
 ```
 
@@ -479,6 +481,10 @@ async def _run_monitor_subprocess(self, prompt, cwd, model, task_id, monitor_ses
     except asyncio.TimeoutError:
         process.kill()
         full_output = "（监控子进程超时，已终止）"
+    except asyncio.CancelledError:
+        # monitor 被取消时，确保子进程不会变成孤儿
+        process.kill()
+        raise
     return full_output
 
 async def _consume_monitor_output(self, process, task_id, monitor_session_id) -> str:
@@ -536,11 +542,21 @@ def _read_monitor_signal(self, signal_path: Path) -> dict:
 
 ```python
 def _get_loop_monitor_hint(self) -> str:
+    """追加到 _build_loop_prompt 返回值末尾。
+    
+    注意：signal JSON 模板中不需要预写 needs_monitor/monitor_context 字段。
+    Claude 会根据本 hint 的指引，在需要时自行添加这两个字段到 signal JSON 中。
+    _read_loop_signal 读取后在 action=="continue" 分支检查这些字段。
+    """
     return (
         "\n\n【后台任务监控】如果你在本次迭代中启动了后台任务（训练、构建等），"
-        "请在 signal file 中设置以下字段：\n"
+        "请在 signal file 的 JSON 中额外添加以下两个字段：\n"
         '- "needs_monitor": true\n'
         '- "monitor_context": "描述启动了什么进程、PID、日志路径等"\n'
+        "例如：\n"
+        '{"action": "continue", "reason": "...", "progress": "1/10", '
+        '"summary": "...", "needs_monitor": true, '
+        '"monitor_context": "启动了 model_a 训练 (PID 1234, 日志 /tmp/train.log)"}\n\n'
         "这样系统会启动独立的监控 session 检查后台任务是否完成，确认完成后才开始下一次迭代。\n"
         "如果你的操作是同步的（改代码、写文件等），不需要设置这些字段。\n\n"
         "【资源竞争注意】如果任务需要独占资源（GPU、特定端口、大量内存等），"
@@ -595,11 +611,20 @@ manual monitor 通过 `asyncio.create_task` 在后台运行，注册在 `dispatc
 ```python
 # backend/api/tasks.py — cancel_task endpoint 中追加
 from backend.main import dispatcher
-for ms_id, handle in list(dispatcher._monitor_tasks.items()):
-    # _monitor_tasks 中的 task 对应的 monitor_session 已在 DB 中标记为 cancelled
-    # cancel asyncio task 让它立即退出而不是等下一个 interval
-    handle.cancel()
-    dispatcher._monitor_tasks.pop(ms_id, None)
+
+# 查询该 task 下所有 monitor session id（已在 TaskQueue.cancel() 中标记为 cancelled）
+async with async_session() as db:
+    result = await db.execute(
+        select(MonitorSession.id)
+        .where(MonitorSession.task_id == task_id)
+    )
+    ms_ids = {row[0] for row in result.all()}
+
+# 只取消属于该 task 的 monitor asyncio tasks
+for ms_id in ms_ids:
+    handle = dispatcher._monitor_tasks.pop(ms_id, None)
+    if handle:
+        handle.cancel()
 ```
 
 ### 用户删除单个 Monitor Session 时
