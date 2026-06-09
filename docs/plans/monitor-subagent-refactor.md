@@ -67,14 +67,14 @@ Task (主 Agent Session)
 
 ### Phase 2: 新增 API Endpoints
 
-- [ ] **2.1** POST `/{session_id}/checks` — 子 agent 报告状态
+- [x] **2.1** POST `/{session_id}/checks` — 子 agent 报告状态
   - 在 `backend/api/monitor.py` 新增
   - Schema: `{"summary": str, "status": str, "is_important": bool}`
   - 创建 MonitorCheck 记录 + 更新 MonitorSession.checks_done/last_summary
   - WebSocket 广播 `monitor_check` 事件（复用现有事件格式）
   - checks_done >= max_checks 时自动标记 completed
 
-- [ ] **2.2** POST `/{session_id}/complete` — 子 agent 标记完成
+- [x] **2.2** POST `/{session_id}/complete` — 子 agent 标记完成
   - Schema: `{"reason": str}`
   - 设 status=completed + 创建最终 MonitorCheck + WebSocket 广播
   - 同时通知 dispatcher 让它知道进程即将退出
