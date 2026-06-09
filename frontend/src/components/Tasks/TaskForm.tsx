@@ -213,7 +213,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   };
 
   return (
-    <form ref={formRef} onSubmit={handleSubmit} className="bg-gray-800 rounded-lg p-4 space-y-3">
+    <form ref={formRef} onSubmit={handleSubmit} className="bg-gray-800 rounded-lg p-4 space-y-3 overflow-hidden">
       <h3 className="text-sm font-semibold text-gray-300">New Task</h3>
       {dropError && (
         <div className="bg-yellow-900/50 border border-yellow-700 text-yellow-300 text-xs rounded px-3 py-2 flex items-center justify-between">
@@ -357,10 +357,10 @@ export function TaskForm({ onCreated }: TaskFormProps) {
         )}
       </div>
       {contextTasks.length > 0 && (
-        <div className="flex items-center gap-2">
-          <label className="text-sm text-gray-400 whitespace-nowrap">Copy context from:</label>
+        <div className="flex items-center gap-2 min-w-0">
+          <label className="text-sm text-gray-400 whitespace-nowrap shrink-0">Copy context from:</label>
           <select
-            className="flex-1 bg-gray-700 text-foreground rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            className="flex-1 min-w-0 bg-gray-700 text-foreground rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
             value={cloneFromTaskId}
             onChange={(e) => setCloneFromTaskId(e.target.value ? Number(e.target.value) : '')}
           >

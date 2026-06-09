@@ -10,11 +10,17 @@ vi.mock('../../api/client', () => ({
     ]),
     listTags: vi.fn().mockResolvedValue([]),
     listSecrets: vi.fn().mockResolvedValue([]),
+    listTasks: vi.fn().mockResolvedValue([]),
     config: vi.fn().mockResolvedValue({
+      default_provider: 'claude',
+      provider_options: ['claude', 'codex'],
       default_model: 'claude-opus-4-6',
       model_options: ['claude-opus-4-6', 'claude-sonnet-4-6'],
+      default_codex_model: 'gpt-5.1-codex-max',
+      codex_model_options: ['gpt-5.1-codex-max'],
       default_effort: 'medium',
       effort_options: ['low', 'medium', 'high'],
+      codex_effort_options: ['low', 'medium', 'high', 'xhigh'],
     }),
     createTask: vi.fn().mockResolvedValue({ id: 1 }),
   },
@@ -23,17 +29,16 @@ vi.mock('../../api/client', () => ({
 import { api } from '../../api/client';
 
 async function selectLoopMode() {
-  const modeSelect = screen.getByDisplayValue('Auto (direct execute)');
+  const modeSelect = screen.getByDisplayValue('Auto');
   await userEvent.selectOptions(modeSelect, 'loop');
 }
 
 async function selectGoalMode() {
-  const modeSelect = screen.getByDisplayValue('Auto (direct execute)');
+  const modeSelect = screen.getByDisplayValue('Auto');
   await userEvent.selectOptions(modeSelect, 'goal');
 }
 
 async function selectProject() {
-  // ProjectSelect is a custom dropdown — click the button to open, then click the project
   const projectBtn = await waitFor(() => screen.getByText('Select project...'));
   await userEvent.click(projectBtn);
   const projectOption = await waitFor(() => screen.getByText('test-project'));
@@ -205,5 +210,81 @@ describe('TaskForm number input fields', () => {
         );
       });
     });
+  });
+});
+
+describe('TaskForm copy-context-from select overflow fix', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('shows the copy-context-from select when project has tasks with sessions', async () => {
+    const tasksWithSession = [
+      { id: 10, description: 'A'.repeat(80), session_id: 'sess-1', title: null, project_id: 1 },
+      { id: 11, description: 'Short task', session_id: 'sess-2', title: null, project_id: 1 },
+    ];
+    vi.mocked(api.listTasks).mockResolvedValue(tasksWithSession as any);
+
+    render(<TaskForm onCreated={vi.fn()} />);
+    await selectProject();
+
+    const label = await waitFor(() => screen.getByText('Copy context from:'));
+    expect(label).toBeInTheDocument();
+
+    const select = screen.getByDisplayValue('None (start fresh)');
+    expect(select).toBeInTheDocument();
+  });
+
+  it('copy-context-from select has min-w-0 to prevent overflow on mobile', async () => {
+    const tasksWithSession = [
+      { id: 10, description: 'Very long task description that could overflow the container on mobile devices', session_id: 'sess-1', title: null, project_id: 1 },
+    ];
+    vi.mocked(api.listTasks).mockResolvedValue(tasksWithSession as any);
+
+    render(<TaskForm onCreated={vi.fn()} />);
+    await selectProject();
+
+    const select = await waitFor(() => screen.getByDisplayValue('None (start fresh)'));
+    expect(select.className).toContain('min-w-0');
+  });
+
+  it('copy-context-from container has min-w-0 to constrain width', async () => {
+    const tasksWithSession = [
+      { id: 10, description: 'task', session_id: 'sess-1', title: null, project_id: 1 },
+    ];
+    vi.mocked(api.listTasks).mockResolvedValue(tasksWithSession as any);
+
+    render(<TaskForm onCreated={vi.fn()} />);
+    await selectProject();
+
+    const label = await waitFor(() => screen.getByText('Copy context from:'));
+    const container = label.closest('div');
+    expect(container?.className).toContain('min-w-0');
+  });
+
+  it('copy-context-from label has shrink-0 to prevent label truncation', async () => {
+    const tasksWithSession = [
+      { id: 10, description: 'task', session_id: 'sess-1', title: null, project_id: 1 },
+    ];
+    vi.mocked(api.listTasks).mockResolvedValue(tasksWithSession as any);
+
+    render(<TaskForm onCreated={vi.fn()} />);
+    await selectProject();
+
+    const label = await waitFor(() => screen.getByText('Copy context from:'));
+    expect(label.className).toContain('shrink-0');
+  });
+
+  it('does not show copy-context-from when no project selected', async () => {
+    render(<TaskForm onCreated={vi.fn()} />);
+    await waitFor(() => screen.getByText('Select project...'));
+
+    expect(screen.queryByText('Copy context from:')).not.toBeInTheDocument();
+  });
+
+  it('form has overflow-hidden to prevent horizontal page expansion', async () => {
+    const { container } = render(<TaskForm onCreated={vi.fn()} />);
+    const form = container.querySelector('form');
+    expect(form?.className).toContain('overflow-hidden');
   });
 });
