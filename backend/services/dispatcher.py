@@ -2,6 +2,8 @@ import asyncio
 import logging
 import os
 import shutil
+import time
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -11,6 +13,7 @@ from sqlalchemy import select as sa_select
 
 from backend.config import settings
 from backend.models.instance import Instance
+from backend.models.log_entry import LogEntry
 from backend.models.task import Task
 from backend.models.project import Project
 from backend.models.global_settings import GlobalSettings
@@ -26,6 +29,21 @@ logger = logging.getLogger(__name__)
 def _default_provider() -> str:
     provider = getattr(settings, "default_provider", "claude")
     return provider if isinstance(provider, str) and provider else "claude"
+
+
+# Priority levels for the per-task message queue
+PRIORITY_USER = 0
+PRIORITY_MONITOR_COMPLETE = 1
+PRIORITY_MONITOR_IMPORTANT = 2
+
+
+@dataclass(order=True)
+class QueuedMessage:
+    priority: int
+    timestamp: float = field(compare=True)
+    prompt: str = field(compare=False)
+    source: str = field(compare=False, default="user")
+    user_message_text: str | None = field(compare=False, default=None)
 
 
 def _binary_available(binary: str) -> bool:
@@ -195,6 +213,11 @@ class GlobalDispatcher:
         self._running = False
         self._monitor_tasks: dict[int, asyncio.Task] = {}           # monitor_session_id -> asyncio task
         self._monitor_processes: dict[int, asyncio.subprocess.Process] = {}  # monitor_session_id -> subprocess
+        self._monitor_log_fhs: dict[int, object] = {}  # monitor_session_id -> log file handle
+
+        # Per-task message queue for serialized chat/monitor messages
+        self._task_queues: dict[int, asyncio.PriorityQueue] = {}
+        self._task_queue_workers: dict[int, asyncio.Task] = {}
 
         # Pool: initialized lazily on start() if pool_enabled
         self.pool: "ClaudePool | None" = None
@@ -515,10 +538,15 @@ class GlobalDispatcher:
                 parts.append(f"用户提供了以下参考图片，请先用 Read 工具查看：\n{image_list}")
             if task.enabled_skills and task.enabled_skills.get("monitor"):
                 parts.append(
-                    "你拥有后台监控能力（通过 ccm-skills MCP 工具）。"
-                    "当用户要求监控后台进程或长时间运行的任务时，"
-                    "调用 create_monitor 启动后台只读监控。"
-                    "可用工具: create_monitor / check_monitors / stop_monitor。"
+                    "【重要 — 监控规则】你拥有后台监控子 agent 系统（通过 ccm-skills MCP 工具）。\n"
+                    "当任务涉及监控、观察、等待、轮询后台进程或长时间运行的操作时，"
+                    "你必须调用 create_monitor 工具将监控工作委托给子 agent，"
+                    "禁止自己用 Bash/Read 等工具手动执行监控循环。\n"
+                    "【禁止】不要使用内置的 Agent 工具或 Monitor 工具来执行监控任务。"
+                    "这些内置工具不在 CCM 系统的管理范围内，无法被追踪和记录。"
+                    "所有监控必须通过 create_monitor 工具发起，由 CCM 子 agent 系统统一管理。\n"
+                    "子 agent 会独立运行并定期汇报状态，你通过 check_monitors 查看进展。\n"
+                    "可用工具: create_monitor（创建监控子agent）/ check_monitors（查看状态）/ stop_monitor（停止监控）。"
                 )
             parts.append(f"任务:\n{task.description}")
             full_prompt = "\n\n".join(parts)
@@ -733,10 +761,15 @@ class GlobalDispatcher:
                 parts.append(f"用户提供了以下参考图片，请先用 Read 工具查看：\n{image_list}")
             if task.enabled_skills and task.enabled_skills.get("monitor"):
                 parts.append(
-                    "你拥有后台监控能力（通过 ccm-skills MCP 工具）。"
-                    "当用户要求监控后台进程或长时间运行的任务时，"
-                    "调用 create_monitor 启动后台只读监控。"
-                    "可用工具: create_monitor / check_monitors / stop_monitor。"
+                    "【重要 — 监控规则】你拥有后台监控子 agent 系统（通过 ccm-skills MCP 工具）。\n"
+                    "当任务涉及监控、观察、等待、轮询后台进程或长时间运行的操作时，"
+                    "你必须调用 create_monitor 工具将监控工作委托给子 agent，"
+                    "禁止自己用 Bash/Read 等工具手动执行监控循环。\n"
+                    "【禁止】不要使用内置的 Agent 工具或 Monitor 工具来执行监控任务。"
+                    "这些内置工具不在 CCM 系统的管理范围内，无法被追踪和记录。"
+                    "所有监控必须通过 create_monitor 工具发起，由 CCM 子 agent 系统统一管理。\n"
+                    "子 agent 会独立运行并定期汇报状态，你通过 check_monitors 查看进展。\n"
+                    "可用工具: create_monitor（创建监控子agent）/ check_monitors（查看状态）/ stop_monitor（停止监控）。"
                 )
             parts.append(f"任务:\n{task.description}")
             full_prompt = "\n\n".join(parts)
@@ -1569,7 +1602,6 @@ class GlobalDispatcher:
             cleanup_monitor_agent_mcp_config,
         )
 
-        _MAX_MONITOR_HOURS = 4
         task_id: int | None = None
 
         try:
@@ -1581,8 +1613,14 @@ class GlobalDispatcher:
                 task_id = ms.task_id
                 ms_description = ms.description
                 ms_context = ms.monitor_context
+                ms_interval = ms.interval
+                ms_max_checks = ms.max_checks
                 model = ms.model
                 task_cwd = task.last_cwd or task.target_repo or os.getcwd()
+
+            # Dynamic timeout: expected duration + 50% buffer, minimum 30 min
+            expected_seconds = ms_interval * ms_max_checks
+            timeout_seconds = max(expected_seconds * 1.5, 1800)
 
             prompt = self._build_monitor_agent_prompt(
                 description=ms_description,
@@ -1605,11 +1643,11 @@ class GlobalDispatcher:
             try:
                 await asyncio.wait_for(
                     proc.wait(),
-                    timeout=_MAX_MONITOR_HOURS * 3600,
+                    timeout=timeout_seconds,
                 )
             except asyncio.TimeoutError:
                 logger.warning(
-                    f"Monitor session {monitor_session_id} timed out after {_MAX_MONITOR_HOURS}h, killing"
+                    f"Monitor session {monitor_session_id} timed out after {timeout_seconds:.0f}s, killing"
                 )
                 proc.kill()
                 await proc.wait()
@@ -1657,8 +1695,12 @@ class GlobalDispatcher:
                 pass
         finally:
             cleanup_monitor_agent_mcp_config(monitor_session_id)
-            log_path = Path(f"/tmp/ccm_monitor_{monitor_session_id}.log")
-            log_path.unlink(missing_ok=True)
+            log_fh = self._monitor_log_fhs.pop(monitor_session_id, None)
+            if log_fh:
+                try:
+                    log_fh.close()
+                except Exception:
+                    pass
             self._monitor_tasks.pop(monitor_session_id, None)
             self._monitor_processes.pop(monitor_session_id, None)
 
@@ -1682,7 +1724,7 @@ class GlobalDispatcher:
             "--output-format", "stream-json",
             "--verbose",
             "--dangerously-skip-permissions",
-            "--disallowedTools", "Edit,Write,NotebookEdit,Workflow",
+            "--disallowedTools", "Edit,Write,NotebookEdit,Workflow,Agent,Monitor",
             "--mcp-config", str(mcp_config_path),
         ]
         if model:
@@ -1707,7 +1749,8 @@ class GlobalDispatcher:
         except Exception:
             log_fh.close()
             raise
-        log_fh.close()
+        # Keep log_fh open — closing it terminates the subprocess's stdout pipe
+        self._monitor_log_fhs[monitor_session_id] = log_fh
 
         self._monitor_processes[monitor_session_id] = process
         logger.info(
@@ -1737,12 +1780,195 @@ class GlobalDispatcher:
 
 ## 行为准则
 1. 用 Bash 执行 ps、tail、cat 等命令检查状态
-2. 自主判断频率：初期密集，稳定后放宽
-3. 重要变化立即 report_status，平时间隔较长
-4. 任务完成/失败/异常 → mark_complete 并说明原因
-5. 你是只读观察者，不要修改任何文件
-6. 检查间用 sleep，不要无间断轮询
-7. 调用 mark_complete 后，你的工作就结束了，不要再做任何事
+2. 每次检查后调用 report_status 汇报
+3. 等待下一轮检查时，用 python 延时命令等待，例如：
+   `Bash(command="python3 -c \"import time; time.sleep(30)\"", timeout=120000)`
+   【重要】不要使用 bash 的 sleep 命令（会被系统拦截），必须用 python3 的 time.sleep。
+4. 【关键】你必须严格按以下循环执行，绝不中断：
+   检查 → report_status → python sleep → 检查 → report_status → python sleep → ...
+   每一步都是一个独立的工具调用。你的进程必须持续运行直到目标完成。
+5. 任务完成/失败/异常 → mark_complete 并说明原因，然后停止
+6. 你是只读观察者，不要修改任何文件
+7. 【禁止】不要使用内置的 Agent 工具
+8. 【禁止】不要使用 Monitor 工具、ScheduleWakeup 工具或 run_in_background —— 这些会导致你退出进程
+9. 【禁止】不要在调用 mark_complete 之前结束你的回合（end_turn）
 
-先做一次初始状态检查，然后持续观察。""")
+先做一次初始状态检查并 report_status，然后用 python sleep 等待，然后继续下一轮。""")
         return "\n".join(parts)
+
+    # -----------------------------------------------------------------------
+    # Per-task message queue (chat + monitor reports)
+    # -----------------------------------------------------------------------
+
+    def _get_task_queue(self, task_id: int) -> asyncio.PriorityQueue:
+        if task_id not in self._task_queues:
+            self._task_queues[task_id] = asyncio.PriorityQueue()
+        return self._task_queues[task_id]
+
+    def _ensure_queue_worker(self, task_id: int):
+        existing = self._task_queue_workers.get(task_id)
+        if existing and not existing.done():
+            return
+        worker = asyncio.create_task(self._task_queue_consumer(task_id))
+        self._task_queue_workers[task_id] = worker
+
+    async def enqueue_message(
+        self,
+        task_id: int,
+        prompt: str,
+        priority: int = PRIORITY_USER,
+        source: str = "user",
+        user_message_text: str | None = None,
+    ):
+        """Enqueue a message for the main agent of a task.
+
+        Messages are processed serially by a per-task consumer.
+        """
+        q = self._get_task_queue(task_id)
+        msg = QueuedMessage(
+            priority=priority,
+            timestamp=time.monotonic(),
+            prompt=prompt,
+            source=source,
+            user_message_text=user_message_text,
+        )
+        await q.put(msg)
+        self._ensure_queue_worker(task_id)
+        logger.info(
+            f"Enqueued message for task {task_id}: source={source} priority={priority} "
+            f"queue_depth={q.qsize()}"
+        )
+
+    async def _task_queue_consumer(self, task_id: int):
+        """Serial consumer: process queued messages one at a time for a task."""
+        q = self._get_task_queue(task_id)
+        idle_timeout = 300  # stop consumer after 5 min idle
+
+        try:
+            while True:
+                try:
+                    msg: QueuedMessage = await asyncio.wait_for(q.get(), timeout=idle_timeout)
+                except asyncio.TimeoutError:
+                    logger.info(f"Task {task_id} queue consumer idle for {idle_timeout}s, stopping")
+                    break
+
+                try:
+                    await self._process_queued_message(task_id, msg)
+                except Exception:
+                    logger.exception(f"Error processing queued message for task {task_id}")
+                finally:
+                    q.task_done()
+        finally:
+            self._task_queue_workers.pop(task_id, None)
+            if q.empty():
+                self._task_queues.pop(task_id, None)
+
+    async def _process_queued_message(self, task_id: int, msg: QueuedMessage):
+        """Resume main agent session with a queued message."""
+        async with self.db_factory() as db:
+            task = await db.get(Task, task_id)
+            if not task or not task.session_id:
+                logger.warning(f"Task {task_id} not found or no session, skipping queued message")
+                return
+
+            # Wait for main agent to be idle (not executing)
+            for _ in range(60):
+                is_busy = False
+                for inst_id, proc in self.instance_manager.processes.items():
+                    if proc.returncode is None:
+                        inst = await db.get(Instance, inst_id)
+                        if inst and inst.current_task_id == task_id:
+                            is_busy = True
+                            break
+                if not is_busy:
+                    break
+                await asyncio.sleep(2)
+            else:
+                logger.warning(f"Task {task_id} still busy after 120s, dropping message: {msg.source}")
+                return
+
+            # Find idle instance
+            result = await db.execute(
+                select(Instance).where(Instance.status == "idle").order_by(Instance.id).limit(1)
+            )
+            inst = result.scalar_one_or_none()
+            if not inst:
+                logger.warning(f"No idle instance for task {task_id}, re-queueing message")
+                q = self._get_task_queue(task_id)
+                await q.put(msg)
+                await asyncio.sleep(5)
+                return
+
+            # Build git env
+            merged: dict = {}
+            if task.project_id:
+                project = await db.get(Project, task.project_id)
+                global_cfg = await db.get(GlobalSettings, 1)
+                if project:
+                    merged = merge_git_config(settings_to_dict(project), settings_to_dict(global_cfg))
+            git_env = _build_git_env(merged)
+
+            effort_level = task.effort_level or settings.default_effort
+
+            # Pool
+            config_dir = None
+            if self.pool and self.pool.enabled:
+                config_dir = self.pool.select(validate=True)
+                if config_dir and task.session_id:
+                    from backend.services.claude_pool import migrate_session
+                    old_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+                    if old_config_dir and old_config_dir != config_dir:
+                        migrate_session(
+                            old_config_dir=old_config_dir,
+                            new_config_dir=config_dir,
+                            session_id=task.session_id,
+                        )
+
+            logger.info(
+                f"Processing queued message for task {task_id}: source={msg.source} "
+                f"on instance {inst.id}"
+            )
+
+            await self.instance_manager.launch(
+                instance_id=inst.id,
+                prompt=msg.prompt,
+                task_id=task_id,
+                cwd=task.last_cwd or task.target_repo or os.getcwd(),
+                model=task.model,
+                resume_session_id=task.session_id,
+                git_env=git_env,
+                thinking_budget=task.thinking_budget,
+                effort_level=effort_level,
+                chat_initiated=True,
+                config_dir=config_dir,
+                provider=task.provider,
+                enable_workflows=task.enable_workflows,
+                enabled_skills=task.enabled_skills,
+            )
+
+            task.status = "executing"
+            await db.commit()
+
+            await self.broadcaster.broadcast("tasks", {
+                "event": "status_change",
+                "task_id": task_id,
+                "new_status": "executing",
+                "instance_id": inst.id,
+            })
+
+            # Wait for the process to finish before processing next message
+            process = self.instance_manager.processes.get(inst.id)
+            if process:
+                await process.wait()
+
+            # Refresh task status after process exits
+            await db.refresh(task)
+            if task.status == "executing":
+                task.status = "completed"
+                await db.commit()
+                await self.broadcaster.broadcast("tasks", {
+                    "event": "status_change",
+                    "task_id": task_id,
+                    "new_status": "completed",
+                    "instance_id": inst.id,
+                })

@@ -3,11 +3,10 @@ import json
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select  # still used by chat history
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
-from backend.models.instance import Instance
 from backend.models.task import Task
 from backend.models.log_entry import LogEntry
 
@@ -21,17 +20,6 @@ class ChatMessage(BaseModel):
     secret_ids: list[int] | None = None
 
 
-async def _find_idle_instance(db: AsyncSession) -> Instance | None:
-    """Find an idle instance to run a chat message."""
-    result = await db.execute(
-        select(Instance)
-        .where(Instance.status == "idle")
-        .order_by(Instance.id)
-        .limit(1)
-    )
-    return result.scalar_one_or_none()
-
-
 @router.post("/{task_id}/chat")
 async def send_chat_message(
     task_id: int,
@@ -39,33 +27,25 @@ async def send_chat_message(
     db: AsyncSession = Depends(get_db),
 ):
     """Send a follow-up message on a task, resuming its previous session."""
-    from backend.main import instance_manager
-
     task = await db.get(Task, task_id)
     if not task:
         raise HTTPException(404, "Task not found")
     if not task.session_id:
         raise HTTPException(400, "No previous session on this task. Run the task first.")
 
-    # Check no instance is currently working on this task
-    busy_instance_id = None
-    for inst_id, proc in instance_manager.processes.items():
-        if proc.returncode is None:
-            inst = await db.get(Instance, inst_id)
-            if inst and inst.current_task_id == task_id:
-                busy_instance_id = inst_id
-                break
-
-    if busy_instance_id is not None:
-        raise HTTPException(409, "Task is currently being processed. Use Interrupt to stop it first.")
-
-    # Find an idle instance
-    inst = await _find_idle_instance(db)
-    if not inst:
-        raise HTTPException(400, "No idle instance available. Create one or wait.")
-
-    # Build prompt — append secrets and image paths if provided
+    # Build prompt — append secrets, skill instructions, and image paths
     prompt_parts = [body.message]
+    if task.enabled_skills and task.enabled_skills.get("monitor"):
+        prompt_parts.append(
+            "【重要 — 监控规则】你拥有后台监控子 agent 系统（通过 ccm-skills MCP 工具）。"
+            "当任务涉及监控、观察、等待、轮询后台进程或长时间运行的操作时，"
+            "你必须调用 create_monitor 工具将监控工作委托给子 agent，"
+            "禁止自己用 Bash/Read 等工具手动执行监控循环。"
+            "【禁止】不要使用内置的 Agent 工具来执行监控任务。"
+            "内置 Agent 工具不在 CCM 系统的管理范围内，无法被追踪和记录。"
+            "所有监控必须通过 create_monitor 工具发起，由 CCM 子 agent 系统统一管理。"
+            "可用工具: create_monitor（创建监控子agent）/ check_monitors（查看状态）/ stop_monitor（停止监控）。"
+        )
     if body.secret_ids:
         from backend.services.dispatcher import _build_secrets_block
         from backend.database import async_session
@@ -90,9 +70,9 @@ async def send_chat_message(
             "is_image": ext in _IMAGE_EXTS,
         })
 
-    # Store user message as a log entry
+    # Store user message as a log entry (use instance_id=1 as placeholder)
     user_log = LogEntry(
-        instance_id=inst.id,
+        instance_id=1,
         task_id=task_id,
         event_type="user_message",
         role="user",
@@ -112,72 +92,17 @@ async def send_chat_message(
         "image_paths": body.image_paths or [],
     })
 
-    # Determine cwd: Claude Code launches in repo root, session binds there
-    cwd = task.last_cwd or task.target_repo
-    if not cwd or not os.path.isdir(cwd):
-        raise HTTPException(400, "Task working directory not found.")
-
-    # Build git env (SSH key, HTTPS token, author info) same as dispatcher
-    from backend.services.dispatcher import _build_git_env
-    from backend.services.git_config import merge_git_config, settings_to_dict
-    from backend.models.project import Project
-    from backend.models.global_settings import GlobalSettings
-    merged: dict = {}
-    if task.project_id:
-        project = await db.get(Project, task.project_id)
-        global_cfg = await db.get(GlobalSettings, 1)
-        if project:
-            merged = merge_git_config(settings_to_dict(project), settings_to_dict(global_cfg))
-    git_env = _build_git_env(merged)
-
-    # Resolve effort: task.effort_level → instance.effort_level → settings.default_effort
-    from backend.config import settings as app_settings
-    effort_level = task.effort_level or app_settings.default_effort
-
-    # Pool: select an account for the chat launch
-    config_dir = None
+    # Enqueue for serial processing (replaces direct launch)
     from backend.main import dispatcher
-    if dispatcher and hasattr(dispatcher, 'pool') and dispatcher.pool and dispatcher.pool.enabled:
-        config_dir = dispatcher.pool.select(validate=True)
-        if config_dir and task.session_id:
-            from backend.services.claude_pool import migrate_session
-            old_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
-            if old_config_dir and old_config_dir != config_dir:
-                migrate_session(
-                    old_config_dir=old_config_dir,
-                    new_config_dir=config_dir,
-                    session_id=task.session_id,
-                )
-
-    # Launch with --resume, using the task's cwd
-    # Use task.model (the model that created the session) to maintain consistency,
-    # falling back to instance model only if task has no model set.
-    pid = await instance_manager.launch(
-        instance_id=inst.id,
-        prompt=prompt,
+    from backend.services.dispatcher import PRIORITY_USER
+    await dispatcher.enqueue_message(
         task_id=task_id,
-        cwd=cwd,
-        model=task.model,
-        resume_session_id=task.session_id,
-        git_env=git_env,
-        thinking_budget=task.thinking_budget,
-        effort_level=effort_level,
-        chat_initiated=True,
-        config_dir=config_dir,
-        provider=task.provider,
-        enable_workflows=task.enable_workflows,
+        prompt=prompt,
+        priority=PRIORITY_USER,
+        source="user",
     )
 
-    task.status = "executing"
-    await db.commit()
-    await broadcaster.broadcast("tasks", {
-        "event": "status_change",
-        "task_id": task_id,
-        "new_status": "executing",
-        "instance_id": inst.id,
-    })
-
-    return {"ok": True, "pid": pid, "instance_id": inst.id, "session_id": task.session_id}
+    return {"ok": True, "queued": True, "session_id": task.session_id}
 
 
 def _tool_summary(tool_input: str | None) -> str:
@@ -245,6 +170,7 @@ async def get_chat_history(
     _TRUNCATE = 20_000  # chars; tool outputs can be huge (file reads, bash output)
 
     messages = []
+    current_source = None  # track monitor context
     for row in rows:
         # Skip noisy system events (heartbeats, telemetry subtypes)
         if row.event_type == "system_event" and row.content in ("task_progress", "thinking_tokens", "token_usage", "api_request", "api_response"):
@@ -265,6 +191,7 @@ async def get_chat_history(
 
         attachments = None
         image_urls = None
+        source = None
         if row.raw_json:
             try:
                 raw = json.loads(row.raw_json)
@@ -275,8 +202,17 @@ async def get_chat_history(
                     elif raw.get("image_urls"):
                         image_urls = raw["image_urls"]
                         attachments = [{"url": u, "name": u.split("/")[-1], "is_image": True} for u in image_urls]
+                    if raw.get("source"):
+                        source = raw["source"]
             except (json.JSONDecodeError, TypeError):
                 pass
+
+        if row.event_type in ("user_message", "system_event") and source:
+            current_source = source
+        elif row.event_type == "user_message":
+            current_source = None
+        msg_source = current_source
+
         messages.append({
             "id": row.id,
             "role": row.role or ("assistant" if row.event_type in ("message", "result") else "system"),
@@ -290,6 +226,7 @@ async def get_chat_history(
             "timestamp": row.timestamp.isoformat() if row.timestamp else None,
             "image_urls": image_urls or None,
             "attachments": attachments,
+            "source": msg_source,
         })
 
     return messages

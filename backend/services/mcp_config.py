@@ -1,5 +1,6 @@
 """MCP config 动态生成 — 根据 task 的 enabled_skills 生成 MCP server 配置。"""
 import json
+import os
 import sys
 import tempfile
 from pathlib import Path
@@ -48,7 +49,9 @@ def generate_mcp_config(task_id: int, enabled_skills: dict, api_base: str | None
 
     config = {"mcpServers": servers}
     config_path = Path(tempfile.gettempdir()) / f"ccm_mcp_{task_id}.json"
-    config_path.write_text(json.dumps(config, indent=2))
+    fd = os.open(str(config_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(config, f, indent=2)
     return config_path
 
 
@@ -94,7 +97,9 @@ def generate_monitor_agent_mcp_config(
     }
 
     config_path = Path(tempfile.gettempdir()) / f"ccm_monitor_agent_{monitor_session_id}.json"
-    config_path.write_text(json.dumps(config, indent=2))
+    fd = os.open(str(config_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(config, f, indent=2)
     return config_path
 
 

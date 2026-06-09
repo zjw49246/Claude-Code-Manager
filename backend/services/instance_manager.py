@@ -13,6 +13,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.config import settings
 from backend.models.instance import Instance
 from backend.models.task import Task
+
+# When a skill is enabled, these built-in Claude Code tools are disallowed
+# for the main agent, forcing it to use the skill's MCP tools instead.
+SKILL_DISALLOWED_BUILTINS: dict[str, list[str]] = {
+    "monitor": ["Agent", "Monitor"],
+}
 from backend.models.log_entry import LogEntry
 from backend.services.stream_parser import StreamParser
 from backend.services.ws_broadcaster import WebSocketBroadcaster
@@ -56,6 +62,7 @@ class InstanceManager:
             effort_level=effort_level,
             enable_workflows=enable_workflows,
             mcp_config_path=str(mcp_config_path) if mcp_config_path else None,
+            enabled_skills=enabled_skills,
         )
 
         # Must unset CLAUDE_CODE env var to avoid nested session detection
@@ -142,6 +149,7 @@ class InstanceManager:
         effort_level: str | None,
         enable_workflows: bool = False,
         mcp_config_path: str | None = None,
+        enabled_skills: dict | None = None,
     ) -> list[str]:
         """Build the subprocess command for a supported coding-agent CLI."""
         if provider == "claude":
@@ -158,8 +166,15 @@ class InstanceManager:
                 cmd.extend(["--model", model])
             if effort_level:
                 cmd.extend(["--effort", effort_level])
+            disallowed = []
             if not enable_workflows:
-                cmd.extend(["--disallowedTools", "Workflow"])
+                disallowed.append("Workflow")
+            if enabled_skills:
+                for skill, enabled in enabled_skills.items():
+                    if enabled and skill in SKILL_DISALLOWED_BUILTINS:
+                        disallowed.extend(SKILL_DISALLOWED_BUILTINS[skill])
+            if disallowed:
+                cmd.extend(["--disallowedTools", ",".join(sorted(set(disallowed)))])
             if mcp_config_path and Path(mcp_config_path).exists():
                 cmd.extend(["--mcp-config", mcp_config_path])
             return cmd

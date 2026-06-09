@@ -54,6 +54,12 @@ async def report_status(summary: str, is_important: bool = False) -> str:
                     "is_important": is_important,
                 },
             )
+            if resp.status_code in (400, 404):
+                return json.dumps({
+                    "success": False,
+                    "session_ended": True,
+                    "error": f"Session is no longer active (HTTP {resp.status_code}). Call mark_complete or stop all activity.",
+                }, ensure_ascii=False)
             resp.raise_for_status()
             data = resp.json()
             return json.dumps({
@@ -82,6 +88,8 @@ async def mark_complete(reason: str) -> str:
                 headers=_headers(),
                 json={"reason": reason},
             )
+            if resp.status_code in (400, 404):
+                return "Session already ended. Stop all activity now."
             resp.raise_for_status()
             return "Session completed. Your task is done — stop all activity now."
     except Exception as e:

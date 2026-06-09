@@ -1,6 +1,6 @@
-import { useState, useMemo, useRef, useEffect } from 'react';
+import { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { api } from '../../api/client';
-import type { Task, Project } from '../../api/client';
+import type { Task, Project, SubAgentSummary } from '../../api/client';
 import { Trash2, RotateCcw, XCircle, MessageCircle, Archive, ArchiveRestore, Star, Copy, Check, MoreVertical, Pencil, Mail, MailOpen, Wrench, Users } from 'lucide-react';
 import { TAG_COLOR_OPTIONS } from '../TagColors';
 import { ExpandableText } from '../ExpandableText';
@@ -34,6 +34,8 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat }: TaskListPro
   const [editingTitleId, setEditingTitleId] = useState<number | null>(null);
   const [titleDraft, setTitleDraft] = useState('');
   const [toolsExpandedId, setToolsExpandedId] = useState<number | null>(null);
+  const [subAgentsExpandedId, setSubAgentsExpandedId] = useState<number | null>(null);
+  const [subAgentSummary, setSubAgentSummary] = useState<SubAgentSummary | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const titleInputRef = useRef<HTMLInputElement>(null);
 
@@ -101,6 +103,23 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat }: TaskListPro
     } catch { /* ignore */ }
   };
 
+  const handleSubAgentsToggle = useCallback(async (taskId: number) => {
+    if (subAgentsExpandedId === taskId) {
+      setSubAgentsExpandedId(null);
+      setSubAgentSummary(null);
+      return;
+    }
+    setSubAgentSummary(null);
+    try {
+      const summary = await api.getSubAgentSummary(taskId);
+      setSubAgentSummary(summary);
+      setSubAgentsExpandedId(taskId);
+    } catch {
+      setSubAgentSummary({ by_type: {} });
+      setSubAgentsExpandedId(taskId);
+    }
+  }, [subAgentsExpandedId]);
+
   if (tasks.length === 0) {
     return <p className="text-gray-500 text-sm text-center py-8">No tasks yet</p>;
   }
@@ -140,11 +159,14 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat }: TaskListPro
                   {Object.values(t.enabled_skills).filter(Boolean).length}
                 </button>
               )}
-              {t.active_sub_agents > 0 && (
-                <span className="text-xs bg-teal-600/30 text-teal-300 px-1.5 rounded flex items-center gap-0.5 animate-pulse">
+              {t.enabled_skills && Object.values(t.enabled_skills).some(Boolean) && (
+                <button
+                  onClick={() => handleSubAgentsToggle(t.id)}
+                  className={`text-xs bg-teal-600/30 text-teal-300 px-1.5 rounded cursor-pointer hover:bg-teal-600/40 flex items-center gap-0.5${t.active_sub_agents > 0 ? ' animate-pulse' : ''}`}
+                >
                   <Users size={12} />
                   {t.active_sub_agents}
-                </span>
+                </button>
               )}
             </div>
             {/* Action buttons */}
@@ -240,6 +262,21 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat }: TaskListPro
                   ✓ {skill.charAt(0).toUpperCase() + skill.slice(1)}
                 </span>
               ))}
+            </div>
+          )}
+          {/* Expandable sub-agents detail */}
+          {subAgentsExpandedId === t.id && (
+            <div className="mt-1 pl-[1.125rem] flex flex-wrap gap-1">
+              {subAgentSummary && Object.entries(subAgentSummary.by_type).some(([, c]) => c.running > 0) ? (
+                Object.entries(subAgentSummary.by_type).filter(([, c]) => c.running > 0).map(([type, counts]) => (
+                  <span key={type} className="text-xs bg-teal-600/20 text-teal-300 px-2 py-0.5 rounded flex items-center gap-1">
+                    {type.charAt(0).toUpperCase() + type.slice(1)}:
+                    <span className="text-green-400">{counts.running} running</span>
+                  </span>
+                ))
+              ) : (
+                <span className="text-xs text-gray-500">No active sub-agents</span>
+              )}
             </div>
           )}
           {/* Row 2: title + description (full width) */}
