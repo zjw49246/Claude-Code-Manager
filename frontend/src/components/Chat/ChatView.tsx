@@ -330,10 +330,12 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
   useWebSocket([`task:${task.id}`], handleWsMessage, handleReconnect);
 
   // Reset sending state when task reaches a terminal status
-  // (catches cases where process_exit WebSocket event is missed)
+  // (catches cases where process_exit WebSocket event is missed — e.g. WS disconnect)
+  // Also trigger auto-dequeue so pending box messages get sent.
   useEffect(() => {
     if (['completed', 'failed', 'cancelled', 'pending'].includes(task.status)) {
       setSending(false);
+      setAutoDequeueFlag(f => f + 1);
     }
   }, [task.status]);
 
