@@ -541,7 +541,9 @@ class GlobalDispatcher:
                 from backend.services.command_registry import COMMAND_REGISTRY
                 for skill_name, enabled in task.enabled_skills.items():
                     if enabled and skill_name in COMMAND_REGISTRY:
-                        parts.append(COMMAND_REGISTRY[skill_name].prompt_template)
+                        cmd = COMMAND_REGISTRY[skill_name]
+                        if not cmd.always_available:
+                            parts.append(cmd.prompt_template)
             parts.append(f"任务:\n{task.description}")
             full_prompt = "\n\n".join(parts)
 
@@ -757,7 +759,9 @@ class GlobalDispatcher:
                 from backend.services.command_registry import COMMAND_REGISTRY
                 for skill_name, enabled in task.enabled_skills.items():
                     if enabled and skill_name in COMMAND_REGISTRY:
-                        parts.append(COMMAND_REGISTRY[skill_name].prompt_template)
+                        cmd = COMMAND_REGISTRY[skill_name]
+                        if not cmd.always_available:
+                            parts.append(cmd.prompt_template)
             parts.append(f"任务:\n{task.description}")
             full_prompt = "\n\n".join(parts)
 

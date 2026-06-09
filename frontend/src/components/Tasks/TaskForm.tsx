@@ -48,7 +48,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   const [filePreviews, setFilePreviews] = useState<string[]>([]);
   const [selectedSecretIds, setSelectedSecretIds] = useState<number[]>([]);
   const [dropError, setDropError] = useState('');
-  const [enabledTools, setEnabledTools] = useState<Record<string, boolean>>({});
+  const [enabledTools, setEnabledTools] = useState<Record<string, boolean>>({ help: true });
   const [showToolsDropdown, setShowToolsDropdown] = useState(false);
   const [showConfigPanel, setShowConfigPanel] = useState(false);
   const [starOnCreate, setStarOnCreate] = useState(false);
@@ -92,6 +92,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
 
   const AVAILABLE_TOOLS = provider === 'claude'
     ? [
+        { key: 'help', label: 'Help', description: '$help command — list available commands' },
         { key: 'workflows', label: 'Workflows', description: 'Enable Workflow tool' },
         { key: 'monitor', label: 'Monitor', description: 'Background monitoring sub-agents' },
       ]
@@ -218,7 +219,12 @@ export function TaskForm({ onCreated }: TaskFormProps) {
         ...(effort ? { effort_level: effort } : {}),
         ...(thinkingBudget ? { thinking_budget: parseInt(thinkingBudget) || null } : {}),
         enable_workflows: !!enabledTools['workflows'],
-        enabled_skills: enabledTools['monitor'] ? { monitor: true } : undefined,
+        enabled_skills: (() => {
+          const skills = Object.entries(enabledTools)
+            .filter(([k, v]) => v && k !== 'workflows')
+            .reduce((acc, [k]) => ({ ...acc, [k]: true }), {} as Record<string, boolean>);
+          return Object.keys(skills).length > 0 ? skills : undefined;
+        })(),
         ...(starOnCreate ? { starred: true } : {}),
         ...(cloneFromTaskId ? { clone_from_task_id: cloneFromTaskId as number } : {}),
       });
