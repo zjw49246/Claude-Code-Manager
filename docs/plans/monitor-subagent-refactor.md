@@ -202,8 +202,8 @@ Task 卡片上的可展开工具权限指示器。
 
 ### Phase 9: 文档
 
-- [ ] **9.1** 更新 CLAUDE.md
-- [ ] **9.2** 更新 README.md
+- [x] **9.1** 更新 CLAUDE.md
+- [x] **9.2** 更新 README.md
 - [ ] **9.3** 提交到 dev 分支（`git add && git commit`，不 push main）
 
 ---

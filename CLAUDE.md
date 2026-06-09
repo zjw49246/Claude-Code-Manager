@@ -29,7 +29,8 @@ claude-manager/
 │   │   ├── chat.py              # 多轮对话 (基于 task, --resume)
 │   │   ├── instances.py         # 实例 CRUD + Ralph Loop 控制 + Dispatcher 端点
 │   │   ├── projects.py          # Project CRUD + git clone
-│   │   ├── monitor.py           # Monitor Session CRUD (子 session 管理)
+│   │   ├── monitor.py           # Monitor Session CRUD + 子 agent checks/complete endpoints
+│   │   ├── sub_agents.py        # 通用子 Agent summary API (GET /tasks/{id}/sub-agents/summary)
 │   │   ├── ws.py                # WebSocket 端点
 │   │   ├── voice.py             # Whisper 语音转文字
 │   │   ├── auth.py              # Token 登录
@@ -45,12 +46,13 @@ claude-manager/
 │   ├── schemas/                 # Pydantic 请求/响应模型
 │   ├── mcp/                     # MCP Server (给 Claude 注入工具能力)
 │   │   ├── __init__.py
-│   │   └── ccm_skills_server.py # FastMCP server: create_monitor / check_monitors / stop_monitor
+│   │   ├── ccm_skills_server.py # FastMCP server: create_monitor / check_monitors / stop_monitor
+│   │   └── ccm_monitor_agent_server.py # 子 Agent MCP server: report_status / mark_complete / get_context
 │   └── services/                # 核心业务逻辑
 │       ├── instance_manager.py  # 子进程生命周期 (launch/stop/consume output, MCP config 注入)
-│       ├── dispatcher.py        # 全局调度器 (9 步任务生命周期, 含 goal 模式 + monitor 子 session)
+│       ├── dispatcher.py        # 全局调度器 (9 步任务生命周期, 含 goal 模式 + monitor 子 agent)
 │       ├── goal_evaluator.py    # Goal 条件评估器 (claude -p 子进程)
-│       ├── mcp_config.py        # MCP config 动态生成 (根据 enabled_skills)
+│       ├── mcp_config.py        # MCP config 动态生成 (主 agent + 子 agent)
 │       ├── ralph_loop.py        # 自动取活循环 (legacy, 保留兼容)
 │       ├── stream_parser.py     # NDJSON stream-json 解析器
 │       ├── task_queue.py        # 优先级队列 (asc = 优先级越高)
@@ -93,8 +95,9 @@ claude-manager/
 - **Thinking 解析**: stream_parser 兼容多种字段名（`thinking` / `text` / 嵌套 content blocks）；加密 thinking 显示为 `[encrypted thinking ...]` 标记
 - **Workflows 开关**: Task.enable_workflows（默认 False）→ CLI `--disallowedTools Workflow`；关闭时 Workflow 工具不可用，节省 token
 - **Skills 系统**: Task.enabled_skills（JSON dict，如 `{"monitor": true}`）控制注入哪些 MCP 工具。创建 task 时勾选 Skills，dispatcher 根据 enabled_skills 动态生成 MCP config 并通过 `--mcp-config` 注入 Claude CLI
-- **Monitor Skill**: 后台监控子 session，Agent 通过 MCP 工具（create_monitor / check_monitors / stop_monitor）自主创建和管理。子 session 是只读 Claude 进程，定期检查状态并将结果写入 DB + WebSocket 广播。每 task 最多 5 个并发 monitor
-- **MCP 架构**: `backend/mcp/ccm_skills_server.py` 是 FastMCP server，通过 stdio 与 Claude CLI 通信，通过 HTTP 调用 CCM 后端 API（不直接访问 DB）。配置文件动态生成到 `/tmp/ccm_mcp_{task_id}.json`，task 结束后自动清理
+- **Monitor Skill**: 后台监控子 session，主 Agent 通过 MCP 工具（create_monitor / check_monitors / stop_monitor）创建和管理。子 session 是**持久 Claude 子 Agent 进程**，拥有自己的 MCP server（`ccm_monitor_agent_server.py`），通过 report_status / mark_complete / get_context 工具自主与系统通信。每 task 最多 5 个并发 monitor
+- **子 Agent 架构**: Monitor 是第一个子 Agent 类型，架构为后续子 Agent（researcher、builder 等）预留。生命周期：注册 → 启动持久进程 → 自主运行（通过 MCP tools → HTTP API → DB + WebSocket）→ 完成/停止 → 清理。进程最长 4 小时超时兜底
+- **MCP 架构**: 主 Agent 用 `ccm_skills_server.py`，子 Agent 用 `ccm_monitor_agent_server.py`，均为 FastMCP server，通过 stdio 与 Claude CLI 通信，通过 HTTP 调用 CCM 后端 API。配置文件动态生成到 `/tmp/ccm_mcp_{task_id}.json`（主 Agent）和 `/tmp/ccm_monitor_agent_{session_id}.json`（子 Agent），结束后自动清理
 - **环境变量清理**: 生成子进程前必须 unset `CLAUDECODE` / `CLAUDE_CODE`，避免嵌套检测
 - **停止顺序**: SIGTERM → 等 10s → SIGKILL
 - **备份服务**: `BackupService`（`backend/services/backup_service.py`）封装 auto-backup SDK，在 lifespan 中以后台线程（APScheduler）运行，支持 local / s3 / oss；`BACKUP_ENABLED=false` 时完全不加载
