@@ -1,7 +1,7 @@
 import { useState, useMemo, useRef, useEffect } from 'react';
 import { api } from '../../api/client';
 import type { Task, Project } from '../../api/client';
-import { Trash2, RotateCcw, XCircle, MessageCircle, Archive, ArchiveRestore, Star, Copy, Check, MoreVertical, Pencil, Mail, MailOpen } from 'lucide-react';
+import { Trash2, RotateCcw, XCircle, MessageCircle, Archive, ArchiveRestore, Star, Copy, Check, MoreVertical, Pencil, Mail, MailOpen, Wrench } from 'lucide-react';
 import { TAG_COLOR_OPTIONS } from '../TagColors';
 import { ExpandableText } from '../ExpandableText';
 
@@ -33,6 +33,7 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat }: TaskListPro
   const [menuOpenId, setMenuOpenId] = useState<number | null>(null);
   const [editingTitleId, setEditingTitleId] = useState<number | null>(null);
   const [titleDraft, setTitleDraft] = useState('');
+  const [toolsExpandedId, setToolsExpandedId] = useState<number | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const titleInputRef = useRef<HTMLInputElement>(null);
 
@@ -130,6 +131,15 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat }: TaskListPro
               {t.model && (
                 <span className="hidden sm:inline text-xs bg-gray-700 text-gray-300 px-1.5 rounded">{t.model}</span>
               )}
+              {t.enabled_skills && Object.values(t.enabled_skills).some(Boolean) && (
+                <button
+                  onClick={() => setToolsExpandedId(toolsExpandedId === t.id ? null : t.id)}
+                  className="text-xs bg-amber-600/30 text-amber-300 px-1.5 rounded cursor-pointer hover:bg-amber-600/40 flex items-center gap-0.5"
+                >
+                  <Wrench size={12} />
+                  {Object.values(t.enabled_skills).filter(Boolean).length}
+                </button>
+              )}
             </div>
             {/* Action buttons */}
             <div className="flex gap-1 shrink-0 items-center">
@@ -216,6 +226,16 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat }: TaskListPro
             </div>
           </div>
           </div>
+          {/* Expandable tools list */}
+          {toolsExpandedId === t.id && t.enabled_skills && (
+            <div className="mt-1 pl-[1.125rem] flex flex-wrap gap-1">
+              {Object.entries(t.enabled_skills).filter(([, v]) => v).map(([skill]) => (
+                <span key={skill} className="text-xs bg-green-600/30 text-green-300 px-1.5 py-0.5 rounded">
+                  ✓ {skill.charAt(0).toUpperCase() + skill.slice(1)}
+                </span>
+              ))}
+            </div>
+          )}
           {/* Row 2: title + description (full width) */}
           <div className="mt-1 pl-[1.125rem]">
             {/* Title (editable) */}
