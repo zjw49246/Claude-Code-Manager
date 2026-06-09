@@ -789,7 +789,14 @@ async def _send_worker_chat(task, body, db):
 # 统一代理模式
 
 async def _proxy_to_worker(task, method, path, body=None):
-    """通用 Worker API 代理。先检查 Worker 健康状态。"""
+    """通用 Worker API 代理。先确保 relay 订阅，再检查健康状态，再转发。
+
+    必须在转发前 subscribe：
+    - retry: failed task 不在 _recover_worker_relays 恢复列表中，
+      Manager 重启后 relay 未订阅，不 subscribe 则 Worker 的所有后续事件丢失
+    - 其他操作（cancel/stop/plan approve）：对应 task 通常已订阅，
+      subscribe_task 是幂等的，调用无害
+    """
     worker = await get_worker(task.worker_id)
     if worker.status != "ready":
         raise HTTPException(
@@ -797,6 +804,8 @@ async def _proxy_to_worker(task, method, path, body=None):
             f"Worker {worker.name} 当前状态为 {worker.status}，无法执行操作。"
             "请等待 Worker 恢复或将 task 切回本机执行。"
         )
+    # 确保 relay 已订阅（幂等；对 retry 场景至关重要）
+    await worker_relay.subscribe_task(worker, task)
     async with httpx.AsyncClient(timeout=30) as client:
         try:
             resp = await client.request(
