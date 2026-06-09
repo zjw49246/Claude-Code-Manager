@@ -379,12 +379,10 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
     fetchHistory();
   }, [fetchHistory]);
 
-  // Load monitor sessions if monitor skill is enabled
+  // Always load monitor sessions (commands can create monitors even without permanent skill)
   useEffect(() => {
-    if (task.enabled_skills?.monitor) {
-      api.listMonitorSessions(task.id).then(setMonitorSessions).catch(() => {});
-    }
-  }, [task.id, task.enabled_skills]);
+    api.listMonitorSessions(task.id).then(setMonitorSessions).catch(() => {});
+  }, [task.id]);
 
   const monitorCount = useMemo(
     () => monitorSessions.filter((s) => s.status === 'running').length,
@@ -643,13 +641,11 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
             </div>
           )}
         </div>
-        {task.enabled_skills?.monitor && (
-          <SubAgentIndicator
-            count={monitorCount}
-            active={monitorCount > 0}
-            onNavigate={() => setShowMonitorPanel(!showMonitorPanel)}
-          />
-        )}
+        <SubAgentIndicator
+          count={monitorCount}
+          active={monitorCount > 0}
+          onNavigate={() => setShowMonitorPanel(!showMonitorPanel)}
+        />
         <button
           onClick={handleStar}
           className={`p-1.5 transition-colors ${starred ? 'text-yellow-400 hover:text-yellow-300' : 'text-gray-600 hover:text-yellow-400'}`}
@@ -682,7 +678,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
       </div>
 
       {/* Monitor Panel */}
-      {showMonitorPanel && task.enabled_skills?.monitor && (
+      {showMonitorPanel && (
         <div className="px-4 py-2 border-b border-gray-800">
           <MonitorPanel
             taskId={task.id}
