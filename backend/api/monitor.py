@@ -289,4 +289,17 @@ async def complete_monitor_session(
         {"event": "monitor_session_status", "monitor_session_id": session_id, "status": "completed"},
     )
 
+    # Notify main agent
+    from backend.services.dispatcher import PRIORITY_MONITOR_COMPLETE
+    complete_prompt = (
+        f"[Monitor #{session_id} 完成] {body.reason}\n\n"
+        "请向用户简要转达监控结果。"
+    )
+    await dispatcher.enqueue_message(
+        task_id=task_id,
+        prompt=complete_prompt,
+        priority=PRIORITY_MONITOR_COMPLETE,
+        source="monitor:complete",
+    )
+
     return {"ok": True, "message": "Session completed. Your task is done — stop all activity now."}
