@@ -224,6 +224,8 @@ cd frontend && npx tsc --noEmit
 | `test_cleanup_mcp_config` | 正确清理临时文件 |
 | `test_cleanup_mcp_config_missing_file` | 文件不存在时不报错 |
 
+> **注意**: `generate_monitor_agent_mcp_config()` 和 `cleanup_monitor_agent_mcp_config()` 为子 Agent 专用 MCP 配置生成/清理函数，目前通过集成测试验证（见下方「子 Agent 系统集成测试」）。
+
 #### `test_monitor_dispatcher.py` — Monitor Dispatcher 生命周期
 
 | 测试 | 验证内容 |
@@ -332,6 +334,51 @@ cd frontend && npx tsc --noEmit
 | `test_lifecycle_failure_retry` / `test_lifecycle_failure_max_retries` | 失败重试/达到上限 |
 | `test_lifecycle_exception` | 异常标记 task failed |
 | `test_plan_phase` | plan 模式进入 plan_review |
+
+### 子 Agent 系统集成测试
+
+> 以下功能通过启动开发服务（`./start-dev.sh`，端口 8003）进行端到端集成验证，暂无独立单元测试文件。
+
+#### 子 Agent MCP Server (`ccm_monitor_agent_server.py`)
+
+| 验证项 | 说明 |
+|--------|------|
+| MCP 进程启动 | `claude --mcp-config` 启动子 Agent 进程，进程正常运行 |
+| `report_status` tool | 子 Agent 调用 → POST `/checks` → DB MonitorCheck 记录 + WebSocket 广播 |
+| `mark_complete` tool | 子 Agent 调用 → POST `/complete` → session 状态变为 completed，进程自行退出 |
+| `get_context` tool | 子 Agent 调用 → GET session 信息，返回 description/context/checks_done |
+
+#### 子 Agent API (`sub_agents.py`)
+
+| 验证项 | 说明 |
+|--------|------|
+| `GET /api/tasks/{id}/sub-agents/summary` | 返回 `by_type.monitor` 的 running/completed 计数 |
+| task 不存在 | 返回 404 |
+
+#### Monitor API 新增端点 (`monitor.py`)
+
+| 验证项 | 说明 |
+|--------|------|
+| `POST /{session_id}/checks` | 子 Agent 报告状态，创建 MonitorCheck 记录，WebSocket 广播 |
+| `POST /{session_id}/complete` | 子 Agent 标记完成，session 状态更新，WebSocket 广播 |
+| checks_done >= max_checks | 自动标记 session 为 completed |
+
+#### Dispatcher 子 Agent 生命周期
+
+| 验证项 | 说明 |
+|--------|------|
+| `_launch_monitor_agent()` | 构建 Claude CLI + MCP config 命令，启动持久子进程 |
+| `_build_monitor_agent_prompt()` | Agent 风格 prompt 包含监控目标、上下文、MCP 工具说明 |
+| `_monitor_session_lifecycle()` | 启动子进程 → wait → 检查状态 → 清理（MCP config + 日志） |
+| `stop_monitor` → 进程 kill | delete_monitor_session 终止子进程 + 清理 MCP 配置文件 |
+
+#### 前端子 Agent UI
+
+| 验证项 | 说明 |
+|--------|------|
+| 工具权限按钮 (Wrench) | `enabled_skills` 有启用项时显示，点击展开已启用 skill 列表 |
+| 子 Agent 徽章 (Users) | `active_sub_agents > 0` 时显示计数 + pulse 动画 |
+| 子 Agent 详情展开 | 点击徽章调用 summary API，按类型显示 running/completed 计数 |
 
 ### 前端检查
 
@@ -495,4 +542,6 @@ git branch
 | `backend/services/mcp_config.py` | `backend/tests/test_mcp_config.py` |
 | `backend/api/monitor.py` | `backend/tests/test_api_monitor.py` |
 | `backend/services/dispatcher.py` (monitor) | `backend/tests/test_monitor_dispatcher.py` |
+| `backend/mcp/ccm_monitor_agent_server.py` | 集成测试（见「子 Agent 系统集成测试」） |
+| `backend/api/sub_agents.py` | 集成测试（见「子 Agent 系统集成测试」） |
 | `frontend/src/**` | TypeScript 类型检查 (`tsc --noEmit`) |
