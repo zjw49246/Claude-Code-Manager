@@ -133,7 +133,7 @@
   - 侧面板/抽屉展示所有 monitor session
   - Auto 模式: 显示 [+ 新建监控] 按钮
   - Loop 模式: 不显示新建按钮
-  - 其他模式（Plan/Goal）: 不显示监控相关 UI
+  - 其他模式: 不显示监控相关 UI（监控仅支持 Auto 和 Loop）
   - manual monitor 显示删除按钮，system monitor 不显示
 
 ### 5.3 新建监控对话框（仅 Auto 模式）
