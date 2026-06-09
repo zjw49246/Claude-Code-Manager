@@ -747,7 +747,13 @@ async def _send_worker_chat(task, body, db):
         "content": body.message,
     })
 
-    # 3. 转发到 Worker CCM
+    # 3. 确保日志中继已订阅（必须在转发之前，与 _forward_task_to_worker 一致）
+    # 原因：Manager 重启后已完成的 task 不会被 _recover_worker_relays 重新订阅，
+    # 用户此时 chat 时 relay 未订阅，如果在 forward 之后才 subscribe，
+    # Worker chat 端的 "executing" 状态广播和初始事件可能丢失
+    await worker_relay.subscribe_task(worker, task)
+
+    # 4. 转发到 Worker CCM
     async with httpx.AsyncClient() as client:
         resp = await client.post(
             f"http://{worker.public_ip}:{worker.ccm_port}/api/tasks/{task.id}/chat",
@@ -761,9 +767,6 @@ async def _send_worker_chat(task, body, db):
         )
         result = resp.json()
 
-    # 4. 确保日志中继已启动（可能是 Chat 唤醒的）
-    await worker_relay.subscribe_task(worker, task)
-
     # 5. 同步 session_id 到 Manager DB
     # 原因：Worker 的 instance_manager._process_event 用 event.pop("session_id")
     # 把 session_id 从事件中移除后才广播，relay 永远收不到。
@@ -773,7 +776,7 @@ async def _send_worker_chat(task, body, db):
         task.session_id = result["session_id"]
         await db.commit()
 
-    # 6. 替换 Worker 本地的 instance_id（对 Manager 无意义）
+    # 6. 替换 Worker 的 instance_id（对 Manager 无意义）
     result["instance_id"] = None
     return result
 ```
@@ -1078,7 +1081,12 @@ Step 5: 从 Worker 同步 task 详情 + 更新 Manager DB
   ├─ 日志不需要导入（WorkerRelay 已经实时存入 Manager DB 了）
   └─ session 文件已在 Step 4 rsync 回来，配合同步的 session_id 即可 --resume
 
-Step 6: 销毁云实例
+Step 6: 断开 relay 连接
+  ├─ worker_relay.stop_worker(worker.id)
+  └─ 必须在销毁实例之前：stop_worker 清空 _worker_ws 和 _worker_tasks，
+     否则实例销毁后 _reconnect 会尝试 10 次重连（指数退避，约 17 分钟浪费）
+
+Step 7: 销毁云实例
   ├─ Elastic Agent: terminate_instance(worker.cloud_instance_id)
   └─ Worker status = terminated
 ```
