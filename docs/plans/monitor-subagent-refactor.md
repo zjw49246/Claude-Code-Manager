@@ -171,7 +171,7 @@ Task 卡片上的可展开工具权限指示器。
   - 在 `backend/api/tasks.py` 的 list_tasks 查询中，对每个 active task 子查询 `SELECT COUNT(*) FROM monitor_sessions WHERE task_id=? AND status='running'`
   - 用 SQLAlchemy subquery/lateral join 避免 N+1
 
-- [ ] **7.2** 前端 `client.ts`: Task interface 新增 `active_sub_agents: number`
+- [x] **7.2** 前端 `client.ts`: Task interface 新增 `active_sub_agents: number`
 
 - [ ] **7.3** `TaskList.tsx` 新增子 agent 徽章
   - 条件: `t.active_sub_agents > 0`
