@@ -103,6 +103,7 @@ class TaskResponse(BaseModel):
     error_message: str | None
     tags: list[str] | None
     metadata_: dict | None = None
+    active_sub_agents: int = 0
     context_window_usage: dict | None
     created_at: datetime
     started_at: datetime | None
