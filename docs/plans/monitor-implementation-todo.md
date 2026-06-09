@@ -3,9 +3,9 @@
 > **设计理念**: 从"CCM 从外部控制监控"变为"给 Agent 注入 MCP 工具，Agent 自主决定何时监控"。
 > Monitor 是 Agent 的第一个 Skill，为未来多 Agent 协作架构奠基。
 >
-> **分支**: `feature/monitor-session`
+> **开发环境**: `/home/ubuntu/Claude-Code-Manager-dev`，`dev` 分支
+> **生产环境**: `/home/ubuntu/Claude-Code-Manager`，端口 8002，不可影响
 > **范围**: 先做 Auto 模式，Loop 模式后续扩展
-> **约束**: 只修改本地代码，不影响已部署服务，不 push 到 main
 >
 > **参考项目**:
 > - [oh-my-codex](https://github.com/Yeachan-Heo/oh-my-codex) — MCP server 架构、Plugin 模式、Bootstrap 生命周期
@@ -421,11 +421,14 @@ from pathlib import Path
 _CCM_ROOT = str(Path(__file__).resolve().parent.parent.parent)
 
 
-def generate_mcp_config(task_id: int, enabled_skills: dict, api_base: str = "http://localhost:8002") -> Path | None:
+def generate_mcp_config(task_id: int, enabled_skills: dict, api_base: str | None = None) -> Path | None:
     """为指定 task 生成 MCP config JSON 文件。
 
     根据 enabled_skills dict 决定注入哪些 MCP server。
     当前只有 monitor skill，未来新增 skill 时在此函数中添加对应 server。
+
+    Args:
+        api_base: CCM API 地址。为 None 时从 settings 读取（基于 host + port 拼接）。
 
     Returns:
         临时文件路径，进程结束后由调用方清理。
@@ -433,6 +436,10 @@ def generate_mcp_config(task_id: int, enabled_skills: dict, api_base: str = "htt
     """
     if not enabled_skills:
         return None
+
+    if api_base is None:
+        from backend.config import settings
+        api_base = f"http://{settings.host}:{settings.port}"
 
     servers = {}
 
@@ -687,7 +694,7 @@ async def delete_monitor_session(
     # 更新 DB 状态（先于 cancel，因为 cancel 时 CancelledError handler 依赖 DB 状态）
     if ms.status == "running":
         ms.status = "cancelled"
-        ms.completed_at = func.now()
+        ms.completed_at = datetime.utcnow()
         await db.commit()
 
     # Cancel 后台 asyncio task + kill 子进程
@@ -772,49 +779,64 @@ async def get_monitor_checks(
       - CancelledError 时 kill 子进程
       """
       try:
+          # 加载初始数据，提取到局部变量（避免跨 DB session 使用 ORM 对象）
           async with self.db_factory() as db:
               ms = await db.get(MonitorSession, monitor_session_id)
               task = await db.get(Task, ms.task_id)
               if not ms or not task:
                   return
+              task_id = ms.task_id
+              interval = ms.interval
+              max_checks = ms.max_checks
+              model = ms.model
 
           while True:
-              # 1. 检查 monitor 是否被外部 cancel（DELETE API 会提前更新 DB 状态）
+              # 1. 从 DB 刷新 monitor + task 状态（每轮重新读取，避免 detached 对象问题）
               async with self.db_factory() as db:
                   ms = await db.get(MonitorSession, monitor_session_id)
+                  task = await db.get(Task, task_id)
                   if not ms or ms.status != "running":
                       break
+                  # 提取本轮需要的字段到局部变量
+                  checks_done = ms.checks_done
+                  ms_description = ms.description
+                  ms_context = ms.monitor_context
+                  task_status = task.status
+                  task_cwd = task.last_cwd or task.target_repo or os.getcwd()
 
               # 2. 检查 task 是否已结束
-              async with self.db_factory() as db:
-                  task = await db.get(Task, ms.task_id)
-                  if task.status in ("completed", "failed", "cancelled"):
-                      final_status = "completed" if task.status == "completed" else "cancelled"
+              if task_status in ("completed", "failed", "cancelled"):
+                  final_status = "completed" if task_status == "completed" else "cancelled"
+                  async with self.db_factory() as db:
                       ms = await db.get(MonitorSession, monitor_session_id)
                       ms.status = final_status
                       ms.completed_at = datetime.utcnow()
                       await db.commit()
-                      await self.broadcaster.broadcast(
-                          f"task:{ms.task_id}",
-                          {"event": "monitor_session_status", "monitor_session_id": ms.id, "status": final_status},
-                      )
-                      break
+                  await self.broadcaster.broadcast(
+                      f"task:{task_id}",
+                      {"event": "monitor_session_status", "monitor_session_id": monitor_session_id, "status": final_status},
+                  )
+                  break
 
               # 3. 检查 max_checks 限制
-              if ms.checks_done >= ms.max_checks:
+              if checks_done >= max_checks:
                   async with self.db_factory() as db:
                       ms = await db.get(MonitorSession, monitor_session_id)
                       ms.status = "completed"
                       ms.completed_at = datetime.utcnow()
                       await db.commit()
                   await self.broadcaster.broadcast(
-                      f"task:{ms.task_id}",
-                      {"event": "monitor_session_status", "monitor_session_id": ms.id, "status": "completed"},
+                      f"task:{task_id}",
+                      {"event": "monitor_session_status", "monitor_session_id": monitor_session_id, "status": "completed"},
                   )
                   break
 
-              # 4. 构建子 session prompt
-              prompt = self._build_monitor_prompt(ms, task)
+              # 4. 构建子 session prompt（使用局部变量，不依赖 ORM 对象）
+              prompt = self._build_monitor_prompt(
+                  checks_done=checks_done,
+                  description=ms_description,
+                  context=ms_context,
+              )
 
               # 5. 启动只读 Claude 子进程 + 解析输出
               check_status = "success"
@@ -825,8 +847,9 @@ async def get_monitor_checks(
               try:
                   full_output = await self._run_monitor_subprocess(
                       prompt=prompt,
-                      cwd=task.last_cwd or task.target_repo or os.getcwd(),
-                      model=ms.model,
+                      cwd=task_cwd,
+                      model=model,
+                      monitor_session_id=monitor_session_id,  # 注册到 _monitor_processes
                   )
                   # 解析输出: 找 STATUS: 和 SUMMARY: 行
                   for line in full_output.splitlines():
@@ -853,9 +876,10 @@ async def get_monitor_checks(
                   ms = await db.get(MonitorSession, monitor_session_id)
                   ms.checks_done += 1
                   ms.last_summary = summary
+                  new_checks_done = ms.checks_done
                   check = MonitorCheck(
                       monitor_session_id=monitor_session_id,
-                      check_number=ms.checks_done,
+                      check_number=new_checks_done,
                       status=check_status,
                       summary=summary,
                       full_output=full_output[:10000] if full_output else None,  # 截断防 DB 爆
@@ -870,11 +894,11 @@ async def get_monitor_checks(
 
               # 7. 广播 WebSocket 事件
               await self.broadcaster.broadcast(
-                  f"task:{ms.task_id}",
+                  f"task:{task_id}",
                   {
                       "event": "monitor_check",
-                      "monitor_session_id": ms.id,
-                      "check_number": ms.checks_done,
+                      "monitor_session_id": monitor_session_id,
+                      "check_number": new_checks_done,
                       "status": check_status,
                       "summary": summary,
                       "is_monitor": True,  # 前端用此标记区分 monitor 消息
@@ -883,13 +907,13 @@ async def get_monitor_checks(
 
               if is_done:
                   await self.broadcaster.broadcast(
-                      f"task:{ms.task_id}",
-                      {"event": "monitor_session_status", "monitor_session_id": ms.id, "status": "completed"},
+                      f"task:{task_id}",
+                      {"event": "monitor_session_status", "monitor_session_id": monitor_session_id, "status": "completed"},
                   )
                   break
 
               # 8. Sleep 等待下一轮
-              await asyncio.sleep(ms.interval)
+              await asyncio.sleep(interval)
 
       except asyncio.CancelledError:
           # DELETE API 取消 — kill 子进程（参考 agent-ml-research: CancelledError → process.kill()）
@@ -925,8 +949,12 @@ async def get_monitor_checks(
   > `[binary, "--print", "--dangerously-skip-permissions", "--output-format", "stream-json", "-p", prompt]`
 
   ```python
-  async def _run_monitor_subprocess(self, prompt: str, cwd: str, model: str | None) -> str:
-      """运行一次只读 Claude 检查子进程，返回文本输出。"""
+  async def _run_monitor_subprocess(self, prompt: str, cwd: str, model: str | None, monitor_session_id: int) -> str:
+      """运行一次只读 Claude 检查子进程，返回文本输出。
+
+      将 process 注册到 self._monitor_processes，使 CancelledError handler 和
+      DELETE API 能够 kill 子进程。
+      """
       cmd = [
           settings.claude_binary,
           "-p", prompt,
@@ -950,9 +978,8 @@ async def get_monitor_checks(
           env=env,
           limit=10 * 1024 * 1024,
       )
-      # 注册进程以便 cancel 时 kill
-      # （调用方通过 monitor_session_id 传入，但这里简化：存到临时变量，由调用方管理）
-      # 实际实现中 monitor_session_id 需要传入本方法，这里简化
+      # 注册进程，使 CancelledError handler 和 DELETE API 能 kill
+      self._monitor_processes[monitor_session_id] = process
 
       try:
           stdout, stderr = await asyncio.wait_for(
@@ -963,9 +990,13 @@ async def get_monitor_checks(
           process.kill()
           await process.wait()
           raise
+      finally:
+          # 子进程结束后移除（lifecycle 的 finally 也会清理，双保险）
+          self._monitor_processes.pop(monitor_session_id, None)
 
       # 使用 StreamParser 解析 stream-json 输出，提取最终文本
       # 参考现有的 _consume_output() 中的解析逻辑
+      # 实现时应复用 StreamParser（backend/services/stream_parser.py），不要重新实现
       text_parts = []
       for line in stdout.decode(errors="replace").splitlines():
           line = line.strip()
@@ -996,13 +1027,14 @@ async def get_monitor_checks(
   > "目标+约束，不教步骤。Claude Opus 足够聪明。"
 
   ```python
-  def _build_monitor_prompt(self, monitor_session, task) -> str:
+  def _build_monitor_prompt(self, checks_done: int, description: str, context: str | None) -> str:
+      """构建 monitor 子 session 的 prompt。接收纯值参数，不依赖 ORM 对象。"""
       parts = [
-          f"你是一个后台监控进程，这是第 {monitor_session.checks_done + 1} 次检查。",
-          f"监控目标: {monitor_session.description}",
+          f"你是一个后台监控进程，这是第 {checks_done + 1} 次检查。",
+          f"监控目标: {description}",
       ]
-      if monitor_session.monitor_context:
-          parts.append(f"上下文: {monitor_session.monitor_context}")
+      if context:
+          parts.append(f"上下文: {context}")
       parts.append(
           "\n检查并报告当前状态。使用 Bash 工具执行 ps aux、tail 日志等命令。"
           "\n\n最后两行必须严格遵循以下格式:"
@@ -1012,12 +1044,17 @@ async def get_monitor_checks(
       return "\n".join(parts)
   ```
 
-### 4.4 MCP Notification（主动通知机制）
+### 4.4 MCP Notification（主动通知机制）⚠️ 可选/待验证
 
+> **状态**: **可选功能**。需要先验证 Claude CLI 是否处理 MCP server notification。
+> 如果不支持（大概率），此功能跳过。被动查询（`check_monitors()`）已经是完整的信息流，
+> 用户随时可以询问主 session 来获取 monitor 状态。
+>
 > **参考**: oh-my-codex 的 Hermes 通信桥 — agent 间消息传递。
 > **参考**: MCP 协议的 server-to-client notification。
 
-- [ ] 在 `ccm_skills_server.py` 中实现后台轮询 + notification:
+- [ ] **前置验证**: 确认 `FastMCP` 是否支持 `send_notification`、Claude CLI 是否处理 notification
+- [ ] 如果验证通过，在 `ccm_skills_server.py` 中实现后台轮询 + notification:
 
   ```python
   # 后台任务: 每 30 秒检查是否有新的 MonitorCheck
@@ -1046,8 +1083,8 @@ async def get_monitor_checks(
               pass
   ```
 
-  > **重要**: 需要先验证 Claude CLI 是否处理 MCP server notification。
-  > 如果不支持，此功能跳过。被动查询（`check_monitors()`）作为主要信息流。
+  > **重要**: 如果验证失败，直接跳过本节。被动查询（`check_monitors()`）是完整可用的主要信息流，
+  > 不影响整体功能。本功能仅为"锦上添花"的体验优化。
 
 ### 4.5 任务取消/删除时清理 Monitor
 
@@ -1217,7 +1254,83 @@ async def get_monitor_checks(
   }
   ```
 
-### 5.3 Monitor 面板组件
+### 5.3 子 Session 计数按钮（SubSessionIndicator）
+
+> **设计思路**: 当主 session 有后台子 session（目前只有 monitor，未来可能有 worker/research 等），
+> 在 Chat 界面显示一个可展开的按钮，让用户直观感知后台活动。
+
+**新建文件**: `frontend/src/components/Chat/SubSessionIndicator.tsx`
+
+- [ ] 在 ChatView 顶部或工具栏区域添加子 session 指示器:
+
+  ```tsx
+  import { useState, useMemo } from 'react';
+  import { ChevronDown, ChevronUp, Activity } from 'lucide-react';
+
+  interface SubSessionCounts {
+    monitor: number;
+    // 未来扩展: worker: number; research: number;
+  }
+
+  interface SubSessionIndicatorProps {
+    counts: SubSessionCounts;
+  }
+
+  export function SubSessionIndicator({ counts }: SubSessionIndicatorProps) {
+    const [expanded, setExpanded] = useState(false);
+
+    const total = useMemo(
+      () => Object.values(counts).reduce((sum, n) => sum + n, 0),
+      [counts]
+    );
+
+    if (total === 0) return null;
+
+    return (
+      <div className="sub-session-indicator">
+        <button
+          className="sub-session-button"
+          onClick={() => setExpanded(!expanded)}
+        >
+          <Activity size={14} />
+          <span>{total} sub-session{total !== 1 ? 's' : ''}</span>
+          {expanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+        </button>
+
+        {expanded && (
+          <div className="sub-session-details">
+            {counts.monitor > 0 && (
+              <div className="sub-session-row">
+                <span className="sub-session-label">Monitor</span>
+                <span className="sub-session-count">{counts.monitor}</span>
+              </div>
+            )}
+            {/* 未来扩展: worker, research 等 */}
+          </div>
+        )}
+      </div>
+    );
+  }
+  ```
+
+- [ ] 在 ChatView 中集成:
+
+  ```tsx
+  // 从 monitor sessions API 获取 running 状态的数量
+  const monitorCount = monitorSessions.filter(s => s.status === 'running').length;
+
+  <SubSessionIndicator counts={{ monitor: monitorCount }} />
+  ```
+
+- [ ] 样式要求:
+  - 按钮使用紧凑样式，不占用过多空间
+  - 展开后以列表形式显示各类子 session 的数量
+  - 总数为 0 时隐藏整个组件
+  - 使用 `Activity` 图标表示后台活动
+
+- [ ] 数据来源: 通过已有的 `getMonitorSessions(taskId)` API 获取，WebSocket 事件实时更新
+
+### 5.4 Monitor 面板组件
 
 **新建文件**: `frontend/src/components/Chat/MonitorPanel.tsx`
 
@@ -1225,20 +1338,21 @@ async def get_monitor_checks(
   - 活跃 monitor 列表，每条显示: 描述、状态、`3/50 次`、最新摘要
   - 停止按钮 → 调用 deleteMonitorSession
   - 点击展开历史 checks 列表
+  - **入口**: 通过 SubSessionIndicator（5.3）的 Monitor 行点击展开，跳转到此面板
 
-### 5.4 Monitor 消息渲染
+### 5.5 Monitor 消息渲染
 
 - [ ] Chat 消息流中，WebSocket 收到 `monitor_check` 事件时:
   - 在消息流中插入一条特殊样式的 monitor 更新消息
   - 不同背景色/图标，与普通对话区分
   - 显示来源 monitor 描述 + 摘要
 
-### 5.5 WebSocket 事件处理
+### 5.6 WebSocket 事件处理
 
 - [ ] 在 ChatView 中监听（使用现有的 `useWebSocket` hook 的 `onMessage` 回调）:
-  - `monitor_session_created` → 面板添加新条目
+  - `monitor_session_created` → SubSessionIndicator 计数 +1 + 面板添加新条目
   - `monitor_check` → 更新摘要 + 消息流插入
-  - `monitor_session_status` → 更新状态标签
+  - `monitor_session_status` → 更新状态标签 + SubSessionIndicator 计数更新
 
 ---
 
