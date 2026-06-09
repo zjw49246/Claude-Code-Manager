@@ -835,14 +835,18 @@ POST /api/tasks/{id}/cancel        → _proxy_to_worker(task, "POST", f"/api/tas
 POST /api/tasks/{id}/retry         → _proxy_to_worker(task, "POST", f"/api/tasks/{id}/retry")
 POST /api/tasks/{id}/plan/approve  → _proxy_to_worker(task, "POST", f"/api/tasks/{id}/plan/approve")
 POST /api/tasks/{id}/plan/reject   → _proxy_to_worker(task, "POST", f"/api/tasks/{id}/plan/reject", body)
+POST /api/tasks/{id}/monitor-sessions        → _proxy_to_worker(task, "POST", f"/api/tasks/{id}/monitor-sessions", body)
+DELETE /api/tasks/{id}/monitor-sessions/{sid} → _proxy_to_worker(task, "DELETE", f"/api/tasks/{id}/monitor-sessions/{sid}")
 
 # 不需要代理的操作（Manager 本地处理）：
-GET  /api/tasks/{id}/chat/history  → Manager DB 已有完整日志副本，直接查本地
-GET  /api/tasks/{id}               → Manager DB
-PUT  /api/tasks/{id}               → Manager DB（标题、标签等元数据）
-POST /api/tasks/{id}/star          → Manager DB
-POST /api/tasks/{id}/archive       → Manager DB
-POST /api/tasks/{id}/read          → Manager DB
+GET  /api/tasks/{id}/chat/history              → Manager DB 已有完整日志副本，直接查本地
+GET  /api/tasks/{id}                           → Manager DB
+PUT  /api/tasks/{id}                           → Manager DB（标题、标签等元数据）
+POST /api/tasks/{id}/star                      → Manager DB
+POST /api/tasks/{id}/archive                   → Manager DB
+POST /api/tasks/{id}/read                      → Manager DB
+GET  /api/tasks/{id}/monitor-sessions          → Manager DB（WorkerRelay 已中继副本）
+GET  /api/tasks/{id}/monitor-sessions/{sid}/checks → Manager DB
 ```
 
 ### 6.5 Chat History
@@ -1223,6 +1227,100 @@ Worker 的 evaluator 每次评估:
   → Manager DB 更新: task.goal_turns_used + task.goal_last_reason
 ```
 
+### 11.4 Monitor Session
+
+Monitor 子进程需要在 task 所在机器上运行（`ps aux` 检查进程、`tail` 读日志、
+读写 signal file 都依赖本地文件系统），因此 Worker task 的 monitor 必须在 Worker
+上执行，不能在 Manager 本地运行。
+
+**Manual monitor（Auto 模式 task）：**
+
+```
+用户在 Manager 创建 manual monitor
+  → POST /tasks/{id}/monitor-sessions
+  → 检测 task.worker_id → 代理到 Worker:
+    POST worker/api/tasks/{id}/monitor-sessions
+  → Worker 创建 MonitorSession + 启动 monitor subprocess
+  → Worker 的 WS 广播 monitor_check / monitor_session_status 事件
+  → WorkerRelay 中继: 存入 Manager DB + 广播到 Manager 前端
+
+用户删除 manual monitor
+  → DELETE /tasks/{id}/monitor-sessions/{sid}
+  → 代理到 Worker: DELETE worker/api/tasks/{id}/monitor-sessions/{sid}
+  → Worker 取消 monitor subprocess
+  → Manager DB 同步更新状态为 cancelled
+```
+
+**System monitor（Loop 模式 task）：**
+
+```
+Worker 的 Dispatcher 运行 loop lifecycle
+  → loop iteration 的 signal file 包含 needs_monitor: true
+  → Worker 自动创建 system monitor（与本地行为完全一致）
+  → Worker 广播 monitor_session_created / monitor_check 事件
+  → WorkerRelay 中继到 Manager（存 DB + 广播前端）
+  → 用户在 Manager UI 可实时看到 Worker 的 system monitor 状态
+```
+
+**WorkerRelay 新增事件处理：**
+
+```python
+# _relay_loop 中新增（与 chat event 存储逻辑类似）
+
+MONITOR_EVENT_TYPES = {
+    "monitor_session_created",
+    "monitor_check",
+    "monitor_session_status",
+}
+
+if event_type == "monitor_session_created":
+    async with self.db_factory() as db:
+        ms = MonitorSession(
+            id=data.get("monitor_session_id"),
+            task_id=task_id,
+            description=data.get("description"),
+            monitor_context=data.get("monitor_context"),
+            interval=data.get("interval", 300),
+            max_checks=data.get("max_checks", 100),
+            model=data.get("model"),
+            status="running",
+            source=data.get("source", "manual"),
+        )
+        await db.merge(ms)  # merge: 幂等，重连后不重复
+        await db.commit()
+
+if event_type == "monitor_check":
+    async with self.db_factory() as db:
+        check = MonitorCheck(
+            monitor_session_id=data.get("monitor_session_id"),
+            check_number=data.get("check_number"),
+            status=data.get("status"),
+            summary=data.get("summary"),
+            full_output=data.get("full_output"),
+        )
+        db.add(check)
+        # 同步 MonitorSession 的 checks_done 和 last_summary
+        ms = await db.get(MonitorSession, data.get("monitor_session_id"))
+        if ms:
+            ms.checks_done = data.get("check_number", ms.checks_done)
+            ms.last_summary = data.get("summary")
+        await db.commit()
+
+if event_type == "monitor_session_status":
+    async with self.db_factory() as db:
+        ms = await db.get(MonitorSession, data.get("monitor_session_id"))
+        if ms:
+            ms.status = data.get("status")
+            if data.get("status") in ("completed", "failed", "cancelled"):
+                ms.completed_at = func.now()
+            await db.commit()
+```
+
+**前置改动（Worker CCM 代码）：** Dispatcher 的 monitor 相关事件需要通过
+`ws_broadcaster` 广播到 `task:{id}` channel。当前 monitor 事件的广播逻辑
+已经在 dispatcher.py 中实现（广播到 `task:{task_id}` channel），WorkerRelay
+订阅该 channel 后可直接收到，无需额外改动。
+
 ---
 
 ## 12. Manager 重启恢复
@@ -1582,6 +1680,10 @@ POST   /api/tasks/{id}/cancel          取消（远程自动代理到 Worker）
 POST   /api/tasks/{id}/retry           重试（远程自动代理到 Worker）
 POST   /api/tasks/{id}/plan/approve    审批 Plan（远程自动代理到 Worker）
 POST   /api/tasks/{id}/plan/reject     拒绝 Plan（远程自动代理到 Worker）
+POST   /api/tasks/{id}/monitor-sessions         创建 Monitor（远程自动代理到 Worker）
+DELETE /api/tasks/{id}/monitor-sessions/{sid}    删除 Monitor（远程自动代理到 Worker）
+GET    /api/tasks/{id}/monitor-sessions          列表（始终查 Manager 本地 DB）
+GET    /api/tasks/{id}/monitor-sessions/{sid}/checks  检查记录（始终查 Manager 本地 DB）
 ```
 
 ---
@@ -1615,7 +1717,8 @@ Phase 2: 任务转发 + Chat 映射
   - Task 创建时选择执行位置
   - WorkerRelay: 每 Worker 一个 WS，日志中继 + 本地存储
   - Chat API 代理（发送/停止/重试 → Worker）
-  - Plan/Loop/Goal 模式状态同步 + 操作代理
+  - Plan/Loop/Goal/Monitor 模式状态同步 + 操作代理
+  - Monitor Session 事件中继（monitor_check/monitor_session_status → Manager DB）
   - Cost / context_window_usage 同步
 
 Phase 3: 文件访问 + Projects
