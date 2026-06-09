@@ -1432,9 +1432,9 @@ async def get_monitor_checks(
 
 ## Phase 7 — 文档
 
-- [ ] 更新 CLAUDE.md（MCP 架构、enabled_skills 字段）
-- [ ] 更新 README.md（Monitor 功能说明、创建 task 时勾选 Skills）
-- [ ] 更新 TEST.md（新增测试用例）
+- [x] 更新 CLAUDE.md（MCP 架构、enabled_skills 字段）
+- [x] 更新 README.md（Monitor 功能说明、创建 task 时勾选 Skills）
+- [x] 更新 TEST.md（新增测试用例）
 
 ---
 
