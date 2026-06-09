@@ -61,9 +61,8 @@
   - manual monitor (source=manual): `while checks_done < max_checks`
   - 每轮: sleep(interval) → 检查 task status → 检查 monitor status → 清理旧 signal → 运行子进程 → 读 signal → 写 DB(MonitorCheck) → 更新 MonitorSession(checks_done+1, last_summary) → 广播 monitor_check 事件 → 判断 done
   - 子进程调用需 try/except: 捕获 TimeoutError 和其他非 CancelledError 异常，记录一条 status="failed" 的 MonitorCheck 后 **继续下一轮**（单次超时/失败不应终止整个 session）
-  - 检查 task status 时: 如果 task 已 completed/failed/cancelled，**必须更新 MonitorSession 状态**（completed→completed, 其他→cancelled），然后 return False。否则 MonitorSession 会永远卡在 "running"
-  - 所有终态转换时设置 `completed_at=func.now()`（done/cancelled/耗尽都算结束）
-  - 完成时广播 `monitor_session_status` 事件（completed/failed）
+  - 检查 task status 时: 如果 task 已 completed/failed/cancelled，**必须更新 MonitorSession 状态**（completed→completed, 其他→cancelled），广播 `monitor_session_status`，然后 return False。否则 MonitorSession 会永远卡在 "running"
+  - **所有终态转换**（done/cancelled/耗尽/task结束）都要同时: ① 设 status ② 设 `completed_at=func.now()` ③ 广播 `monitor_session_status` 事件。三者缺一不可，适用于本方法内部和外部更新点（见下方通用规则）
   - 所有退出路径（done/cancelled/耗尽）都要 `signal_path.unlink(missing_ok=True)` 清理 signal file
   - 返回 True=完成，False=取消或耗尽
 
@@ -73,7 +72,7 @@
   - 注册 `asyncio.current_task()` 到 `self._monitor_tasks[monitor_session.id]`
   - try: 运行 `_run_monitor_session`
   - except CancelledError: pass（DELETE API 已提前更新 DB 状态）
-  - except Exception: 更新 MonitorSession 状态为 "failed"（防止未预期异常导致状态卡在 "running"）
+  - except Exception: 更新 MonitorSession 状态为 "failed" + completed_at（防止未预期异常导致状态卡在 "running"）
   - finally: 清理 `_monitor_tasks`
 
 ---
@@ -115,7 +114,7 @@
   - `DELETE /tasks/{task_id}/monitor-sessions/{session_id}` — 删除 monitor session
     - 校验 task_id 归属
     - 校验 source == "manual"，system monitor 返回 403
-    - 更新 DB status="cancelled"
+    - 更新 DB status="cancelled", completed_at=now()
     - 取消 `dispatcher._monitor_tasks` 中的 asyncio task
   - `GET /tasks/{task_id}/monitor-sessions` — 列表（response_model=list[MonitorSessionResponse]）
   - `GET /tasks/{task_id}/monitor-sessions/{session_id}/checks` — 检查记录列表（response_model=list[MonitorCheckResponse]）
@@ -125,7 +124,7 @@
 
 ### 4.3 任务取消时清理 Monitor
 - [ ] 在 `backend/services/task_queue.py` 的 `cancel()` 方法中追加:
-  - 批量更新该 task 下所有 running 的 MonitorSession 为 cancelled
+  - 批量更新该 task 下所有 running 的 MonitorSession 为 cancelled + completed_at=now()
 - [ ] 在 `backend/services/task_queue.py` 的 `delete()` 方法中追加（参考 LogEntry 的清理模式）:
   - 先删除该 task 下所有 MonitorCheck（通过 MonitorSession.task_id 关联）
   - 再删除该 task 下所有 MonitorSession
@@ -137,7 +136,7 @@
 
 ### 4.4 服务重启清理
 - [ ] 在 `dispatcher.py` 的 `_cleanup_stale_state()` 末尾追加:
-  - 查询所有 status="running" 的 MonitorSession，标记为 "failed"
+  - 查询所有 status="running" 的 MonitorSession，标记为 "failed" + completed_at=now()
 
 ---
 
