@@ -32,6 +32,9 @@
 - 账号在 Worker 本机登录，不从 Manager 分配（避免单机账号过多被封）
 - 项目数据在 Worker 存活期间存放在 Worker 上
 - Worker 销毁时，项目文件 + session 文件全部迁移回 Manager
+- Manager ↔ Worker 通信含 auth token 和代码数据，**生产环境建议使用 VPC 内网 IP
+  或 SSH 隧道**，避免在公网上明文传输。如必须走公网，需在 Worker 上配置 TLS
+  (HTTPS/WSS)
 
 ---
 
@@ -363,7 +366,7 @@ async def _forward_task_to_worker(self, task):
 
     # 2. 先订阅 WS relay（必须在创建 task 之前，否则 Worker Dispatcher
     #    可能在 task 创建后立即取到并执行，导致初始事件丢失）
-    await self._start_worker_task_relay(worker, task)
+    await worker_relay.subscribe_task(worker, task)
 
     # 3. 调 Worker CCM API 创建 task，指定 ID = task.id
     async with httpx.AsyncClient() as client:
@@ -466,19 +469,26 @@ class WorkerRelay:
                 channel = msg.get("channel", "")
                 data = msg.get("data", msg)
                 event_type = data.get("event_type") or data.get("event")
+
+                # 提取 task_id：优先从 data 中取，否则从 channel 名解析
+                # 原因：instance_manager 广播到 task:{id} 的事件（message, tool_use 等）
+                # 不在 data 中包含 task_id，只能从 channel 名获取
                 task_id = data.get("task_id")
+                if not task_id and channel.startswith("task:"):
+                    try:
+                        task_id = int(channel.split(":", 1)[1])
+                    except (ValueError, IndexError):
+                        pass
 
                 # 过滤：只处理我们关心的 task
-                if task_id and task_id not in self._worker_tasks.get(worker.id, set()):
-                    continue
                 if not task_id:
                     continue
+                if task_id not in self._worker_tasks.get(worker.id, set()):
+                    continue
 
-                # 1. 存入 Manager DB（保留完整日志副本）
-                # 跳过 user_message：由 _send_worker_chat 在转发前已存入，
-                # 避免 Worker 回传时重复存储
+                # 1. 跳过 user_message：由 _send_worker_chat 在转发前已存入 DB 并广播，
+                # Worker 回传的 user_message 直接丢弃，避免重复存储和双重广播
                 if event_type == "user_message":
-                    await self.broadcaster.broadcast(f"task:{task_id}", data)
                     continue
                 if event_type in CHAT_EVENT_TYPES:
                     async with self.db_factory() as db:
@@ -524,11 +534,14 @@ class WorkerRelay:
                             await db.commit()
 
                 # 4. 同步 Plan 模式（plan_content + 状态变为 plan_review）
+                # 注意：plan_ready 广播只含 task_id + instance_id，不含 plan_content
+                # 需要从 Worker API 单独获取 plan_content
                 if event_type == "plan_ready":
+                    plan_content = await self._fetch_plan_content(worker, task_id)
                     async with self.db_factory() as db:
                         task_obj = await db.get(Task, task_id)
                         if task_obj:
-                            task_obj.plan_content = data.get("plan_content")
+                            task_obj.plan_content = plan_content
                             task_obj.status = "plan_review"
                             await db.commit()
 
@@ -541,12 +554,15 @@ class WorkerRelay:
                             await db.commit()
 
                 # 6. 同步 Goal 模式评估结果
+                # 实际广播字段：task:{id} channel 有 turn/max_turns/achieved/reason
+                #              tasks channel 只有 task_id/turn/achieved（无 reason）
                 if event_type == "goal_evaluation":
                     async with self.db_factory() as db:
                         task_obj = await db.get(Task, task_id)
                         if task_obj:
-                            task_obj.goal_turns_used = data.get("turns_used", task_obj.goal_turns_used)
-                            task_obj.goal_last_reason = data.get("reason")
+                            task_obj.goal_turns_used = data.get("turn", task_obj.goal_turns_used)
+                            if data.get("reason"):
+                                task_obj.goal_last_reason = data["reason"]
                             await db.commit()
 
                 # 7. 广播到 Manager 前端（格式和本地 task 完全一致）
@@ -635,6 +651,17 @@ class WorkerRelay:
                         db.add(log)
                     await db.commit()
 
+    async def _fetch_plan_content(self, worker, task_id):
+        """plan_ready 广播不含 plan_content，需要从 Worker API 获取。"""
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"http://{worker.public_ip}:{worker.ccm_port}/api/tasks/{task_id}",
+                headers={"Authorization": f"Bearer {worker.auth_token}"}
+            )
+            if resp.status_code == 200:
+                return resp.json().get("plan_content")
+            return None
+
     async def stop_worker(self, worker_id: int):
         """断开与 Worker 的连接。"""
         ws = self._worker_ws.pop(worker_id, None)
@@ -702,7 +729,7 @@ async def _send_worker_chat(task, body, db):
         result = resp.json()
 
     # 4. 确保日志中继已启动（可能是 Chat 唤醒的）
-    await worker_relay.start_relay(worker, task)
+    await worker_relay.subscribe_task(worker, task)
 
     # 5. 替换 Worker 本地的 instance_id（对 Manager 无意义）
     result["instance_id"] = None
@@ -824,7 +851,7 @@ if body.clone_from_task_id:
 ```
 Task 创建在 Worker 上
   → Dispatcher._forward_task_to_worker()
-  → WorkerRelay.start_relay(worker, task)  ← 先建立 relay
+  → WorkerRelay.subscribe_task(worker, task)  ← 先建立 relay
   → POST Worker API 创建 task              ← 再创建 task（避免丢失初始事件）
   → 建立 WS 连接，开始中继
 
@@ -1221,11 +1248,12 @@ async def _health_check_loop(self):
             workers = await self._get_ready_workers(db)
             for worker in workers:
                 try:
-                    resp = await httpx.AsyncClient().get(
-                        f"http://{worker.public_ip}:{worker.ccm_port}/api/system/health",
-                        headers={"Authorization": f"Bearer {worker.auth_token}"},
-                        timeout=10
-                    )
+                    async with httpx.AsyncClient() as client:
+                        resp = await client.get(
+                            f"http://{worker.public_ip}:{worker.ccm_port}/api/system/health",
+                            headers={"Authorization": f"Bearer {worker.auth_token}"},
+                            timeout=10
+                        )
                     worker.last_heartbeat = datetime.utcnow()
                     _fail_counts.pop(worker.id, None)
                 except Exception:
