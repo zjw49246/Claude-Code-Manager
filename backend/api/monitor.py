@@ -1,0 +1,131 @@
+from datetime import datetime
+
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import select, func
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from backend.database import get_db
+from backend.models.task import Task
+from backend.models.monitor_session import MonitorSession, MonitorCheck
+from backend.schemas.monitor_session import (
+    MonitorSessionCreate,
+    MonitorSessionResponse,
+    MonitorCheckResponse,
+)
+
+router = APIRouter(prefix="/api/tasks/{task_id}/monitor-sessions", tags=["monitor"])
+
+MAX_CONCURRENT_MONITORS = 5
+
+
+@router.post("", response_model=MonitorSessionResponse)
+async def create_monitor_session(
+    task_id: int,
+    body: MonitorSessionCreate,
+    db: AsyncSession = Depends(get_db),
+):
+    task = await db.get(Task, task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    skills = task.enabled_skills or {}
+    if not skills.get("monitor"):
+        raise HTTPException(403, "Monitor skill not enabled for this task")
+    if task.status not in ("in_progress", "executing"):
+        raise HTTPException(400, "Cannot create monitor for inactive task")
+
+    active_count = await db.scalar(
+        select(func.count(MonitorSession.id))
+        .where(MonitorSession.task_id == task_id, MonitorSession.status == "running")
+    )
+    if active_count >= MAX_CONCURRENT_MONITORS:
+        raise HTTPException(
+            429,
+            f"Too many active monitors ({active_count}/{MAX_CONCURRENT_MONITORS}). "
+            "Stop an existing monitor first.",
+        )
+
+    ms = MonitorSession(
+        task_id=task_id,
+        description=body.description,
+        monitor_context=body.monitor_context,
+        interval=body.interval,
+        max_checks=body.max_checks,
+        model=body.model,
+    )
+    db.add(ms)
+    await db.commit()
+    await db.refresh(ms)
+
+    from backend.main import dispatcher
+    dispatcher.start_monitor_session(ms)
+
+    await dispatcher.broadcaster.broadcast(
+        f"task:{task_id}",
+        {"event": "monitor_session_created", "monitor_session_id": ms.id, "description": ms.description},
+    )
+
+    return ms
+
+
+@router.get("", response_model=list[MonitorSessionResponse])
+async def list_monitor_sessions(task_id: int, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(
+        select(MonitorSession)
+        .where(MonitorSession.task_id == task_id)
+        .order_by(MonitorSession.created_at.desc())
+    )
+    return list(result.scalars().all())
+
+
+@router.get("/{session_id}", response_model=MonitorSessionResponse)
+async def get_monitor_session(
+    task_id: int, session_id: int, db: AsyncSession = Depends(get_db),
+):
+    ms = await db.get(MonitorSession, session_id)
+    if not ms or ms.task_id != task_id:
+        raise HTTPException(404, "Monitor session not found")
+    return ms
+
+
+@router.delete("/{session_id}")
+async def delete_monitor_session(
+    task_id: int, session_id: int, db: AsyncSession = Depends(get_db),
+):
+    ms = await db.get(MonitorSession, session_id)
+    if not ms or ms.task_id != task_id:
+        raise HTTPException(404, "Monitor session not found")
+
+    if ms.status == "running":
+        ms.status = "cancelled"
+        ms.completed_at = datetime.utcnow()
+        await db.commit()
+
+    from backend.main import dispatcher
+    atask = dispatcher._monitor_tasks.get(session_id)
+    if atask and not atask.done():
+        atask.cancel()
+    proc = dispatcher._monitor_processes.get(session_id)
+    if proc and proc.returncode is None:
+        proc.kill()
+
+    await dispatcher.broadcaster.broadcast(
+        f"task:{task_id}",
+        {"event": "monitor_session_status", "monitor_session_id": session_id, "status": "cancelled"},
+    )
+
+    return {"ok": True}
+
+
+@router.get("/{session_id}/checks", response_model=list[MonitorCheckResponse])
+async def get_monitor_checks(
+    task_id: int, session_id: int, db: AsyncSession = Depends(get_db),
+):
+    ms = await db.get(MonitorSession, session_id)
+    if not ms or ms.task_id != task_id:
+        raise HTTPException(404, "Monitor session not found")
+    result = await db.execute(
+        select(MonitorCheck)
+        .where(MonitorCheck.monitor_session_id == session_id)
+        .order_by(MonitorCheck.created_at.desc())
+    )
+    return list(result.scalars().all())
