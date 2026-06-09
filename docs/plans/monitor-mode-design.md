@@ -455,7 +455,7 @@ async def _run_monitor_subprocess(self, prompt, cwd, model, task_id, monitor_ses
         "--model", model,
         "--output-format", "stream-json",
         "--dangerously-skip-permissions",
-        "--disallowedTools", "Edit", "Write", "NotebookEdit",
+        "--disallowedTools", "Edit,Write,NotebookEdit",
     ]
 
     env = {
@@ -471,8 +471,14 @@ async def _run_monitor_subprocess(self, prompt, cwd, model, task_id, monitor_ses
         env=env,
     )
 
-    full_output = await self._consume_monitor_output(process, task_id, monitor_session_id)
-    await asyncio.wait_for(process.wait(), timeout=120)
+    try:
+        full_output = await asyncio.wait_for(
+            self._consume_monitor_output(process, task_id, monitor_session_id),
+            timeout=300,
+        )
+    except asyncio.TimeoutError:
+        process.kill()
+        full_output = "（监控子进程超时，已终止）"
     return full_output
 
 async def _consume_monitor_output(self, process, task_id, monitor_session_id) -> str:
