@@ -81,7 +81,7 @@ Task (主 Agent Session)
 
 ### Phase 3: MCP Config 生成
 
-- [ ] **3.1** 在 `backend/services/mcp_config.py` 新增 `generate_monitor_agent_mcp_config()`
+- [x] **3.1** 在 `backend/services/mcp_config.py` 新增 `generate_monitor_agent_mcp_config()`
   ```python
   def generate_monitor_agent_mcp_config(
       monitor_session_id: int, task_id: int, api_base: str | None = None
@@ -91,7 +91,7 @@ Task (主 Agent Session)
   - server: `backend.mcp.ccm_monitor_agent_server`
   - args: `--monitor-session-id`, `--task-id`, `--api-base`, `--auth-token`
 
-- [ ] **3.2** 新增 `cleanup_monitor_agent_mcp_config(monitor_session_id: int)`
+- [x] **3.2** 新增 `cleanup_monitor_agent_mcp_config(monitor_session_id: int)`
 
 ### Phase 4: 重构 Dispatcher
 
