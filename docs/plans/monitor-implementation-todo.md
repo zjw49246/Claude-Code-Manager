@@ -104,29 +104,29 @@
 
 **修改文件**: `backend/models/task.py`
 
-- [ ] 新增字段（搜索 `enable_workflows` 找到插入位置，在其下方添加）:
+- [x] 新增字段（搜索 `enable_workflows` 找到插入位置，在其下方添加）:
   ```python
   enabled_skills: Mapped[dict | None] = mapped_column(JSON, nullable=True)
   ```
 
 **修改文件**: `backend/schemas/task.py`
 
-- [ ] `TaskCreate`（搜索 `enable_workflows`，在其下方添加）:
+- [x] `TaskCreate`（搜索 `enable_workflows`，在其下方添加）:
   ```python
   enabled_skills: dict | None = None  # e.g. {"monitor": true}
   ```
-- [ ] `TaskUpdate`（搜索 `enable_workflows`，在其下方添加）:
+- [x] `TaskUpdate`（搜索 `enable_workflows`，在其下方添加）:
   ```python
   enabled_skills: dict | None = None
   ```
-- [ ] `TaskResponse`（搜索 `enable_workflows`，在其下方添加）:
+- [x] `TaskResponse`（搜索 `enable_workflows`，在其下方添加）:
   ```python
   enabled_skills: dict | None = None
   ```
 
 **Migration**:
-- [ ] `alembic revision --autogenerate -m "add_enabled_skills_to_tasks"`
-- [ ] `alembic upgrade head`
+- [x] `alembic revision --autogenerate -m "add_enabled_skills_to_tasks"`
+- [x] `alembic upgrade head`
 
 ### 1.2 MonitorSession Model
 
@@ -135,7 +135,7 @@
 
 **新建文件**: `backend/models/monitor_session.py`
 
-- [ ] 创建以下内容:
+- [x] 创建以下内容:
 
 ```python
 from datetime import datetime
@@ -177,22 +177,22 @@ class MonitorCheck(Base):
 
 **修改文件**: `alembic/env.py`
 
-- [ ] 在现有 import 区域添加（搜索其他 model import 找到位置）:
+- [x] 在现有 import 区域添加（搜索其他 model import 找到位置）:
   ```python
   from backend.models.monitor_session import MonitorSession, MonitorCheck
   ```
 
 ### 1.4 创建 Migration
 
-- [ ] `alembic revision --autogenerate -m "add_monitor_sessions_and_checks_tables"`
-- [ ] 检查生成的 migration 文件，确认两个表结构正确
-- [ ] `alembic upgrade head` 验证迁移成功
+- [x] `alembic revision --autogenerate -m "add_monitor_sessions_and_checks_tables"`
+- [x] 检查生成的 migration 文件，确认两个表结构正确
+- [x] `alembic upgrade head` 验证迁移成功
 
 ### 1.5 Schema
 
 **新建文件**: `backend/schemas/monitor_session.py`
 
-- [ ] 创建:
+- [x] 创建:
 
 ```python
 from datetime import datetime

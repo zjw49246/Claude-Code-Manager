@@ -23,6 +23,7 @@ class TaskCreate(BaseModel):
     effort_level: str | None = None
     thinking_budget: int | None = None
     enable_workflows: bool = False
+    enabled_skills: dict | None = None
     tags: list[str] | None = None
     image_paths: list[str] | None = None  # kept for backwards compat
     file_paths: list[str] | None = None
@@ -57,6 +58,7 @@ class TaskUpdate(BaseModel):
     goal_max_turns: int | None = None
     goal_evaluator_model: str | None = None
     enable_workflows: bool | None = None
+    enabled_skills: dict | None = None
     provider: str | None = None
     starred: bool | None = None
     tags: list[str] | None = None
@@ -94,6 +96,7 @@ class TaskResponse(BaseModel):
     effort_level: str | None
     thinking_budget: int | None
     enable_workflows: bool
+    enabled_skills: dict | None
     starred: bool
     archived: bool
     has_unread: bool
