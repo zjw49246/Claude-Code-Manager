@@ -6,6 +6,7 @@ from pathlib import Path
 
 
 _CCM_ROOT = str(Path(__file__).resolve().parent.parent.parent)
+_VENV_PYTHON = str(Path(_CCM_ROOT) / ".venv" / "bin" / "python3")
 
 
 def generate_mcp_config(task_id: int, enabled_skills: dict, api_base: str | None = None) -> Path | None:
@@ -37,7 +38,7 @@ def generate_mcp_config(task_id: int, enabled_skills: dict, api_base: str | None
         if auth_token:
             args.extend(["--auth-token", auth_token])
         servers["ccm_skills"] = {
-            "command": sys.executable,
+            "command": _VENV_PYTHON,
             "args": args,
             "cwd": _CCM_ROOT,
         }
@@ -85,7 +86,7 @@ def generate_monitor_agent_mcp_config(
     config = {
         "mcpServers": {
             "ccm_monitor_agent": {
-                "command": sys.executable,
+                "command": _VENV_PYTHON,
                 "args": args,
                 "cwd": _CCM_ROOT,
             }
