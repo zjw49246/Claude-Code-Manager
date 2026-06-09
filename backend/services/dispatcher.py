@@ -44,6 +44,7 @@ class QueuedMessage:
     prompt: str = field(compare=False)
     source: str = field(compare=False, default="user")
     user_message_text: str | None = field(compare=False, default=None)
+    command_skills: dict | None = field(compare=False, default=None)
 
 
 def _binary_available(binary: str) -> bool:
@@ -536,18 +537,11 @@ class GlobalDispatcher:
             if image_paths:
                 image_list = "\n".join(f"- {p}" for p in image_paths)
                 parts.append(f"用户提供了以下参考图片，请先用 Read 工具查看：\n{image_list}")
-            if task.enabled_skills and task.enabled_skills.get("monitor"):
-                parts.append(
-                    "【重要 — 监控规则】你拥有后台监控子 agent 系统（通过 ccm-skills MCP 工具）。\n"
-                    "当任务涉及监控、观察、等待、轮询后台进程或长时间运行的操作时，"
-                    "你必须调用 create_monitor 工具将监控工作委托给子 agent，"
-                    "禁止自己用 Bash/Read 等工具手动执行监控循环。\n"
-                    "【禁止】不要使用内置的 Agent 工具或 Monitor 工具来执行监控任务。"
-                    "这些内置工具不在 CCM 系统的管理范围内，无法被追踪和记录。"
-                    "所有监控必须通过 create_monitor 工具发起，由 CCM 子 agent 系统统一管理。\n"
-                    "子 agent 会独立运行并定期汇报状态，你通过 check_monitors 查看进展。\n"
-                    "可用工具: create_monitor（创建监控子agent）/ check_monitors（查看状态）/ stop_monitor（停止监控）。"
-                )
+            if task.enabled_skills:
+                from backend.services.command_registry import COMMAND_REGISTRY
+                for skill_name, enabled in task.enabled_skills.items():
+                    if enabled and skill_name in COMMAND_REGISTRY:
+                        parts.append(COMMAND_REGISTRY[skill_name].prompt_template)
             parts.append(f"任务:\n{task.description}")
             full_prompt = "\n\n".join(parts)
 
@@ -759,18 +753,11 @@ class GlobalDispatcher:
             if image_paths:
                 image_list = "\n".join(f"- {p}" for p in image_paths)
                 parts.append(f"用户提供了以下参考图片，请先用 Read 工具查看：\n{image_list}")
-            if task.enabled_skills and task.enabled_skills.get("monitor"):
-                parts.append(
-                    "【重要 — 监控规则】你拥有后台监控子 agent 系统（通过 ccm-skills MCP 工具）。\n"
-                    "当任务涉及监控、观察、等待、轮询后台进程或长时间运行的操作时，"
-                    "你必须调用 create_monitor 工具将监控工作委托给子 agent，"
-                    "禁止自己用 Bash/Read 等工具手动执行监控循环。\n"
-                    "【禁止】不要使用内置的 Agent 工具或 Monitor 工具来执行监控任务。"
-                    "这些内置工具不在 CCM 系统的管理范围内，无法被追踪和记录。"
-                    "所有监控必须通过 create_monitor 工具发起，由 CCM 子 agent 系统统一管理。\n"
-                    "子 agent 会独立运行并定期汇报状态，你通过 check_monitors 查看进展。\n"
-                    "可用工具: create_monitor（创建监控子agent）/ check_monitors（查看状态）/ stop_monitor（停止监控）。"
-                )
+            if task.enabled_skills:
+                from backend.services.command_registry import COMMAND_REGISTRY
+                for skill_name, enabled in task.enabled_skills.items():
+                    if enabled and skill_name in COMMAND_REGISTRY:
+                        parts.append(COMMAND_REGISTRY[skill_name].prompt_template)
             parts.append(f"任务:\n{task.description}")
             full_prompt = "\n\n".join(parts)
 
@@ -1819,6 +1806,7 @@ class GlobalDispatcher:
         priority: int = PRIORITY_USER,
         source: str = "user",
         user_message_text: str | None = None,
+        command_skills: dict | None = None,
     ):
         """Enqueue a message for the main agent of a task.
 
@@ -1831,6 +1819,7 @@ class GlobalDispatcher:
             prompt=prompt,
             source=source,
             user_message_text=user_message_text,
+            command_skills=command_skills,
         )
         await q.put(msg)
         self._ensure_queue_worker(task_id)
@@ -1934,6 +1923,11 @@ class GlobalDispatcher:
                 f"on instance {inst.id}"
             )
 
+            # Merge command_skills with task's enabled_skills for this launch
+            effective_skills = dict(task.enabled_skills or {})
+            if msg.command_skills:
+                effective_skills.update(msg.command_skills)
+
             # Capture launch params before closing DB session
             launch_kwargs = dict(
                 instance_id=inst.id,
@@ -1949,7 +1943,7 @@ class GlobalDispatcher:
                 config_dir=config_dir,
                 provider=task.provider,
                 enable_workflows=task.enable_workflows,
-                enabled_skills=task.enabled_skills,
+                enabled_skills=effective_skills,
             )
             inst_id = inst.id
 

@@ -150,24 +150,20 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat }: TaskListPro
               {t.model && (
                 <span className="hidden sm:inline text-xs bg-gray-700 text-gray-300 px-1.5 rounded">{t.model}</span>
               )}
-              {t.enabled_skills && Object.values(t.enabled_skills).some(Boolean) && (
-                <button
-                  onClick={() => setToolsExpandedId(toolsExpandedId === t.id ? null : t.id)}
-                  className="text-xs bg-amber-600/30 text-amber-300 px-1.5 rounded cursor-pointer hover:bg-amber-600/40 flex items-center gap-0.5"
-                >
-                  <Wrench size={12} />
-                  {Object.values(t.enabled_skills).filter(Boolean).length}
-                </button>
-              )}
-              {t.enabled_skills && Object.values(t.enabled_skills).some(Boolean) && (
-                <button
-                  onClick={() => handleSubAgentsToggle(t.id)}
-                  className={`text-xs bg-teal-600/30 text-teal-300 px-1.5 rounded cursor-pointer hover:bg-teal-600/40 flex items-center gap-0.5${t.active_sub_agents > 0 ? ' animate-pulse' : ''}`}
-                >
-                  <Users size={12} />
-                  {t.active_sub_agents}
-                </button>
-              )}
+              <button
+                onClick={() => setToolsExpandedId(toolsExpandedId === t.id ? null : t.id)}
+                className="text-xs bg-amber-600/30 text-amber-300 px-1.5 rounded cursor-pointer hover:bg-amber-600/40 flex items-center gap-0.5"
+              >
+                <Wrench size={12} />
+                {t.enabled_skills ? Object.values(t.enabled_skills).filter(Boolean).length : 0}
+              </button>
+              <button
+                onClick={() => handleSubAgentsToggle(t.id)}
+                className={`text-xs bg-teal-600/30 text-teal-300 px-1.5 rounded cursor-pointer hover:bg-teal-600/40 flex items-center gap-0.5${t.active_sub_agents > 0 ? ' animate-pulse' : ''}`}
+              >
+                <Users size={12} />
+                {t.active_sub_agents}
+              </button>
             </div>
             {/* Action buttons */}
             <div className="flex gap-1 shrink-0 items-center">
@@ -255,13 +251,17 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat }: TaskListPro
           </div>
           </div>
           {/* Expandable tools list */}
-          {toolsExpandedId === t.id && t.enabled_skills && (
+          {toolsExpandedId === t.id && (
             <div className="mt-1 pl-[1.125rem] flex flex-wrap gap-1">
-              {Object.entries(t.enabled_skills).filter(([, v]) => v).map(([skill]) => (
-                <span key={skill} className="text-xs bg-green-600/30 text-green-300 px-1.5 py-0.5 rounded">
-                  ✓ {skill.charAt(0).toUpperCase() + skill.slice(1)}
-                </span>
-              ))}
+              {t.enabled_skills && Object.entries(t.enabled_skills).filter(([, v]) => v).length > 0 ? (
+                Object.entries(t.enabled_skills).filter(([, v]) => v).map(([skill]) => (
+                  <span key={skill} className="text-xs bg-green-600/30 text-green-300 px-1.5 py-0.5 rounded">
+                    ✓ {skill.charAt(0).toUpperCase() + skill.slice(1)}
+                  </span>
+                ))
+              ) : (
+                <span className="text-xs text-gray-500">No tools enabled — use $command to access temporarily</span>
+              )}
             </div>
           )}
           {/* Expandable sub-agents detail */}

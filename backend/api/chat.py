@@ -33,19 +33,25 @@ async def send_chat_message(
     if not task.session_id:
         raise HTTPException(400, "No previous session on this task. Run the task first.")
 
+    # Parse $command syntax
+    from backend.services.command_registry import parse_command, COMMAND_REGISTRY
+    command, command_args = parse_command(body.message)
+    command_skills: dict | None = None
+
     # Build prompt — append secrets, skill instructions, and image paths
     prompt_parts = [body.message]
-    if task.enabled_skills and task.enabled_skills.get("monitor"):
-        prompt_parts.append(
-            "【重要 — 监控规则】你拥有后台监控子 agent 系统（通过 ccm-skills MCP 工具）。"
-            "当任务涉及监控、观察、等待、轮询后台进程或长时间运行的操作时，"
-            "你必须调用 create_monitor 工具将监控工作委托给子 agent，"
-            "禁止自己用 Bash/Read 等工具手动执行监控循环。"
-            "【禁止】不要使用内置的 Agent 工具来执行监控任务。"
-            "内置 Agent 工具不在 CCM 系统的管理范围内，无法被追踪和记录。"
-            "所有监控必须通过 create_monitor 工具发起，由 CCM 子 agent 系统统一管理。"
-            "可用工具: create_monitor（创建监控子agent）/ check_monitors（查看状态）/ stop_monitor（停止监控）。"
-        )
+    if command:
+        # $command detected: inject command prompt and set temporary skills
+        prompt_parts.append(command.prompt_template)
+        if command_args:
+            prompt_parts[0] = command_args
+        command_skills = command.required_skills or None
+    else:
+        # Normal message: inject prompts for permanently enabled skills
+        if task.enabled_skills:
+            for skill_name, enabled in task.enabled_skills.items():
+                if enabled and skill_name in COMMAND_REGISTRY:
+                    prompt_parts.append(COMMAND_REGISTRY[skill_name].prompt_template)
     if body.secret_ids:
         from backend.services.dispatcher import _build_secrets_block
         from backend.database import async_session
@@ -100,6 +106,7 @@ async def send_chat_message(
         prompt=prompt,
         priority=PRIORITY_USER,
         source="user",
+        command_skills=command_skills,
     )
 
     return {"ok": True, "queued": True, "session_id": task.session_id}
