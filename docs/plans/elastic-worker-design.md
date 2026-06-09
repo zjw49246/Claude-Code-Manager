@@ -186,12 +186,18 @@ Step 6: account-login
   # 需要适配：增加 --add-to-pool <account-name> 参数，登录完成后
   # 自动将账号添加到 ~/.claude-pool/accounts.json 中
   cd /opt/ccm
-  python3 scripts/auto_login.py --email alice@example.com --add-to-pool account-1
+  # 关键：第一个账号必须使用 ~/.claude 作为 config_dir（与进程默认
+  # CLAUDE_CONFIG_DIR 一致）。原因：chat.py 的 migrate_session 用
+  # os.environ.get("CLAUDE_CONFIG_DIR") 作为 old_config_dir，默认值是
+  # ~/.claude。如果第一个账号用 ~/.claude-account-1，pool 轮换时
+  # migrate_session 在 ~/.claude 下找不到 session 文件，--resume 失败。
+  # Manager 的第一个账号也是 ~/.claude，保持一致。
+  python3 scripts/auto_login.py --email alice@example.com --add-to-pool default
   python3 scripts/auto_login.py --email bob@example.com --add-to-pool account-2
 
   # 登录完成后，Worker 上会有：
   # ~/.claude-pool/accounts.json  (账号池配置)
-  # ~/.claude-account-1/          (第一个账号的 config_dir)
+  # ~/.claude/                    (第一个账号的 config_dir，与进程默认值一致)
   # ~/.claude-account-2/          (第二个账号的 config_dir)
   # 通过 CCM 的硬连接机制，所有 session 都可从第一个账号的 config_dir 访问
 
@@ -819,10 +825,16 @@ async def _proxy_to_worker(task, method, path, body=None):
             raise HTTPException(503, f"无法连接到 Worker {worker.name}，请检查 Worker 状态")
 
 # 需要代理的操作：
-POST /api/tasks/{id}/chat          → _proxy_to_worker(task, "POST", f"/api/tasks/{id}/chat", body)
+
+# chat 使用专用函数（见 6.3），有 user_message 存储/session_id 同步等特殊逻辑：
+POST /api/tasks/{id}/chat          → _send_worker_chat(task, body, db)
+
+# 以下使用通用代理：
 POST /api/tasks/{id}/stop-session  → _proxy_to_worker(task, "POST", f"/api/tasks/{id}/stop-session")
 POST /api/tasks/{id}/cancel        → _proxy_to_worker(task, "POST", f"/api/tasks/{id}/cancel")
 POST /api/tasks/{id}/retry         → _proxy_to_worker(task, "POST", f"/api/tasks/{id}/retry")
+POST /api/tasks/{id}/plan/approve  → _proxy_to_worker(task, "POST", f"/api/tasks/{id}/plan/approve")
+POST /api/tasks/{id}/plan/reject   → _proxy_to_worker(task, "POST", f"/api/tasks/{id}/plan/reject", body)
 
 # 不需要代理的操作（Manager 本地处理）：
 GET  /api/tasks/{id}/chat/history  → Manager DB 已有完整日志副本，直接查本地
@@ -1144,8 +1156,8 @@ async def _sync_task_details_from_worker(self, worker, db):
 
 ```
 销毁前:
-  Worker 上: ~/.claude-account-1/projects/<encoded_cwd>/<session_id>.jsonl
-  (通过硬连接，所有 Worker 账号都能访问)
+  Worker 上: ~/.claude/projects/<encoded_cwd>/<session_id>.jsonl
+  (通过硬连接，所有 Worker 账号都能访问；第一个账号用 ~/.claude，见 3.3 Step 6)
 
 rsync 后:
   Manager 上: <manager 第一个账号 config_dir>/projects/<encoded_cwd>/<session_id>.jsonl
