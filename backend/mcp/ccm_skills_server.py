@@ -17,10 +17,17 @@ mcp = FastMCP("ccm-skills", instructions="CCM task skill tools")
 
 _TASK_ID: int = 0
 _API_BASE: str = "http://localhost:8000"
+_AUTH_TOKEN: str = ""
 
 
 def _api_url(path: str) -> str:
     return f"{_API_BASE}/api/tasks/{_TASK_ID}{path}"
+
+
+def _headers() -> dict[str, str]:
+    if _AUTH_TOKEN:
+        return {"Authorization": f"Bearer {_AUTH_TOKEN}"}
+    return {}
 
 
 @mcp.tool()
@@ -45,6 +52,7 @@ async def create_monitor(
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(
                 _api_url("/monitor-sessions"),
+                headers=_headers(),
                 json={
                     "description": description,
                     "monitor_context": context,
@@ -73,7 +81,7 @@ async def check_monitors() -> str:
     """
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(_api_url("/monitor-sessions"))
+            resp = await client.get(_api_url("/monitor-sessions"), headers=_headers())
             resp.raise_for_status()
             sessions = resp.json()
             if not sessions:
@@ -105,7 +113,8 @@ async def stop_monitor(monitor_id: int) -> str:
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.delete(
-                _api_url(f"/monitor-sessions/{monitor_id}")
+                _api_url(f"/monitor-sessions/{monitor_id}"),
+                headers=_headers(),
             )
             resp.raise_for_status()
             return json.dumps({
@@ -121,9 +130,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="CCM Skills MCP Server")
     parser.add_argument("--task-id", type=int, required=True)
     parser.add_argument("--api-base", default="http://localhost:8000")
+    parser.add_argument("--auth-token", default="")
     args = parser.parse_args()
 
     _TASK_ID = args.task_id
     _API_BASE = args.api_base
+    _AUTH_TOKEN = args.auth_token
 
     mcp.run(transport="stdio")
