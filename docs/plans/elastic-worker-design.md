@@ -419,8 +419,12 @@ async def _forward_task_to_worker(self, task):
 > **前置改动（CCM 代码）：**
 > 1. `LogEntry.instance_id` 改为 nullable（当前是 NOT NULL），或者新增一个
 >    id=0 name="remote" 的虚拟 Instance 记录。远程 task 的 LogEntry 用这个值。
-> 2. ~~（已确认不需要）~~ Dispatcher 的 `status_change` 事件**已经**同时广播到 `tasks` 和
->    `task:{id}` 两个 channel，WorkerRelay 订阅 `task:{id}` 可以正常收到。无需改动。
+> 2. Dispatcher 的各事件 channel 映射（已确认）：
+>    - `status_change`, `plan_ready` → 只发 `"tasks"` channel
+>    - `loop_iteration_end`, chat events → 只发 `"task:{id}"` channel
+>    - `goal_evaluation` → 同时发 `"task:{id}"` 和 `"tasks"`
+>    WorkerRelay 需要订阅 `"tasks"` + `"task:{id}"`，并按来源 channel 转发到 Manager
+>    相同的 channel，保持与本地 task 行为完全一致。
 > 3. Worker CCM 的 `/ws` 端点需要加 Bearer Token 认证（当前无认证）。
 
 ```python
@@ -575,12 +579,19 @@ class WorkerRelay:
                                 task_obj.goal_last_reason = data["reason"]
                             await db.commit()
 
-                # 7. 广播到 Manager 前端（格式和本地 task 完全一致）
-                await self.broadcaster.broadcast(f"task:{task_id}", data)
-                # status_change 还需要广播到 tasks 全局 channel，
-                # 否则 Manager 前端 task 列表不会实时更新
-                if event_type == "status_change":
-                    await self.broadcaster.broadcast("tasks", data)
+                # 7. 广播到 Manager 前端 — 保持与本地 task 完全一致的 channel 映射
+                # 本地 task 的 channel 规则：
+                #   status_change, plan_ready → "tasks" only
+                #   loop_iteration_end, chat events, context_usage → "task:{id}" only
+                #   goal_evaluation → BOTH "task:{id}" AND "tasks"（两次独立 broadcast）
+                # 所以：转发到事件来源的同一 channel，完美镜像本地行为。
+                # 同时剥离 Worker 的 instance_id（对 Manager 无意义，可能导致前端
+                # 尝试查找不存在的 Instance 记录）
+                forward_data = {k: v for k, v in data.items() if k != "instance_id"}
+                if channel.startswith("task:"):
+                    await self.broadcaster.broadcast(f"task:{task_id}", forward_data)
+                elif channel == "tasks":
+                    await self.broadcaster.broadcast("tasks", forward_data)
 
         except websockets.ConnectionClosed:
             # Worker 断线 → 尝试重连
