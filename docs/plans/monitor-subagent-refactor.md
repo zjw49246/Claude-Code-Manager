@@ -204,7 +204,7 @@ Task 卡片上的可展开工具权限指示器。
 
 - [x] **9.1** 更新 CLAUDE.md
 - [x] **9.2** 更新 README.md
-- [ ] **9.3** 提交到 dev 分支（`git add && git commit`，不 push main）
+- [x] **9.3** 提交到 dev 分支（`git add && git commit`，不 push main）
 
 ---
 
