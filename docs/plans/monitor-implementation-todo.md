@@ -165,7 +165,6 @@
   - `monitor_session_created` → 列表添加新条目
   - `monitor_check` → 实时更新最新摘要
   - `monitor_session_status` → 更新状态标签
-  - `monitor_output` → 实时流式输出（如果用户在详情页）
 
 ---
 
