@@ -1,8 +1,9 @@
 # Monitor Session 实施计划
 
 > 分支: `feature/monitor-session`
-> 约束: 仅本地修改，不 push，不影响部署。
 > 范围: 仅 Auto 模式和 Loop 模式，Goal 模式不支持监控。
+>
+> **⚠ 关键约束：所有代码修改必须在 `feature/monitor-session` 分支上进行。禁止合并或 push 到 main 分支。禁止 push 到远程仓库。**
 
 ---
 
@@ -83,11 +84,11 @@
 - [ ] 新增 `_get_loop_monitor_hint(self) -> str` 方法
   - 告诉 Claude: 如果启动了后台任务，在 signal file 中设置 `needs_monitor: true` 和 `monitor_context`
   - 包含资源争用提示: 一次迭代只启动一个需要独占资源的任务
-- [ ] 在 `_build_loop_prompt` 的 **全部 3 个 return 路径** 中追加此 hint（must_complete 首次 ~line 1310、must_complete 后续 ~line 1350、普通 ~line 1378）
+- [ ] 在 `_build_loop_prompt` 的 **全部 3 个 return 路径** 中追加此 hint（搜索 `return` 语句，分别在 `if iteration == 0 and task.must_complete` / `elif task.must_complete` / `else` 三个分支末尾）
 
 ### 3.2 Gate Monitor 插入
-- [ ] 在 `_run_loop_lifecycle` 的 `action == "continue"` 分支中（约 line 966）:
-  - 从已解析的 `signal` 局部变量中读取 `needs_monitor` 和 `monitor_context`（signal 在 ~line 899 已解析，不要重新读文件）
+- [ ] 在 `_run_loop_lifecycle` 中找到 `if action == "continue":` 分支（搜索该字符串定位）:
+  - 从已解析的 `signal` 局部变量中读取 `needs_monitor` 和 `monitor_context`（signal 在 `signal = self._read_loop_signal(signal_path)` 处已解析，不要重新读文件）
   - 如果 `needs_monitor == true`:
     - 创建 MonitorSession 记录（source="loop", interval=300）
     - 广播 `monitor_session_created` 事件
@@ -129,7 +130,7 @@
   - 先删除该 task 下所有 MonitorCheck（通过 MonitorSession.task_id 关联）
   - 再删除该 task 下所有 MonitorSession
   - 注意: 项目无 FK CASCADE，必须手动清理，否则产生孤儿数据
-- [ ] 在 `backend/api/tasks.py` 的 `cancel_task` endpoint（line 166）中追加:
+- [ ] 在 `backend/api/tasks.py` 的 `cancel_task` endpoint（搜索 `async def cancel_task`）中追加:
   - `from backend.main import dispatcher` 获取 dispatcher
   - 查询该 task 下所有 running 的 MonitorSession ID
   - 遍历 `dispatcher._monitor_tasks`，cancel 匹配的 asyncio task（立即中断 sleep）
