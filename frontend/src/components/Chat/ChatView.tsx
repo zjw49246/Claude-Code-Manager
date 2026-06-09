@@ -10,7 +10,7 @@ import { QuickPhraseDropdown } from '../QuickPhrases/QuickPhraseDropdown';
 import { ExpandableText } from '../ExpandableText';
 import { formatMessageTime } from '../../config/timezone';
 import { useFileDrop } from '../../hooks/useFileDrop';
-import { SubSessionIndicator } from './SubSessionIndicator';
+import { SubAgentIndicator } from './SubAgentIndicator';
 import { MonitorPanel } from './MonitorPanel';
 
 interface ChatViewProps {
@@ -276,7 +276,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
       if (summary) {
         const entry: ChatMessage = {
           id: Date.now() + Math.random(),
-          role: 'assistant',
+          role: 'system',
           event_type: 'system_event',
           content: `[Monitor #${monitorSessionId}] Check #${checkNumber}: ${summary}`,
           tool_name: null,
@@ -287,6 +287,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
           timestamp: new Date().toISOString(),
           image_urls: null,
           attachments: null,
+          source: 'monitor',
         };
         setMessages((prev) => [...prev, entry]);
       }
@@ -643,11 +644,10 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
           )}
         </div>
         {task.enabled_skills?.monitor && (
-          <SubSessionIndicator
-            counts={{ monitor: monitorCount }}
-            onNavigate={(skill) => {
-              if (skill === 'monitor') setShowMonitorPanel(!showMonitorPanel);
-            }}
+          <SubAgentIndicator
+            count={monitorCount}
+            active={monitorCount > 0}
+            onNavigate={() => setShowMonitorPanel(!showMonitorPanel)}
           />
         )}
         <button
@@ -1379,14 +1379,23 @@ const MessageBubble = memo(function MessageBubble({ message }: { message: ChatMe
     );
   }
 
+  const isMonitor = message.source === 'monitor';
+
   return (
     <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'}`} {...(isUser ? { 'data-user-msg': '' } : {})}>
       <div className="max-w-[85%] group">
+        {isMonitor && !isUser && (
+          <div className="flex items-center gap-1 mb-0.5 pl-1">
+            <span className="text-xs bg-teal-600/30 text-teal-300 px-1.5 py-0.5 rounded">Monitor</span>
+          </div>
+        )}
         <div
           className={`rounded-2xl px-4 py-2.5 text-sm ${
             isUser
               ? 'bg-indigo-600 text-white rounded-br-md whitespace-pre-wrap'
-              : 'bg-gray-800 text-gray-200 rounded-bl-md'
+              : isMonitor
+                ? 'bg-teal-900/40 text-gray-200 rounded-bl-md border border-teal-700/30'
+                : 'bg-gray-800 text-gray-200 rounded-bl-md'
           }`}
         >
           {isUser ? (

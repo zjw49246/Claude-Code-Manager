@@ -162,6 +162,7 @@ export interface ChatMessage {
   timestamp: string | null;
   image_urls: string[] | null;
   attachments: FileAttachment[] | null;
+  source?: string | null;
 }
 
 export interface LogEntry {

@@ -178,12 +178,13 @@ async def cancel_task(task_id: int, queue: TaskQueue = Depends(_get_queue), db: 
         .where(MonitorSession.task_id == task_id, MonitorSession.status.in_(["running"]))
     )
     for (ms_id,) in result.all():
-        atask = dispatcher._monitor_tasks.get(ms_id)
-        if atask and not atask.done():
-            atask.cancel()
         proc = dispatcher._monitor_processes.get(ms_id)
         if proc and proc.returncode is None:
             proc.kill()
+            await proc.wait()
+        atask = dispatcher._monitor_tasks.get(ms_id)
+        if atask and not atask.done():
+            atask.cancel()
 
     return task
 

@@ -1,5 +1,5 @@
 from datetime import datetime
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 
 class MonitorSessionCreate(BaseModel):
@@ -8,6 +8,20 @@ class MonitorSessionCreate(BaseModel):
     interval: int = 120
     max_checks: int = 50
     model: str | None = None
+
+    @field_validator("interval")
+    @classmethod
+    def interval_must_be_positive(cls, v: int) -> int:
+        if v < 5:
+            raise ValueError("interval must be at least 5 seconds")
+        return v
+
+    @field_validator("max_checks")
+    @classmethod
+    def max_checks_must_be_positive(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("max_checks must be at least 1")
+        return v
 
 
 class MonitorSessionResponse(BaseModel):

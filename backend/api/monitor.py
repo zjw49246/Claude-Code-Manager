@@ -109,6 +109,7 @@ async def delete_monitor_session(
     proc = dispatcher._monitor_processes.get(session_id)
     if proc and proc.returncode is None:
         proc.kill()
+        await proc.wait()
 
     from backend.services.mcp_config import cleanup_monitor_agent_mcp_config
     cleanup_monitor_agent_mcp_config(session_id)
@@ -171,6 +172,22 @@ async def create_monitor_check(
     await db.commit()
     await db.refresh(check)
 
+    # Persist every check as a system_event log entry (like "Session started")
+    from backend.models.log_entry import LogEntry
+    import json as _json
+    monitor_log = LogEntry(
+        instance_id=1,
+        task_id=task_id,
+        event_type="system_event",
+        role="system",
+        content=f"[Monitor #{session_id}] Check #{new_checks_done}: {body.summary}",
+        raw_json=_json.dumps({"source": "monitor", "monitor_session_id": session_id,
+                              "check_number": new_checks_done, "is_important": body.is_important}),
+        is_error=False,
+    )
+    db.add(monitor_log)
+    await db.commit()
+
     from backend.main import dispatcher
     await dispatcher.broadcaster.broadcast(
         f"task:{task_id}",
@@ -181,7 +198,7 @@ async def create_monitor_check(
             "status": body.status,
             "summary": body.summary,
             "is_important": body.is_important,
-            "is_monitor": True,
+            "source": "monitor",
         },
     )
 
@@ -189,6 +206,38 @@ async def create_monitor_check(
         await dispatcher.broadcaster.broadcast(
             f"task:{task_id}",
             {"event": "monitor_session_status", "monitor_session_id": session_id, "status": "completed"},
+        )
+        # Notify main agent that monitoring is complete
+        from backend.services.dispatcher import PRIORITY_MONITOR_COMPLETE
+        complete_prompt = (
+            f"[Monitor #{session_id} 完成] 已达最大检查次数（{ms.max_checks}次）。最后状态: {body.summary}\n\n"
+            "请向用户简要转达监控结果。"
+        )
+        await dispatcher.enqueue_message(
+            task_id=task_id,
+            prompt=complete_prompt,
+            priority=PRIORITY_MONITOR_COMPLETE,
+            source="monitor:complete",
+        )
+        # Kill the sub-agent process since it's no longer needed
+        sub_proc = dispatcher._monitor_processes.get(session_id)
+        if sub_proc and sub_proc.returncode is None:
+            sub_proc.kill()
+            await sub_proc.wait()
+
+    # Enqueue important reports to main agent
+    if body.is_important and not auto_complete:
+        from backend.services.dispatcher import PRIORITY_MONITOR_IMPORTANT
+        report_prompt = (
+            f"[Monitor #{session_id} 汇报] {body.summary}\n\n"
+            "请向用户简要转达这个监控结果。"
+        )
+        await dispatcher.enqueue_message(
+            task_id=task_id,
+            prompt=report_prompt,
+            priority=PRIORITY_MONITOR_IMPORTANT,
+            source="monitor:report",
+            user_message_text=f"[Monitor #{session_id}] {body.summary}",
         )
 
     return check
@@ -231,7 +280,7 @@ async def complete_monitor_session(
             "check_number": ms.checks_done,
             "status": "completed",
             "summary": body.reason,
-            "is_important": True,
+            "is_important": False,
             "is_monitor": True,
         },
     )
