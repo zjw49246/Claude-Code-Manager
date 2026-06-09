@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { api } from '../../api/client';
 import type { Project, TagItem, Task, UploadResult } from '../../api/client';
-import { Plus, Paperclip, X, Star } from 'lucide-react';
+import { Plus, Paperclip, X, Star, Wrench, Settings } from 'lucide-react';
 import { ProjectSelect } from '../ProjectSelect';
 import { resolveTagColor } from '../TagColors';
 import { VoiceButton } from '../Voice/VoiceButton';
@@ -48,9 +48,12 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   const [filePreviews, setFilePreviews] = useState<string[]>([]);
   const [selectedSecretIds, setSelectedSecretIds] = useState<number[]>([]);
   const [dropError, setDropError] = useState('');
-  const [enableWorkflows, setEnableWorkflows] = useState(false);
-  const [enableMonitor, setEnableMonitor] = useState(false);
+  const [enabledTools, setEnabledTools] = useState<Record<string, boolean>>({});
+  const [showToolsDropdown, setShowToolsDropdown] = useState(false);
+  const [showConfigPanel, setShowConfigPanel] = useState(false);
   const [starOnCreate, setStarOnCreate] = useState(false);
+  const toolsRef = useRef<HTMLDivElement>(null);
+  const configRef = useRef<HTMLDivElement>(null);
   const [cloneFromTaskId, setCloneFromTaskId] = useState<number | ''>('');
   const [contextTasks, setContextTasks] = useState<Task[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -86,6 +89,29 @@ export function TaskForm({ onCreated }: TaskFormProps) {
       .then((tasks) => setContextTasks(tasks.filter((t) => t.session_id)))
       .catch(() => setContextTasks([]));
   }, [projectId]);
+
+  const AVAILABLE_TOOLS = provider === 'claude'
+    ? [
+        { key: 'workflows', label: 'Workflows', description: 'Enable Workflow tool' },
+        { key: 'monitor', label: 'Monitor', description: 'Background monitoring sub-agents' },
+      ]
+    : [];
+  const enabledToolCount = Object.values(enabledTools).filter(Boolean).length;
+
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (toolsRef.current && !toolsRef.current.contains(e.target as Node)) {
+        setShowToolsDropdown(false);
+      }
+      if (configRef.current && !configRef.current.contains(e.target as Node)) {
+        setShowConfigPanel(false);
+      }
+    };
+    if (showToolsDropdown || showConfigPanel) document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [showToolsDropdown, showConfigPanel]);
+
+  const hasNonDefaultConfig = priority !== 0 || mode !== 'auto' || provider !== (providerOptions[0] || 'claude') || model !== '' || effort !== '' || thinkingBudget !== '';
 
   const activeDefaultModel = provider === 'codex' ? defaultCodexModel : defaultModel;
   const activeModelOptions = provider === 'codex' ? codexModelOptions : modelOptions;
@@ -191,8 +217,8 @@ export function TaskForm({ onCreated }: TaskFormProps) {
         model: model || activeDefaultModel,
         ...(effort ? { effort_level: effort } : {}),
         ...(thinkingBudget ? { thinking_budget: parseInt(thinkingBudget) || null } : {}),
-        enable_workflows: enableWorkflows,
-        enabled_skills: enableMonitor ? { monitor: true } : undefined,
+        enable_workflows: !!enabledTools['workflows'],
+        enabled_skills: enabledTools['monitor'] ? { monitor: true } : undefined,
         ...(starOnCreate ? { starred: true } : {}),
         ...(cloneFromTaskId ? { clone_from_task_id: cloneFromTaskId as number } : {}),
       });
@@ -376,172 +402,217 @@ export function TaskForm({ onCreated }: TaskFormProps) {
           </select>
         </div>
       )}
-      <div className="flex items-center gap-3 flex-wrap">
-        <label className="text-sm text-gray-400">Priority:</label>
-        <select
-          className="w-[52px] bg-gray-700 text-foreground rounded px-1 py-1.5 text-sm"
-          value={priority}
-          onChange={(e) => setPriority(Number(e.target.value))}
-        >
-          {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((p) => (
-            <option key={p} value={p}>{p}</option>
-          ))}
-        </select>
-        <label className="text-sm text-gray-400 ml-1">Mode:</label>
-        <select
-          className="w-[70px] bg-gray-700 text-foreground rounded px-1 py-1.5 text-sm"
-          value={mode}
-          onChange={(e) => setMode(e.target.value)}
-        >
-          <option value="auto">Auto</option>
-          <option value="plan">Plan</option>
-          <option value="loop">Loop</option>
-          <option value="goal">Goal</option>
-        </select>
-        <label className="text-sm text-gray-400 ml-1">CLI:</label>
-        <select
-          className="w-[75px] bg-gray-700 text-foreground rounded px-1 py-1.5 text-sm"
-          value={provider}
-          onChange={(e) => {
-            setProvider(e.target.value);
-            setModel('');
-            setEffort('');
-          }}
-        >
-          {providerOptions.map((p) => (
-            <option key={p} value={p}>{p === 'claude' ? 'Claude' : p === 'codex' ? 'Codex' : p}</option>
-          ))}
-        </select>
-        <label className="text-sm text-gray-400 ml-1">Model:</label>
-        <select
-          className="w-[140px] bg-gray-700 text-foreground rounded px-1 py-1.5 text-sm"
-          value={model}
-          onChange={(e) => setModel(e.target.value)}
-        >
-          <option value="">{activeDefaultModel} (default)</option>
-          {activeModelOptions.map((m) => (
-            <option key={m} value={m}>{m}</option>
-          ))}
-        </select>
-        <label className="text-sm text-gray-400 ml-1">Effort:</label>
-        <select
-          className="w-[80px] bg-gray-700 text-foreground rounded px-1 py-1.5 text-sm"
-          value={effort}
-          onChange={(e) => setEffort(e.target.value)}
-        >
-          <option value="">{defaultEffort} (default)</option>
-          {activeEffortOptions.filter((e) => e !== defaultEffort).map((e) => (
-            <option key={e} value={e}>{e}</option>
-          ))}
-        </select>
-        <label className="text-sm text-gray-400 ml-1">Thinking:</label>
-        <select
-          className="w-[80px] bg-gray-700 text-foreground rounded px-1 py-1.5 text-sm"
-          value={thinkingBudget}
-          onChange={(e) => setThinkingBudget(e.target.value)}
-        >
-          <option value="">default</option>
-          <option value="4096">4k</option>
-          <option value="8192">8k</option>
-          <option value="16384">16k</option>
-          <option value="32768">32k</option>
-          <option value="65536">64k</option>
-          <option value="131072">128k</option>
-        </select>
-        {mode === 'loop' && (
-          <>
-            <input
-              className="flex-1 min-w-0 bg-gray-700 text-foreground rounded px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              placeholder="Todo file path (e.g. TODO.md)"
-              value={todoFilePath}
-              onChange={(e) => setTodoFilePath(e.target.value)}
-              required
-            />
-            <label className="text-sm text-gray-400 ml-1 whitespace-nowrap">Max iter:</label>
-            <input
-              type="text"
-              inputMode="numeric"
-              className="w-20 bg-gray-700 text-foreground rounded px-2 py-1 text-sm"
-              value={maxIterations}
-              onChange={(e) => setMaxIterations(e.target.value.replace(/[^0-9]/g, ''))}
-              onBlur={() => {
-                const n = parseInt(maxIterations);
-                setMaxIterations(String((!n || n < 1) ? 1 : n));
-              }}
-            />
-            <label className="flex items-center gap-1 text-sm text-gray-400 ml-1 whitespace-nowrap cursor-pointer">
-              <input
-                type="checkbox"
-                checked={mustComplete}
-                onChange={(e) => setMustComplete(e.target.checked)}
-                className="accent-indigo-500"
-              />
-              Must complete
-            </label>
-          </>
-        )}
-        {mode === 'goal' && (
-          <>
-            <input
-              className="flex-1 min-w-0 bg-gray-700 text-foreground rounded px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              placeholder="Goal condition (e.g. all tests pass and lint is clean)"
-              value={goalCondition}
-              onChange={(e) => setGoalCondition(e.target.value)}
-              required
-            />
-            <label className="text-sm text-gray-400 ml-1 whitespace-nowrap">Max turns:</label>
-            <input
-              type="text"
-              inputMode="numeric"
-              className="w-20 bg-gray-700 text-foreground rounded px-2 py-1 text-sm"
-              value={goalMaxTurns}
-              onChange={(e) => setGoalMaxTurns(e.target.value.replace(/[^0-9]/g, ''))}
-              onBlur={() => {
-                const n = parseInt(goalMaxTurns);
-                setGoalMaxTurns(String((!n || n < 1) ? 1 : n));
-              }}
-            />
-          </>
-        )}
-        {provider === 'claude' && (
-          <label className="flex items-center gap-1 text-sm text-gray-400 whitespace-nowrap cursor-pointer" title="Enable Workflow tool (uses more tokens)">
-            <input
-              type="checkbox"
-              checked={enableWorkflows}
-              onChange={(e) => setEnableWorkflows(e.target.checked)}
-              className="accent-indigo-500"
-            />
-            Workflows
-          </label>
-        )}
-        {provider === 'claude' && (
-          <label className="flex items-center gap-1 text-sm text-gray-400 whitespace-nowrap cursor-pointer" title="Enable Monitor skill - lets the agent create background monitoring sessions">
-            <input
-              type="checkbox"
-              checked={enableMonitor}
-              onChange={(e) => setEnableMonitor(e.target.checked)}
-              className="accent-indigo-500"
-            />
-            Monitor
-          </label>
-        )}
-        <label className="flex items-center gap-1.5 text-sm text-gray-400 ml-auto whitespace-nowrap cursor-pointer">
-          <Star size={14} className={starOnCreate ? 'text-yellow-400' : 'text-gray-600'} fill={starOnCreate ? 'currentColor' : 'none'} />
+      {/* Mode-specific inputs (loop/goal) */}
+      {mode === 'loop' && (
+        <div className="flex items-center gap-2 flex-wrap">
           <input
-            type="checkbox"
-            checked={starOnCreate}
-            onChange={(e) => setStarOnCreate(e.target.checked)}
-            className="accent-yellow-500 hidden"
+            className="flex-1 min-w-0 bg-gray-700 text-foreground rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            placeholder="Todo file path (e.g. TODO.md)"
+            value={todoFilePath}
+            onChange={(e) => setTodoFilePath(e.target.value)}
+            required
           />
-          Star
-        </label>
+          <label className="text-xs text-gray-400 whitespace-nowrap">Max iter:</label>
+          <input
+            type="text"
+            inputMode="numeric"
+            className="w-16 bg-gray-700 text-foreground rounded px-2 py-1.5 text-sm"
+            value={maxIterations}
+            onChange={(e) => setMaxIterations(e.target.value.replace(/[^0-9]/g, ''))}
+            onBlur={() => {
+              const n = parseInt(maxIterations);
+              setMaxIterations(String((!n || n < 1) ? 1 : n));
+            }}
+          />
+          <label className="flex items-center gap-1 text-xs text-gray-400 whitespace-nowrap cursor-pointer">
+            <input
+              type="checkbox"
+              checked={mustComplete}
+              onChange={(e) => setMustComplete(e.target.checked)}
+              className="accent-indigo-500"
+            />
+            Must complete
+          </label>
+        </div>
+      )}
+      {mode === 'goal' && (
+        <div className="flex items-center gap-2 flex-wrap">
+          <input
+            className="flex-1 min-w-0 bg-gray-700 text-foreground rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            placeholder="Goal condition (e.g. all tests pass and lint is clean)"
+            value={goalCondition}
+            onChange={(e) => setGoalCondition(e.target.value)}
+            required
+          />
+          <label className="text-xs text-gray-400 whitespace-nowrap">Max turns:</label>
+          <input
+            type="text"
+            inputMode="numeric"
+            className="w-16 bg-gray-700 text-foreground rounded px-2 py-1.5 text-sm"
+            value={goalMaxTurns}
+            onChange={(e) => setGoalMaxTurns(e.target.value.replace(/[^0-9]/g, ''))}
+            onBlur={() => {
+              const n = parseInt(goalMaxTurns);
+              setGoalMaxTurns(String((!n || n < 1) ? 1 : n));
+            }}
+          />
+        </div>
+      )}
+      {/* Bottom action row */}
+      <div className="flex items-center gap-2">
+        {/* Config dropdown */}
+        <div ref={configRef} className="relative">
+          <button
+            type="button"
+            onClick={() => setShowConfigPanel(!showConfigPanel)}
+            className={`flex items-center gap-1 text-xs px-2 py-1.5 rounded border transition-colors ${
+              hasNonDefaultConfig
+                ? 'bg-amber-600/30 text-amber-300 border-amber-500/50 hover:bg-amber-600/40'
+                : 'bg-gray-700 text-gray-400 border-gray-600 hover:bg-gray-600 hover:text-gray-300'
+            }`}
+          >
+            <Settings size={13} />
+            Config
+          </button>
+          {showConfigPanel && (
+            <div className="absolute bottom-full mb-1 left-0 bg-gray-800 border border-gray-600 rounded shadow-lg z-20 p-3 min-w-[280px]">
+              <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 items-center text-xs">
+                <span className="text-gray-400">Priority</span>
+                <select
+                  className="bg-gray-700 text-foreground rounded px-2 py-1 text-xs"
+                  value={priority}
+                  onChange={(e) => setPriority(Number(e.target.value))}
+                >
+                  {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((p) => (
+                    <option key={p} value={p}>{p}</option>
+                  ))}
+                </select>
+
+                <span className="text-gray-400">Mode</span>
+                <select
+                  className="bg-gray-700 text-foreground rounded px-2 py-1 text-xs"
+                  value={mode}
+                  onChange={(e) => setMode(e.target.value)}
+                >
+                  <option value="auto">Auto</option>
+                  <option value="plan">Plan</option>
+                  <option value="loop">Loop</option>
+                  <option value="goal">Goal</option>
+                </select>
+
+                <span className="text-gray-400">CLI</span>
+                <select
+                  className="bg-gray-700 text-foreground rounded px-2 py-1 text-xs"
+                  value={provider}
+                  onChange={(e) => {
+                    setProvider(e.target.value);
+                    setModel('');
+                    setEffort('');
+                  }}
+                >
+                  {providerOptions.map((p) => (
+                    <option key={p} value={p}>{p === 'claude' ? 'Claude' : p === 'codex' ? 'Codex' : p}</option>
+                  ))}
+                </select>
+
+                <span className="text-gray-400">Model</span>
+                <select
+                  className="bg-gray-700 text-foreground rounded px-2 py-1 text-xs"
+                  value={model}
+                  onChange={(e) => setModel(e.target.value)}
+                >
+                  <option value="">{activeDefaultModel} (default)</option>
+                  {activeModelOptions.map((m) => (
+                    <option key={m} value={m}>{m}</option>
+                  ))}
+                </select>
+
+                <span className="text-gray-400">Effort</span>
+                <select
+                  className="bg-gray-700 text-foreground rounded px-2 py-1 text-xs"
+                  value={effort}
+                  onChange={(e) => setEffort(e.target.value)}
+                >
+                  <option value="">{defaultEffort} (default)</option>
+                  {activeEffortOptions.filter((e) => e !== defaultEffort).map((e) => (
+                    <option key={e} value={e}>{e}</option>
+                  ))}
+                </select>
+
+                <span className="text-gray-400">Thinking</span>
+                <select
+                  className="bg-gray-700 text-foreground rounded px-2 py-1 text-xs"
+                  value={thinkingBudget}
+                  onChange={(e) => setThinkingBudget(e.target.value)}
+                >
+                  <option value="">default</option>
+                  <option value="4096">4k</option>
+                  <option value="8192">8k</option>
+                  <option value="16384">16k</option>
+                  <option value="32768">32k</option>
+                  <option value="65536">64k</option>
+                  <option value="131072">128k</option>
+                </select>
+              </div>
+            </div>
+          )}
+        </div>
+        {/* Tools dropdown */}
+        {AVAILABLE_TOOLS.length > 0 && (
+          <div ref={toolsRef} className="relative">
+            <button
+              type="button"
+              onClick={() => setShowToolsDropdown(!showToolsDropdown)}
+              className={`flex items-center gap-1 text-xs px-2 py-1.5 rounded border transition-colors ${
+                enabledToolCount > 0
+                  ? 'bg-indigo-600/30 text-indigo-300 border-indigo-500/50 hover:bg-indigo-600/40'
+                  : 'bg-gray-700 text-gray-400 border-gray-600 hover:bg-gray-600 hover:text-gray-300'
+              }`}
+            >
+              <Wrench size={13} />
+              Tools{enabledToolCount > 0 ? ` (${enabledToolCount})` : ''}
+            </button>
+            {showToolsDropdown && (
+              <div className="absolute bottom-full mb-1 left-0 bg-gray-800 border border-gray-600 rounded shadow-lg z-20 min-w-[180px]">
+                {AVAILABLE_TOOLS.map((tool) => (
+                  <label
+                    key={tool.key}
+                    className="flex items-center gap-2 px-3 py-2 text-xs text-gray-300 hover:bg-gray-700 cursor-pointer transition-colors"
+                    title={tool.description}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={!!enabledTools[tool.key]}
+                      onChange={(e) => setEnabledTools((prev) => ({ ...prev, [tool.key]: e.target.checked }))}
+                      className="accent-indigo-500"
+                    />
+                    {tool.label}
+                  </label>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+        {/* Star */}
+        <button
+          type="button"
+          onClick={() => setStarOnCreate(!starOnCreate)}
+          className={`flex items-center gap-1 text-xs px-2 py-1.5 rounded border transition-colors ${
+            starOnCreate
+              ? 'bg-yellow-600/30 text-yellow-300 border-yellow-500/50 hover:bg-yellow-600/40'
+              : 'bg-gray-700 text-gray-400 border-gray-600 hover:bg-gray-600 hover:text-gray-300'
+          }`}
+        >
+          <Star size={13} fill={starOnCreate ? 'currentColor' : 'none'} />
+        </button>
+        {/* Create */}
         <button
           type="submit"
           disabled={loading || !canSubmit}
-          className="flex items-center gap-1 bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-2 rounded text-sm font-medium disabled:opacity-50"
+          className="flex items-center gap-1 bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-1.5 rounded text-xs font-medium disabled:opacity-50 ml-auto"
         >
-          <Plus size={16} />
-          {loading ? 'Creating...' : 'Create Task'}
+          <Plus size={14} />
+          {loading ? 'Creating...' : 'Create'}
         </button>
       </div>
     </form>
