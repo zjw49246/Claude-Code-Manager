@@ -106,6 +106,7 @@ export interface Task {
   effort_level: string | null;
   enable_workflows: boolean;
   enabled_skills: Record<string, boolean> | null;
+  active_sub_agents: number;
   tags: string[] | null;
   metadata_: {
     image_paths?: string[];
