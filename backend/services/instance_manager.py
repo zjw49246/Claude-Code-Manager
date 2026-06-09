@@ -34,7 +34,7 @@ class InstanceManager:
         self._last_stderr: dict[int, str] = {}  # instance_id -> stderr from last run
         self._launch_params: dict[int, dict] = {}  # instance_id -> params for re-launch on rotation
 
-    async def launch(self, instance_id: int, prompt: str, task_id: int | None = None, cwd: str | None = None, model: str | None = None, resume_session_id: str | None = None, loop_iteration: int | None = None, git_env: dict | None = None, thinking_budget: int | None = None, effort_level: str | None = None, chat_initiated: bool = False, config_dir: str | None = None, provider: str = "claude", enable_workflows: bool = False) -> int:
+    async def launch(self, instance_id: int, prompt: str, task_id: int | None = None, cwd: str | None = None, model: str | None = None, resume_session_id: str | None = None, loop_iteration: int | None = None, git_env: dict | None = None, thinking_budget: int | None = None, effort_level: str | None = None, chat_initiated: bool = False, config_dir: str | None = None, provider: str = "claude", enable_workflows: bool = False, enabled_skills: dict | None = None) -> int:
         """Launch a Claude Code subprocess for the given instance.
 
         If resume_session_id is provided, uses --resume to continue the conversation.
@@ -42,6 +42,12 @@ class InstanceManager:
         that loop-task chat history can be grouped by iteration in the frontend.
         """
         provider = (provider or "claude").lower()
+
+        mcp_config_path = None
+        if enabled_skills and provider == "claude" and task_id:
+            from backend.services.mcp_config import generate_mcp_config
+            mcp_config_path = generate_mcp_config(task_id, enabled_skills)
+
         cmd = self._build_command(
             provider=provider,
             prompt=prompt,
@@ -49,6 +55,7 @@ class InstanceManager:
             resume_session_id=resume_session_id,
             effort_level=effort_level,
             enable_workflows=enable_workflows,
+            mcp_config_path=str(mcp_config_path) if mcp_config_path else None,
         )
 
         # Must unset CLAUDE_CODE env var to avoid nested session detection
@@ -92,6 +99,7 @@ class InstanceManager:
                 "thinking_budget": thinking_budget,
                 "effort_level": effort_level,
                 "enable_workflows": enable_workflows,
+                "enabled_skills": enabled_skills,
             }
 
         # Update instance record
@@ -133,6 +141,7 @@ class InstanceManager:
         resume_session_id: str | None,
         effort_level: str | None,
         enable_workflows: bool = False,
+        mcp_config_path: str | None = None,
     ) -> list[str]:
         """Build the subprocess command for a supported coding-agent CLI."""
         if provider == "claude":
@@ -151,6 +160,8 @@ class InstanceManager:
                 cmd.extend(["--effort", effort_level])
             if not enable_workflows:
                 cmd.extend(["--disallowedTools", "Workflow"])
+            if mcp_config_path and Path(mcp_config_path).exists():
+                cmd.extend(["--mcp-config", mcp_config_path])
             return cmd
 
         if provider == "codex":
@@ -397,6 +408,7 @@ class InstanceManager:
                 chat_initiated=True,
                 config_dir=new_config_dir,
                 enable_workflows=params.get("enable_workflows", False),
+                enabled_skills=params.get("enabled_skills"),
             )
             return True
 

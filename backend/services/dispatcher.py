@@ -520,6 +520,7 @@ class GlobalDispatcher:
                 provider=task.provider,
                 config_dir=pool_config_dir,
                 enable_workflows=task.enable_workflows,
+                enabled_skills=task.enabled_skills,
             )
 
             # Wait for process to finish (with timeout)
@@ -632,6 +633,8 @@ class GlobalDispatcher:
                 "instance_id": instance_id,
             })
         finally:
+            from backend.services.mcp_config import cleanup_mcp_config
+            cleanup_mcp_config(task.id)
             self._running_tasks.pop(instance_id, None)
             await self._reset_instance_if_stale(instance_id, task.id)
 
@@ -695,6 +698,7 @@ class GlobalDispatcher:
                 provider=task.provider,
                 config_dir=config_dir,
                 enable_workflows=task.enable_workflows,
+                enabled_skills=task.enabled_skills,
             )
         else:
             # No session to resume — re-launch from scratch
@@ -723,6 +727,7 @@ class GlobalDispatcher:
                 provider=task.provider,
                 config_dir=config_dir,
                 enable_workflows=task.enable_workflows,
+                enabled_skills=task.enabled_skills,
             )
 
         # Wait for process
@@ -879,6 +884,7 @@ class GlobalDispatcher:
                 effort_level=effort_level,
                 provider=task.provider,
                 enable_workflows=task.enable_workflows,
+                enabled_skills=task.enabled_skills,
             )
 
             process = self.instance_manager.processes.get(instance_id)
@@ -1060,6 +1066,7 @@ class GlobalDispatcher:
                     effort_level=effort_level,
                     provider=task.provider,
                     enable_workflows=task.enable_workflows,
+                    enabled_skills=task.enabled_skills,
                 )
             else:
                 follow_up = self._build_goal_followup_prompt(last_reason, turn, max_turns)
@@ -1076,6 +1083,7 @@ class GlobalDispatcher:
                     effort_level=effort_level,
                     provider=task.provider,
                     enable_workflows=task.enable_workflows,
+                    enabled_skills=task.enabled_skills,
                 )
 
             # Wait for process to finish
@@ -1438,6 +1446,7 @@ class GlobalDispatcher:
             effort_level=effort_level,
             provider=task.provider,
             enable_workflows=task.enable_workflows,
+            enabled_skills=task.enabled_skills,
         )
 
         fix_proc = self.instance_manager.processes.get(instance_id)
@@ -1468,6 +1477,7 @@ class GlobalDispatcher:
             effort_level=effort_level,
             provider=task.provider,
             enable_workflows=task.enable_workflows,
+            enabled_skills=task.enabled_skills,
         )
         process = self.instance_manager.processes.get(instance_id)
         if process:
