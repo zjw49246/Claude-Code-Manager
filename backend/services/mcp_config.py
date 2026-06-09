@@ -55,3 +55,49 @@ def cleanup_mcp_config(task_id: int):
     """清理临时 MCP config 文件。"""
     config_path = Path(tempfile.gettempdir()) / f"ccm_mcp_{task_id}.json"
     config_path.unlink(missing_ok=True)
+
+
+def generate_monitor_agent_mcp_config(
+    monitor_session_id: int, task_id: int, api_base: str | None = None
+) -> Path:
+    """为 monitor 子 agent 生成专用 MCP config。
+
+    Returns:
+        配置文件路径，调用方负责清理。
+    """
+    from backend.config import settings
+
+    if api_base is None:
+        host = settings.host if settings.host != "0.0.0.0" else "127.0.0.1"
+        api_base = f"http://{host}:{settings.port}"
+
+    auth_token = getattr(settings, "auth_token", "") or ""
+
+    args = [
+        "-m", "backend.mcp.ccm_monitor_agent_server",
+        "--monitor-session-id", str(monitor_session_id),
+        "--task-id", str(task_id),
+        "--api-base", api_base,
+    ]
+    if auth_token:
+        args.extend(["--auth-token", auth_token])
+
+    config = {
+        "mcpServers": {
+            "ccm_monitor_agent": {
+                "command": sys.executable,
+                "args": args,
+                "cwd": _CCM_ROOT,
+            }
+        }
+    }
+
+    config_path = Path(tempfile.gettempdir()) / f"ccm_monitor_agent_{monitor_session_id}.json"
+    config_path.write_text(json.dumps(config, indent=2))
+    return config_path
+
+
+def cleanup_monitor_agent_mcp_config(monitor_session_id: int):
+    """清理 monitor 子 agent 的 MCP config 文件。"""
+    config_path = Path(tempfile.gettempdir()) / f"ccm_monitor_agent_{monitor_session_id}.json"
+    config_path.unlink(missing_ok=True)
