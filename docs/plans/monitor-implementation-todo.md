@@ -24,7 +24,7 @@
 
 ### 1.4 创建 Schema
 - [ ] 新建 `backend/schemas/monitor_session.py`
-  - MonitorSessionCreate(BaseModel): description, interval(=300), max_checks(=100), model(optional)
+  - MonitorSessionCreate(BaseModel): description, monitor_context(optional), interval(=300), max_checks(=100), model(optional)
   - MonitorSessionResponse(BaseModel, from_attributes=True): 完整字段
   - MonitorCheckResponse(BaseModel, from_attributes=True): 完整字段
 
@@ -37,6 +37,7 @@
 
 ### 2.2 Signal File 工具方法
 - [ ] `_get_monitor_signal_path(self, monitor_session_id: int, cwd: str) -> Path`
+  - cwd 使用 `task.last_cwd or task.target_repo or os.getcwd()` fallback（与 loop signal 一致）
 - [ ] `_read_monitor_signal(self, signal_path: Path) -> dict`
 
 ### 2.3 Monitor Session Prompt
@@ -59,6 +60,7 @@
   - 每轮: sleep(interval) → 检查 task status → 检查 monitor status → 清理旧 signal → 运行子进程 → 读 signal → 写 DB(MonitorCheck) → 广播 monitor_check 事件 → 判断 done
   - 检查 task status 时: 如果 task 已 completed/failed/cancelled，**必须更新 MonitorSession 状态**（completed→completed, 其他→cancelled），然后 return False。否则 MonitorSession 会永远卡在 "running"
   - 完成时广播 `monitor_session_status` 事件（completed/failed）
+  - 所有退出路径（done/cancelled/耗尽）都要 `signal_path.unlink(missing_ok=True)` 清理 signal file
   - 返回 True=完成，False=取消或耗尽
 
 ### 2.6 后台 Monitor 启动器（Auto 模式用）
@@ -78,15 +80,17 @@
 - [ ] 新增 `_get_loop_monitor_hint(self) -> str` 方法
   - 告诉 Claude: 如果启动了后台任务，在 signal file 中设置 `needs_monitor: true` 和 `monitor_context`
   - 包含资源争用提示: 一次迭代只启动一个需要独占资源的任务
-- [ ] 在 `_build_loop_prompt` 返回值中追加此 hint
+- [ ] 在 `_build_loop_prompt` 的 **全部 3 个 return 路径** 中追加此 hint（must_complete 首次 ~line 1310、must_complete 后续 ~line 1350、普通 ~line 1378）
 
 ### 3.2 Gate Monitor 插入
 - [ ] 在 `_run_loop_lifecycle` 的 `action == "continue"` 分支中（约 line 966）:
-  - 读取 signal 的 `needs_monitor` 和 `monitor_context` 字段
+  - 从已解析的 `signal` 局部变量中读取 `needs_monitor` 和 `monitor_context`（signal 在 ~line 899 已解析，不要重新读文件）
   - 如果 `needs_monitor == true`:
     - 创建 MonitorSession 记录（source="loop", interval=300）
     - 广播 `monitor_session_created` 事件
+    - 将当前 asyncio task 注册到 `self._monitor_tasks[monitor_session.id]`（使 cancel API 能打断 gate monitor 的 sleep，否则取消延迟最多 300 秒）
     - `await self._run_monitor_session(monitor_session, task)` — 同步阻塞直到后台任务完成
+    - finally: 从 `_monitor_tasks` 中移除
     - 如果返回 False（被取消），退出循环
   - 继续下一轮迭代
 
