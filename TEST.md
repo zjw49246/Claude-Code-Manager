@@ -169,6 +169,78 @@ cd frontend && npx tsc --noEmit
 | `test_dispatcher_status/start/stop` | 调度器控制 |
 | `test_ralph_start/stop/status` | Ralph Loop 控制 |
 
+#### `test_api_monitor.py` — Monitor API 端点
+
+| 测试 | 验证内容 |
+|------|---------|
+| `test_create_monitor_session` | POST 创建 monitor session，状态码 200 |
+| `test_create_monitor_no_skill` | enabled_skills 无 monitor 时 → 403 |
+| `test_create_monitor_task_not_found` | task 不存在 → 404 |
+| `test_create_monitor_task_completed` | task 已完成 → 400 |
+| `test_create_monitor_concurrency_limit` | 超过 5 个并发 monitor → 429 |
+| `test_list_monitor_sessions` | GET 列出 task 下所有 monitor sessions |
+| `test_get_monitor_session` | GET 获取单个 monitor session |
+| `test_get_monitor_session_not_found` | 404 处理 |
+| `test_delete_monitor_session` | DELETE 停止 monitor session |
+| `test_get_monitor_checks` | GET 获取 monitor 检查历史 |
+| `test_task_delete_cleans_monitors` | task 删除 → MonitorCheck 和 MonitorSession 全部清理 |
+| `test_task_cancel_cancels_monitors` | task 取消 → 所有 running monitor 变为 cancelled |
+
+#### `test_mcp_server.py` — MCP Server 工具
+
+| 测试 | 验证内容 |
+|------|---------|
+| `test_mcp_server_tools_registered` | MCP server 启动，3 个 tool 正确注册 |
+| `test_api_url` | API URL 拼接正确 |
+| `test_create_monitor_success` | create_monitor → HTTP POST 成功 |
+| `test_check_monitors_returns_sessions` | check_monitors → HTTP GET 返回状态 |
+| `test_check_monitors_empty` | 无 monitor 时返回空列表 |
+| `test_stop_monitor_success` | stop_monitor → HTTP DELETE 成功 |
+| `test_create_monitor_api_error` | API 不可达 → `{"success": false}` |
+| `test_check_monitors_api_error` | API 不可达 → `{"success": false}` |
+| `test_stop_monitor_api_error` | API 不可达 → `{"success": false}` |
+
+#### `test_monitor_models.py` — Monitor 数据层
+
+| 测试 | 验证内容 |
+|------|---------|
+| `test_monitor_session_crud` | MonitorSession CRUD 操作 |
+| `test_monitor_check_crud` | MonitorCheck CRUD 操作 |
+| `test_monitor_session_defaults` | MonitorSession 默认值正确 |
+| `test_enabled_skills_json_field` | enabled_skills JSON 字段读写 |
+| `test_enabled_skills_none` | enabled_skills 为 None 时正常 |
+| `test_enabled_skills_multiple` | 多 skill 的 JSON 读写 |
+| `test_multiple_checks_per_session` | 单 session 多次 check 记录 |
+
+#### `test_mcp_config.py` — MCP Config 生成
+
+| 测试 | 验证内容 |
+|------|---------|
+| `test_generate_mcp_config_none_skills` | enabled_skills 为 None → 返回 None |
+| `test_generate_mcp_config_empty_skills` | 空 dict → 返回 None |
+| `test_generate_mcp_config_no_matching_skills` | 无匹配 skill → 返回 None |
+| `test_generate_mcp_config_monitor_enabled` | monitor: true → 生成包含 ccm_skills server 的配置 |
+| `test_generate_mcp_config_file_path` | 配置文件路径格式正确 |
+| `test_cleanup_mcp_config` | 正确清理临时文件 |
+| `test_cleanup_mcp_config_missing_file` | 文件不存在时不报错 |
+
+#### `test_monitor_dispatcher.py` — Monitor Dispatcher 生命周期
+
+| 测试 | 验证内容 |
+|------|---------|
+| `test_build_monitor_prompt` | prompt 构建包含描述和上下文 |
+| `test_build_monitor_prompt_no_context` | 无上下文时 prompt 正常 |
+| `test_start_monitor_session` | 启动 monitor session 创建 asyncio task |
+| `test_lifecycle_max_checks_reached` | max_checks 耗尽 → completed |
+| `test_lifecycle_task_ended` | task 结束 → monitor 联动结束 |
+| `test_lifecycle_subprocess_timeout` | 子进程超时 → failed check → 继续 |
+| `test_lifecycle_subprocess_crash` | 子进程崩溃 → failed check → 继续 |
+| `test_lifecycle_cancelled` | CancelledError → kill 子进程 |
+| `test_lifecycle_done_status` | STATUS: done → completed |
+| `test_lifecycle_unexpected_exception_marks_failed` | 未预期异常 → failed |
+| `test_lifecycle_writes_check_record` | check 结果写入 DB |
+| `test_lifecycle_broadcasts_check_event` | check 结果广播 WebSocket |
+
 #### 服务层单元测试
 
 ##### `test_service_ws_broadcaster.py` — WebSocket 广播
@@ -418,4 +490,9 @@ git branch
 | `backend/services/whisper_client.py` | `backend/tests/test_service_whisper_client.py` |
 | `backend/services/backup_service.py` | `backend/tests/test_service_backup.py` |
 | `backend/services/token_manager_service.py` | `backend/tests/test_service_token_manager.py` |
+| `backend/mcp/ccm_skills_server.py` | `backend/tests/test_mcp_server.py` |
+| `backend/models/monitor_session.py` | `backend/tests/test_monitor_models.py` |
+| `backend/services/mcp_config.py` | `backend/tests/test_mcp_config.py` |
+| `backend/api/monitor.py` | `backend/tests/test_api_monitor.py` |
+| `backend/services/dispatcher.py` (monitor) | `backend/tests/test_monitor_dispatcher.py` |
 | `frontend/src/**` | TypeScript 类型检查 (`tsc --noEmit`) |

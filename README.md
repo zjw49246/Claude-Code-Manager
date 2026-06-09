@@ -19,6 +19,7 @@ Web 端调度和管理多个 Claude Code 实例并行工作。灵感来自胡渊
 - **语音输入** — 通过 OpenAI Whisper API 语音转文字创建任务
 - **PWA** — 手机浏览器 Add to Home Screen，原生 App 体验
 - **Android App** — 通过 Capacitor 打包原生 APK，App 内可配置远程服务器地址
+- **Monitor Skill** — Agent 可自主创建后台监控子 session，定期检查进程状态/日志并汇报，通过 MCP 工具注入
 - **主题切换** — 支持浅色/深色主题，偏好持久化
 - **Token 认证** — Bearer Token 保护所有 API，安全远程访问
 - **远程访问** — 通过 Cloudflare Tunnel 隧道暴露到公网
@@ -157,9 +158,10 @@ JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home" \
 
 ### 基本流程
 
-1. **Tasks** — 创建任务，选择已有项目或新建项目（可选填 remote URL），填写 Prompt 和优先级
+1. **Tasks** — 创建任务，选择已有项目或新建项目（可选填 remote URL），填写 Prompt 和优先级。可勾选 **Monitor** skill 赋予 Agent 后台监控能力
 2. **Dispatcher** 自动分配任务到空闲 worker → Claude Code 自主完成所有工作（含 worktree 创建和清理） → 取下一个
-4. 点击任务的 **Chat** 按钮，可以对已完成的任务继续追问
+3. 点击任务的 **Chat** 按钮，可以对已完成的任务继续追问
+4. 启用 Monitor 的任务中，Agent 可自主创建后台监控子 session，Chat 界面通过 SubSessionIndicator 和 MonitorPanel 展示监控状态
 
 ### Plan Mode
 
@@ -191,6 +193,11 @@ JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home" \
 | | `POST /api/instances/{id}/stop` | 停止实例 |
 | | `POST /api/instances/{id}/run` | 手动执行 |
 | | `GET /api/instances/{id}/logs` | 获取日志 |
+| Monitor | `POST /api/tasks/{id}/monitor-sessions` | 创建 monitor 子 session |
+| | `GET /api/tasks/{id}/monitor-sessions` | 列出 monitor sessions |
+| | `GET /api/tasks/{id}/monitor-sessions/{sid}` | monitor session 详情 |
+| | `DELETE /api/tasks/{id}/monitor-sessions/{sid}` | 停止 monitor session |
+| | `GET /api/tasks/{id}/monitor-sessions/{sid}/checks` | monitor 检查历史 |
 | Dispatcher | `GET /api/dispatcher/status` | 调度器状态 |
 | | `POST /api/dispatcher/start` | 启动调度器 |
 | | `POST /api/dispatcher/stop` | 停止调度器 |
