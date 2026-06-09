@@ -48,10 +48,11 @@
 ### 2.4 Monitor 子进程
 - [ ] `_run_monitor_subprocess(self, prompt, cwd, model, task_id, monitor_session_id) -> str`
   - 使用 `settings.claude_binary` CLI
-  - 参数: `-p`, `--model`, `--output-format stream-json`, `--dangerously-skip-permissions`, `--disallowedTools Edit,Write,NotebookEdit`
+  - 参数: `-p`, `--model`（model 为 None 时 fallback 到 `settings.default_model`）, `--output-format stream-json`, `--dangerously-skip-permissions`, `--disallowedTools Edit,Write,NotebookEdit`
   - 环境变量: 继承当前环境，排除 CLAUDECODE/CLAUDE_CODE
   - 使用已有的 `StreamParser` 解析输出（不要重新实现）
   - 整体用 `asyncio.wait_for` 包裹，超时 300 秒
+  - **必须** 处理 `CancelledError`: `except CancelledError: process.kill(); await process.wait(); raise`（防止 asyncio task 被取消时子进程成为孤儿）
 
 ### 2.5 Monitor Session 主循环
 - [ ] `_run_monitor_session(self, monitor_session, task) -> bool`
@@ -148,7 +149,7 @@
   - manual monitor 显示删除按钮，system monitor 不显示
 
 ### 5.3 新建监控对话框（仅 Auto 模式）
-- [ ] 弹窗表单: 描述(必填)、间隔(默认300秒)、最大检查次数(默认100)
+- [ ] 弹窗表单: 描述(必填)、监控上下文(选填，提供给 monitor 的额外背景信息)、间隔(默认300秒)、最大检查次数(默认100)
 - [ ] 提交后调用 createMonitorSession API
 
 ### 5.4 Monitor 详情页
