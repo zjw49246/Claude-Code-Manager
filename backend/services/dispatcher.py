@@ -193,6 +193,8 @@ class GlobalDispatcher:
         self._dispatch_task: asyncio.Task | None = None
         self._running_tasks: dict[int, asyncio.Task] = {}  # instance_id -> lifecycle task
         self._running = False
+        self._monitor_tasks: dict[int, asyncio.Task] = {}           # monitor_session_id -> asyncio task
+        self._monitor_processes: dict[int, asyncio.subprocess.Process] = {}  # monitor_session_id -> subprocess
 
         # Pool: initialized lazily on start() if pool_enabled
         self.pool: "ClaudePool | None" = None
@@ -256,6 +258,16 @@ class GlobalDispatcher:
                 logger.warning(f"Resetting stuck task {t.id} from '{t.status}' to 'completed'")
                 t.status = "completed"
                 t.error_message = None
+
+            from backend.models.monitor_session import MonitorSession
+            result = await db.execute(
+                select(MonitorSession).where(MonitorSession.status == "running")
+            )
+            for ms in result.scalars().all():
+                logger.warning(f"Cleaning up stale monitor session {ms.id}")
+                ms.status = "failed"
+                ms.completed_at = datetime.utcnow()
+
             await db.commit()
 
     async def stop(self):
@@ -501,6 +513,13 @@ class GlobalDispatcher:
             if image_paths:
                 image_list = "\n".join(f"- {p}" for p in image_paths)
                 parts.append(f"用户提供了以下参考图片，请先用 Read 工具查看：\n{image_list}")
+            if task.enabled_skills and task.enabled_skills.get("monitor"):
+                parts.append(
+                    "你拥有后台监控能力（通过 ccm-skills MCP 工具）。"
+                    "当用户要求监控后台进程或长时间运行的任务时，"
+                    "调用 create_monitor 启动后台只读监控。"
+                    "可用工具: create_monitor / check_monitors / stop_monitor。"
+                )
             parts.append(f"任务:\n{task.description}")
             full_prompt = "\n\n".join(parts)
 
@@ -712,6 +731,13 @@ class GlobalDispatcher:
             if image_paths:
                 image_list = "\n".join(f"- {p}" for p in image_paths)
                 parts.append(f"用户提供了以下参考图片，请先用 Read 工具查看：\n{image_list}")
+            if task.enabled_skills and task.enabled_skills.get("monitor"):
+                parts.append(
+                    "你拥有后台监控能力（通过 ccm-skills MCP 工具）。"
+                    "当用户要求监控后台进程或长时间运行的任务时，"
+                    "调用 create_monitor 启动后台只读监控。"
+                    "可用工具: create_monitor / check_monitors / stop_monitor。"
+                )
             parts.append(f"任务:\n{task.description}")
             full_prompt = "\n\n".join(parts)
 
@@ -1516,3 +1542,235 @@ class GlobalDispatcher:
             "task_id": task.id,
             "instance_id": instance_id,
         })
+
+    # -----------------------------------------------------------------------
+    # Monitor Session lifecycle
+    # -----------------------------------------------------------------------
+
+    def start_monitor_session(self, monitor_session):
+        task = asyncio.create_task(
+            self._monitor_session_lifecycle(monitor_session.id)
+        )
+        self._monitor_tasks[monitor_session.id] = task
+
+    async def _monitor_session_lifecycle(self, monitor_session_id: int):
+        import json as _json
+        from backend.models.monitor_session import MonitorSession, MonitorCheck
+
+        try:
+            async with self.db_factory() as db:
+                ms = await db.get(MonitorSession, monitor_session_id)
+                task = await db.get(Task, ms.task_id)
+                if not ms or not task:
+                    return
+                task_id = ms.task_id
+                interval = ms.interval
+                max_checks = ms.max_checks
+                model = ms.model
+
+            while True:
+                async with self.db_factory() as db:
+                    ms = await db.get(MonitorSession, monitor_session_id)
+                    task = await db.get(Task, task_id)
+                    if not ms or ms.status != "running":
+                        break
+                    checks_done = ms.checks_done
+                    ms_description = ms.description
+                    ms_context = ms.monitor_context
+                    task_status = task.status
+                    task_cwd = task.last_cwd or task.target_repo or os.getcwd()
+
+                if task_status in ("completed", "failed", "cancelled"):
+                    final_status = "completed" if task_status == "completed" else "cancelled"
+                    async with self.db_factory() as db:
+                        ms = await db.get(MonitorSession, monitor_session_id)
+                        ms.status = final_status
+                        ms.completed_at = datetime.utcnow()
+                        await db.commit()
+                    await self.broadcaster.broadcast(
+                        f"task:{task_id}",
+                        {"event": "monitor_session_status", "monitor_session_id": monitor_session_id, "status": final_status},
+                    )
+                    break
+
+                if checks_done >= max_checks:
+                    async with self.db_factory() as db:
+                        ms = await db.get(MonitorSession, monitor_session_id)
+                        ms.status = "completed"
+                        ms.completed_at = datetime.utcnow()
+                        await db.commit()
+                    await self.broadcaster.broadcast(
+                        f"task:{task_id}",
+                        {"event": "monitor_session_status", "monitor_session_id": monitor_session_id, "status": "completed"},
+                    )
+                    break
+
+                prompt = self._build_monitor_prompt(
+                    checks_done=checks_done,
+                    description=ms_description,
+                    context=ms_context,
+                )
+
+                check_status = "success"
+                summary = ""
+                full_output = ""
+                is_done = False
+
+                try:
+                    full_output = await self._run_monitor_subprocess(
+                        prompt=prompt,
+                        cwd=task_cwd,
+                        model=model,
+                        monitor_session_id=monitor_session_id,
+                    )
+                    for line in full_output.splitlines():
+                        line_stripped = line.strip()
+                        if line_stripped.startswith("STATUS:"):
+                            status_val = line_stripped[7:].strip().lower()
+                            if status_val == "done":
+                                is_done = True
+                            elif status_val == "error":
+                                check_status = "failed"
+                        elif line_stripped.startswith("SUMMARY:"):
+                            summary = line_stripped[8:].strip()
+                except asyncio.TimeoutError:
+                    check_status = "failed"
+                    summary = "Monitor check timed out"
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    check_status = "failed"
+                    summary = f"Monitor check error: {e}"
+
+                async with self.db_factory() as db:
+                    ms = await db.get(MonitorSession, monitor_session_id)
+                    ms.checks_done += 1
+                    ms.last_summary = summary
+                    new_checks_done = ms.checks_done
+                    check = MonitorCheck(
+                        monitor_session_id=monitor_session_id,
+                        check_number=new_checks_done,
+                        status=check_status,
+                        summary=summary,
+                        full_output=full_output[:10000] if full_output else None,
+                    )
+                    db.add(check)
+
+                    if is_done:
+                        ms.status = "completed"
+                        ms.completed_at = datetime.utcnow()
+
+                    await db.commit()
+
+                await self.broadcaster.broadcast(
+                    f"task:{task_id}",
+                    {
+                        "event": "monitor_check",
+                        "monitor_session_id": monitor_session_id,
+                        "check_number": new_checks_done,
+                        "status": check_status,
+                        "summary": summary,
+                        "is_monitor": True,
+                    },
+                )
+
+                if is_done:
+                    await self.broadcaster.broadcast(
+                        f"task:{task_id}",
+                        {"event": "monitor_session_status", "monitor_session_id": monitor_session_id, "status": "completed"},
+                    )
+                    break
+
+                await asyncio.sleep(interval)
+
+        except asyncio.CancelledError:
+            proc = self._monitor_processes.get(monitor_session_id)
+            if proc and proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+        except Exception:
+            logger.exception(f"Monitor session {monitor_session_id} failed unexpectedly")
+            try:
+                async with self.db_factory() as db:
+                    ms = await db.get(MonitorSession, monitor_session_id)
+                    if ms and ms.status == "running":
+                        ms.status = "failed"
+                        ms.completed_at = datetime.utcnow()
+                        await db.commit()
+                        await self.broadcaster.broadcast(
+                            f"task:{ms.task_id}",
+                            {"event": "monitor_session_status", "monitor_session_id": ms.id, "status": "failed"},
+                        )
+            except Exception:
+                pass
+        finally:
+            self._monitor_tasks.pop(monitor_session_id, None)
+            self._monitor_processes.pop(monitor_session_id, None)
+
+    async def _run_monitor_subprocess(self, prompt: str, cwd: str, model: str | None, monitor_session_id: int) -> str:
+        import json as _json
+        from backend.services.stream_parser import StreamParser
+
+        cmd = [
+            settings.claude_binary,
+            "-p", prompt,
+            "--output-format", "stream-json",
+            "--dangerously-skip-permissions",
+            "--disallowedTools", "Edit,Write,NotebookEdit",
+        ]
+        if model:
+            cmd.extend(["--model", model])
+        elif settings.default_model:
+            cmd.extend(["--model", settings.default_model])
+
+        env = {k: v for k, v in os.environ.items()
+               if k.upper() not in ("CLAUDECODE", "CLAUDE_CODE")}
+
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd,
+            env=env,
+            limit=10 * 1024 * 1024,
+        )
+        self._monitor_processes[monitor_session_id] = process
+
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=300,
+            )
+        except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
+            raise
+        finally:
+            self._monitor_processes.pop(monitor_session_id, None)
+
+        parser = StreamParser()
+        text_parts = []
+        for line in stdout.decode(errors="replace").splitlines():
+            if not line.strip():
+                continue
+            events = parser.parse_line(line)
+            for event in events:
+                if event["event_type"] == "message" and event.get("content"):
+                    text_parts.append(event["content"])
+
+        return "\n".join(text_parts)
+
+    def _build_monitor_prompt(self, checks_done: int, description: str, context: str | None) -> str:
+        parts = [
+            f"你是一个后台监控进程，这是第 {checks_done + 1} 次检查。",
+            f"监控目标: {description}",
+        ]
+        if context:
+            parts.append(f"上下文: {context}")
+        parts.append(
+            "\n检查并报告当前状态。使用 Bash 工具执行 ps aux、tail 日志等命令。"
+            "\n\n最后两行必须严格遵循以下格式:"
+            "\nSUMMARY: <一句话概括当前状态>"
+            "\nSTATUS: running|done|error"
+        )
+        return "\n".join(parts)

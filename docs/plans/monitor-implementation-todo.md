@@ -599,7 +599,7 @@ def cleanup_mcp_config(task_id: int):
 
 **新建文件**: `backend/api/monitor.py`
 
-- [ ] 创建以下端点:
+- [x] 创建以下端点:
 
 ```python
 from datetime import datetime
@@ -747,11 +747,11 @@ async def get_monitor_checks(
 
 **修改文件**: `backend/main.py`
 
-- [ ] 在现有 router import 区域（搜索 `from backend.api.`）添加:
+- [x] 在现有 router import 区域（搜索 `from backend.api.`）添加:
   ```python
   from backend.api.monitor import router as monitor_router
   ```
-- [ ] 在现有 `app.include_router(...)` 区域添加:
+- [x] 在现有 `app.include_router(...)` 区域添加:
   ```python
   app.include_router(monitor_router)
   ```
@@ -764,13 +764,13 @@ async def get_monitor_checks(
 
 **修改文件**: `backend/services/dispatcher.py`
 
-- [ ] 在 `__init__` 中（搜索 `self._running_tasks`，在其附近添加）:
+- [x] 在 `__init__` 中（搜索 `self._running_tasks`，在其附近添加）:
   ```python
   self._monitor_tasks: dict[int, asyncio.Task] = {}           # monitor_session_id -> asyncio task
   self._monitor_processes: dict[int, asyncio.subprocess.Process] = {}  # monitor_session_id -> subprocess
   ```
 
-- [ ] 新增 `start_monitor_session()`:
+- [x] 新增 `start_monitor_session()`:
   ```python
   def start_monitor_session(self, monitor_session):
       """启动 monitor session 的后台循环。由 API 层调用。"""
@@ -780,7 +780,7 @@ async def get_monitor_checks(
       self._monitor_tasks[monitor_session.id] = task
   ```
 
-- [ ] 新增 `_monitor_session_lifecycle()` — 核心循环:
+- [x] 新增 `_monitor_session_lifecycle()` — 核心循环:
 
   ```python
   async def _monitor_session_lifecycle(self, monitor_session_id: int):
@@ -956,7 +956,7 @@ async def get_monitor_checks(
           self._monitor_processes.pop(monitor_session_id, None)
   ```
 
-- [ ] 新增 `_run_monitor_subprocess()` — 启动只读 Claude 子进程:
+- [x] 新增 `_run_monitor_subprocess()` — 启动只读 Claude 子进程:
 
   > **参考**: agent-ml-research 的 `claude_client.build_command()`:
   > `[binary, "--print", "--dangerously-skip-permissions", "--output-format", "stream-json", "-p", prompt]`
@@ -1034,7 +1034,7 @@ async def get_monitor_checks(
   > 应复用现有的 `StreamParser`（`backend/services/stream_parser.py`），而不是重新实现。
   > 实现时搜索 `class StreamParser` 了解接口，然后在此方法中使用。
 
-- [ ] 新增 `_build_monitor_prompt()`:
+- [x] 新增 `_build_monitor_prompt()`:
 
   > **参考**: agent-ml-research 的 prompt 设计原则:
   > "目标+约束，不教步骤。Claude Opus 足够聪明。"
@@ -1066,8 +1066,8 @@ async def get_monitor_checks(
 > **参考**: oh-my-codex 的 Hermes 通信桥 — agent 间消息传递。
 > **参考**: MCP 协议的 server-to-client notification。
 
-- [ ] **前置验证**: 确认 `FastMCP` 是否支持 `send_notification`、Claude CLI 是否处理 notification
-- [ ] 如果验证通过，在 `ccm_skills_server.py` 中实现后台轮询 + notification:
+- [x] **前置验证**: 确认 `FastMCP` 是否支持 `send_notification`、Claude CLI 是否处理 notification
+- [x] 如果验证通过，在 `ccm_skills_server.py` 中实现后台轮询 + notification:
 
   ```python
   # 后台任务: 每 30 秒检查是否有新的 MonitorCheck
@@ -1103,7 +1103,7 @@ async def get_monitor_checks(
 
 **修改文件**: `backend/services/task_queue.py`
 
-- [ ] `cancel()` 方法（搜索 `async def cancel`，line 175）末尾添加:
+- [x] `cancel()` 方法（搜索 `async def cancel`，line 175）末尾添加:
   ```python
   # 批量取消该 task 下所有 running 的 MonitorSession
   from backend.models.monitor_session import MonitorSession
@@ -1114,7 +1114,7 @@ async def get_monitor_checks(
   )
   ```
 
-- [ ] `delete()` 方法（搜索 `async def delete`，line 101）在 `await self.db.delete(task)` 前添加:
+- [x] `delete()` 方法（搜索 `async def delete`，line 101）在 `await self.db.delete(task)` 前添加:
   ```python
   # 清理 MonitorCheck 和 MonitorSession（无 FK CASCADE，必须手动清理）
   from backend.models.monitor_session import MonitorSession, MonitorCheck
@@ -1132,7 +1132,7 @@ async def get_monitor_checks(
 
 **修改文件**: `backend/api/tasks.py`
 
-- [ ] `cancel_task` endpoint（搜索 `async def cancel_task`，line 167）中，`await _stop_task_process(task_id, db)` 后添加:
+- [x] `cancel_task` endpoint（搜索 `async def cancel_task`，line 167）中，`await _stop_task_process(task_id, db)` 后添加:
   ```python
   # Cancel 所有该 task 的 monitor asyncio tasks + kill 子进程
   from backend.main import dispatcher
@@ -1152,7 +1152,7 @@ async def get_monitor_checks(
 
 **修改文件**: `backend/services/dispatcher.py`
 
-- [ ] `_cleanup_stale_state()` 末尾（搜索 `await db.commit()` in `_cleanup_stale_state`）前添加:
+- [x] `_cleanup_stale_state()` 末尾（搜索 `await db.commit()` in `_cleanup_stale_state`）前添加:
   ```python
   # 清理重启前遗留的 running monitor sessions
   from backend.models.monitor_session import MonitorSession
@@ -1171,7 +1171,7 @@ async def get_monitor_checks(
 
 **修改文件**: `backend/services/dispatcher.py`
 
-- [ ] 在 Auto 模式的 prompt 构建中（搜索 `parts.append(f"任务:\n{task.description}")` 在 `_run_task_lifecycle` 中，约 line 504），在其前面添加:
+- [x] 在 Auto 模式的 prompt 构建中（搜索 `parts.append(f"任务:\n{task.description}")` 在 `_run_task_lifecycle` 中，约 line 504），在其前面添加:
   ```python
   # 注入 skill 引导
   if task.enabled_skills and task.enabled_skills.get("monitor"):
