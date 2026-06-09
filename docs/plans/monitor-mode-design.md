@@ -2,9 +2,9 @@
 
 ## 概述
 
-为 CCM 新增 Monitor Session（监控会话）功能。Monitor Session 是一个**独立的 Claude 子 session**，可以挂在任何 task 下面，定期检查后台任务状态并汇报。
+为 CCM 新增 Monitor Session（监控会话）功能。Monitor Session 是一个**独立的 Claude 子 session**，可以挂在 Auto 或 Loop 模式的 task 下面，定期检查后台任务状态并汇报。
 
-与 v1 方案的核心区别：**Monitor 不再是一个独立模式，而是一个通用能力**，可以附加到任何模式的 task 上，且能参与任务决策。
+与 v1 方案的核心区别：**Monitor 不再是一个独立模式，而是一个通用能力**，可以附加到 Auto/Loop 模式的 task 上，且能参与任务决策（Loop 门控）。
 
 ### 解决的核心问题
 
@@ -14,10 +14,11 @@
 
 ### 设计原则
 
-- Monitor Session 是**通用的独立子 session**，底层统一，行为由 prompt 决定
+- Monitor Session 是**独立的子 session**，底层统一，行为由 prompt 决定
+- 仅支持 **Auto 模式**（用户手动创建）和 **Loop 模式**（系统自动创建门控）
 - 是否参与决策（门控 vs 纯观察）由 prompt 逻辑控制，不在系统层面区分
 - 每个 task 可以挂多个 Monitor Session
-- Monitor Session 不支持对话，但可以被用户删除
+- Monitor Session 不支持对话，但可以被用户删除（仅 manual）
 - Monitor Session 与主 session 完全解耦
 
 ## 各模式下的接入方式
@@ -687,7 +688,7 @@ await db.commit()
 ```
 
 - **[+ 新建监控]**：仅 Auto 模式显示，点击弹出创建对话框
-- **[监控列表(N)]**：所有模式都有，显示当前 task 下的 monitor 数量，点击打开监控列表面板
+- **[监控列表(N)]**：仅 Auto 和 Loop 模式显示，显示当前 task 下的 monitor 数量，点击打开监控列表面板
 
 ### 2. 新建监控对话框
 
