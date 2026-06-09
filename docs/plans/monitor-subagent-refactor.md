@@ -153,12 +153,12 @@ Task (主 Agent Session)
 
 Task 卡片上的可展开工具权限指示器。
 
-- [ ] **6.1** 在 `TaskList.tsx` Row 1 badges 区域新增工具按钮
+- [x] **6.1** 在 `TaskList.tsx` Row 1 badges 区域新增工具按钮
   - 条件: `t.enabled_skills` 有至少一个为 true 的 key
   - 外观: lucide `Wrench` 图标 + 数量，如 `🔧1`
   - 样式: `text-xs bg-amber-600/30 text-amber-300 px-1.5 rounded cursor-pointer hover:bg-amber-600/40`
 
-- [ ] **6.2** 点击展开工具列表
+- [x] **6.2** 点击展开工具列表
   - `useState<number | null>` 跟踪展开状态
   - 展开区域在 Row 1 与 Row 2 之间，显示所有 skill 的 badge
   - 已启用: 绿色 badge `✓ Monitor`；未启用的不显示
