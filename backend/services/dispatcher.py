@@ -1928,9 +1928,13 @@ class GlobalDispatcher:
             )
 
             # Merge command_skills with task's enabled_skills for this launch
-            effective_skills = dict(task.enabled_skills or {})
+            original_skills = dict(task.enabled_skills or {})
+            effective_skills = dict(original_skills)
             if msg.command_skills:
                 effective_skills.update(msg.command_skills)
+                # Temporarily write to DB so API-level checks pass
+                task.enabled_skills = effective_skills
+                await db.flush()
 
             # Capture launch params before closing DB session
             launch_kwargs = dict(
@@ -1950,6 +1954,7 @@ class GlobalDispatcher:
                 enabled_skills=effective_skills,
             )
             inst_id = inst.id
+            has_temp_skills = msg.command_skills is not None
 
             await self.instance_manager.launch(**launch_kwargs)
 
@@ -1969,3 +1974,11 @@ class GlobalDispatcher:
         if process:
             await process.wait()
         # Status management is handled by _consume_output (chat_initiated=True)
+
+        # Phase 3: restore original enabled_skills if temporarily modified
+        if has_temp_skills:
+            async with self.db_factory() as db:
+                task = await db.get(Task, task_id)
+                if task:
+                    task.enabled_skills = original_skills
+                    await db.commit()
