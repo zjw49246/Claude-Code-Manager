@@ -39,6 +39,18 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat }: TaskListPro
   const menuRef = useRef<HTMLDivElement>(null);
   const titleInputRef = useRef<HTMLInputElement>(null);
 
+  // Close dropdowns on outside click
+  useEffect(() => {
+    if (toolsExpandedId === null && subAgentsExpandedId === null) return;
+    const handleDropdownClick = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (toolsExpandedId !== null && !target.closest('[data-tools-dropdown]')) setToolsExpandedId(null);
+      if (subAgentsExpandedId !== null && !target.closest('[data-subagents-dropdown]')) setSubAgentsExpandedId(null);
+    };
+    document.addEventListener('mousedown', handleDropdownClick);
+    return () => document.removeEventListener('mousedown', handleDropdownClick);
+  }, [toolsExpandedId, subAgentsExpandedId]);
+
   // Close overflow menu on outside click
   useEffect(() => {
     if (menuOpenId === null) return;
@@ -150,13 +162,29 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat }: TaskListPro
               {t.model && (
                 <span className="hidden sm:inline text-xs bg-gray-700 text-gray-300 px-1.5 rounded">{t.model}</span>
               )}
-              <button
-                onClick={() => setToolsExpandedId(toolsExpandedId === t.id ? null : t.id)}
-                className="text-xs bg-amber-600/30 text-amber-300 px-1.5 rounded cursor-pointer hover:bg-amber-600/40 flex items-center gap-0.5"
-              >
-                <Wrench size={12} />
-                {t.enabled_skills ? Object.values(t.enabled_skills).filter(Boolean).length : 0}
-              </button>
+              <div className="relative" data-tools-dropdown>
+                <button
+                  onClick={() => setToolsExpandedId(toolsExpandedId === t.id ? null : t.id)}
+                  className="text-xs bg-amber-600/30 text-amber-300 px-1.5 rounded cursor-pointer hover:bg-amber-600/40 flex items-center gap-0.5"
+                >
+                  <Wrench size={12} />
+                  {t.enabled_skills ? Object.values(t.enabled_skills).filter(Boolean).length : 0}
+                </button>
+                {toolsExpandedId === t.id && (
+                  <div className="absolute top-full mt-1 left-0 bg-gray-800 border border-gray-600 rounded shadow-lg z-20 min-w-[140px] py-1">
+                    {t.enabled_skills && Object.entries(t.enabled_skills).filter(([, v]) => v).length > 0 ? (
+                      Object.entries(t.enabled_skills).filter(([, v]) => v).map(([skill]) => (
+                        <div key={skill} className="px-3 py-1 text-xs text-gray-300 flex items-center gap-1.5">
+                          <span className="text-green-400">✓</span>
+                          {skill.charAt(0).toUpperCase() + skill.slice(1)}
+                        </div>
+                      ))
+                    ) : (
+                      <div className="px-3 py-1 text-xs text-gray-500">No tools enabled</div>
+                    )}
+                  </div>
+                )}
+              </div>
               <button
                 onClick={() => handleSubAgentsToggle(t.id)}
                 className={`text-xs bg-teal-600/30 text-teal-300 px-1.5 rounded cursor-pointer hover:bg-teal-600/40 flex items-center gap-0.5${t.active_sub_agents > 0 ? ' animate-pulse' : ''}`}
@@ -250,20 +278,7 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat }: TaskListPro
             </div>
           </div>
           </div>
-          {/* Expandable tools list */}
-          {toolsExpandedId === t.id && (
-            <div className="mt-1 pl-[1.125rem] flex flex-wrap gap-1">
-              {t.enabled_skills && Object.entries(t.enabled_skills).filter(([, v]) => v).length > 0 ? (
-                Object.entries(t.enabled_skills).filter(([, v]) => v).map(([skill]) => (
-                  <span key={skill} className="text-xs bg-green-600/30 text-green-300 px-1.5 py-0.5 rounded">
-                    ✓ {skill.charAt(0).toUpperCase() + skill.slice(1)}
-                  </span>
-                ))
-              ) : (
-                <span className="text-xs text-gray-500">No tools enabled — use $command to access temporarily</span>
-              )}
-            </div>
-          )}
+          {/* Tools dropdown is now inline above */}
           {/* Expandable sub-agents detail */}
           {subAgentsExpandedId === t.id && (
             <div className="mt-1 pl-[1.125rem] flex flex-wrap gap-1">
