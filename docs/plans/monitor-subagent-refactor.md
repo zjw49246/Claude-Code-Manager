@@ -184,7 +184,7 @@ Task 卡片上的可展开工具权限指示器。
   - 在 `backend/api/sub_agents.py` 实现（新文件，为后续子 agent 类型预留）
   - 展开面板按类型显示: `Monitor  ● 1 running  ○ 3 completed`
 
-- [ ] **7.5** 前端 `client.ts` 新增 `SubAgentSummary` interface 和 `getSubAgentSummary()` API
+- [x] **7.5** 前端 `client.ts` 新增 `SubAgentSummary` interface 和 `getSubAgentSummary()` API
 
 ### Phase 8: 测试
 

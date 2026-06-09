@@ -288,6 +288,15 @@ export interface MonitorCheck {
   created_at: string;
 }
 
+export interface SubAgentTypeSummary {
+  running: number;
+  completed: number;
+}
+
+export interface SubAgentSummary {
+  by_type: Record<string, SubAgentTypeSummary>;
+}
+
 export const api = {
   // Projects
   listProjects: () => request<Project[]>('/api/projects'),
@@ -524,6 +533,10 @@ export const api = {
     request<MonitorCheck[]>(`/api/tasks/${taskId}/monitor-sessions/${sessionId}/checks`),
   deleteMonitorSession: (taskId: number, sessionId: number) =>
     request<{ ok: boolean }>(`/api/tasks/${taskId}/monitor-sessions/${sessionId}`, { method: 'DELETE' }),
+
+  // Sub-Agents
+  getSubAgentSummary: (taskId: number) =>
+    request<SubAgentSummary>(`/api/tasks/${taskId}/sub-agents/summary`),
 
   // System
   health: () => request<{ status: string }>('/api/system/health'),
