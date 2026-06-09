@@ -1,21 +1,21 @@
-# CCM + Elastic Agent 分布式方案设计
+# CCM 分布式 Worker 方案设计
 
 > 本文档是 CCM 分布式 Worker 功能的完整设计方案，持续更新。
 
 ## 1. 架构总览
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│  Manager 机器 (用户的服务器)                              │
-│  ┌──────────────────┐  ┌─────────────────────────────┐  │
-│  │  CCM 服务         │  │  Elastic Agent Manager      │  │
-│  │  (UI + API +     │  │  (开机/bootstrap/健康监控)    │  │
-│  │   本地 Dispatcher)│  │                             │  │
-│  └────────┬─────────┘  └──────────┬──────────────────┘  │
-│           │                       │                      │
-│  本地 Claude Code 实例            │ SSH + WebSocket       │
-│  (用 manager 自己的账号)          │                      │
-└───────────────────────────────────┼──────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│  Manager 机器 (用户的服务器)                           │
+│  ┌─────────────────────────────────────────────────┐ │
+│  │  CCM 服务                                       │ │
+│  │  (UI + API + 本地 Dispatcher                    │ │
+│  │   + WorkerProvisioner + WorkerRelay)            │ │
+│  └────────┬────────────────────────────────────────┘ │
+│           │                                          │
+│  本地 Claude Code 实例          SSH + WebSocket       │
+│  (用 manager 自己的账号)          │                   │
+└───────────────────────────────────┼───────────────────┘
                                     │
             ┌───────────────────────┼──────────────────┐
             │                       │                  │
@@ -132,7 +132,7 @@ Body: {
 ```
 
 1. 在 Worker 表创建记录，status = `creating`
-2. 调用 Elastic Agent Manager：开云实例
+2. 调用 WorkerProvisioner：开云实例
 3. 等实例 Running，获取 IP
 4. 执行 Bootstrap Pipeline（见 3.3）
 5. 自动创建 SSH Server 配置（用于 Files 界面访问）
@@ -1108,7 +1108,7 @@ Step 6: 断开 relay 连接
      否则实例销毁后 _reconnect 会尝试 10 次重连（指数退避，约 17 分钟浪费）
 
 Step 7: 销毁云实例
-  ├─ Elastic Agent: terminate_instance(worker.cloud_instance_id)
+  ├─ WorkerProvisioner: terminate_instance(worker.cloud_instance_id)
   └─ Worker status = terminated
 ```
 
@@ -1393,32 +1393,127 @@ async def _health_check_loop(self):
 
 ---
 
-## 16. Elastic Agent 的角色精简
+## 16. WorkerProvisioner — 云实例管理集成
 
-在此方案中，Elastic Agent 只负责三件事：
+将云实例管理直接集成到 CCM 中，不依赖独立的 Elastic Agent 服务。
+只需要三个能力：开关机、SSH 执行、Bootstrap 编排，代码量不大，没必要维护独立 repo。
 
-| 功能 | 使用的组件 |
-|------|-----------|
-| 开机/关机云实例 | `CloudProvider` (AWS/Aliyun) |
-| Bootstrap (SSH 安装依赖 + 部署 CCM) | `SSHExecutor` + `BootstrapPipeline` |
-| 健康监控 | 可以用 Elastic Agent 的，也可以 CCM 自己做（更简单） |
+### 16.1 模块结构
 
-**不需要的 Elastic Agent 组件：**
-- TaskScheduler / TaskRouter — CCM Dispatcher 负责
-- TaskRegistry — CCM Task 表负责
-- WorkerRuntime — Worker 上跑完整 CCM，不需要裸 runtime
-- FileSync (watchdog + OSS) — 用 SSH 直接读，销毁时 rsync
-- CredentialBinding — 账号在 Worker 本机登录，不做跨机绑定
-- WebSocket message protocol (Execute/Stop/Log) — CCM 有自己的 API + WS
+```
+backend/services/
+  worker_provisioner.py      # 主编排：创建/销毁/重启 Worker 的完整流程
+  cloud_provider.py          # 云 API 抽象层
+  ssh_executor.py            # SSH 远程命令执行
+```
 
-**需要的 Elastic Agent 组件：**
-- `CloudProvider` 接口 + AWS/Aliyun 实现
-- `SSHExecutor` 执行远程命令
-- `BootstrapPipeline` + `BootstrapHandler` 编排 bootstrap 步骤
-- `NodeRegistry` 记录 worker 云实例状态（可选，也可以用 CCM 的 Worker 表替代）
+### 16.2 CloudProvider 抽象
 
-实际上可以考虑把需要的部分直接集成到 CCM 中，作为一个 `services/worker_provisioner.py`，
-避免运行两个独立服务。
+```python
+# backend/services/cloud_provider.py
+
+from abc import ABC, abstractmethod
+
+class CloudProvider(ABC):
+    @abstractmethod
+    async def create_instance(self, config: dict) -> str:
+        """创建云实例，返回 instance_id。"""
+
+    @abstractmethod
+    async def wait_until_running(self, instance_id: str) -> str:
+        """等实例 Running，返回 public_ip。"""
+
+    @abstractmethod
+    async def terminate_instance(self, instance_id: str) -> None:
+        """销毁云实例。"""
+
+class AWSProvider(CloudProvider):
+    """基于 boto3 的 AWS EC2 实现。"""
+    ...
+
+class AliyunProvider(CloudProvider):
+    """基于 alibabacloud SDK 的阿里云 ECS 实现。"""
+    ...
+
+def get_cloud_provider(provider_name: str) -> CloudProvider:
+    providers = {"aws": AWSProvider, "aliyun": AliyunProvider}
+    return providers[provider_name]()
+```
+
+### 16.3 SSHExecutor
+
+```python
+# backend/services/ssh_executor.py
+
+class SSHExecutor:
+    """通过 asyncssh 执行远程命令，支持步骤化执行和实时日志。"""
+
+    def __init__(self, host: str, user: str, key_path: str):
+        self.host = host
+        self.user = user
+        self.key_path = key_path
+
+    async def run(self, command: str, timeout: int = 300) -> tuple[int, str]:
+        """执行命令，返回 (exit_code, output)。"""
+        ...
+
+    async def upload(self, local_path: str, remote_path: str) -> None:
+        """SCP 上传文件。"""
+        ...
+```
+
+### 16.4 WorkerProvisioner
+
+```python
+# backend/services/worker_provisioner.py
+
+class WorkerProvisioner:
+    """Worker 生命周期管理：创建、Bootstrap、销毁、重启。
+
+    集成了 CloudProvider 和 SSHExecutor，在 CCM 进程内直接运行，
+    不依赖外部服务。Worker 状态记录在 CCM 的 Worker 表中。
+    """
+
+    def __init__(self, db_factory, cloud_provider: CloudProvider):
+        self.db_factory = db_factory
+        self.cloud = cloud_provider
+
+    async def create_worker(self, worker_id: int, accounts: list[dict]):
+        """完整的 Worker 创建流程：开机 → Bootstrap → 健康检查。
+        每个步骤更新 Worker.bootstrap_step，失败时记录 bootstrap_error。
+        """
+        ...
+
+    async def destroy_worker(self, worker_id: int):
+        """销毁云实例（数据迁移由上层调用方在此之前完成）。"""
+        ...
+
+    async def restart_worker(self, worker_id: int, force: bool = False):
+        """SSH 重启 Worker CCM 服务（git pull + restart）。"""
+        ...
+```
+
+### 16.5 初始化
+
+```python
+# backend/main.py lifespan 中
+
+from backend.services.cloud_provider import get_cloud_provider
+from backend.services.worker_provisioner import WorkerProvisioner
+
+cloud = get_cloud_provider(settings.worker_cloud_provider)
+worker_provisioner = WorkerProvisioner(db_factory=async_session, cloud_provider=cloud)
+```
+
+### 16.6 对比独立 Elastic Agent 的优势
+
+| | 集成到 CCM | 独立 Elastic Agent |
+|---|---|---|
+| 部署 | 单进程，无额外运维 | 需要部署两个服务 |
+| 通信 | 直接调用，无网络开销 | 需要 HTTP/gRPC 跨服务调用 |
+| 状态 | 共享 DB（Worker 表） | 需要同步两边状态 |
+| 代码量 | ~3 个文件，几百行 | 完整框架，大量用不上的代码 |
+| 扩展 | 新增云厂商只需加一个 CloudProvider 实现 | 同 |
 
 ---
 
