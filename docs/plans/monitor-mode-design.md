@@ -44,7 +44,9 @@ Dispatcher 读 monitor signal，开始迭代 N+1
 
 ### Goal 模式 — evaluation 间门控
 
-与 loop 类似，在 evaluation 之间插入 monitor 检查。goal 的 signal 同样扩展 `needs_monitor` 字段。
+**注意：Goal 模式没有 signal file 机制**，与 Loop 完全不同。Goal 模式使用 `--resume` 保持同一 session，由 GoalEvaluator 读 conversation transcript 判断目标是否达成。
+
+因此 Goal 模式的 monitor 集成需要不同方式：在 GoalEvaluator 评估结果中识别"后台任务已启动但未完成"的状态，或扩展 evaluator 返回一个 `needs_monitor` 标志。具体设计在 Phase 6 中细化，实现优先级低于 Loop 和 Auto。
 
 ### Auto 模式 — 用户手动创建
 
@@ -78,7 +80,7 @@ class MonitorSession(Base):
     monitor_context: Mapped[str | None] = mapped_column(Text, nullable=True)  # 来自 signal file 的上下文（PID、日志路径等）
     interval: Mapped[int] = mapped_column(Integer, default=300)   # 轮询间隔（秒）
     max_checks: Mapped[int] = mapped_column(Integer, default=100)
-    model: Mapped[str | None] = mapped_column(String(100), nullable=True)  # 默认 claude-opus-4-6
+    model: Mapped[str | None] = mapped_column(String(100), nullable=True)  # 默认使用 settings.default_model
 
     # 状态
     status: Mapped[str] = mapped_column(String(20), default="running")
@@ -306,13 +308,18 @@ async def _run_monitor_session(self, monitor_session: MonitorSession, task: Task
 ```python
 # backend/api/monitor.py
 
-@router.post("/tasks/{task_id}/monitor-sessions")
+@router.post("/tasks/{task_id}/monitor-sessions", response_model=MonitorSessionResponse)
 async def create_monitor_session(
     task_id: int,
     request: MonitorSessionCreate,
     db: AsyncSession = Depends(get_db),
 ):
     """用户手动创建 monitor session（Auto 模式等场景）"""
+    # 校验 task 存在
+    task = await db.get(Task, task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+
     monitor_session = MonitorSession(
         task_id=task_id,
         description=request.description,
@@ -361,7 +368,7 @@ async def delete_monitor_session(
 
     return {"status": "cancelled"}
 
-@router.get("/tasks/{task_id}/monitor-sessions")
+@router.get("/tasks/{task_id}/monitor-sessions", response_model=list[MonitorSessionResponse])
 async def list_monitor_sessions(
     task_id: int,
     db: AsyncSession = Depends(get_db),
@@ -374,7 +381,7 @@ async def list_monitor_sessions(
     )
     return result.scalars().all()
 
-@router.get("/tasks/{task_id}/monitor-sessions/{session_id}/checks")
+@router.get("/tasks/{task_id}/monitor-sessions/{session_id}/checks", response_model=list[MonitorCheckResponse])
 async def get_monitor_checks(
     task_id: int,
     session_id: int,
@@ -778,7 +785,7 @@ await db.commit()
 - 每条检查默认折叠，显示摘要
 - 点击展开显示完整的 monitor session 输出（来自 MonitorCheck.full_output）
 
-### 4. WebSocket 事件
+### 5. WebSocket 事件
 
 ```typescript
 // monitor session 创建
@@ -895,5 +902,5 @@ def downgrade():
 3. **Phase 3 — Loop 集成**：扩展 loop signal file + `_run_loop_lifecycle` 中插入 monitor 门控
 4. **Phase 4 — API**：Monitor Session CRUD 端点（创建/删除/列表/详情）
 5. **Phase 5 — 前端**：监控列表面板 + 新建对话框 + 详情页 + WebSocket 事件
-6. **Phase 6 — Goal 集成**：与 loop 类似的 signal 扩展
+6. **Phase 6 — Goal 集成**：需要单独设计（Goal 模式无 signal file，需扩展 GoalEvaluator）
 7. **Phase 7 — 测试**：loop + monitor 门控、手动创建/删除、各种边界情况

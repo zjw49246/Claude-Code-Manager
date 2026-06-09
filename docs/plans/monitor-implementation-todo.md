@@ -93,16 +93,17 @@
 ### 4.1 创建 API 文件
 - [ ] 新建 `backend/api/monitor.py`（项目路由在 `backend/api/` 目录，不是 `backend/routers/`）
   - `POST /tasks/{task_id}/monitor-sessions` — 创建 manual monitor session
-    - 校验 task 存在
+    - 校验 task 存在（404 if not found）
     - 创建 MonitorSession(source="manual")
     - 调用 `asyncio.create_task(dispatcher._run_monitor_session_background(...))`
+    - response_model=MonitorSessionResponse
   - `DELETE /tasks/{task_id}/monitor-sessions/{session_id}` — 删除 monitor session
     - 校验 task_id 归属
     - 校验 source == "manual"，system monitor 返回 403
     - 更新 DB status="cancelled"
     - 取消 `dispatcher._monitor_tasks` 中的 asyncio task
-  - `GET /tasks/{task_id}/monitor-sessions` — 列表
-  - `GET /tasks/{task_id}/monitor-sessions/{session_id}/checks` — 检查记录列表
+  - `GET /tasks/{task_id}/monitor-sessions` — 列表（response_model=list[MonitorSessionResponse]）
+  - `GET /tasks/{task_id}/monitor-sessions/{session_id}/checks` — 检查记录列表（response_model=list[MonitorCheckResponse]）
 
 ### 4.2 注册路由
 - [ ] 在 `backend/main.py` 中 import 并 include monitor router（参考其他 router 的注册方式）
@@ -152,11 +153,19 @@
 
 ---
 
-## Phase 6 — Goal 模式集成（可选，与 Loop 类似）
+## Phase 6 — Goal 模式集成（可选，需单独设计）
 
-- [ ] 在 `_run_goal_lifecycle` 的 evaluation 间插入 gate monitor 逻辑
-- [ ] 复用 Loop 的 `needs_monitor` 信号机制
-- [ ] Goal signal file 扩展 needs_monitor 字段
+**注意：Goal 模式没有 signal file**，不能照搬 Loop 的 `needs_monitor` 机制。
+Goal 模式使用 `--resume` + GoalEvaluator 评估 conversation transcript。
+
+可选方案：
+- [ ] 方案 A: 扩展 GoalEvaluator 返回值，增加 `needs_monitor` + `monitor_context` 字段
+  - evaluator 从 conversation transcript 中识别"启动了后台任务"
+  - `_run_goal_lifecycle` 在 eval_result.needs_monitor 时插入 gate monitor
+- [ ] 方案 B: 在 goal prompt 中引导 Claude 写一个 monitor signal file（类似 loop）
+  - 需要在 `_build_goal_initial_prompt` / `_build_goal_followup_prompt` 中添加引导
+  - 每轮执行完后检查该 signal file 是否存在
+- [ ] 确定方案后实现
 
 ---
 
