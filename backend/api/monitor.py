@@ -218,6 +218,7 @@ async def create_monitor_check(
             prompt=complete_prompt,
             priority=PRIORITY_MONITOR_COMPLETE,
             source="monitor:complete",
+            user_message_text=f"[Monitor #{session_id}] 监控完成: {body.summary}",
         )
         # Kill the sub-agent process since it's no longer needed
         sub_proc = dispatcher._monitor_processes.get(session_id)
@@ -289,17 +290,32 @@ async def complete_monitor_session(
         {"event": "monitor_session_status", "monitor_session_id": session_id, "status": "completed"},
     )
 
-    # Notify main agent
-    from backend.services.dispatcher import PRIORITY_MONITOR_COMPLETE
-    complete_prompt = (
-        f"[Monitor #{session_id} 完成] {body.reason}\n\n"
-        "请向用户简要转达监控结果。"
+    # Check if the previous report_status already notified the main agent
+    # (is_important=True on final check). Skip notification to avoid duplicates.
+    from backend.models.log_entry import LogEntry
+    import json as _json
+    prev_check_log = await db.scalar(
+        select(LogEntry.raw_json)
+        .where(
+            LogEntry.task_id == task_id,
+            LogEntry.event_type == "system_event",
+            LogEntry.raw_json.like(f'%"monitor_session_id": {session_id}%'),
+            LogEntry.raw_json.like('%"is_important": true%'),
+        )
+        .order_by(LogEntry.id.desc())
     )
-    await dispatcher.enqueue_message(
-        task_id=task_id,
-        prompt=complete_prompt,
-        priority=PRIORITY_MONITOR_COMPLETE,
-        source="monitor:complete",
-    )
+    if not prev_check_log:
+        from backend.services.dispatcher import PRIORITY_MONITOR_COMPLETE
+        complete_prompt = (
+            f"[Monitor #{session_id} 完成] {body.reason}\n\n"
+            "请向用户简要转达监控结果。"
+        )
+        await dispatcher.enqueue_message(
+            task_id=task_id,
+            prompt=complete_prompt,
+            priority=PRIORITY_MONITOR_COMPLETE,
+            source="monitor:complete",
+            user_message_text=f"[Monitor #{session_id}] 监控完成: {body.reason}",
+        )
 
     return {"ok": True, "message": "Session completed. Your task is done — stop all activity now."}
