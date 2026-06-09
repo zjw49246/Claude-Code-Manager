@@ -1860,6 +1860,8 @@ class GlobalDispatcher:
         """Resume main agent session with a queued message."""
         # Phase 1: read task state, find idle instance, launch process
         inst_id: int | None = None
+        has_temp_skills = False
+        original_skills: dict = {}
         async with self.db_factory() as db:
             task = await db.get(Task, task_id)
             if not task or not task.session_id:
@@ -1931,6 +1933,7 @@ class GlobalDispatcher:
             original_skills = dict(task.enabled_skills or {})
             effective_skills = dict(original_skills)
             if msg.command_skills:
+                has_temp_skills = True
                 effective_skills.update(msg.command_skills)
                 # Temporarily write to DB so API-level checks pass
                 task.enabled_skills = effective_skills
@@ -1954,7 +1957,6 @@ class GlobalDispatcher:
                 enabled_skills=effective_skills,
             )
             inst_id = inst.id
-            has_temp_skills = msg.command_skills is not None
 
             await self.instance_manager.launch(**launch_kwargs)
 
@@ -1970,15 +1972,23 @@ class GlobalDispatcher:
         # DB session closed — process runs independently
 
         # Phase 2: wait for process to finish (no DB held)
-        process = self.instance_manager.processes.get(inst_id)
-        if process:
-            await process.wait()
-        # Status management is handled by _consume_output (chat_initiated=True)
-
-        # Phase 3: restore original enabled_skills if temporarily modified
-        if has_temp_skills:
-            async with self.db_factory() as db:
-                task = await db.get(Task, task_id)
-                if task:
-                    task.enabled_skills = original_skills
-                    await db.commit()
+        try:
+            process = self.instance_manager.processes.get(inst_id)
+            if process:
+                await process.wait()
+            # Status management is handled by _consume_output (chat_initiated=True)
+        finally:
+            # Phase 3: remove temporarily added skills (must run even on crash)
+            if has_temp_skills:
+                try:
+                    async with self.db_factory() as db:
+                        task = await db.get(Task, task_id)
+                        if task:
+                            current = dict(task.enabled_skills or {})
+                            for key in msg.command_skills:
+                                if key not in original_skills or not original_skills[key]:
+                                    current.pop(key, None)
+                            task.enabled_skills = current
+                            await db.commit()
+                except Exception:
+                    logger.exception(f"Failed to restore enabled_skills for task {task_id}")
