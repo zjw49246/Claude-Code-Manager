@@ -387,6 +387,9 @@ async def _forward_task_to_worker(self, task):
                 ...
             }
         )
+        # 必须检查响应状态：Worker 可能返回 422（字段校验失败）或 500（内部错误）
+        # 不检查的话 task 永远卡在 in_progress，relay 订阅了但收不到任何事件
+        resp.raise_for_status()
 ```
 
 ---
@@ -508,8 +511,10 @@ class WorkerRelay:
                         db.add(log)
                         await db.commit()
 
-                # 2. 同步 task 状态 + 元数据变化
+                # 2. 同步 task 状态
                 # 注意：Dispatcher 广播用 "new_status" 而非 "status"
+                # session_id 不在 status_change 广播中（被 instance_manager pop 掉了），
+                # 由 _send_worker_chat 从 chat 响应中同步
                 if event_type == "status_change":
                     async with self.db_factory() as db:
                         task_obj = await db.get(Task, task_id)
@@ -517,8 +522,6 @@ class WorkerRelay:
                             new_status = data.get("new_status")
                             if new_status:
                                 task_obj.status = new_status
-                            if data.get("session_id"):
-                                task_obj.session_id = data["session_id"]
                             await db.commit()
 
                 # 3. 同步 cost / context_window_usage
@@ -731,7 +734,16 @@ async def _send_worker_chat(task, body, db):
     # 4. 确保日志中继已启动（可能是 Chat 唤醒的）
     await worker_relay.subscribe_task(worker, task)
 
-    # 5. 替换 Worker 本地的 instance_id（对 Manager 无意义）
+    # 5. 同步 session_id 到 Manager DB
+    # 原因：Worker 的 instance_manager._process_event 用 event.pop("session_id")
+    # 把 session_id 从事件中移除后才广播，relay 永远收不到。
+    # 只有 chat 响应中包含 session_id，必须在这里存入 Manager DB，
+    # 否则 Worker 销毁后 --resume 无法找到 session 文件。
+    if result.get("session_id"):
+        task.session_id = result["session_id"]
+        await db.commit()
+
+    # 6. 替换 Worker 本地的 instance_id（对 Manager 无意义）
     result["instance_id"] = None
     return result
 ```
