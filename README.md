@@ -19,7 +19,7 @@ Web 端调度和管理多个 Claude Code 实例并行工作。灵感来自胡渊
 - **语音输入** — 通过 OpenAI Whisper API 语音转文字创建任务
 - **PWA** — 手机浏览器 Add to Home Screen，原生 App 体验
 - **Android App** — 通过 Capacitor 打包原生 APK，App 内可配置远程服务器地址
-- **Monitor Skill** — Agent 可自主创建后台监控子 session，定期检查进程状态/日志并汇报，通过 MCP 工具注入
+- **Monitor Sub-Agent** — Agent 可自主创建持久监控子 Agent，子 Agent 拥有独立 MCP 工具（report_status / mark_complete / get_context），自主决定检查频率并通过 API 向系统汇报
 - **主题切换** — 支持浅色/深色主题，偏好持久化
 - **Token 认证** — Bearer Token 保护所有 API，安全远程访问
 - **远程访问** — 通过 Cloudflare Tunnel 隧道暴露到公网
@@ -66,9 +66,11 @@ claude-manager/
 │   ├── middleware/      # Token 认证中间件
 │   ├── models/          # SQLAlchemy ORM (task, instance, project, log_entry, worktree)
 │   ├── schemas/         # Pydantic 请求/响应模型
+│   ├── mcp/             # MCP Servers (主 agent + 子 agent)
 │   ├── services/        # 核心业务逻辑
-│   │   ├── dispatcher.py        # 全局调度器 (9 步任务生命周期)
+│   │   ├── dispatcher.py        # 全局调度器 (9 步任务生命周期 + 子 agent 管理)
 │   │   ├── instance_manager.py  # Claude Code 子进程管理
+│   │   ├── mcp_config.py        # MCP config 动态生成 (主 agent + 子 agent)
 │   │   ├── ralph_loop.py        # 自动取活循环 (legacy)
 │   │   ├── stream_parser.py     # NDJSON stream-json 解析
 │   │   ├── task_queue.py        # 优先级任务队列
@@ -161,7 +163,7 @@ JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home" \
 1. **Tasks** — 创建任务，选择已有项目或新建项目（可选填 remote URL），填写 Prompt 和优先级。可勾选 **Monitor** skill 赋予 Agent 后台监控能力
 2. **Dispatcher** 自动分配任务到空闲 worker → Claude Code 自主完成所有工作（含 worktree 创建和清理） → 取下一个
 3. 点击任务的 **Chat** 按钮，可以对已完成的任务继续追问
-4. 启用 Monitor 的任务中，Agent 可自主创建后台监控子 session，Chat 界面通过 SubSessionIndicator 和 MonitorPanel 展示监控状态
+4. 启用 Monitor 的任务中，Agent 可自主创建持久监控子 Agent，子 Agent 独立运行并自主汇报。Task 列表显示活跃子 Agent 数量，Chat 界面通过 MonitorPanel 展示监控状态
 
 ### Plan Mode
 
@@ -198,6 +200,9 @@ JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home" \
 | | `GET /api/tasks/{id}/monitor-sessions/{sid}` | monitor session 详情 |
 | | `DELETE /api/tasks/{id}/monitor-sessions/{sid}` | 停止 monitor session |
 | | `GET /api/tasks/{id}/monitor-sessions/{sid}/checks` | monitor 检查历史 |
+| | `POST /api/tasks/{id}/monitor-sessions/{sid}/checks` | 子 agent 报告状态 |
+| | `POST /api/tasks/{id}/monitor-sessions/{sid}/complete` | 子 agent 标记完成 |
+| Sub-Agents | `GET /api/tasks/{id}/sub-agents/summary` | 子 agent 按类型汇总 |
 | Dispatcher | `GET /api/dispatcher/status` | 调度器状态 |
 | | `POST /api/dispatcher/start` | 启动调度器 |
 | | `POST /api/dispatcher/stop` | 停止调度器 |
@@ -362,5 +367,6 @@ cloudflared tunnel run <tunnel-name>
 - **Claude Code 集成**：通过 `claude -p [prompt] --dangerously-skip-permissions --output-format stream-json --verbose` 非交互模式调用，Claude Code 读项目 CLAUDE.md 决定 git 操作
 - **进程超时保护**：任务执行超过 `TASK_TIMEOUT_SECONDS`（默认 30 分钟）后自动 kill，防止进程挂死
 - **多轮对话**：session_id 绑定在 Task 上，follow-up 时使用 `--resume <session_id>` 续接会话
+- **子 Agent 系统**：Monitor 是第一个子 Agent 类型，持久 Claude 子进程拥有独立 MCP server，通过 HTTP API 与系统通信，架构为后续子 Agent 类型预留
 - **进程管理**：`asyncio.create_subprocess_exec` 启动，必须 unset `CLAUDECODE` 环境变量避免嵌套检测
 - **停止机制**：SIGTERM → 等待 10s → SIGKILL
