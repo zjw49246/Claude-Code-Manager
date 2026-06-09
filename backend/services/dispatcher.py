@@ -1865,6 +1865,8 @@ class GlobalDispatcher:
 
     async def _process_queued_message(self, task_id: int, msg: QueuedMessage):
         """Resume main agent session with a queued message."""
+        # Phase 1: read task state, find idle instance, launch process
+        inst_id: int | None = None
         async with self.db_factory() as db:
             task = await db.get(Task, task_id)
             if not task or not task.session_id:
@@ -1872,11 +1874,11 @@ class GlobalDispatcher:
                 return
 
             # Wait for main agent to be idle (not executing)
-            for _ in range(60):
+            for attempt in range(60):
                 is_busy = False
-                for inst_id, proc in self.instance_manager.processes.items():
+                for iid, proc in self.instance_manager.processes.items():
                     if proc.returncode is None:
-                        inst = await db.get(Instance, inst_id)
+                        inst = await db.get(Instance, iid)
                         if inst and inst.current_task_id == task_id:
                             is_busy = True
                             break
@@ -1884,7 +1886,10 @@ class GlobalDispatcher:
                     break
                 await asyncio.sleep(2)
             else:
-                logger.warning(f"Task {task_id} still busy after 120s, dropping message: {msg.source}")
+                logger.warning(f"Task {task_id} still busy after 120s, re-queueing message: {msg.source}")
+                q = self._get_task_queue(task_id)
+                await q.put(msg)
+                await asyncio.sleep(5)
                 return
 
             # Find idle instance
@@ -1929,7 +1934,8 @@ class GlobalDispatcher:
                 f"on instance {inst.id}"
             )
 
-            await self.instance_manager.launch(
+            # Capture launch params before closing DB session
+            launch_kwargs = dict(
                 instance_id=inst.id,
                 prompt=msg.prompt,
                 task_id=task_id,
@@ -1945,6 +1951,9 @@ class GlobalDispatcher:
                 enable_workflows=task.enable_workflows,
                 enabled_skills=task.enabled_skills,
             )
+            inst_id = inst.id
+
+            await self.instance_manager.launch(**launch_kwargs)
 
             task.status = "executing"
             await db.commit()
@@ -1953,22 +1962,12 @@ class GlobalDispatcher:
                 "event": "status_change",
                 "task_id": task_id,
                 "new_status": "executing",
-                "instance_id": inst.id,
+                "instance_id": inst_id,
             })
+        # DB session closed — process runs independently
 
-            # Wait for the process to finish before processing next message
-            process = self.instance_manager.processes.get(inst.id)
-            if process:
-                await process.wait()
-
-            # Refresh task status after process exits
-            await db.refresh(task)
-            if task.status == "executing":
-                task.status = "completed"
-                await db.commit()
-                await self.broadcaster.broadcast("tasks", {
-                    "event": "status_change",
-                    "task_id": task_id,
-                    "new_status": "completed",
-                    "instance_id": inst.id,
-                })
+        # Phase 2: wait for process to finish (no DB held)
+        process = self.instance_manager.processes.get(inst_id)
+        if process:
+            await process.wait()
+        # Status management is handled by _consume_output (chat_initiated=True)
