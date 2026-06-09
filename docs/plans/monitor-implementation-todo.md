@@ -549,12 +549,13 @@ def cleanup_mcp_config(task_id: int):
   "enabled_skills": enabled_skills,
   ```
 
-- [ ] MCP config 清理: 在 `_consume_output()` 方法结束时（搜索 `async def _consume_output`），或在 dispatcher 的进程等待完成后，调用:
+- [ ] MCP config 清理: 在 dispatcher 的 `_run_task_lifecycle()` 的 `finally` 块中（搜索 `finally:` in `_run_task_lifecycle`），添加:
   ```python
   from backend.services.mcp_config import cleanup_mcp_config
-  if task_id:
-      cleanup_mcp_config(task_id)
+  cleanup_mcp_config(task.id)
   ```
+  > **注意**: 必须在 task 的 Claude 进程退出后清理，不能在 `_consume_output()` 中清理（进程可能还在运行）。
+  > `_run_task_lifecycle` 的 finally 块是唯一可靠的时机。
 
 ### 3.3 Dispatcher 传递 `enabled_skills`
 
@@ -591,6 +592,8 @@ def cleanup_mcp_config(task_id: int):
 - [ ] 创建以下端点:
 
 ```python
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1274,9 +1277,10 @@ async def get_monitor_checks(
 
   interface SubSessionIndicatorProps {
     counts: SubSessionCounts;
+    onNavigate?: (skill: keyof SubSessionCounts) => void;
   }
 
-  export function SubSessionIndicator({ counts }: SubSessionIndicatorProps) {
+  export function SubSessionIndicator({ counts, onNavigate }: SubSessionIndicatorProps) {
     const [expanded, setExpanded] = useState(false);
 
     const total = useMemo(
@@ -1300,7 +1304,10 @@ async def get_monitor_checks(
         {expanded && (
           <div className="sub-session-details">
             {counts.monitor > 0 && (
-              <div className="sub-session-row">
+              <div
+                className="sub-session-row clickable"
+                onClick={() => onNavigate?.('monitor')}
+              >
                 <span className="sub-session-label">Monitor</span>
                 <span className="sub-session-count">{counts.monitor}</span>
               </div>
@@ -1318,8 +1325,14 @@ async def get_monitor_checks(
   ```tsx
   // 从 monitor sessions API 获取 running 状态的数量
   const monitorCount = monitorSessions.filter(s => s.status === 'running').length;
+  const [showMonitorPanel, setShowMonitorPanel] = useState(false);
 
-  <SubSessionIndicator counts={{ monitor: monitorCount }} />
+  <SubSessionIndicator
+    counts={{ monitor: monitorCount }}
+    onNavigate={(skill) => {
+      if (skill === 'monitor') setShowMonitorPanel(true);
+    }}
+  />
   ```
 
 - [ ] 样式要求:
