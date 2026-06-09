@@ -49,6 +49,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   const [selectedSecretIds, setSelectedSecretIds] = useState<number[]>([]);
   const [dropError, setDropError] = useState('');
   const [enableWorkflows, setEnableWorkflows] = useState(false);
+  const [enableMonitor, setEnableMonitor] = useState(false);
   const [starOnCreate, setStarOnCreate] = useState(false);
   const [cloneFromTaskId, setCloneFromTaskId] = useState<number | ''>('');
   const [contextTasks, setContextTasks] = useState<Task[]>([]);
@@ -191,6 +192,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
         ...(effort ? { effort_level: effort } : {}),
         ...(thinkingBudget ? { thinking_budget: parseInt(thinkingBudget) || null } : {}),
         enable_workflows: enableWorkflows,
+        enabled_skills: enableMonitor ? { monitor: true } : undefined,
         ...(starOnCreate ? { starred: true } : {}),
         ...(cloneFromTaskId ? { clone_from_task_id: cloneFromTaskId as number } : {}),
       });
@@ -510,6 +512,17 @@ export function TaskForm({ onCreated }: TaskFormProps) {
               className="accent-indigo-500"
             />
             Workflows
+          </label>
+        )}
+        {provider === 'claude' && (
+          <label className="flex items-center gap-1 text-sm text-gray-400 whitespace-nowrap cursor-pointer" title="Enable Monitor skill - lets the agent create background monitoring sessions">
+            <input
+              type="checkbox"
+              checked={enableMonitor}
+              onChange={(e) => setEnableMonitor(e.target.checked)}
+              className="accent-indigo-500"
+            />
+            Monitor
           </label>
         )}
         <label className="flex items-center gap-1.5 text-sm text-gray-400 ml-auto whitespace-nowrap cursor-pointer">

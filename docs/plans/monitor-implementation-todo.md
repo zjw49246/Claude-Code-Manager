@@ -1193,17 +1193,17 @@ async def get_monitor_checks(
 
 **修改文件**: `frontend/src/components/Tasks/TaskForm.tsx`
 
-- [ ] 新增 state（搜索 `enableWorkflows` 的 useState，在其附近添加）:
+- [x] 新增 state（搜索 `enableWorkflows` 的 useState，在其附近添加）:
   ```tsx
   const [enableMonitor, setEnableMonitor] = useState(false);
   ```
 
-- [ ] 在 submit handler 中（搜索 `enable_workflows: enableWorkflows`），添加:
+- [x] 在 submit handler 中（搜索 `enable_workflows: enableWorkflows`），添加:
   ```tsx
   enabled_skills: enableMonitor ? { monitor: true } : undefined,
   ```
 
-- [ ] 在 Workflows checkbox 后面（搜索 `Workflows</label>`）添加:
+- [x] 在 Workflows checkbox 后面（搜索 `Workflows</label>`）添加:
   ```tsx
   <label className="flex items-center gap-1 text-sm text-gray-400 whitespace-nowrap cursor-pointer" title="Enable Monitor skill - lets the agent create background monitoring sessions">
     <input
@@ -1220,17 +1220,17 @@ async def get_monitor_checks(
 
 **修改文件**: `frontend/src/api/client.ts`
 
-- [ ] `TaskResponse` 接口中（搜索 `enable_workflows`）添加:
+- [x] `TaskResponse` 接口中（搜索 `enable_workflows`）添加:
   ```tsx
   enabled_skills: Record<string, boolean> | null;
   ```
 
-- [ ] `createTask` 方法参数中（搜索 `enable_workflows?:` ）添加:
+- [x] `createTask` 方法参数中（搜索 `enable_workflows?:` ）添加:
   ```tsx
   enabled_skills?: Record<string, boolean>;
   ```
 
-- [ ] 添加 Monitor API 方法:
+- [x] 添加 Monitor API 方法:
   ```tsx
   // Monitor Sessions
   listMonitorSessions: (taskId: number) =>
@@ -1241,7 +1241,7 @@ async def get_monitor_checks(
     api.delete(`/api/tasks/${taskId}/monitor-sessions/${sessionId}`).then(r => r.data),
   ```
 
-- [ ] TypeScript 接口:
+- [x] TypeScript 接口:
   ```tsx
   export interface MonitorSession {
     id: number;
@@ -1274,7 +1274,7 @@ async def get_monitor_checks(
 
 **新建文件**: `frontend/src/components/Chat/SubSessionIndicator.tsx`
 
-- [ ] 在 ChatView 顶部或工具栏区域添加子 session 指示器:
+- [x] 在 ChatView 顶部或工具栏区域添加子 session 指示器:
 
   ```tsx
   import { useState, useMemo } from 'react';
@@ -1330,7 +1330,7 @@ async def get_monitor_checks(
   }
   ```
 
-- [ ] 在 ChatView 中集成:
+- [x] 在 ChatView 中集成:
 
   ```tsx
   // 从 monitor sessions API 获取 running 状态的数量
@@ -1345,19 +1345,19 @@ async def get_monitor_checks(
   />
   ```
 
-- [ ] 样式要求:
+- [x] 样式要求:
   - 按钮使用紧凑样式，不占用过多空间
   - 展开后以列表形式显示各类子 session 的数量
   - 总数为 0 时隐藏整个组件
   - 使用 `Activity` 图标表示后台活动
 
-- [ ] 数据来源: 通过已有的 `getMonitorSessions(taskId)` API 获取，WebSocket 事件实时更新
+- [x] 数据来源: 通过已有的 `getMonitorSessions(taskId)` API 获取，WebSocket 事件实时更新
 
 ### 5.4 Monitor 面板组件
 
 **新建文件**: `frontend/src/components/Chat/MonitorPanel.tsx`
 
-- [ ] 在 Task 详情页（ChatView）中，当 `task.enabled_skills?.monitor` 为 true 时显示 Monitor 面板:
+- [x] 在 Task 详情页（ChatView）中，当 `task.enabled_skills?.monitor` 为 true 时显示 Monitor 面板:
   - 活跃 monitor 列表，每条显示: 描述、状态、`3/50 次`、最新摘要
   - 停止按钮 → 调用 deleteMonitorSession
   - 点击展开历史 checks 列表
@@ -1365,14 +1365,14 @@ async def get_monitor_checks(
 
 ### 5.5 Monitor 消息渲染
 
-- [ ] Chat 消息流中，WebSocket 收到 `monitor_check` 事件时:
+- [x] Chat 消息流中，WebSocket 收到 `monitor_check` 事件时:
   - 在消息流中插入一条特殊样式的 monitor 更新消息
   - 不同背景色/图标，与普通对话区分
   - 显示来源 monitor 描述 + 摘要
 
 ### 5.6 WebSocket 事件处理
 
-- [ ] 在 ChatView 中监听（使用现有的 `useWebSocket` hook 的 `onMessage` 回调）:
+- [x] 在 ChatView 中监听（使用现有的 `useWebSocket` hook 的 `onMessage` 回调）:
   - `monitor_session_created` → SubSessionIndicator 计数 +1 + 面板添加新条目
   - `monitor_check` → 更新摘要 + 消息流插入
   - `monitor_session_status` → 更新状态标签 + SubSessionIndicator 计数更新
