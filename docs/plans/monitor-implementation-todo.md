@@ -59,6 +59,7 @@
   - system monitor (source=loop): `while True` 无限循环，不受 max_checks 限制
   - manual monitor (source=manual): `while checks_done < max_checks`
   - 每轮: sleep(interval) → 检查 task status → 检查 monitor status → 清理旧 signal → 运行子进程 → 读 signal → 写 DB(MonitorCheck) → 广播 monitor_check 事件 → 判断 done
+  - 子进程调用需 try/except: 捕获 TimeoutError 和其他非 CancelledError 异常，记录一条 status="failed" 的 MonitorCheck 后 **继续下一轮**（单次超时/失败不应终止整个 session）
   - 检查 task status 时: 如果 task 已 completed/failed/cancelled，**必须更新 MonitorSession 状态**（completed→completed, 其他→cancelled），然后 return False。否则 MonitorSession 会永远卡在 "running"
   - 完成时广播 `monitor_session_status` 事件（completed/failed）
   - 所有退出路径（done/cancelled/耗尽）都要 `signal_path.unlink(missing_ok=True)` 清理 signal file
@@ -104,6 +105,8 @@
   - `POST /tasks/{task_id}/monitor-sessions` — 创建 manual monitor session
     - 通过 `from backend.main import dispatcher` 获取 dispatcher 实例（参考 chat.py/pool.py 的模式）
     - 校验 task 存在（404 if not found）
+    - 校验 task.mode == "auto"（403，manual monitor 仅支持 Auto 模式）
+    - 校验 task.status in ("in_progress", "executing")（400，不能对已完成/取消的 task 创建 monitor）
     - 创建 MonitorSession(source="manual")
     - 调用 `asyncio.create_task(dispatcher._run_monitor_session_background(...))`
     - response_model=MonitorSessionResponse
@@ -171,7 +174,7 @@
 ### 6.1 测试
 - [ ] 测试 MonitorSession / MonitorCheck CRUD（model 层）
 - [ ] 测试 `_run_monitor_session` 的 done 判断、max_checks 耗尽、取消检测
-- [ ] 测试 API 权限（manual 可删除，system 不可删除，task_id 归属校验）
+- [ ] 测试 API 权限（manual 可删除，system 不可删除，task_id 归属校验，非 auto 模式拒绝创建，已完成 task 拒绝创建）
 - [ ] 测试 Loop 集成: needs_monitor → gate → 完成后继续
 - [ ] 测试取消流程: 取消 task → monitor sessions 全部 cancelled
 - [ ] 测试服务重启: running 的 monitor session 被清理为 failed
