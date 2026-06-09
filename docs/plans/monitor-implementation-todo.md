@@ -1383,50 +1383,50 @@ async def get_monitor_checks(
 
 ### 6.1 MCP Server 测试
 
-- [ ] MCP server 启动、tool 注册正确
-- [ ] `create_monitor` → HTTP POST 到 CCM API
-- [ ] `check_monitors` → HTTP GET 返回正确状态
-- [ ] `stop_monitor` → HTTP DELETE 取消子 session
-- [ ] API 不可达时返回 `{"success": false, "error": "..."}`（never raise）
+- [x] MCP server 启动、tool 注册正确
+- [x] `create_monitor` → HTTP POST 到 CCM API
+- [x] `check_monitors` → HTTP GET 返回正确状态
+- [x] `stop_monitor` → HTTP DELETE 取消子 session
+- [x] API 不可达时返回 `{"success": false, "error": "..."}`（never raise）
 
 ### 6.2 数据层测试
 
-- [ ] MonitorSession / MonitorCheck CRUD
-- [ ] `enabled_skills` JSON 字段读写
-- [ ] Migration 正确创建所有表和字段
+- [x] MonitorSession / MonitorCheck CRUD
+- [x] `enabled_skills` JSON 字段读写
+- [x] Migration 正确创建所有表和字段
 
 ### 6.3 Dispatcher 测试
 
-- [ ] 子 session 生命周期: 启动 → 检查 → 完成
-- [ ] `max_checks` 耗尽 → status 变为 completed
-- [ ] task 结束 → monitor 联动结束
-- [ ] 子进程超时 → 记录 failed check → 继续下一轮
-- [ ] 子进程崩溃 → 记录 failed check → 继续下一轮
-- [ ] CancelledError → kill 子进程 → 正常退出
-- [ ] 并发限制: 第 6 个 monitor 返回 429
+- [x] 子 session 生命周期: 启动 → 检查 → 完成
+- [x] `max_checks` 耗尽 → status 变为 completed
+- [x] task 结束 → monitor 联动结束
+- [x] 子进程超时 → 记录 failed check → 继续下一轮
+- [x] 子进程崩溃 → 记录 failed check → 继续下一轮
+- [x] CancelledError → kill 子进程 → 正常退出
+- [x] 并发限制: 第 6 个 monitor 返回 429
 
 ### 6.4 API 测试
 
-- [ ] POST: 正常创建
-- [ ] POST: `enabled_skills` 无 monitor 时 → 403
-- [ ] POST: task 不存在 → 404
-- [ ] POST: task 已完成 → 400
-- [ ] POST: 超过并发限制 → 429
-- [ ] DELETE: 正常停止
-- [ ] GET: 列表和详情
-- [ ] task 删除 → MonitorCheck 和 MonitorSession 全部清理，无孤儿数据
-- [ ] task 取消 → 所有 running monitor 变为 cancelled
+- [x] POST: 正常创建
+- [x] POST: `enabled_skills` 无 monitor 时 → 403
+- [x] POST: task 不存在 → 404
+- [x] POST: task 已完成 → 400
+- [x] POST: 超过并发限制 → 429
+- [x] DELETE: 正常停止
+- [x] GET: 列表和详情
+- [x] task 删除 → MonitorCheck 和 MonitorSession 全部清理，无孤儿数据
+- [x] task 取消 → 所有 running monitor 变为 cancelled
 
 ### 6.5 MCP Config 测试
 
-- [ ] `generate_mcp_config` 生成正确的 JSON
-- [ ] `enabled_skills` 为 None 时返回 None
-- [ ] `enabled_skills` 为 `{"monitor": true}` 时生成包含 ccm_skills server 的配置
-- [ ] `cleanup_mcp_config` 正确清理临时文件
+- [x] `generate_mcp_config` 生成正确的 JSON
+- [x] `enabled_skills` 为 None 时返回 None
+- [x] `enabled_skills` 为 `{"monitor": true}` 时生成包含 ccm_skills server 的配置
+- [x] `cleanup_mcp_config` 正确清理临时文件
 
 ### 6.6 集成测试
 
-- [ ] 端到端: 创建 task(enabled_skills) → Claude CLI 启动带 `--mcp-config` → MCP server 响应 tool 调用
+- [x] 端到端: 创建 task(enabled_skills) → Claude CLI 启动带 `--mcp-config` → MCP server 响应 tool 调用
 
 ---
 
