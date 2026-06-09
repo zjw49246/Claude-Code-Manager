@@ -302,7 +302,7 @@ async def _run_monitor_session(self, monitor_session: MonitorSession, task: Task
 用户通过前端按钮创建，后端提供 API：
 
 ```python
-# backend/routers/monitor.py
+# backend/api/monitor.py
 
 @router.post("/tasks/{task_id}/monitor-sessions")
 async def create_monitor_session(
@@ -482,28 +482,26 @@ async def _run_monitor_subprocess(self, prompt, cwd, model, task_id, monitor_ses
     return full_output
 
 async def _consume_monitor_output(self, process, task_id, monitor_session_id) -> str:
-    """解析 stream-json 输出，实时广播，返回完整文本。"""
+    """复用项目已有的 StreamParser 解析 stream-json 输出，实时广播，返回完整文本。"""
+    from backend.services.stream_parser import StreamParser
+    parser = StreamParser()
     full_text_parts = []
 
     async for line in process.stdout:
         line = line.decode().strip()
         if not line:
             continue
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
 
-        if event.get("type") == "assistant" and "content" in event:
-            for block in event["content"]:
-                if block.get("type") == "text":
-                    full_text_parts.append(block["text"])
+        events = parser.parse_line(line)
+        for event in events:
+            if event.get("event_type") == "message":
+                full_text_parts.append(event.get("content", ""))
 
-        await self.broadcaster.broadcast(f"task:{task_id}", {
-            "event_type": "monitor_output",
-            "monitor_session_id": monitor_session_id,
-            "data": event,
-        })
+            await self.broadcaster.broadcast(f"task:{task_id}", {
+                "event_type": "monitor_output",
+                "monitor_session_id": monitor_session_id,
+                "data": event,
+            })
 
     return "\n".join(full_text_parts)
 ```
@@ -556,25 +554,52 @@ def _get_loop_monitor_hint(self) -> str:
 
 ### 用户取消任务时
 
-```python
-async def cancel_task(self, task_id: int):
-    # 现有逻辑：停止主进程
-    ...
+项目中没有 `cancel_task` 方法。任务取消流程：
+1. API (`POST /tasks/{task_id}/cancel`) 调用 `TaskQueue.cancel()` 设置 DB status="cancelled"
+2. 生命周期方法（loop/goal）在每轮迭代开始时检测到 status=="cancelled"，自行退出
+3. Loop gate monitor 在 `_run_monitor_session` 的 `asyncio.sleep` 后检测 task status，自行退出
 
-    # 新增：取消该 task 下所有运行中的 monitor sessions
-    async with self.db_factory() as db:
-        result = await db.execute(
-            select(MonitorSession)
-            .where(MonitorSession.task_id == task_id)
-            .where(MonitorSession.status == "running")
-        )
-        for ms in result.scalars().all():
-            ms.status = "cancelled"
-            # 取消对应的 asyncio task
-            handle = self._monitor_tasks.pop(ms.id, None)
-            if handle:
-                handle.cancel()
-        await db.commit()
+**新增：monitor 清理逻辑**
+
+在 `TaskQueue.cancel()` 中追加 monitor session 清理：
+
+```python
+# backend/services/task_queue.py — cancel() 方法末尾追加
+
+async def cancel(self, task_id: int) -> Task | None:
+    task = await self.get(task_id)
+    if not task or task.status not in ("pending", "in_progress", "executing", "merging"):
+        return None
+    task.status = "cancelled"
+    task.completed_at = datetime.utcnow()
+
+    # 新增：标记该 task 下所有运行中的 monitor sessions 为 cancelled
+    await self.db.execute(
+        update(MonitorSession)
+        .where(MonitorSession.task_id == task_id)
+        .where(MonitorSession.status == "running")
+        .values(status="cancelled")
+    )
+
+    await self.db.commit()
+    await self.db.refresh(task)
+    return task
+```
+
+**Manual monitor 的 asyncio task 取消**：
+
+manual monitor 通过 `asyncio.create_task` 在后台运行，注册在 `dispatcher._monitor_tasks` 中。
+`_run_monitor_session` 每轮检查 MonitorSession.status，发现 "cancelled" 后自行退出（无需显式 cancel asyncio task，最多延迟一个 interval）。
+如需立即取消，可在 cancel API 中追加：
+
+```python
+# backend/api/tasks.py — cancel_task endpoint 中追加
+from backend.main import dispatcher
+for ms_id, handle in list(dispatcher._monitor_tasks.items()):
+    # _monitor_tasks 中的 task 对应的 monitor_session 已在 DB 中标记为 cancelled
+    # cancel asyncio task 让它立即退出而不是等下一个 interval
+    handle.cancel()
+    dispatcher._monitor_tasks.pop(ms_id, None)
 ```
 
 ### 用户删除单个 Monitor Session 时
@@ -590,6 +615,23 @@ async def delete_monitor_session(...):
     if ms.source != "manual":
         raise HTTPException(400, "系统创建的监控不允许删除，请取消整个任务")
     ...
+```
+
+### 服务重启恢复
+
+在 `_cleanup_stale_state()` 中追加 monitor session 清理：
+
+```python
+# dispatcher.py — _cleanup_stale_state() 末尾追加
+
+# 清理 running 状态的 monitor sessions（服务重启后子进程已死）
+result = await db.execute(
+    select(MonitorSession).where(MonitorSession.status == "running")
+)
+for ms in result.scalars().all():
+    logger.warning(f"Resetting stale monitor session {ms.id} from 'running' to 'failed'")
+    ms.status = "failed"
+await db.commit()
 ```
 
 ## 前端变更
