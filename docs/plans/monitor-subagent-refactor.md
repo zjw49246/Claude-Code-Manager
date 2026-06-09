@@ -166,7 +166,7 @@ Task 卡片上的可展开工具权限指示器。
 
 ### Phase 7: 前端 — 子 Agent 计数徽章
 
-- [ ] **7.1** 后端: 在 Task response schema 中新增 `active_sub_agents` 字段
+- [x] **7.1** 后端: 在 Task response schema 中新增 `active_sub_agents` 字段
   - 类型: `int`，默认 0
   - 在 `backend/api/tasks.py` 的 list_tasks 查询中，对每个 active task 子查询 `SELECT COUNT(*) FROM monitor_sessions WHERE task_id=? AND status='running'`
   - 用 SQLAlchemy subquery/lateral join 避免 N+1

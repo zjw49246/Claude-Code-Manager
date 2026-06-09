@@ -1,7 +1,7 @@
 from datetime import datetime
 
-from sqlalchemy import Integer, String, Text, DateTime, JSON
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import Integer, String, Text, DateTime, JSON, select, func
+from sqlalchemy.orm import Mapped, mapped_column, column_property
 
 from backend.database import Base
 
@@ -54,3 +54,16 @@ class Task(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+def _configure_task_properties():
+    from backend.models.monitor_session import MonitorSession
+    ms = MonitorSession.__table__
+    Task.active_sub_agents = column_property(
+        select(func.count(ms.c.id))
+        .where(ms.c.task_id == Task.id, ms.c.status == "running")
+        .correlate(Task.__table__)
+        .scalar_subquery()
+    )
+
+_configure_task_properties()
