@@ -1061,15 +1061,66 @@ Step 4: 同步 Session 文件回 Manager
   │              manager:<manager 第一个账号 config_dir>/projects/
   └─ 这样 Manager 的 Claude Code 用 --resume 就能找到所有 session
 
-Step 5: 更新 Manager DB
-  ├─ 对所有 worker_id = 此 worker 的 task:
-  │   └─ task.worker_id = None   (切回本机执行)
+Step 5: 从 Worker 同步 task 详情 + 更新 Manager DB
+  ├─ 关键原因：relay 无法同步的字段（instance_manager.pop session_id 等）
+  │   必须在销毁前从 Worker API 拉取，否则 Manager DB 缺失关键数据
+  ├─ 批量获取 Worker 上所有 task 详情：
+  │   GET worker/api/tasks/{id} for each task
+  ├─ 对每个 task 同步以下字段（仅在 Manager 为空时覆盖）：
+  │   ├─ session_id  ← 最关键：instance_manager 用 event.pop() 移除后广播，
+  │   │                relay 永远收不到。如不同步，--resume 无法找到 session
+  │   ├─ last_cwd    ← instance_manager.launch() 在 Worker 上设置，
+  │   │                chat 时需要用来定位工作目录
+  │   ├─ error_message ← task 失败时由 Worker 的 mark_failed() 设置，
+  │   │                   status_change 广播不含此字段
+  │   └─ completed_at ← mark_completed/mark_failed 设置
+  ├─ task.worker_id = None（切回本机执行）
   ├─ 日志不需要导入（WorkerRelay 已经实时存入 Manager DB 了）
-  └─ session_id 不变，session 文件已 rsync 回来
+  └─ session 文件已在 Step 4 rsync 回来，配合同步的 session_id 即可 --resume
 
 Step 6: 销毁云实例
   ├─ Elastic Agent: terminate_instance(worker.cloud_instance_id)
   └─ Worker status = terminated
+```
+
+**Step 5 实现代码：**
+
+```python
+async def _sync_task_details_from_worker(self, worker, db):
+    """销毁前从 Worker 同步 relay 无法覆盖的 task 字段。
+
+    原因：instance_manager 用 event.pop("session_id") 在广播前移除 session_id，
+    relay 永远收不到。last_cwd 在 launch() 时直接写 Worker DB。error_message
+    在 mark_failed() 时设置，status_change 广播不含此字段。
+    这些字段只存在于 Worker DB，必须在销毁前拉取。
+    """
+    worker_tasks = (await db.execute(
+        select(Task).where(Task.worker_id == worker.id)
+    )).scalars().all()
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        for task in worker_tasks:
+            try:
+                resp = await client.get(
+                    f"http://{worker.public_ip}:{worker.ccm_port}/api/tasks/{task.id}",
+                    headers={"Authorization": f"Bearer {worker.auth_token}"},
+                )
+                if resp.status_code != 200:
+                    continue
+                wt = resp.json()
+                # 只在 Manager 为空时覆盖（避免覆盖 Manager 侧已有的正确值）
+                if not task.session_id:
+                    task.session_id = wt.get("session_id")
+                if not task.last_cwd:
+                    task.last_cwd = wt.get("last_cwd")
+                if not task.error_message:
+                    task.error_message = wt.get("error_message")
+                if not task.completed_at and wt.get("completed_at"):
+                    task.completed_at = wt["completed_at"]
+            except Exception:
+                pass  # Worker 可能已经不响应，尽力同步
+            task.worker_id = None
+    await db.commit()
 ```
 
 ### 10.3 无缝衔接原理
@@ -1084,9 +1135,10 @@ rsync 后:
 
 用户继续 Chat:
   1. task.worker_id 已经是 None → 走本地 Chat 逻辑
-  2. Manager CCM 用 --resume <session_id>
-  3. Claude Code 在 Manager 第一个账号的 config_dir 下找到 session 文件
-  4. 对话无缝继续
+  2. task.session_id 已从 Worker API 同步（Step 5）
+  3. Manager CCM 用 --resume <session_id>
+  4. Claude Code 在 Manager 第一个账号的 config_dir 下找到 session 文件
+  5. 对话无缝继续
 ```
 
 前提条件：
