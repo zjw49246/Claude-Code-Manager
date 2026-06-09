@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useMemo, useCallback, memo } from 'react';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { api } from '../../api/client';
-import type { ChatMessage, FileAttachment, Task, Project, UploadResult } from '../../api/client';
+import type { ChatMessage, FileAttachment, Task, Project, UploadResult, MonitorSession } from '../../api/client';
 import { useWebSocket } from '../../hooks/useWebSocket';
 import { Send, ArrowLeft, Loader2, ChevronDown, ChevronRight, ChevronUp, Copy, Check, Paperclip, X, StopCircle, Pencil, ArrowDown, Star, ListPlus, Trash2 } from 'lucide-react';
 import { SecretPicker } from '../Secrets/SecretPicker';
@@ -10,6 +10,8 @@ import { QuickPhraseDropdown } from '../QuickPhrases/QuickPhraseDropdown';
 import { ExpandableText } from '../ExpandableText';
 import { formatMessageTime } from '../../config/timezone';
 import { useFileDrop } from '../../hooks/useFileDrop';
+import { SubSessionIndicator } from './SubSessionIndicator';
+import { MonitorPanel } from './MonitorPanel';
 
 interface ChatViewProps {
   task: Task;
@@ -129,6 +131,8 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [showScrollBottom, setShowScrollBottom] = useState(false);
   const [starred, setStarred] = useState(task.starred);
+  const [monitorSessions, setMonitorSessions] = useState<MonitorSession[]>([]);
+  const [showMonitorPanel, setShowMonitorPanel] = useState(false);
   const isProcessing = sending || ['in_progress', 'executing'].includes(task.status);
 
   const userMsgCount = useMemo(() => {
@@ -257,7 +261,37 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
     const msg = raw as { channel?: string; data?: Record<string, unknown> };
     if (msg.channel !== `task:${task.id}` || !msg.data) return;
 
-    const eventType = msg.data.event_type as string;
+    const eventType = msg.data.event_type as string || (msg.data.event as string);
+
+    if (eventType === 'monitor_session_created' || eventType === 'monitor_session_status') {
+      api.listMonitorSessions(task.id).then(setMonitorSessions).catch(() => {});
+      return;
+    }
+
+    if (eventType === 'monitor_check') {
+      api.listMonitorSessions(task.id).then(setMonitorSessions).catch(() => {});
+      const summary = msg.data.summary as string;
+      const monitorSessionId = msg.data.monitor_session_id as number;
+      const checkNumber = msg.data.check_number as number;
+      if (summary) {
+        const entry: ChatMessage = {
+          id: Date.now() + Math.random(),
+          role: 'assistant',
+          event_type: 'system_event',
+          content: `[Monitor #${monitorSessionId}] Check #${checkNumber}: ${summary}`,
+          tool_name: null,
+          tool_input: null,
+          tool_output: null,
+          is_error: (msg.data.status as string) === 'failed',
+          loop_iteration: null,
+          timestamp: new Date().toISOString(),
+          image_urls: null,
+          attachments: null,
+        };
+        setMessages((prev) => [...prev, entry]);
+      }
+      return;
+    }
 
     if (eventType === 'process_exit') {
       // Small delay so any final output messages queued just before
@@ -343,6 +377,18 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
   useEffect(() => {
     fetchHistory();
   }, [fetchHistory]);
+
+  // Load monitor sessions if monitor skill is enabled
+  useEffect(() => {
+    if (task.enabled_skills?.monitor) {
+      api.listMonitorSessions(task.id).then(setMonitorSessions).catch(() => {});
+    }
+  }, [task.id, task.enabled_skills]);
+
+  const monitorCount = useMemo(
+    () => monitorSessions.filter((s) => s.status === 'running').length,
+    [monitorSessions]
+  );
 
   const grouped = useMemo(() => groupMessages(messages), [messages]);
 
@@ -596,6 +642,14 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
             </div>
           )}
         </div>
+        {task.enabled_skills?.monitor && (
+          <SubSessionIndicator
+            counts={{ monitor: monitorCount }}
+            onNavigate={(skill) => {
+              if (skill === 'monitor') setShowMonitorPanel(!showMonitorPanel);
+            }}
+          />
+        )}
         <button
           onClick={handleStar}
           className={`p-1.5 transition-colors ${starred ? 'text-yellow-400 hover:text-yellow-300' : 'text-gray-600 hover:text-yellow-400'}`}
@@ -626,6 +680,18 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
           </button>
         )}
       </div>
+
+      {/* Monitor Panel */}
+      {showMonitorPanel && task.enabled_skills?.monitor && (
+        <div className="px-4 py-2 border-b border-gray-800">
+          <MonitorPanel
+            taskId={task.id}
+            sessions={monitorSessions}
+            onSessionsChange={setMonitorSessions}
+            onClose={() => setShowMonitorPanel(false)}
+          />
+        </div>
+      )}
 
       {/* Interrupting banner */}
       {interrupting && (
