@@ -669,6 +669,13 @@ class InstanceManager:
                 )
             await db.commit()
 
+        if task_id:
+            await self.broadcaster.broadcast(f"task:{task_id}", {
+                "event_type": "process_exit",
+                "exit_code": process.returncode,
+                "stderr": None,
+            })
+
         self.processes.pop(instance_id, None)
         self._stopping.discard(instance_id)
         return True
