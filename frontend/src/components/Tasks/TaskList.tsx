@@ -1,7 +1,7 @@
 import { useState, useMemo, useRef, useEffect } from 'react';
 import { api } from '../../api/client';
 import type { Task, Project } from '../../api/client';
-import { Trash2, RotateCcw, XCircle, MessageCircle, Archive, ArchiveRestore, Star, Copy, Check, MoreVertical, Pencil, Mail, MailOpen, Wrench } from 'lucide-react';
+import { Trash2, RotateCcw, XCircle, MessageCircle, Archive, ArchiveRestore, Star, Copy, Check, MoreVertical, Pencil, Mail, MailOpen, Wrench, Users } from 'lucide-react';
 import { TAG_COLOR_OPTIONS } from '../TagColors';
 import { ExpandableText } from '../ExpandableText';
 
@@ -139,6 +139,12 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat }: TaskListPro
                   <Wrench size={12} />
                   {Object.values(t.enabled_skills).filter(Boolean).length}
                 </button>
+              )}
+              {t.active_sub_agents > 0 && (
+                <span className="text-xs bg-teal-600/30 text-teal-300 px-1.5 rounded flex items-center gap-0.5 animate-pulse">
+                  <Users size={12} />
+                  {t.active_sub_agents}
+                </span>
               )}
             </div>
             {/* Action buttons */}
