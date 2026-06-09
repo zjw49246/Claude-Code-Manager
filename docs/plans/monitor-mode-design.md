@@ -2,9 +2,9 @@
 
 ## 概述
 
-为 CCM 新增 Monitor Session（监控会话）功能。Monitor Session 是一个**独立的 Claude 子 session**，可以挂在任何 task 下面，定期检查后台任务状态并汇报。
+为 CCM 新增 Monitor Session（监控会话）功能。Monitor Session 是一个**独立的 Claude 子 session**，可以挂在 Auto 或 Loop 模式的 task 下面，定期检查后台任务状态并汇报。
 
-与 v1 方案的核心区别：**Monitor 不再是一个独立模式，而是一个通用能力**，可以附加到任何模式的 task 上，且能参与任务决策。
+与 v1 方案的核心区别：**Monitor 不再是一个独立模式，而是一个通用能力**，可以附加到 Auto/Loop 模式的 task 上，且能参与任务决策（Loop 门控）。
 
 ### 解决的核心问题
 
@@ -14,10 +14,11 @@
 
 ### 设计原则
 
-- Monitor Session 是**通用的独立子 session**，底层统一，行为由 prompt 决定
+- Monitor Session 是**独立的子 session**，底层统一，行为由 prompt 决定
+- 仅支持 **Auto 模式**（用户手动创建）和 **Loop 模式**（系统自动创建门控）
 - 是否参与决策（门控 vs 纯观察）由 prompt 逻辑控制，不在系统层面区分
 - 每个 task 可以挂多个 Monitor Session
-- Monitor Session 不支持对话，但可以被用户删除
+- Monitor Session 不支持对话，但可以被用户删除（仅 manual）
 - Monitor Session 与主 session 完全解耦
 
 ## 各模式下的接入方式
@@ -41,10 +42,6 @@ Dispatcher 读 monitor signal，开始迭代 N+1
 **触发条件**：Claude 在 loop signal file 中设置 `needs_monitor: true`，由 Claude 自行判断是否需要。
 
 **Prompt 引导**：loop prompt 中告知 Claude——如果启动了后台任务（训练、构建等），在 signal 中设置 `needs_monitor: true` 和 `monitor_context`（描述启动了什么进程、PID、日志路径等）。
-
-### Goal 模式 — evaluation 间门控
-
-与 loop 类似，在 evaluation 之间插入 monitor 检查。goal 的 signal 同样扩展 `needs_monitor` 字段。
 
 ### Auto 模式 — 用户手动创建
 
@@ -78,7 +75,7 @@ class MonitorSession(Base):
     monitor_context: Mapped[str | None] = mapped_column(Text, nullable=True)  # 来自 signal file 的上下文（PID、日志路径等）
     interval: Mapped[int] = mapped_column(Integer, default=300)   # 轮询间隔（秒）
     max_checks: Mapped[int] = mapped_column(Integer, default=100)
-    model: Mapped[str | None] = mapped_column(String(100), nullable=True)  # 默认 claude-opus-4-6
+    model: Mapped[str | None] = mapped_column(String(100), nullable=True)  # 默认使用 settings.default_model
 
     # 状态
     status: Mapped[str] = mapped_column(String(20), default="running")
@@ -88,7 +85,7 @@ class MonitorSession(Base):
 
     # 来源
     source: Mapped[str] = mapped_column(String(20), default="manual")
-    # 可选值: "manual"（用户手动创建）, "loop"（loop 迭代间自动创建）, "goal"（goal 间自动创建）
+    # 可选值: "manual"（用户手动创建）, "loop"（loop 迭代间自动创建）
 
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -152,7 +149,7 @@ if action == "continue":
                 monitor_context=monitor_context,
                 interval=300,       # 默认 5 分钟
                 max_checks=100,     # 默认最多 100 次
-                model="claude-opus-4-6",
+                model=settings.default_model,  # 使用项目配置，不要硬编码
                 source="loop",
             )
             db.add(monitor_session)
@@ -186,7 +183,7 @@ async def _run_monitor_session(self, monitor_session: MonitorSession, task: Task
     返回 True 表示后台任务完成，False 表示被取消或 max_checks 耗尽。
 
     循环策略：
-    - source="loop"/"goal"（系统 monitor）：无 max_checks 限制，一直检查直到 done 或任务取消
+    - source="loop"（系统 monitor）：无 max_checks 限制，一直检查直到 done 或任务取消
     - source="manual"（用户 monitor）：受 max_checks 限制
     """
 
@@ -202,10 +199,19 @@ async def _run_monitor_session(self, monitor_session: MonitorSession, task: Task
 
         await asyncio.sleep(monitor_session.interval)
 
-        # 检查 task 是否已被取消
+        # 检查 task 是否已被取消或已完成
         async with self.db_factory() as db:
             t = await db.get(Task, task.id)
             if not t or t.status in ("cancelled", "completed", "failed"):
+                # 更新 monitor session 状态（task 取消时 TaskQueue.cancel() 已处理，
+                # 但 task 正常完成/失败时需要在这里更新）
+                await db.execute(
+                    update(MonitorSession)
+                    .where(MonitorSession.id == monitor_session.id)
+                    .where(MonitorSession.status == "running")
+                    .values(status="completed" if t and t.status == "completed" else "cancelled")
+                )
+                await db.commit()
                 return False
 
         # 检查 monitor session 是否已被取消（用户取消整个任务，或手动删除 manual monitor）
@@ -224,7 +230,7 @@ async def _run_monitor_session(self, monitor_session: MonitorSession, task: Task
         result = await self._run_monitor_subprocess(
             prompt=prompt,
             cwd=cwd,
-            model=monitor_session.model or "claude-opus-4-6",
+            model=monitor_session.model or settings.default_model,
             task_id=task.id,
             monitor_session_id=monitor_session.id,
         )
@@ -274,6 +280,12 @@ async def _run_monitor_session(self, monitor_session: MonitorSession, task: Task
                     .values(status="completed", completed_at=func.now())
                 )
                 await db.commit()
+            await self.broadcaster.broadcast(f"task:{task.id}", {
+                "event_type": "monitor_session_status",
+                "monitor_session_id": monitor_session.id,
+                "status": "completed",
+            })
+            signal_path.unlink(missing_ok=True)  # 清理 signal file
             return True
 
     # max_checks 耗尽（仅 manual monitor 会走到这里）
@@ -284,6 +296,12 @@ async def _run_monitor_session(self, monitor_session: MonitorSession, task: Task
             .values(status="failed")
         )
         await db.commit()
+    await self.broadcaster.broadcast(f"task:{task.id}", {
+        "event_type": "monitor_session_status",
+        "monitor_session_id": monitor_session.id,
+        "status": "failed",
+    })
+    signal_path.unlink(missing_ok=True)  # 清理 signal file
     return False
 ```
 
@@ -292,15 +310,20 @@ async def _run_monitor_session(self, monitor_session: MonitorSession, task: Task
 用户通过前端按钮创建，后端提供 API：
 
 ```python
-# backend/routers/monitor.py
+# backend/api/monitor.py
 
-@router.post("/tasks/{task_id}/monitor-sessions")
+@router.post("/tasks/{task_id}/monitor-sessions", response_model=MonitorSessionResponse)
 async def create_monitor_session(
     task_id: int,
     request: MonitorSessionCreate,
     db: AsyncSession = Depends(get_db),
 ):
     """用户手动创建 monitor session（Auto 模式等场景）"""
+    # 校验 task 存在
+    task = await db.get(Task, task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+
     monitor_session = MonitorSession(
         task_id=task_id,
         description=request.description,
@@ -326,7 +349,14 @@ async def delete_monitor_session(
     session_id: int,
     db: AsyncSession = Depends(get_db),
 ):
-    """用户删除 monitor session"""
+    """用户删除 monitor session（仅限 manual monitor）"""
+    # 校验归属 + 来源
+    ms = await db.get(MonitorSession, session_id)
+    if not ms or ms.task_id != task_id:
+        raise HTTPException(404, "Monitor session not found")
+    if ms.source != "manual":
+        raise HTTPException(403, "System monitor cannot be deleted")
+
     await db.execute(
         update(MonitorSession)
         .where(MonitorSession.id == session_id)
@@ -342,7 +372,7 @@ async def delete_monitor_session(
 
     return {"status": "cancelled"}
 
-@router.get("/tasks/{task_id}/monitor-sessions")
+@router.get("/tasks/{task_id}/monitor-sessions", response_model=list[MonitorSessionResponse])
 async def list_monitor_sessions(
     task_id: int,
     db: AsyncSession = Depends(get_db),
@@ -355,7 +385,7 @@ async def list_monitor_sessions(
     )
     return result.scalars().all()
 
-@router.get("/tasks/{task_id}/monitor-sessions/{session_id}/checks")
+@router.get("/tasks/{task_id}/monitor-sessions/{session_id}/checks", response_model=list[MonitorCheckResponse])
 async def get_monitor_checks(
     task_id: int,
     session_id: int,
@@ -391,6 +421,16 @@ async def _run_monitor_session_background(self, monitor_session, task_id):
         await self._run_monitor_session(monitor_session, task)
     except asyncio.CancelledError:
         pass
+    except Exception:
+        # 未预期异常 — 确保 DB 状态不会永远卡在 "running"
+        async with self.db_factory() as db:
+            await db.execute(
+                update(MonitorSession)
+                .where(MonitorSession.id == monitor_session.id)
+                .where(MonitorSession.status == "running")
+                .values(status="failed")
+            )
+            await db.commit()
     finally:
         self._monitor_tasks.pop(monitor_session.id, None)
 ```
@@ -418,7 +458,7 @@ def _build_monitor_session_prompt(self, monitor_session: MonitorSession, task: T
         "用中文写一句话摘要。\n"
         "检查完毕后，将结果写入 signal file：\n"
         f"echo '{{\"status\": \"running 或 done\", \"summary\": \"简短进度摘要\"}}' > "
-        f"{self._get_monitor_signal_path(monitor_session)}\n"
+        f"{self._get_monitor_signal_path(monitor_session.id, task.last_cwd or task.target_repo)}\n"
         "- status: 任务还在进行写 running，已完成写 done\n"
         "- summary: 中文一句话描述当前进度\n"
     )
@@ -438,7 +478,7 @@ async def _run_monitor_subprocess(self, prompt, cwd, model, task_id, monitor_ses
         "--model", model,
         "--output-format", "stream-json",
         "--dangerously-skip-permissions",
-        "--disallowedTools", "Edit", "Write", "NotebookEdit",
+        "--disallowedTools", "Edit,Write,NotebookEdit",
     ]
 
     env = {
@@ -454,33 +494,41 @@ async def _run_monitor_subprocess(self, prompt, cwd, model, task_id, monitor_ses
         env=env,
     )
 
-    full_output = await self._consume_monitor_output(process, task_id, monitor_session_id)
-    await asyncio.wait_for(process.wait(), timeout=120)
+    try:
+        full_output = await asyncio.wait_for(
+            self._consume_monitor_output(process, task_id, monitor_session_id),
+            timeout=300,
+        )
+    except asyncio.TimeoutError:
+        process.kill()
+        full_output = "（监控子进程超时，已终止）"
+    except asyncio.CancelledError:
+        # monitor 被取消时，确保子进程不会变成孤儿
+        process.kill()
+        raise
     return full_output
 
 async def _consume_monitor_output(self, process, task_id, monitor_session_id) -> str:
-    """解析 stream-json 输出，实时广播，返回完整文本。"""
+    """复用项目已有的 StreamParser 解析 stream-json 输出，实时广播，返回完整文本。"""
+    from backend.services.stream_parser import StreamParser
+    parser = StreamParser()
     full_text_parts = []
 
     async for line in process.stdout:
         line = line.decode().strip()
         if not line:
             continue
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
 
-        if event.get("type") == "assistant" and "content" in event:
-            for block in event["content"]:
-                if block.get("type") == "text":
-                    full_text_parts.append(block["text"])
+        events = parser.parse_line(line)
+        for event in events:
+            if event.get("event_type") == "message":
+                full_text_parts.append(event.get("content", ""))
 
-        await self.broadcaster.broadcast(f"task:{task_id}", {
-            "event_type": "monitor_output",
-            "monitor_session_id": monitor_session_id,
-            "data": event,
-        })
+            await self.broadcaster.broadcast(f"task:{task_id}", {
+                "event_type": "monitor_output",
+                "monitor_session_id": monitor_session_id,
+                "data": event,
+            })
 
     return "\n".join(full_text_parts)
 ```
@@ -488,10 +536,9 @@ async def _consume_monitor_output(self, process, task_id, monitor_session_id) ->
 ### 7. Signal File 路径与读取
 
 ```python
-def _get_monitor_signal_path(self, monitor_session: MonitorSession) -> Path:
+def _get_monitor_signal_path(self, monitor_session_id: int, cwd: str) -> Path:
     """获取 monitor session 的 signal file 路径。"""
-    cwd = monitor_session.task.last_cwd or monitor_session.task.target_repo
-    return Path(cwd) / ".claude-manager" / f"monitor_signal_{monitor_session.id}.json"
+    return Path(cwd) / ".claude-manager" / f"monitor_signal_{monitor_session_id}.json"
 
 def _read_monitor_signal(self, signal_path: Path) -> dict:
     """读取 signal file，容错处理。"""
@@ -516,11 +563,21 @@ def _read_monitor_signal(self, signal_path: Path) -> dict:
 
 ```python
 def _get_loop_monitor_hint(self) -> str:
+    """追加到 _build_loop_prompt 返回值末尾。
+    
+    注意：signal JSON 模板中不需要预写 needs_monitor/monitor_context 字段。
+    Claude 会根据本 hint 的指引，在需要时自行添加这两个字段到 signal JSON 中。
+    _read_loop_signal 读取后在 action=="continue" 分支检查这些字段。
+    """
     return (
         "\n\n【后台任务监控】如果你在本次迭代中启动了后台任务（训练、构建等），"
-        "请在 signal file 中设置以下字段：\n"
+        "请在 signal file 的 JSON 中额外添加以下两个字段：\n"
         '- "needs_monitor": true\n'
         '- "monitor_context": "描述启动了什么进程、PID、日志路径等"\n'
+        "例如：\n"
+        '{"action": "continue", "reason": "...", "progress": "1/10", '
+        '"summary": "...", "needs_monitor": true, '
+        '"monitor_context": "启动了 model_a 训练 (PID 1234, 日志 /tmp/train.log)"}\n\n'
         "这样系统会启动独立的监控 session 检查后台任务是否完成，确认完成后才开始下一次迭代。\n"
         "如果你的操作是同步的（改代码、写文件等），不需要设置这些字段。\n\n"
         "【资源竞争注意】如果任务需要独占资源（GPU、特定端口、大量内存等），"
@@ -534,32 +591,68 @@ def _get_loop_monitor_hint(self) -> str:
 
 ### 用户取消任务时
 
-```python
-async def cancel_task(self, task_id: int):
-    # 现有逻辑：停止主进程
-    ...
+项目中没有 `cancel_task` 方法。任务取消流程：
+1. API (`POST /tasks/{task_id}/cancel`) 调用 `TaskQueue.cancel()` 设置 DB status="cancelled"
+2. 生命周期方法（loop）在每轮迭代开始时检测到 status=="cancelled"，自行退出
+3. Loop gate monitor 在 `_run_monitor_session` 的 `asyncio.sleep` 后检测 task status，自行退出
 
-    # 新增：取消该 task 下所有运行中的 monitor sessions
-    async with self.db_factory() as db:
-        result = await db.execute(
-            select(MonitorSession)
-            .where(MonitorSession.task_id == task_id)
-            .where(MonitorSession.status == "running")
-        )
-        for ms in result.scalars().all():
-            ms.status = "cancelled"
-            # 取消对应的 asyncio task
-            handle = self._monitor_tasks.pop(ms.id, None)
-            if handle:
-                handle.cancel()
-        await db.commit()
+**新增：monitor 清理逻辑**
+
+在 `TaskQueue.cancel()` 中追加 monitor session 清理：
+
+```python
+# backend/services/task_queue.py — cancel() 方法末尾追加
+
+async def cancel(self, task_id: int) -> Task | None:
+    task = await self.get(task_id)
+    if not task or task.status not in ("pending", "in_progress", "executing", "merging"):
+        return None
+    task.status = "cancelled"
+    task.completed_at = datetime.utcnow()
+
+    # 新增：标记该 task 下所有运行中的 monitor sessions 为 cancelled
+    await self.db.execute(
+        update(MonitorSession)
+        .where(MonitorSession.task_id == task_id)
+        .where(MonitorSession.status == "running")
+        .values(status="cancelled")
+    )
+
+    await self.db.commit()
+    await self.db.refresh(task)
+    return task
+```
+
+**Manual monitor 的 asyncio task 取消**：
+
+manual monitor 通过 `asyncio.create_task` 在后台运行，注册在 `dispatcher._monitor_tasks` 中。
+`_run_monitor_session` 每轮检查 MonitorSession.status，发现 "cancelled" 后自行退出（无需显式 cancel asyncio task，最多延迟一个 interval）。
+如需立即取消，可在 cancel API 中追加：
+
+```python
+# backend/api/tasks.py — cancel_task endpoint 中追加
+from backend.main import dispatcher
+
+# 查询该 task 下所有 monitor session id（已在 TaskQueue.cancel() 中标记为 cancelled）
+async with async_session() as db:
+    result = await db.execute(
+        select(MonitorSession.id)
+        .where(MonitorSession.task_id == task_id)
+    )
+    ms_ids = {row[0] for row in result.all()}
+
+# 只取消属于该 task 的 monitor asyncio tasks
+for ms_id in ms_ids:
+    handle = dispatcher._monitor_tasks.pop(ms_id, None)
+    if handle:
+        handle.cancel()
 ```
 
 ### 用户删除单个 Monitor Session 时
 
 通过 `DELETE /tasks/{task_id}/monitor-sessions/{session_id}` API。
 仅限 `source="manual"` 的 monitor session 可以被删除。
-`source="loop"` 或 `source="goal"` 的系统创建 monitor 不允许删除，前端不显示删除按钮，后端 API 校验拒绝。
+`source="loop"` 的系统创建 monitor 不允许删除，前端不显示删除按钮，后端 API 校验拒绝。
 
 ```python
 @router.delete("/tasks/{task_id}/monitor-sessions/{session_id}")
@@ -568,6 +661,23 @@ async def delete_monitor_session(...):
     if ms.source != "manual":
         raise HTTPException(400, "系统创建的监控不允许删除，请取消整个任务")
     ...
+```
+
+### 服务重启恢复
+
+在 `_cleanup_stale_state()` 中追加 monitor session 清理：
+
+```python
+# dispatcher.py — _cleanup_stale_state() 末尾追加
+
+# 清理 running 状态的 monitor sessions（服务重启后子进程已死）
+result = await db.execute(
+    select(MonitorSession).where(MonitorSession.status == "running")
+)
+for ms in result.scalars().all():
+    logger.warning(f"Resetting stale monitor session {ms.id} from 'running' to 'failed'")
+    ms.status = "failed"
+await db.commit()
 ```
 
 ## 前端变更
@@ -586,7 +696,7 @@ async def delete_monitor_session(...):
 └──────────────────────────────────────────────┘
 ```
 
-**Loop / Goal 模式：**
+**Loop 模式：**
 ```
 ┌──────────────────────────────────────────────┐
 │  Task #12: 训练模型               [监控列表(2)] │
@@ -597,7 +707,7 @@ async def delete_monitor_session(...):
 ```
 
 - **[+ 新建监控]**：仅 Auto 模式显示，点击弹出创建对话框
-- **[监控列表(N)]**：所有模式都有，显示当前 task 下的 monitor 数量，点击打开监控列表面板
+- **[监控列表(N)]**：仅 Auto 和 Loop 模式显示，显示当前 task 下的 monitor 数量，点击打开监控列表面板
 
 ### 2. 新建监控对话框
 
@@ -649,7 +759,7 @@ async def delete_monitor_session(...):
 
 - 运行中的 monitor 显示 ● 绿点
 - 仅 `source="manual"` 的 monitor 显示 🗑️ 删除按钮
-- `source="loop"/"goal"` 的系统 monitor 不显示删除按钮（只能通过取消整个任务来终止）
+- `source="loop"` 的系统 monitor 不显示删除按钮（只能通过取消整个任务来终止）
 - 已完成的 monitor 显示 ✓
 - 点击任意一条进入详情页
 
@@ -660,7 +770,9 @@ async def delete_monitor_session(...):
 ```
 ┌────────────────────────────────────────┐
 │ ← 返回列表     Monitor #1: "监控训练进度" │
-│ 状态: 运行中 | 间隔: 300秒 | 5/100 次   │
+│ 状态: 运行中 | 间隔: 300秒 | 已检查 5 次  │
+│ （manual monitor 显示 "5/100 次"，      │
+│   system monitor 显示 "已检查 5 次"）    │
 ├────────────────────────────────────────┤
 │                                        │
 │ ▼ 检查 #5  2024-01-15 14:30           │
@@ -687,7 +799,7 @@ async def delete_monitor_session(...):
 - 每条检查默认折叠，显示摘要
 - 点击展开显示完整的 monitor session 输出（来自 MonitorCheck.full_output）
 
-### 4. WebSocket 事件
+### 5. WebSocket 事件
 
 ```typescript
 // monitor session 创建
@@ -804,5 +916,4 @@ def downgrade():
 3. **Phase 3 — Loop 集成**：扩展 loop signal file + `_run_loop_lifecycle` 中插入 monitor 门控
 4. **Phase 4 — API**：Monitor Session CRUD 端点（创建/删除/列表/详情）
 5. **Phase 5 — 前端**：监控列表面板 + 新建对话框 + 详情页 + WebSocket 事件
-6. **Phase 6 — Goal 集成**：与 loop 类似的 signal 扩展
-7. **Phase 7 — 测试**：loop + monitor 门控、手动创建/删除、各种边界情况
+6. **Phase 6 — 测试**：loop + monitor 门控、手动创建/删除、各种边界情况
