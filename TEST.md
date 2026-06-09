@@ -358,6 +358,19 @@ cd frontend && npx tsc --noEmit
 | 4 | AI | 查 DB 确认 task.session_id 存在，`--resume` 会被使用 |
 | 5 | 人 | 测试语音按钮 → 确认录音转文字填入输入框 |
 
+### 测试 9：Monitor Session
+
+| 步骤 | 谁 | 做什么 |
+|------|-----|--------|
+| 1 | AI | `pytest backend/tests/test_monitor_session.py -v` — 验证 Model CRUD、API 权限、取消/删除清理、服务重启清理 |
+| 2 | 人 | 创建 Auto 模式任务 → 在 Chat 页点「监控列表」按钮 → 点「新建监控」→ 填写描述 → 创建 |
+| 3 | 人 | 确认监控列表显示新创建的 session，状态为 running |
+| 4 | 人 | 点击 session 进入详情 → 确认检查记录按时间倒序显示 |
+| 5 | 人 | 删除 manual monitor → 确认状态变为 cancelled |
+| 6 | 人 | Loop 模式任务页面 → 确认监控列表按钮存在但无「新建监控」按钮 |
+| 7 | AI | 取消 task → 确认关联的 monitor session 全部变为 cancelled |
+| 8 | AI | 删除 task → 确认 MonitorSession 和 MonitorCheck 无孤儿数据 |
+
 ### AI 验证命令速查
 
 测试时 Claude Code 常用的验证命令：
@@ -418,4 +431,6 @@ git branch
 | `backend/services/whisper_client.py` | `backend/tests/test_service_whisper_client.py` |
 | `backend/services/backup_service.py` | `backend/tests/test_service_backup.py` |
 | `backend/services/token_manager_service.py` | `backend/tests/test_service_token_manager.py` |
+| `backend/api/monitor.py` | `backend/tests/test_monitor_session.py` |
+| `backend/models/monitor_session.py` | `backend/tests/test_monitor_session.py` |
 | `frontend/src/**` | TypeScript 类型检查 (`tsc --noEmit`) |
