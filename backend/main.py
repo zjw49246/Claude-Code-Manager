@@ -28,7 +28,6 @@ from backend.api.files import router as files_router
 from backend.api.pool import router as pool_router
 from backend.api.discussions import router as discussions_router
 from backend.api.quick_phrases import router as quick_phrases_router
-from backend.api.monitor import router as monitor_router
 from backend.middleware.auth import TokenAuthMiddleware
 from backend.services.ws_broadcaster import WebSocketBroadcaster
 from backend.services.instance_manager import InstanceManager
@@ -159,7 +158,6 @@ app.include_router(files_router)
 app.include_router(pool_router)
 app.include_router(discussions_router)
 app.include_router(quick_phrases_router)
-app.include_router(monitor_router)
 
 # Serve frontend static files in production
 FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"

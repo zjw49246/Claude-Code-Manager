@@ -105,16 +105,6 @@ class TaskQueue:
         if task.status not in ("pending", "failed", "cancelled", "conflict", "completed"):
             return False
         await self.db.execute(sa_delete(LogEntry).where(LogEntry.task_id == task_id))
-
-        from backend.models.monitor_session import MonitorSession, MonitorCheck
-        ms_ids_result = await self.db.execute(
-            select(MonitorSession.id).where(MonitorSession.task_id == task_id)
-        )
-        ms_ids = [row[0] for row in ms_ids_result]
-        if ms_ids:
-            await self.db.execute(sa_delete(MonitorCheck).where(MonitorCheck.monitor_session_id.in_(ms_ids)))
-        await self.db.execute(sa_delete(MonitorSession).where(MonitorSession.task_id == task_id))
-
         await self.db.execute(
             update(Instance)
             .where(Instance.current_task_id == task_id)
@@ -188,14 +178,6 @@ class TaskQueue:
             return None
         task.status = "cancelled"
         task.completed_at = datetime.utcnow()
-
-        from backend.models.monitor_session import MonitorSession
-        await self.db.execute(
-            update(MonitorSession)
-            .where(MonitorSession.task_id == task_id, MonitorSession.status == "running")
-            .values(status="cancelled", completed_at=datetime.utcnow())
-        )
-
         await self.db.commit()
         await self.db.refresh(task)
         return task
