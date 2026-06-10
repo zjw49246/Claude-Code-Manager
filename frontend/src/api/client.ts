@@ -382,6 +382,8 @@ export const api = {
   },
 
   // Tasks
+  getTask: (id: number) =>
+    request<Task>(`/api/tasks/${id}`),
   listTasks: (status?: string, includeArchived?: boolean, projectId?: number, starred?: boolean, limit?: number, offset?: number, archivedOnly?: boolean, hasUnread?: boolean) =>
     request<Task[]>(`/api/tasks?${new URLSearchParams({
       ...(status ? { status } : {}),

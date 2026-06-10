@@ -9,6 +9,7 @@ import { ArrowLeft, ChevronDown, ChevronRight, Copy, Check, XCircle, ArrowDown }
 interface LoopChatViewProps {
   task: Task;
   onBack: () => void;
+  inline?: boolean;
 }
 
 // Iteration metadata received from loop_iteration_end WebSocket events
@@ -355,7 +356,7 @@ function IterationPanel({ iteration, messages, meta, isActive, defaultOpen, task
 
 // ─── Main view ────────────────────────────────────────────────────────────────
 
-export function LoopChatView({ task, onBack }: LoopChatViewProps) {
+export function LoopChatView({ task, onBack, inline }: LoopChatViewProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [iterMeta, setIterMeta] = useState<Map<number, IterationMeta>>(new Map());
   const [activeIteration, setActiveIteration] = useState<number | null>(null);
@@ -485,7 +486,7 @@ export function LoopChatView({ task, onBack }: LoopChatViewProps) {
   const isRunning = ['executing', 'in_progress'].includes(task.status);
 
   return (
-    <div className="fixed inset-0 bg-gray-950 flex flex-col z-50">
+    <div className={inline ? "flex flex-col h-full bg-gray-950" : "fixed inset-0 bg-gray-950 flex flex-col z-50"}>
       {/* Header */}
       <div className="flex items-center gap-3 px-4 py-3 pt-[max(0.75rem,env(safe-area-inset-top))] border-b border-gray-800 bg-gray-900">
         <button onClick={onBack} className="text-gray-400 hover:text-foreground">

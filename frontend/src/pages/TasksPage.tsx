@@ -12,7 +12,12 @@ import { ChevronLeft, ChevronRight, ChevronDown, Filter } from 'lucide-react';
 
 const PAGE_SIZE = 20;
 
-export function TasksPage() {
+interface TasksPageProps {
+  chatTaskId: number | null;
+  onChatTaskChange: (id: number | null) => void;
+}
+
+export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [allTasks, setAllTasks] = useState<Task[]>([]);
   const [totalCount, setTotalCount] = useState(0);
@@ -28,6 +33,19 @@ export function TasksPage() {
   const [chatTask, setChatTask] = useState<Task | null>(null);
   const chatTaskRef = useRef<Task | null>(null);
   chatTaskRef.current = chatTask;
+
+  const setChatTaskWrapped = useCallback((t: Task | null) => {
+    setChatTask(t);
+    onChatTaskChange(t?.id ?? null);
+  }, [onChatTaskChange]);
+
+  const [isWide, setIsWide] = useState(() => window.innerWidth >= 1280);
+  useEffect(() => {
+    const mq = window.matchMedia('(min-width: 1280px)');
+    const handler = (e: MediaQueryListEvent) => setIsWide(e.matches);
+    mq.addEventListener('change', handler);
+    return () => mq.removeEventListener('change', handler);
+  }, []);
 
   const totalPages = Math.max(1, Math.ceil(totalCount / PAGE_SIZE));
   const statusFilterParam = statusFilters.length > 0 ? statusFilters.join(',') : undefined;
@@ -47,16 +65,20 @@ export function TasksPage() {
       setAllTasks(all);
       setProjects(projs);
       setTagItems(tags);
-      // Update chatTask if it's open (to get latest session_id etc.)
-      const current = chatTaskRef.current;
-      if (current) {
-        const updated = [...filtered, ...all].find((t) => t.id === current.id);
-        if (updated) setChatTask(updated);
+      // Resolve chatTaskId from URL on first load, or update open chatTask
+      const currentId = chatTaskRef.current?.id ?? chatTaskId;
+      if (currentId) {
+        const pool = [...filtered, ...all];
+        let found = pool.find((t) => t.id === currentId);
+        if (!found && !chatTaskRef.current) {
+          try { found = await api.getTask(currentId); } catch { /* task may not exist */ }
+        }
+        if (found) setChatTaskWrapped(found);
       }
     } catch (e) {
       console.error('Failed to load tasks:', e);
     }
-  }, [statusFilterParam, showArchived, projectFilter, starredFilter, unreadFilter, page]);
+  }, [statusFilterParam, showArchived, projectFilter, starredFilter, unreadFilter, page, chatTaskId, setChatTaskWrapped]);
 
   useEffect(() => {
     refresh();
@@ -123,8 +145,25 @@ export function TasksPage() {
     ? visibleProjects.filter((p) => p.tags.includes(tagFilter))
     : visibleProjects;
 
-  return (
-    <div className="space-y-4">
+  const splitMode = isWide && chatTask;
+
+  const filteredTasks = tagFilter
+    ? tasks.filter((t) => {
+        if (!t.project_id) return false;
+        const proj = projects.find((p) => p.id === t.project_id);
+        return proj ? proj.tags.includes(tagFilter) : false;
+      })
+    : tasks;
+
+  const handleOpenChat = useCallback((t: Task) => {
+    setChatTaskWrapped(t);
+    if (t.has_unread) {
+      api.markTaskRead(t.id).catch(() => {});
+    }
+  }, [setChatTaskWrapped]);
+
+  const taskListContent = (
+    <>
       <TaskForm onCreated={refresh} />
 
       <PlanPanel tasks={allTasks} onRefresh={refresh} />
@@ -266,21 +305,11 @@ export function TasksPage() {
       </div>
 
       <TaskList
-        tasks={tagFilter
-          ? tasks.filter((t) => {
-              if (!t.project_id) return false;
-              const proj = projects.find((p) => p.id === t.project_id);
-              return proj ? proj.tags.includes(tagFilter) : false;
-            })
-          : tasks}
+        tasks={filteredTasks}
         projects={projects}
         onRefresh={refresh}
-        onOpenChat={(t) => {
-          setChatTask(t);
-          if (t.has_unread) {
-            api.markTaskRead(t.id).catch(() => {});
-          }
-        }}
+        onOpenChat={handleOpenChat}
+        activeTaskId={chatTask?.id ?? null}
       />
 
       {totalPages > 1 && (
@@ -305,13 +334,32 @@ export function TasksPage() {
           </button>
         </div>
       )}
+    </>
+  );
 
-      {chatTask && chatTask.mode === 'loop' && (
-        <LoopChatView task={chatTask} onBack={() => setChatTask(null)} />
-      )}
-      {chatTask && chatTask.mode !== 'loop' && (
-        <ChatView task={chatTask} projects={projects} onBack={() => setChatTask(null)} onTaskUpdated={refresh} />
-      )}
+  const chatPanel = chatTask && (
+    chatTask.mode === 'loop'
+      ? <LoopChatView task={chatTask} onBack={() => setChatTaskWrapped(null)} inline={isWide} />
+      : <ChatView task={chatTask} projects={projects} onBack={() => setChatTaskWrapped(null)} onTaskUpdated={refresh} inline={isWide} />
+  );
+
+  if (splitMode) {
+    return (
+      <div className="flex gap-4 h-[calc(100vh-64px)] -mt-4 -mx-4">
+        <div className="w-[420px] shrink-0 overflow-y-auto p-4 space-y-4">
+          {taskListContent}
+        </div>
+        <div className="flex-1 min-w-0">
+          {chatPanel}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      {taskListContent}
+      {chatPanel}
     </div>
   );
 }
