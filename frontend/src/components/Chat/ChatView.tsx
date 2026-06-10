@@ -629,7 +629,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
               <ExpandableText
                 text={task.title || task.description || 'Untitled'}
                 collapsedLines={1}
-                className="text-sm text-gray-400 truncate"
+                className="text-sm text-gray-400"
               />
               <button
                 onClick={() => { setTitleDraft(task.title || ''); setEditingTitle(true); }}
