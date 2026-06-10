@@ -131,6 +131,14 @@
 
 ---
 
+### 阶段 N：PTY 常驻会话模式（2026-06-10，commit 1b6d45b）
+- [x] `use_pty_mode` flag（默认 false，-p 行为零变化），claude 任务分流到 claude_pty CCMBackend
+- [x] 输入走 channel 注入（MCP notification），输出走会话 JSONL，事件结构与 StreamParser 对齐，下游无感知
+- [x] stop() PTY 分支（Esc 中断 + 会话回收）；dispatcher 超时 kill 经 proxy 真正回收会话
+- [x] 端到端冒烟 `scripts/pty_smoke.py`：launch → 事件入库/广播 → exit 0 → **第二轮热复用同一进程 7.8s 完成**
+- 依赖 claude_pty >= a478051（/home/ubuntu/Projects/PTY，dev venv editable 安装）
+- 已知边界：交互模式无 result 事件 → instance.total_cost_usd 暂不更新（待 usage 累加方案）；goal evaluator / monitor 子 agent 仍走 -p（设计如此）
+
 ## 问题记录
 
 > 格式：问题 → 原因 → 解决 → 预防措施 → commit ID
