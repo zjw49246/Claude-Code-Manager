@@ -66,6 +66,54 @@ async def ccm_command_help() -> str:
 
 
 @mcp.tool()
+async def ccm_enable_skill(skill_name: str) -> str:
+    """为当前 task 启用一个工具/技能（持久生效）。
+
+    Args:
+        skill_name: 要启用的工具名称（如 monitor, help）
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(_api_url(""), headers=_headers())
+            resp.raise_for_status()
+            task_data = resp.json()
+            skills = task_data.get("enabled_skills") or {}
+            if skills.get(skill_name):
+                return json.dumps({"success": True, "message": f"{skill_name} 已经是启用状态"}, ensure_ascii=False)
+            skills[skill_name] = True
+            resp = await client.put(_api_url(""), headers=_headers(), json={"enabled_skills": skills})
+            resp.raise_for_status()
+            return json.dumps({"success": True, "message": f"已启用 {skill_name}"}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+
+
+@mcp.tool()
+async def ccm_disable_skill(skill_name: str) -> str:
+    """为当前 task 禁用一个工具/技能（持久生效）。
+
+    Args:
+        skill_name: 要禁用的工具名称（如 monitor）。help 不可禁用。
+    """
+    try:
+        if skill_name == "help":
+            return json.dumps({"success": False, "error": "help 是内置命令，不可禁用"}, ensure_ascii=False)
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(_api_url(""), headers=_headers())
+            resp.raise_for_status()
+            task_data = resp.json()
+            skills = task_data.get("enabled_skills") or {}
+            if not skills.get(skill_name):
+                return json.dumps({"success": True, "message": f"{skill_name} 已经是禁用状态"}, ensure_ascii=False)
+            skills.pop(skill_name, None)
+            resp = await client.put(_api_url(""), headers=_headers(), json={"enabled_skills": skills})
+            resp.raise_for_status()
+            return json.dumps({"success": True, "message": f"已禁用 {skill_name}"}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+
+
+@mcp.tool()
 async def create_monitor(
     description: str,
     context: str = "",
