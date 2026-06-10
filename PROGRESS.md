@@ -141,6 +141,15 @@
 - **号池注意（Phase 3 最高优先）**：PTY 模式撞限不退进程（-p 靠 exit code + stderr 触发换号），当前表现为 turn 超时而非自动 rotation。迁移基础设施已就绪（config_dir 注入 / migrate_session 硬链接 / on_exit rotation 钩子），缺撞限检测信号——计划扫 PTY 输出 usage-limit 标志或 JSONL error 事件后调 migrate_and_relaunch
 - 开关语义（commit 待定）：关闭 PTY 模式立即回收所有 idle 会话，mid-turn 会话跑完为止
 
+### 实测反馈修复（2026-06-10，commit 见本条）
+- [x] **回复黑洞**：channel 注入 + pty_bridge_reply 工具让 CC 把真实回答"发"进无人消费的通道，用户只看到一句自我总结（task 47/48/50 的"回复一点点/报告没发/提示词丢失"全是此因）。修复：PTY 仓库移除该工具 + 指示语改为"channel 消息=用户消息，在对话中直接回答"（PTY commit 30b6588）
+- [x] **冷恢复投递被吞**：spawn 瞬间写 stdin 时 TUI 未就绪 → turn 永不开始 → 消费者挂 30 分钟霸占任务队列（task 47/48 后期全卡死）。修复：删除 spawn 时投递，统一走 channel 注入
+- [x] **orphan CC 进程**：后端重启不回收 PTY 会话 → 旧 CC 占着 session 文件。修复：lifespan shutdown 调 pty_backend.shutdown()
+- [x] **池尸体**：手动中断/超时 kill 后死会话残留 pool。修复：全路径 pool.remove
+- [x] **日志盲区**：未配 root logger，claude_pty 日志全丢。修复：basicConfig INFO
+- [x] **额度 unknown**：交互模式无 contextWindow。修复：按 task.model 回填（[1m]→1M，否则 200K）
+- 已知无解/待做：thinking 在交互 JSONL 中加密（CC 行为，仅能显示占位）；loop 单 turn 跑完导致无逐轮进度（Phase 3 设计）；号池撞限检测（Phase 3）
+
 ## 问题记录
 
 > 格式：问题 → 原因 → 解决 → 预防措施 → commit ID
