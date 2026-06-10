@@ -770,6 +770,17 @@ class InstanceManager:
             await self.broadcaster.broadcast(f"task:{task_id}", broadcast_data)
 
         # Persist and broadcast context usage
+        if context_usage and not context_usage.get("context_window"):
+            # Interactive (PTY) mode has no result event carrying contextWindow.
+            # Fill from the task's model choice: [1m] variants get 1M, else 200K.
+            model_name = ""
+            if task_id:
+                async with self.db_factory() as db:
+                    t = await db.get(Task, task_id)
+                    model_name = (t.model or "") if t else ""
+            context_usage["context_window"] = (
+                1_000_000 if "[1m]" in model_name else 200_000
+            )
         if context_usage and task_id:
             async with self.db_factory() as db:
                 await db.execute(
