@@ -83,7 +83,7 @@ register_command(Command(
     description="为当前 task 启用一个工具（持久生效）",
     prompt_template=(
         "用户请求启用工具。请调用 ccm_enable_skill 工具，参数为用户指定的工具名。"
-        "启用后告知用户结果。可用的工具名: monitor, help 等。"
+        "启用后告知用户结果。"
     ),
     always_available=True,
 ))
