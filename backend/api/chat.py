@@ -145,6 +145,7 @@ def _tool_summary(tool_input: str | None) -> str:
 async def get_chat_history(
     task_id: int,
     limit: int = 0,
+    before_id: int = 0,
     compact: bool = True,
     db: AsyncSession = Depends(get_db),
 ):
@@ -152,6 +153,7 @@ async def get_chat_history(
 
     compact=True (default): tool_input/tool_output replaced with short summary.
     compact=False: full tool_input/tool_output included (truncated at 20k chars).
+    before_id: only return messages with id < before_id (for pagination).
     """
     task = await db.get(Task, task_id)
     if not task:
@@ -164,10 +166,14 @@ async def get_chat_history(
         LogEntry.is_error, LogEntry.loop_iteration, LogEntry.timestamp,
         LogEntry.raw_json,
     ]
+    conditions = [LogEntry.task_id == task_id, LogEntry.event_type.in_(allowed)]
+    if before_id > 0:
+        conditions.append(LogEntry.id < before_id)
+
     if limit > 0:
         stmt = (
             select(*cols)
-            .where(LogEntry.task_id == task_id, LogEntry.event_type.in_(allowed))
+            .where(*conditions)
             .order_by(LogEntry.id.desc())
             .limit(limit)
         )
@@ -176,7 +182,7 @@ async def get_chat_history(
     else:
         stmt = (
             select(*cols)
-            .where(LogEntry.task_id == task_id, LogEntry.event_type.in_(allowed))
+            .where(*conditions)
             .order_by(LogEntry.id.asc())
         )
         result = await db.execute(stmt)
