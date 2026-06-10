@@ -496,7 +496,8 @@ class InstanceManager:
 
             old_config_dir = self._config_dirs.get(instance_id)
             if not old_config_dir:
-                return False
+                # Default-account launch — still rotatable (see dispatcher)
+                old_config_dir = os.path.expanduser("~/.claude")
 
             if is_auth_failure(combined):
                 dispatcher.pool.mark_auth_failure(old_config_dir)

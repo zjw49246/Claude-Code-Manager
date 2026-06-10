@@ -351,3 +351,34 @@ class TestDispatcherPoolIntegration:
         im = InstanceManager(db_factory=mock_db, broadcaster=broadcaster)
         dispatcher = GlobalDispatcher(db_factory=mock_db, instance_manager=im, broadcaster=broadcaster)
         assert dispatcher._pool_select() is None
+
+
+# ---------- 2026-06-10 生产事故回归：新版 CC 限流文案未被识别 ----------
+
+class TestRateLimitWordingVariants:
+    """CC 2.1.x 的实际限流文案必须全部命中（task 79 撞限未换号的根因）。"""
+
+    def test_session_limit_wording(self):
+        from backend.services.claude_pool import is_rate_limited
+        # 2026-06-10 生产实际文案
+        assert is_rate_limited("You've hit your session limit · resets 5:50pm (UTC)")
+
+    def test_weekly_limit_wording(self):
+        from backend.services.claude_pool import is_rate_limited
+        assert is_rate_limited("You've hit your weekly limit · resets 8am (America/Los_Angeles)")
+
+    def test_legacy_wordings_still_match(self):
+        from backend.services.claude_pool import is_rate_limited
+        assert is_rate_limited("You've hit your limit")
+        assert is_rate_limited("usage limit reached")
+        assert is_rate_limited("resets 5pm (America/New_York)")
+
+    def test_resets_with_minutes_any_timezone(self):
+        from backend.services.claude_pool import is_rate_limited
+        assert is_rate_limited("resets 11:30am (UTC)")
+        assert is_rate_limited("resets 5:50pm (Asia/Shanghai)")
+
+    def test_normal_text_not_matched(self):
+        from backend.services.claude_pool import is_rate_limited
+        assert not is_rate_limited("I implemented the rate limiter middleware as requested")
+        assert not is_rate_limited("the function resets the counter")

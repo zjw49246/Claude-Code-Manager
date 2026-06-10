@@ -424,7 +424,10 @@ class GlobalDispatcher:
 
         old_config_dir = self.instance_manager.get_config_dir(instance_id)
         if not old_config_dir:
-            return None
+            # Launched on the default account (no explicit config_dir) —
+            # rotation must still work; the default dir is a pool member.
+            import os as _os
+            old_config_dir = _os.path.expanduser("~/.claude")
 
         # Mark the old account
         if is_auth_failure(combined):
