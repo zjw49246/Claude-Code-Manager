@@ -135,6 +135,9 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
   const [monitorSessions, setMonitorSessions] = useState<MonitorSession[]>([]);
   const [showMonitorPanel, setShowMonitorPanel] = useState(false);
   const isProcessing = sending || ['in_progress', 'executing'].includes(task.status);
+  const [hasMoreHistory, setHasMoreHistory] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const HISTORY_PAGE_SIZE = 200;
 
   const userMsgCount = useMemo(() => {
     const chatUserMsgs = messages.filter((m) => m.role === 'user').length;
@@ -349,13 +352,44 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
 
   const fetchHistory = useCallback(() => {
     setHistoryLoading(true);
-    api.getTaskChatHistory(task.id).then((msgs) => {
-      // Filter out empty text messages (partial streaming chunks), keep tool/thinking/system events
-      setMessages(msgs.filter((m) =>
+    api.getTaskChatHistory(task.id, true, HISTORY_PAGE_SIZE).then((msgs) => {
+      const filtered = msgs.filter((m) =>
         !((m.event_type === 'message' || m.event_type === 'result') && !m.content)
-      ));
+      );
+      setMessages(filtered);
+      setHasMoreHistory(msgs.length >= HISTORY_PAGE_SIZE);
     }).catch(() => {}).finally(() => setHistoryLoading(false));
   }, [task.id]);
+
+  const scrollRestorationRef = useRef<number | null>(null);
+
+  const loadMoreHistory = useCallback(() => {
+    if (loadingMore || !hasMoreHistory || messages.length === 0) return;
+    const oldestId = messages[0]?.id;
+    if (!oldestId) return;
+    const container = messagesContainerRef.current;
+    if (container) scrollRestorationRef.current = container.scrollHeight;
+    setLoadingMore(true);
+    api.getTaskChatHistory(task.id, true, HISTORY_PAGE_SIZE, oldestId).then((msgs) => {
+      const filtered = msgs.filter((m) =>
+        !((m.event_type === 'message' || m.event_type === 'result') && !m.content)
+      );
+      if (filtered.length > 0) {
+        setMessages((prev) => [...filtered, ...prev]);
+      }
+      setHasMoreHistory(msgs.length >= HISTORY_PAGE_SIZE);
+    }).catch(() => {}).finally(() => setLoadingMore(false));
+  }, [task.id, messages, loadingMore, hasMoreHistory]);
+
+  useEffect(() => {
+    if (scrollRestorationRef.current !== null && !loadingMore) {
+      const container = messagesContainerRef.current;
+      if (container) {
+        container.scrollTop += container.scrollHeight - scrollRestorationRef.current;
+      }
+      scrollRestorationRef.current = null;
+    }
+  }, [loadingMore]);
 
   // Re-fetch history when WebSocket reconnects to pick up any messages
   // that arrived during the disconnection gap
@@ -416,6 +450,9 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
     el.addEventListener('scroll', handleScroll, { passive: true });
     return () => el.removeEventListener('scroll', handleScroll);
   }, []);
+
+  const loadMoreRef = useRef(loadMoreHistory);
+  loadMoreRef.current = loadMoreHistory;
 
   // Auto-scroll only on initial history load
   useEffect(() => {
@@ -707,6 +744,19 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
 
       {/* Messages */}
       <div ref={messagesContainerRef} className="flex-1 overflow-y-auto p-4 space-y-3 min-h-0">
+        {/* Load older messages */}
+        {messages.length > 0 && hasMoreHistory && (
+          <div className="flex justify-center py-2">
+            <button
+              onClick={loadMoreHistory}
+              disabled={loadingMore}
+              className="text-xs text-gray-400 hover:text-gray-200 px-3 py-1.5 rounded-full bg-gray-800 hover:bg-gray-700 transition-colors disabled:opacity-50 flex items-center gap-1.5"
+            >
+              {loadingMore ? <Loader2 size={12} className="animate-spin" /> : <ChevronUp size={12} />}
+              {loadingMore ? 'Loading...' : 'Load older messages'}
+            </button>
+          </div>
+        )}
         {messages.length === 0 && historyLoading && (
           <div className="flex items-center justify-center gap-2 text-gray-500 mt-20">
             <Loader2 size={16} className="animate-spin" />

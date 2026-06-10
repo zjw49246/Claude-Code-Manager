@@ -460,8 +460,8 @@ export const api = {
   // Chat (task-based)
   sendTaskChat: (taskId: number, message: string, filePaths?: string[], secretIds?: number[]) =>
     request<{ ok: boolean; pid: number; instance_id: number; session_id: string }>(`/api/tasks/${taskId}/chat`, { method: 'POST', body: JSON.stringify({ message, file_paths: filePaths, secret_ids: secretIds }) }),
-  getTaskChatHistory: (taskId: number, compact = true) =>
-    request<ChatMessage[]>(`/api/tasks/${taskId}/chat/history?compact=${compact}`),
+  getTaskChatHistory: (taskId: number, compact = true, limit = 0, beforeId = 0) =>
+    request<ChatMessage[]>(`/api/tasks/${taskId}/chat/history?compact=${compact}${limit ? `&limit=${limit}` : ''}${beforeId ? `&before_id=${beforeId}` : ''}`),
   getMessageDetail: (taskId: number, messageId: number) =>
     request<{ id: number; tool_input: string | null; tool_output: string | null; content: string | null }>(`/api/tasks/${taskId}/chat/${messageId}/detail`),
 
