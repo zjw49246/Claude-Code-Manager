@@ -1,6 +1,9 @@
 import logging
 import os
 from contextlib import asynccontextmanager
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)-5s %(name)s: %(message)s")
+logging.getLogger("claude_pty").setLevel(logging.DEBUG)
 from pathlib import Path
 
 from sqlalchemy import select

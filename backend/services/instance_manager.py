@@ -706,8 +706,8 @@ class InstanceManager:
         Sends SIGINT first so Claude can gracefully save session state,
         then falls back to SIGTERM and SIGKILL if needed.
         """
-        # PTY mode
-        if self._pty_backend and instance_id not in self.processes:
+        # PTY mode: check if this instance is managed by PTY backend
+        if self._pty_backend and (instance_id in self._pty_backend._sessions or instance_id in self._pty_backend._proxies):
             self._stopping.add(instance_id)
             await self._pty_backend.stop(instance_id)
             async with self.db_factory() as db:
