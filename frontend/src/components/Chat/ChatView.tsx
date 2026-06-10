@@ -803,6 +803,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
                   />
                 </div>
                 <div className="flex items-center justify-end gap-1 mt-0.5 pr-1">
+                  {task.created_at && <MessageTimestamp timestamp={task.created_at} />}
                   <MessageCopyButton text={task.description} />
                 </div>
               </div>

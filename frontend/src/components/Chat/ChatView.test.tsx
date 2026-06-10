@@ -12,6 +12,7 @@ vi.mock('../../api/client', () => ({
     updateTask: vi.fn().mockResolvedValue({}),
     stopTaskSession: vi.fn().mockResolvedValue({}),
     uploadImages: vi.fn().mockResolvedValue([]),
+    listMonitorSessions: vi.fn().mockResolvedValue([]),
   },
 }));
 
@@ -84,6 +85,30 @@ describe('ChatView', () => {
       expect(screen.getByText('— Initial Prompt —')).toBeInTheDocument();
       // Description appears in the initial prompt bubble (header shows title instead)
       expect(screen.getByText('Build a login page')).toBeInTheDocument();
+    });
+
+    it('shows timestamp on initial prompt bubble from task.created_at', async () => {
+      const task = makeTask({ description: 'Hello', created_at: '2024-06-15T10:30:00Z' });
+      const { container } = render(<ChatView task={task} projects={projects} onBack={onBack} onTaskUpdated={onTaskUpdated} />);
+
+      // The initial prompt bubble should contain a MessageTimestamp span
+      const initialPromptDiv = container.querySelector('[data-user-msg]')!;
+      expect(initialPromptDiv).toBeInTheDocument();
+      // Look for the timestamp span (text-[10px] is the MessageTimestamp class)
+      const timestampSpan = initialPromptDiv.querySelector('span.select-none');
+      expect(timestampSpan).toBeInTheDocument();
+      expect(timestampSpan!.textContent).toBeTruthy();
+    });
+
+    it('does not show timestamp on initial prompt when created_at is missing', async () => {
+      const task = makeTask({ description: 'Hello', created_at: '' });
+      const { container } = render(<ChatView task={task} projects={projects} onBack={onBack} onTaskUpdated={onTaskUpdated} />);
+
+      const initialPromptDiv = container.querySelector('[data-user-msg]')!;
+      expect(initialPromptDiv).toBeInTheDocument();
+      // No timestamp span should appear
+      const timestampSpan = initialPromptDiv.querySelector('span.select-none');
+      expect(timestampSpan).not.toBeInTheDocument();
     });
 
     it('does not render initial prompt bubble when description is null', async () => {
