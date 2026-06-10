@@ -339,8 +339,8 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
 
   const chatPanel = chatTask && (
     chatTask.mode === 'loop'
-      ? <LoopChatView task={chatTask} onBack={() => setChatTaskWrapped(null)} inline={isWide} />
-      : <ChatView task={chatTask} projects={projects} onBack={() => setChatTaskWrapped(null)} onTaskUpdated={refresh} inline={isWide} />
+      ? <LoopChatView key={chatTask.id} task={chatTask} onBack={() => setChatTaskWrapped(null)} inline={isWide} />
+      : <ChatView key={chatTask.id} task={chatTask} projects={projects} onBack={() => setChatTaskWrapped(null)} onTaskUpdated={refresh} inline={isWide} />
   );
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
