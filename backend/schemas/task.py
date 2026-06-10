@@ -110,3 +110,9 @@ class TaskResponse(BaseModel):
     completed_at: datetime | None
 
     model_config = {"from_attributes": True}
+
+    @model_validator(mode="after")
+    def _ensure_default_skills(self):
+        from backend.services.command_registry import ensure_default_skills
+        self.enabled_skills = ensure_default_skills(self.enabled_skills)
+        return self

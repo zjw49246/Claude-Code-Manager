@@ -33,6 +33,19 @@ def parse_command(message: str) -> tuple[Command | None, str]:
     return cmd, args
 
 
+def get_default_skills() -> dict[str, bool]:
+    """Return skills that should be enabled on every task by default."""
+    return {cmd.name: True for cmd in COMMAND_REGISTRY.values() if cmd.always_available}
+
+
+def ensure_default_skills(skills: dict | None) -> dict:
+    """Merge default skills into the given skills dict. Defaults cannot be overridden."""
+    result = dict(skills or {})
+    for k, v in get_default_skills().items():
+        result[k] = v
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Built-in commands
 # ---------------------------------------------------------------------------
