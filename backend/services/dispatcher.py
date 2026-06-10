@@ -379,7 +379,7 @@ class GlobalDispatcher:
                                 merged = merge_git_config(settings_to_dict(project), settings_to_dict(global_cfg))
                     git_env = _build_git_env(merged)
 
-                    logger.info(f"Dispatching task {task.id} ({task.title}) to instance {instance.id} ({instance.name})")
+                    logger.info(f"Dispatching task {task.id} ({task.title}) to instance {instance.id} ({instance.name}), skills={task.enabled_skills}")
                     self._running_tasks[instance.id] = asyncio.create_task(
                         self._run_task_lifecycle(instance.id, task, git_env)
                     )
@@ -537,9 +537,13 @@ class GlobalDispatcher:
             if image_paths:
                 image_list = "\n".join(f"- {p}" for p in image_paths)
                 parts.append(f"用户提供了以下参考图片，请先用 Read 工具查看：\n{image_list}")
-            if task.enabled_skills:
+            # Ensure enabled_skills has defaults (DB may store None)
+            from backend.services.command_registry import ensure_default_skills
+            task_skills = ensure_default_skills(task.enabled_skills)
+
+            if task_skills:
                 from backend.services.command_registry import COMMAND_REGISTRY
-                for skill_name, enabled in task.enabled_skills.items():
+                for skill_name, enabled in task_skills.items():
                     if enabled and skill_name in COMMAND_REGISTRY:
                         cmd = COMMAND_REGISTRY[skill_name]
                         if not cmd.always_available:
@@ -563,7 +567,7 @@ class GlobalDispatcher:
                 provider=task.provider,
                 config_dir=pool_config_dir,
                 enable_workflows=task.enable_workflows,
-                enabled_skills=task.enabled_skills,
+                enabled_skills=task_skills,
             )
 
             # Wait for process to finish (with timeout)
