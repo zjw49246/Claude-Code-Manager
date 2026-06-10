@@ -293,6 +293,13 @@
 - [x] `auto-backup` 依赖改用 HTTPS 拉取（`5a8ee10`）
 - 教训：服务器部署用 systemd 而非 nohup，确保 SSH 断开和机器重启后自动恢复
 
+### Chat 中断后工具继续运行、不知何时结束
+- **问题**: -p 模式下点 Interrupt 后 Claude 仍在调用工具，UI 不知道回复何时结束
+- **原因**: ① Interrupt 只杀当前子进程，per-task 消息队列里排队的消息随即被 consumer 派发，新子进程继续跑；② `_stop_task_process` 找不到进程时静默把 task 标记 completed，进程实际还在跑；③ 前端乐观清状态，无任何提示
+- **解决**: `dispatcher.clear_task_queue()` 在 stop-session 时先清空排队消息；端点返回 `stopped`/`cleared_messages` 真实结果；ChatView 在 `stopped=false` 时明确提示用户
+- **预防**: 中断语义必须覆盖"排队中"的工作，不只是"执行中"的进程；API 不应把 no-op 包装成成功
+- **Commit**: f4d24e5
+
 ## 已知问题
 
 - `total_cost_usd` 仅在 Claude Code stream-json result 事件报告时更新
