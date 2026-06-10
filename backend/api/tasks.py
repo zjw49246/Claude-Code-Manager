@@ -151,16 +151,29 @@ async def delete_task(task_id: int, queue: TaskQueue = Depends(_get_queue)):
 
 @router.post("/{task_id}/stop-session")
 async def stop_task_session(task_id: int, db: AsyncSession = Depends(get_db)):
-    """Stop the running Claude Code session for a task."""
+    """Stop the running Claude Code session for a task.
+
+    Clears pending queued chat messages first so the queue consumer does not
+    immediately relaunch after the current process is stopped.
+    """
+    from backend.main import dispatcher
+    cleared = dispatcher.clear_task_queue(task_id)
     stopped = await _stop_task_process(task_id, db)
     if not stopped:
         task = await db.get(Task, task_id)
         if task and task.status in ("executing", "in_progress"):
             task.status = "completed"
             await db.commit()
-            return {"ok": True, "note": "No running process found, task marked as completed"}
+            return {
+                "ok": True,
+                "stopped": False,
+                "cleared_messages": cleared,
+                "note": "No running process found, task marked as completed",
+            }
+        if cleared:
+            return {"ok": True, "stopped": False, "cleared_messages": cleared}
         raise HTTPException(400, "No running session found for this task")
-    return {"ok": True}
+    return {"ok": True, "stopped": True, "cleared_messages": cleared}
 
 
 @router.post("/{task_id}/cancel", response_model=TaskResponse)

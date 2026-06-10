@@ -2559,3 +2559,34 @@ async def test_loop_p_mode_stays_stateless(db_factory, tmp_path):
     # -p 模式语义不变：每轮无 resume
     assert launches[0].get("resume_session_id") is None
     assert launches[1].get("resume_session_id") is None
+
+
+# ---------------------------------------------------------------------------
+# clear_task_queue — interrupt drops pending chat messages
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_clear_task_queue_drops_pending_messages(db_factory):
+    """clear_task_queue drains all pending messages and returns the count."""
+    import time
+    from backend.services.dispatcher import QueuedMessage, PRIORITY_USER
+
+    dispatcher = _make_dispatcher(db_factory)
+    q = dispatcher._get_task_queue(1)
+    for i in range(3):
+        q.put_nowait(QueuedMessage(
+            priority=PRIORITY_USER, timestamp=time.monotonic(),
+            prompt=f"msg {i}", source="user",
+        ))
+
+    cleared = dispatcher.clear_task_queue(1)
+
+    assert cleared == 3
+    assert q.empty()
+
+
+@pytest.mark.asyncio
+async def test_clear_task_queue_no_queue_returns_zero(db_factory):
+    """clear_task_queue on a task with no queue is a no-op returning 0."""
+    dispatcher = _make_dispatcher(db_factory)
+    assert dispatcher.clear_task_queue(999) == 0

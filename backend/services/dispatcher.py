@@ -1917,6 +1917,27 @@ class GlobalDispatcher:
             f"queue_depth={q.qsize()}"
         )
 
+    def clear_task_queue(self, task_id: int) -> int:
+        """Drop all pending queued messages for a task (used on interrupt).
+
+        Returns the number of messages discarded. The message currently being
+        processed (if any) is not affected — callers stop the process separately.
+        """
+        q = self._task_queues.get(task_id)
+        if not q:
+            return 0
+        cleared = 0
+        while True:
+            try:
+                q.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            q.task_done()
+            cleared += 1
+        if cleared:
+            logger.info(f"Cleared {cleared} pending queued message(s) for task {task_id} on interrupt")
+        return cleared
+
     async def _task_queue_consumer(self, task_id: int):
         """Serial consumer: process queued messages one at a time for a task."""
         q = self._get_task_queue(task_id)
