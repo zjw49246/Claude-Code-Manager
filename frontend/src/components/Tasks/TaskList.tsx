@@ -14,6 +14,12 @@ interface TaskListProps {
   activeTaskId?: number | null;
 }
 
+const ALL_TOOLS = [
+  { key: 'help', label: 'Help' },
+  { key: 'workflows', label: 'Workflows' },
+  { key: 'monitor', label: 'Monitor' },
+];
+
 const statusColors: Record<string, string> = {
   pending: 'bg-yellow-500',
   in_progress: 'bg-blue-500',
@@ -173,17 +179,31 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId 
                   {t.enabled_skills ? Object.values(t.enabled_skills).filter(Boolean).length : 0}
                 </button>
                 {toolsExpandedId === t.id && (
-                  <div className="absolute top-full mt-1 left-0 bg-gray-800 border border-gray-600 rounded shadow-lg z-20 min-w-[140px] py-1">
-                    {t.enabled_skills && Object.entries(t.enabled_skills).filter(([, v]) => v).length > 0 ? (
-                      Object.entries(t.enabled_skills).filter(([, v]) => v).map(([skill]) => (
-                        <div key={skill} className="px-3 py-1 text-xs text-gray-300 flex items-center gap-1.5">
-                          <span className="text-green-400">✓</span>
-                          {skill.charAt(0).toUpperCase() + skill.slice(1)}
-                        </div>
-                      ))
-                    ) : (
-                      <div className="px-3 py-1 text-xs text-gray-500">No tools enabled</div>
-                    )}
+                  <div className="absolute top-full mt-1 left-0 bg-gray-800 border border-gray-600 rounded shadow-lg z-20 min-w-[160px] py-1">
+                    {ALL_TOOLS.map((tool) => {
+                      const enabled = !!(t.enabled_skills && t.enabled_skills[tool.key]);
+                      return (
+                        <button
+                          key={tool.key}
+                          onClick={async (e) => {
+                            e.stopPropagation();
+                            const newSkills = { ...(t.enabled_skills || {}), [tool.key]: !enabled };
+                            try {
+                              await api.updateTask(t.id, { enabled_skills: newSkills });
+                              onRefresh();
+                            } catch {}
+                          }}
+                          className="w-full px-3 py-1.5 text-xs text-left flex items-center gap-2 hover:bg-gray-700 transition-colors"
+                        >
+                          <span className={`w-3.5 h-3.5 rounded border flex items-center justify-center text-[9px] ${
+                            enabled ? 'bg-green-600 border-green-500 text-white' : 'border-gray-600'
+                          }`}>
+                            {enabled && '✓'}
+                          </span>
+                          <span className={enabled ? 'text-gray-200' : 'text-gray-400'}>{tool.label}</span>
+                        </button>
+                      );
+                    })}
                   </div>
                 )}
               </div>
