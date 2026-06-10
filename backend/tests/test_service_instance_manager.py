@@ -1391,3 +1391,150 @@ async def test_launch_non_chat_does_not_store_params(db_factory):
 
     assert inst_id not in im._launch_params
     await asyncio.sleep(0.1)
+
+
+# ---------- PTY mode wiring (use_pty_mode flag) ----------
+
+class _FakeDB:
+    def __init__(self):
+        self.executed = []
+
+    async def execute(self, stmt):
+        self.executed.append(stmt)
+        return MagicMock(rowcount=1)
+
+    async def commit(self):
+        pass
+
+    async def get(self, model, pk):
+        inst = MagicMock()
+        inst.current_task_id = None
+        return inst
+
+
+class _FakeDBFactory:
+    def __init__(self):
+        self.db = _FakeDB()
+
+    def __call__(self):
+        return self
+
+    async def __aenter__(self):
+        return self.db
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+def test_pty_backend_disabled_by_default():
+    im = InstanceManager(MagicMock(), MagicMock())
+    assert im._pty_backend is None
+
+
+@pytest.mark.asyncio
+async def test_launch_delegates_to_pty_backend_for_claude():
+    im = InstanceManager(_FakeDBFactory(), MagicMock())
+    calls = {}
+
+    class FakeBackend:
+        async def launch_for_ccm(self, **kwargs):
+            calls.update(kwargs)
+            im.processes[kwargs["instance_id"]] = MagicMock(pid=4242)
+            return "sess-1"
+
+    im._pty_backend = FakeBackend()
+    im._pty_enabled = True
+    pid = await im.launch(
+        instance_id=7, prompt="do it", task_id=3, cwd="/w",
+        model="default", provider="claude",
+    )
+    assert pid == 4242
+    assert calls["instance_id"] == 7
+    assert calls["prompt"] == "do it"
+    assert calls["model"] is None  # "default" normalized away
+    assert calls["cwd"] == "/w"
+
+
+@pytest.mark.asyncio
+async def test_launch_pty_ignores_codex_provider():
+    im = InstanceManager(_FakeDBFactory(), MagicMock())
+
+    class ExplodingBackend:
+        async def launch_for_ccm(self, **kwargs):
+            raise AssertionError("PTY backend must not be used for codex")
+
+    im._pty_backend = ExplodingBackend()
+    fake_proc = MagicMock(pid=1)
+    fake_proc.stdout = None
+    with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=fake_proc)):
+        with patch.object(im, "_consume_output", new=AsyncMock()):
+            await im.launch(
+                instance_id=1, prompt="x", provider="codex", cwd="/w",
+            )
+    assert im.processes[1] is fake_proc
+
+
+@pytest.mark.asyncio
+async def test_stop_uses_pty_backend_for_managed_instance():
+    from claude_pty.adapters.ccm import _PTYProcessProxy
+
+    im = InstanceManager(_FakeDBFactory(), MagicMock())
+    im.broadcaster.broadcast = AsyncMock()
+    proxy = _PTYProcessProxy()
+    im.processes[5] = proxy
+    stopped = []
+
+    class FakeBackend:
+        _sessions = {5: object()}
+
+        async def stop(self, instance_id):
+            stopped.append(instance_id)
+            proxy.complete(0)
+
+    im._pty_backend = FakeBackend()
+    ok = await im.stop(5)
+    assert ok is True
+    assert stopped == [5]
+    assert 5 not in im.processes
+
+
+# ---------- runtime PTY mode toggle ----------
+
+def test_set_pty_mode_runtime_toggle():
+    im = InstanceManager(MagicMock(), MagicMock())
+    assert im.pty_mode_enabled is False
+
+    # enable: lazy-creates backend (claude_pty installed in dev venv)
+    assert im.set_pty_mode(True) is True
+    assert im.pty_mode_enabled is True
+    assert im._pty_backend is not None
+    backend = im._pty_backend
+
+    # disable: flag off, backend retained for in-flight sessions
+    assert im.set_pty_mode(False) is False
+    assert im.pty_mode_enabled is False
+    assert im._pty_backend is backend
+
+    # re-enable reuses the same backend
+    assert im.set_pty_mode(True) is True
+    assert im._pty_backend is backend
+
+
+@pytest.mark.asyncio
+async def test_launch_respects_disabled_pty_mode():
+    """With a backend present but mode disabled, claude goes through -p."""
+    im = InstanceManager(_FakeDBFactory(), MagicMock())
+
+    class ExplodingBackend:
+        async def launch_for_ccm(self, **kwargs):
+            raise AssertionError("PTY backend must not be used when disabled")
+
+    im._pty_backend = ExplodingBackend()
+    im._pty_enabled = False  # toggled off at runtime
+
+    fake_proc = MagicMock(pid=1)
+    fake_proc.stdout = None
+    with patch("asyncio.create_subprocess_exec", new=AsyncMock(return_value=fake_proc)):
+        with patch.object(im, "_consume_output", new=AsyncMock()):
+            await im.launch(instance_id=1, prompt="x", provider="claude", cwd="/w")
+    assert im.processes[1] is fake_proc

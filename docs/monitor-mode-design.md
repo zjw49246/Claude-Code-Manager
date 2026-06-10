@@ -1,0 +1,466 @@
+# Monitor 功能设计方案
+
+## 概述
+
+为 CCM 新增 Monitor（监控）功能，解决长时间运行任务无法主动汇报进度的问题。Monitor 通过**独立的 Claude session** 定期轮询检查任务进展并向用户汇报，与主任务并行运行、互不干扰。
+
+Monitor 包含两个层面：
+
+1. **Monitor 模式** — 与 loop/goal 并列的新任务模式，适用于"启动一个长任务然后定期检查"的场景
+2. **监控叠加** — loop 和 goal 模式可选开启监控，为已有模式附加定期汇报能力
+
+## 核心设计
+
+### 架构：双 Session 并行
+
+```
+┌─────────────────────────────────────────────────┐
+│  Task (monitor_enabled = true)                  │
+│                                                 │
+│  ┌──────────────┐    ┌────────────────────────┐ │
+│  │  主 Session   │    │  Monitor Session (独立) │ │
+│  │  执行任务     │    │  定期检查 + 汇报        │ │
+│  │  (loop/goal/  │    │  每隔 interval 唤醒     │ │
+│  │   monitor)    │    │  只读，不修改文件       │ │
+│  └──────────────┘    └────────────────────────┘ │
+│        ↓ 共享项目目录、日志文件 ↑                  │
+└─────────────────────────────────────────────────┘
+```
+
+- **主 Session**：按原有模式逻辑执行任务（loop 的信号文件、goal 的评估器等）
+- **Monitor Session**：完全独立的 Claude 进程，每隔 `monitor_interval` 秒启动一次，检查项目目录下的日志、进程状态、文件变化等，向用户汇报进展
+- 两者**并行运行**，Monitor 从主 Session 启动的同时就开始轮询
+
+### 各模式下的行为差异
+
+| | 主 Session 完成判断 | Monitor 角色 | 主 Session 额外提示 |
+|---|---|---|---|
+| **Monitor 模式** | 由轮询 Session 判断 | 汇报 + 判断完成 | "尽量后台运行后退出，保持日志输出" |
+| **Loop + 监控** | Signal file（原逻辑不变） | 仅汇报，不影响流程 | "已开启监控，请保持充分日志输出" |
+| **Goal + 监控** | 评估器（原逻辑不变） | 仅汇报，不影响流程 | "已开启监控，请保持充分日志输出" |
+| **Auto 模式** | 不可开启监控 | — | — |
+
+### 监控开启规则
+
+- **Monitor 模式**：默认开启监控，必须配置 `monitor_interval`
+- **Loop / Goal 模式**：可选开启，开启后需配置 `monitor_interval`
+- **Auto 模式**：不允许开启监控（单轮执行，无长任务语义）
+
+## 数据模型变更
+
+### Task 模型新增字段
+
+```python
+# backend/models/task.py
+
+# mode 字段扩展：新增 "monitor" 选项
+mode: Mapped[str] = mapped_column(String(20), default="auto")
+# 可选值: "auto", "plan", "loop", "goal", "monitor"
+
+# Monitor 相关字段
+monitor_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+monitor_interval: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 轮询间隔（秒）
+monitor_model: Mapped[str | None] = mapped_column(String(100), nullable=True)  # 轮询用模型（默认 haiku）
+monitor_max_checks: Mapped[int] = mapped_column(Integer, default=100)  # 最大检查次数（兜底）
+monitor_checks_done: Mapped[int] = mapped_column(Integer, default=0)  # 已完成检查次数
+monitor_last_summary: Mapped[str | None] = mapped_column(Text, nullable=True)  # 最近一次汇报摘要
+```
+
+### Schema 变更
+
+```python
+# backend/schemas/task.py
+
+class TaskCreate(BaseModel):
+    # ... 现有字段 ...
+    monitor_enabled: bool = False
+    monitor_interval: int | None = None      # 秒，如 300 = 5 分钟
+    monitor_model: str | None = None         # 默认 claude-haiku-4-5
+    monitor_max_checks: int = 100
+
+    @model_validator(mode="after")
+    def validate_monitor(self):
+        if self.mode == "monitor":
+            self.monitor_enabled = True
+            if not self.monitor_interval:
+                raise ValueError("monitor 模式必须配置 monitor_interval")
+        if self.monitor_enabled and not self.monitor_interval:
+            raise ValueError("开启监控必须配置 monitor_interval")
+        if self.monitor_enabled and self.mode == "auto":
+            raise ValueError("auto 模式不支持开启监控")
+        return self
+```
+
+### TaskResponse 新增字段
+
+```python
+class TaskResponse(BaseModel):
+    # ... 现有字段 ...
+    monitor_enabled: bool
+    monitor_interval: int | None
+    monitor_model: str | None
+    monitor_max_checks: int
+    monitor_checks_done: int
+    monitor_last_summary: str | None
+```
+
+## 后端实现
+
+### Dispatcher 变更
+
+#### 1. 主流程入口（_execute_task_on_instance）
+
+在现有模式分发逻辑后，启动 monitor 并行循环：
+
+```python
+# dispatcher.py
+
+async def _execute_task_on_instance(self, instance_id, task, ...):
+    monitor_task = None
+
+    # 如果开启了监控，启动并行轮询
+    if task.monitor_enabled and task.monitor_interval:
+        monitor_task = asyncio.create_task(
+            self._run_monitor_loop(task)
+        )
+
+    # 按原有模式执行主任务
+    if task.mode == "monitor":
+        await self._run_monitor_main_session(instance_id, task, cwd, ...)
+    elif task.mode == "loop":
+        await self._run_loop_lifecycle(instance_id, task, cwd, ...)
+    elif task.mode == "goal":
+        await self._run_goal_lifecycle(instance_id, task, cwd, ...)
+    else:
+        # auto / plan
+        ...
+
+    # 主任务结束后，如果是 loop/goal 模式，取消 monitor
+    if monitor_task and task.mode != "monitor":
+        monitor_task.cancel()
+```
+
+#### 2. Monitor 模式主 Session
+
+```python
+async def _run_monitor_main_session(self, instance_id, task, cwd, ...):
+    """Monitor 模式：执行用户的任务（启动脚本等），主 session 结束后
+    不标记 completed，等轮询 session 判断。"""
+
+    prompt = self._build_monitor_main_prompt(task)
+
+    await self.instance_manager.launch(
+        instance_id=instance_id,
+        prompt=prompt,
+        task_id=task.id,
+        cwd=cwd,
+        model=task.model,
+        ...
+    )
+
+    # 等待主进程结束
+    process = self.instance_manager.processes.get(instance_id)
+    if process:
+        await process.wait()
+
+    # 注意：不标记 completed，保持 executing 状态
+    # 任务完成由 _run_monitor_loop 中的轮询 session 判断
+```
+
+#### 3. Monitor 轮询循环（核心）
+
+```python
+async def _run_monitor_loop(self, task: Task):
+    """独立的监控轮询循环，与主任务并行运行。
+    每隔 interval 秒启动一个新的 Claude session 检查进度。"""
+
+    signal_path = Path(cwd) / ".claude-manager" / f"monitor_signal_{task.id}.json"
+    signal_path.parent.mkdir(parents=True, exist_ok=True)
+    checks_done = 0
+
+    while checks_done < task.monitor_max_checks:
+        await asyncio.sleep(task.monitor_interval)
+
+        # 检查 task 是否已被取消/删除/完成（loop/goal 模式可能已结束）
+        async with self.db_factory() as db:
+            t = await db.get(Task, task.id)
+            if not t or t.status in ("cancelled", "completed", "failed"):
+                return
+
+        # 清除 signal file
+        signal_path.unlink(missing_ok=True)
+
+        # 构建轮询 prompt
+        prompt = self._build_monitor_check_prompt(task, checks_done, signal_path)
+
+        # 启动独立 Claude 进程（不复用主 session）
+        monitor_model = task.monitor_model or "claude-haiku-4-5"
+        # 用 instance_manager 或直接起子进程
+        # 这里需要一个不占用 instance 的轻量调用方式
+        result = await self._run_monitor_subprocess(
+            prompt=prompt,
+            cwd=task.last_cwd or task.target_repo,
+            model=monitor_model,
+            task_id=task.id,
+        )
+
+        checks_done += 1
+
+        # 读取 signal file 判断是否完成（仅 monitor 模式）
+        if task.mode == "monitor":
+            signal = self._read_monitor_signal(signal_path)
+            if signal.get("status") == "done":
+                # 标记任务完成
+                async with self.db_factory() as db:
+                    queue = TaskQueue(db)
+                    await queue.mark_completed(task.id)
+                # 广播
+                await self.broadcaster.broadcast("tasks", {
+                    "event": "status_change",
+                    "task_id": task.id,
+                    "new_status": "completed",
+                })
+                return
+
+        # 更新检查计数和摘要
+        async with self.db_factory() as db:
+            await db.execute(
+                update(Task)
+                .where(Task.id == task.id)
+                .values(
+                    monitor_checks_done=checks_done,
+                    monitor_last_summary=signal.get("summary", ""),
+                )
+            )
+            await db.commit()
+
+        # 广播监控汇报
+        await self.broadcaster.broadcast(f"task:{task.id}", {
+            "event_type": "monitor_check",
+            "check_number": checks_done,
+            "summary": signal.get("summary", ""),
+            "status": signal.get("status", "running"),
+        })
+```
+
+#### 4. Monitor 轮询子进程
+
+```python
+async def _run_monitor_subprocess(self, prompt, cwd, model, task_id):
+    """启动一个独立的轻量 Claude 进程进行监控检查。
+    不占用 instance，不使用 --resume。"""
+
+    cmd = [
+        settings.claude_binary,
+        "-p", prompt,
+        "--model", model,
+        "--output-format", "stream-json",
+        "--dangerously-skip-permissions",
+    ]
+
+    env = {
+        k: v for k, v in os.environ.items()
+        if k.upper() not in ("CLAUDECODE", "CLAUDE_CODE")
+    }
+
+    process = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        cwd=cwd,
+        env=env,
+    )
+
+    # 消费输出并广播到前端（标记为 monitor 输出）
+    await self._consume_monitor_output(process, task_id)
+
+    await asyncio.wait_for(process.wait(), timeout=120)
+```
+
+### Prompt 构建
+
+#### Monitor 模式主 Session Prompt
+
+```python
+def _build_monitor_main_prompt(self, task: Task) -> str:
+    return (
+        "请阅读项目根目录的 CLAUDE.md 了解项目规范。\n\n"
+        "【监控模式】这是一个监控任务。请执行用户的任务后尽量让自己退出：\n"
+        "- 对于需要长时间运行的进程（训练、构建等），请放到后台运行"
+        "（nohup/tmux/screen），确保日志输出到文件\n"
+        "- 如果任务确实需要你持续操作，可以继续运行\n"
+        "- 确保有清晰的日志文件，监控进程会依据日志判断任务进展\n\n"
+        f"任务:\n{task.description}"
+    )
+```
+
+#### Monitor 轮询 Prompt
+
+```python
+def _build_monitor_check_prompt(self, task, check_number, signal_path):
+    return (
+        f"你是一个监控进程，这是第 {check_number + 1} 次检查。\n\n"
+        f"需要监控的任务:\n{task.description}\n\n"
+        "请检查这个任务的执行进展：\n"
+        "1. 检查相关进程是否还在运行（ps aux）\n"
+        "2. 查看日志文件的最新内容\n"
+        "3. 判断任务完成度\n\n"
+        "【重要】你是只读的监控者，不要修改任何文件或执行任何会影响任务的操作。\n\n"
+        "检查完毕后，将结果写入 signal file：\n"
+        f"echo '{{\"status\": \"running 或 done\", \"summary\": \"简短进度摘要\"}}' > {signal_path}\n"
+        "- status: 任务还在进行写 running，已完成写 done\n"
+        "- summary: 一句话描述当前进度"
+    )
+```
+
+#### Loop/Goal + 监控的额外提示
+
+在现有的 `_build_loop_prompt` 和 `_build_goal_initial_prompt` 中追加：
+
+```python
+def _get_monitor_hint(self, task: Task) -> str:
+    if not task.monitor_enabled:
+        return ""
+    return (
+        "\n\n【监控已开启】有独立的监控进程会每隔 "
+        f"{task.monitor_interval} 秒检查任务进展。"
+        "请在执行过程中保持充分的日志输出（进度、状态、关键结果），"
+        "方便监控进程判断进展并向用户汇报。"
+    )
+```
+
+## 中断逻辑
+
+### 用户点击中断时需要停止的内容
+
+| 模式 | 停止主 Session | 停止 Monitor 轮询 |
+|---|---|---|
+| Monitor 模式 | 如果还在跑，kill 掉 | 取消轮询循环 |
+| Loop + 监控 | kill 当前迭代进程 | 取消轮询循环 |
+| Goal + 监控 | kill 当前 turn 进程 | 取消轮询循环 |
+
+### 实现
+
+```python
+async def cancel_task(self, task_id: int):
+    # 现有逻辑：停止主进程
+    ...
+
+    # 新增：取消 monitor 循环
+    monitor_handle = self._monitor_tasks.get(task_id)
+    if monitor_handle:
+        monitor_handle.cancel()
+        del self._monitor_tasks[task_id]
+```
+
+Dispatcher 需要维护一个 `_monitor_tasks: dict[int, asyncio.Task]` 来追踪活跃的 monitor 循环。
+
+## 前端变更
+
+### 1. TaskForm — 新增 Monitor 相关控件
+
+**模式选择扩展：**
+
+```
+Mode: [auto] [plan] [loop] [goal] [monitor]  ← 新增
+```
+
+**Monitor 模式选中时显示：**
+
+```
+┌─────────────────────────────────────┐
+│ 轮询间隔:  [300] 秒 (5 分钟)         │
+│ 监控模型:  [claude-haiku-4-5  ▼]    │
+│ 最大检查次数: [100]                   │
+└─────────────────────────────────────┘
+```
+
+**Loop / Goal 模式时显示可选监控开关：**
+
+```
+┌─────────────────────────────────────┐
+│ ☐ 开启监控                          │
+│   （勾选后展开 interval/model 配置）  │
+└─────────────────────────────────────┘
+```
+
+### 2. ChatView — 监控输出折叠区域
+
+在 Chat 主区域之外，新增一个可折叠的监控面板：
+
+```
+┌─────────────────────────────────────────────┐
+│  Chat 主区域（主 Session 输出）               │
+│  [User] 运行训练脚本 train.py                │
+│  [Claude] 已启动训练，日志输出到 train.log... │
+│  ...                                        │
+├─────────────────────────────────────────────┤
+│  ▼ 监控汇报 (3/100)          下次检查: 2:34  │
+│  ┌─────────────────────────────────────────┐│
+│  │ [#3] 训练进行中，epoch 45/100，          ││
+│  │      loss=0.23，预计还需 40 分钟          ││
+│  ├─────────────────────────────────────────┤│
+│  │ [#2] 训练进行中，epoch 30/100，          ││
+│  │      loss=0.31                           ││
+│  ├─────────────────────────────────────────┤│
+│  │ [#1] 训练已启动，epoch 5/100，           ││
+│  │      loss=1.24                           ││
+│  └─────────────────────────────────────────┘│
+└─────────────────────────────────────────────┘
+```
+
+**关键 UI 元素：**
+
+- **折叠标题**：显示已检查次数 / 最大次数，下次检查倒计时
+- **汇报列表**：最新的在最上面，每条显示检查编号 + 摘要
+- **展开详情**：点击单条可展开完整的 monitor session 输出
+- **视觉区分**：用不同背景色或边框与主 Chat 输出区分
+
+### 3. WebSocket 事件
+
+新增 `monitor_check` 事件类型：
+
+```typescript
+interface MonitorCheckEvent {
+    event_type: "monitor_check";
+    check_number: number;
+    summary: string;
+    status: "running" | "done";
+}
+```
+
+前端在 `task:{id}` channel 上监听此事件，更新折叠面板内容。
+
+## Alembic Migration
+
+```python
+"""add monitor fields to task
+
+Revision ID: xxxx
+"""
+
+def upgrade():
+    op.add_column('tasks', sa.Column('monitor_enabled', sa.Boolean(), default=False))
+    op.add_column('tasks', sa.Column('monitor_interval', sa.Integer(), nullable=True))
+    op.add_column('tasks', sa.Column('monitor_model', sa.String(100), nullable=True))
+    op.add_column('tasks', sa.Column('monitor_max_checks', sa.Integer(), default=100))
+    op.add_column('tasks', sa.Column('monitor_checks_done', sa.Integer(), default=0))
+    op.add_column('tasks', sa.Column('monitor_last_summary', sa.Text(), nullable=True))
+
+def downgrade():
+    op.drop_column('tasks', 'monitor_last_summary')
+    op.drop_column('tasks', 'monitor_checks_done')
+    op.drop_column('tasks', 'monitor_max_checks')
+    op.drop_column('tasks', 'monitor_model')
+    op.drop_column('tasks', 'monitor_interval')
+    op.drop_column('tasks', 'monitor_enabled')
+```
+
+## 实现顺序建议
+
+1. **Phase 1 — 数据层**：Task 模型 + Schema + Migration
+2. **Phase 2 — 后端核心**：Dispatcher monitor 轮询循环 + 子进程调用 + Prompt 构建
+3. **Phase 3 — 前端 TaskForm**：Monitor 模式选项 + 监控开关 + 配置表单
+4. **Phase 4 — 前端 ChatView**：监控折叠面板 + WebSocket 事件处理
+5. **Phase 5 — 中断逻辑**：取消时同时停止主进程 + monitor 循环
+6. **Phase 6 — 测试**：各模式组合测试（monitor 单独、loop+监控、goal+监控）
