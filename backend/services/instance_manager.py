@@ -288,10 +288,11 @@ class InstanceManager:
                 )
                 # Restore task status for chat-initiated runs (not managed by dispatcher)
                 if task_id and chat_initiated:
+                    chat_active_statuses = ["executing", "in_progress", "failed", "pending"]
                     if exit_code == 0 or interrupted:
                         result = await db.execute(
                             update(Task)
-                            .where(Task.id == task_id, Task.status == "executing")
+                            .where(Task.id == task_id, Task.status.in_(chat_active_statuses))
                             .values(status="completed", completed_at=datetime.utcnow(), error_message=None)
                         )
                         if result.rowcount:
@@ -304,7 +305,7 @@ class InstanceManager:
                     else:
                         result = await db.execute(
                             update(Task)
-                            .where(Task.id == task_id, Task.status == "executing")
+                            .where(Task.id == task_id, Task.status.in_(chat_active_statuses))
                             .values(status="failed", error_message=stderr_text[:500] if stderr_text else f"Process exited with code {exit_code}")
                         )
                         if result.rowcount:

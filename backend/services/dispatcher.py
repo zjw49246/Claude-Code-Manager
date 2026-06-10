@@ -1981,10 +1981,10 @@ class GlobalDispatcher:
                     "source": "monitor",
                 })
 
-            await self.instance_manager.launch(**launch_kwargs)
-
             task.status = "executing"
             await db.commit()
+
+            await self.instance_manager.launch(**launch_kwargs)
 
             await self.broadcaster.broadcast("tasks", {
                 "event": "status_change",
