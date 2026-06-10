@@ -35,20 +35,44 @@ class InstanceManager:
         self._last_stderr: dict[int, str] = {}  # instance_id -> stderr from last run
         self._launch_params: dict[int, dict] = {}  # instance_id -> params for re-launch on rotation
 
-        # PTY persistent-session backend (claude provider only, behind flag).
-        # When active, claude launches are delegated to claude_pty and the
-        # `claude -p` subprocess path below is bypassed entirely.
+        # PTY persistent-session backend (claude provider only).
+        # Runtime-switchable: env USE_PTY_MODE is the boot default, the
+        # /api/settings/runtime endpoint can flip it live (affects new
+        # launches only; running sessions finish on their current path).
         self._pty_backend = None
+        self._pty_enabled = False
         if settings.use_pty_mode:
-            try:
-                from claude_pty.adapters.ccm import CCMBackend
-                self._pty_backend = CCMBackend(self)
-                logger.info("PTY mode enabled (claude_pty persistent sessions)")
-            except ImportError:
-                logger.warning(
-                    "USE_PTY_MODE is set but claude_pty is not installed; "
-                    "falling back to `claude -p` mode"
-                )
+            self.set_pty_mode(True)
+
+    @property
+    def pty_mode_enabled(self) -> bool:
+        return self._pty_enabled and self._pty_backend is not None
+
+    def set_pty_mode(self, enabled: bool) -> bool:
+        """Enable/disable PTY mode at runtime. Returns the effective state.
+
+        The backend is created lazily on first enable and kept on disable
+        (it may still manage sessions that started in PTY mode).
+        """
+        if enabled:
+            if self._pty_backend is None:
+                try:
+                    from claude_pty.adapters.ccm import CCMBackend
+                    self._pty_backend = CCMBackend(self)
+                    logger.info("PTY mode enabled (claude_pty persistent sessions)")
+                except ImportError:
+                    logger.warning(
+                        "PTY mode requested but claude_pty is not installed; "
+                        "staying on `claude -p` mode"
+                    )
+                    self._pty_enabled = False
+                    return False
+            self._pty_enabled = True
+        else:
+            if self._pty_enabled:
+                logger.info("PTY mode disabled; new launches use `claude -p`")
+            self._pty_enabled = False
+        return self._pty_enabled
 
     async def launch(self, instance_id: int, prompt: str, task_id: int | None = None, cwd: str | None = None, model: str | None = None, resume_session_id: str | None = None, loop_iteration: int | None = None, git_env: dict | None = None, thinking_budget: int | None = None, effort_level: str | None = None, chat_initiated: bool = False, config_dir: str | None = None, provider: str = "claude", enable_workflows: bool = False, enabled_skills: dict | None = None) -> int:
         """Launch a Claude Code subprocess for the given instance.
@@ -64,7 +88,7 @@ class InstanceManager:
             from backend.services.mcp_config import generate_mcp_config
             mcp_config_path = generate_mcp_config(task_id, enabled_skills)
 
-        if provider == "claude" and self._pty_backend is not None:
+        if provider == "claude" and self.pty_mode_enabled:
             return await self._launch_pty(
                 instance_id=instance_id,
                 prompt=prompt,

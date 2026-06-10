@@ -90,6 +90,12 @@ async def _reset_stale_discussion_agents():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    # Apply persisted runtime-settings override (frontend PTY toggle)
+    from backend.models.global_settings import GlobalSettings
+    async with async_session() as db:
+        row = await db.get(GlobalSettings, 1)
+        if row is not None and row.use_pty_mode is not None:
+            instance_manager.set_pty_mode(row.use_pty_mode)
     await _reset_stale_discussion_agents()
     await _sync_tags()
     if settings.auto_start_dispatcher:
