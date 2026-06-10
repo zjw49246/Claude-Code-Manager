@@ -290,21 +290,28 @@ async def complete_monitor_session(
         {"event": "monitor_session_status", "monitor_session_id": session_id, "status": "completed"},
     )
 
-    # Check if the previous report_status already notified the main agent
-    # (is_important=True on final check). Skip notification to avoid duplicates.
+    # Check if the last report_status already notified the main agent
+    # (is_important=True). Only skip if the MOST RECENT check was important,
+    # not any historical one.
     from backend.models.log_entry import LogEntry
     import json as _json
-    prev_check_log = await db.scalar(
+    last_report_log = await db.scalar(
         select(LogEntry.raw_json)
         .where(
             LogEntry.task_id == task_id,
             LogEntry.event_type == "system_event",
             LogEntry.raw_json.like(f'%"monitor_session_id": {session_id}%'),
-            LogEntry.raw_json.like('%"is_important": true%'),
+            LogEntry.raw_json.like('%"check_number"%'),
         )
         .order_by(LogEntry.id.desc())
     )
-    if not prev_check_log:
+    already_notified = False
+    if last_report_log:
+        try:
+            already_notified = _json.loads(last_report_log).get("is_important", False)
+        except (ValueError, TypeError):
+            pass
+    if not already_notified:
         from backend.services.dispatcher import PRIORITY_MONITOR_COMPLETE
         complete_prompt = (
             f"[Monitor #{session_id} 完成] {body.reason}\n\n"
