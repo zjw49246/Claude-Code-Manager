@@ -138,6 +138,8 @@
 - [x] 端到端冒烟 `scripts/pty_smoke.py`：launch → 事件入库/广播 → exit 0 → **第二轮热复用同一进程 7.8s 完成**
 - 依赖 claude_pty >= a478051（/home/ubuntu/Projects/PTY，dev venv editable 安装）
 - 已知边界：交互模式无 result 事件 → instance.total_cost_usd 暂不更新（待 usage 累加方案）；goal evaluator / monitor 子 agent 仍走 -p（设计如此）
+- **号池注意（Phase 3 最高优先）**：PTY 模式撞限不退进程（-p 靠 exit code + stderr 触发换号），当前表现为 turn 超时而非自动 rotation。迁移基础设施已就绪（config_dir 注入 / migrate_session 硬链接 / on_exit rotation 钩子），缺撞限检测信号——计划扫 PTY 输出 usage-limit 标志或 JSONL error 事件后调 migrate_and_relaunch
+- 开关语义（commit 待定）：关闭 PTY 模式立即回收所有 idle 会话，mid-turn 会话跑完为止
 
 ## 问题记录
 
