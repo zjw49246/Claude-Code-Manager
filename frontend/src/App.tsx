@@ -39,11 +39,54 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: string |
   }
 }
 
+const VALID_PAGES = new Set(['tasks', 'dashboard', 'projects', 'secrets', 'files', 'discussions', 'server']);
+
+function parseHash(): { page: string; chatTaskId: number | null } {
+  const hash = window.location.hash.replace(/^#\/?/, '');
+  const parts = hash.split('/');
+  const page = VALID_PAGES.has(parts[0]) ? parts[0] : 'tasks';
+  let chatTaskId: number | null = null;
+  if (page === 'tasks' && parts[1] === 'chat' && parts[2]) {
+    const id = parseInt(parts[2], 10);
+    if (id > 0) chatTaskId = id;
+  }
+  return { page, chatTaskId };
+}
+
+function updateHash(page: string, chatTaskId: number | null) {
+  let hash = `#/${page}`;
+  if (page === 'tasks' && chatTaskId) hash += `/chat/${chatTaskId}`;
+  if (window.location.hash !== hash) {
+    window.history.replaceState(null, '', hash);
+  }
+}
+
 function App() {
-  const [page, setPage] = useState('tasks');
+  const initial = parseHash();
+  const [page, setPage] = useState(initial.page);
+  const [chatTaskId, setChatTaskId] = useState<number | null>(initial.chatTaskId);
   const [authenticated, setAuthenticated] = useState(false);
   const [checking, setChecking] = useState(true);
   const [needsServerConfig, setNeedsServerConfig] = useState(false);
+
+  useEffect(() => {
+    updateHash(page, chatTaskId);
+  }, [page, chatTaskId]);
+
+  useEffect(() => {
+    const onHashChange = () => {
+      const parsed = parseHash();
+      setPage(parsed.page);
+      setChatTaskId(parsed.chatTaskId);
+    };
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
+
+  const handleNavigate = (p: string) => {
+    setPage(p);
+    if (p !== 'tasks') setChatTaskId(null);
+  };
 
   useEffect(() => {
     // In Capacitor, require server URL to be configured first
@@ -102,10 +145,10 @@ function App() {
   return (
     <ErrorBoundary>
       <div className="min-h-screen bg-gray-900 text-foreground flex flex-col">
-        <Header currentPage={page} onNavigate={setPage} />
-        <main className="flex-1 max-w-6xl mx-auto w-full p-4">
+        <Header currentPage={page} onNavigate={handleNavigate} />
+        <main className={`flex-1 mx-auto w-full p-4 ${page === 'tasks' && chatTaskId ? 'max-w-[1800px]' : 'max-w-6xl'}`}>
           {page === 'dashboard' && <Dashboard />}
-          {page === 'tasks' && <TasksPage />}
+          {page === 'tasks' && <TasksPage chatTaskId={chatTaskId} onChatTaskChange={setChatTaskId} />}
           {page === 'projects' && <ProjectsPage />}
           {page === 'secrets' && <SecretsPage />}
           {page === 'files' && <FilesPage />}

@@ -18,6 +18,7 @@ interface ChatViewProps {
   projects: Project[];
   onBack: () => void;
   onTaskUpdated?: () => void;
+  inline?: boolean;
 }
 
 interface QueuedMessage {
@@ -103,7 +104,7 @@ function ContextUsageIndicator({ usage }: { usage: ContextUsage }) {
   );
 }
 
-export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProps) {
+export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: ChatViewProps) {
   const projectName = useMemo(() => {
     if (!task.project_id) return null;
     const p = projects.find((p) => p.id === task.project_id);
@@ -593,7 +594,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
   };
 
   return (
-    <div className="fixed inset-0 bg-gray-950 flex flex-col z-50">
+    <div className={inline ? "flex flex-col h-full bg-gray-950" : "fixed inset-0 bg-gray-950 flex flex-col z-50"}>
       {/* Header */}
       <div className="flex items-center gap-2 sm:gap-3 px-3 sm:px-4 py-2 pt-[max(0.5rem,env(safe-area-inset-top))] border-b border-gray-800 bg-gray-900">
         <button onClick={onBack} className="text-gray-400 hover:text-foreground shrink-0">

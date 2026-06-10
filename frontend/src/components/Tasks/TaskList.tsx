@@ -10,6 +10,7 @@ interface TaskListProps {
   projects: Project[];
   onRefresh: () => void;
   onOpenChat: (task: Task) => void;
+  activeTaskId?: number | null;
 }
 
 const statusColors: Record<string, string> = {
@@ -22,7 +23,7 @@ const statusColors: Record<string, string> = {
   cancelled: 'bg-gray-500',
 };
 
-export function TaskList({ tasks, projects, onRefresh, onOpenChat }: TaskListProps) {
+export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId }: TaskListProps) {
   const projectMap = useMemo(() => {
     const map: Record<number, { name: string; color: string | null }> = {};
     for (const p of projects) map[p.id] = { name: p.name, color: p.badge_color };
@@ -139,7 +140,7 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat }: TaskListPro
   return (
     <div className="space-y-2">
       {tasks.map((t) => (
-        <div key={t.id} className={`rounded-lg p-3 ${t.has_unread ? 'bg-indigo-900/50 ring-1 ring-indigo-500/50' : 'bg-gray-800'}`}>
+        <div key={t.id} className={`rounded-lg p-3 ${activeTaskId === t.id ? 'bg-indigo-900/60 ring-1 ring-indigo-400/60' : t.has_unread ? 'bg-indigo-900/50 ring-1 ring-indigo-500/50' : 'bg-gray-800'}`}>
           {/* Row 1: status dot + badges (left, wraps) | action buttons (right, no wrap) */}
           <div className="flex items-center gap-2">
             <span className={`w-2.5 h-2.5 rounded-full shrink-0 self-start mt-[9px] ${statusColors[t.status] || 'bg-gray-500'}`} />
