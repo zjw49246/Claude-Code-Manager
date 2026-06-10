@@ -146,7 +146,7 @@ function App() {
     <ErrorBoundary>
       <div className="min-h-screen bg-gray-900 text-foreground flex flex-col">
         <Header currentPage={page} onNavigate={handleNavigate} />
-        <main className={`flex-1 mx-auto w-full p-4 ${page === 'tasks' && chatTaskId ? 'max-w-[1800px]' : 'max-w-6xl'}`}>
+        <main className={`flex-1 mx-auto w-full p-4 ${page === 'tasks' && chatTaskId ? 'max-w-[1400px]' : 'max-w-6xl'}`}>
           {page === 'dashboard' && <Dashboard />}
           {page === 'tasks' && <TasksPage chatTaskId={chatTaskId} onChatTaskChange={setChatTaskId} />}
           {page === 'projects' && <ProjectsPage />}
