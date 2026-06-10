@@ -147,11 +147,11 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
 
   const splitMode = isWide && chatTask;
 
-  const filteredTasks = tagFilter
+  const filteredTasks = tagFilters.length > 0
     ? tasks.filter((t) => {
         if (!t.project_id) return false;
         const proj = projects.find((p) => p.id === t.project_id);
-        return proj ? proj.tags.includes(tagFilter) : false;
+        return proj ? tagFilters.some((tag) => proj.tags.includes(tag)) : false;
       })
     : tasks;
 
