@@ -53,6 +53,7 @@ class InstanceManager:
 
         # PTY mode: delegate to claude-pty backend if available
         if self._pty_backend and provider == "claude":
+            logger.info("PTY launch: instance=%s task=%s skills=%s provider=%s", instance_id, task_id, enabled_skills, provider)
             mcp_config_path = None
             if enabled_skills and task_id:
                 from backend.services.mcp_config import generate_mcp_config
