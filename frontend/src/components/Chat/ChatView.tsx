@@ -595,12 +595,12 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
   return (
     <div className="fixed inset-0 bg-gray-950 flex flex-col z-50">
       {/* Header */}
-      <div className="flex items-center gap-3 px-4 py-2 pt-[max(0.5rem,env(safe-area-inset-top))] border-b border-gray-800 bg-gray-900">
-        <button onClick={onBack} className="text-gray-400 hover:text-foreground">
+      <div className="flex items-center gap-2 sm:gap-3 px-3 sm:px-4 py-2 pt-[max(0.5rem,env(safe-area-inset-top))] border-b border-gray-800 bg-gray-900">
+        <button onClick={onBack} className="text-gray-400 hover:text-foreground shrink-0">
           <ArrowLeft size={20} />
         </button>
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
+        <div className="flex-1 min-w-0 overflow-hidden">
+          <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
             <p className="text-foreground font-medium text-sm whitespace-nowrap">Task #{task.id}</p>
             <span className={`text-xs px-1.5 rounded font-medium whitespace-nowrap ${task.provider === 'codex' ? 'bg-green-600/30 text-green-300' : 'bg-blue-600/30 text-blue-300'}`}>
               {providerLabel}
@@ -608,7 +608,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
             {projectName && (
               <span className="text-xs bg-emerald-600/30 text-emerald-300 px-1.5 rounded font-medium whitespace-nowrap">{projectName}</span>
             )}
-            <p className="text-xs text-gray-500 whitespace-nowrap">
+            <p className="hidden sm:inline text-xs text-gray-500 whitespace-nowrap">
               {task.session_id ? 'Session active' : 'No session yet'}
             </p>
             {contextUsage && <><span className="flex-1" /><span className="hidden sm:flex"><ContextUsageIndicator usage={contextUsage} /></span></>}
@@ -629,7 +629,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
               <ExpandableText
                 text={task.title || task.description || 'Untitled'}
                 collapsedLines={1}
-                className="text-sm text-gray-400"
+                className="text-sm text-gray-400 truncate"
               />
               <button
                 onClick={() => { setTitleDraft(task.title || ''); setEditingTitle(true); }}
@@ -641,6 +641,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
             </div>
           )}
         </div>
+        <div className="flex items-center gap-1 shrink-0">
         <SubAgentIndicator
           count={monitorCount}
           active={monitorCount > 0}
@@ -675,6 +676,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated }: ChatViewProp
             <span className="hidden sm:inline">{interrupting ? 'Interrupting...' : 'Interrupt'}</span>
           </button>
         )}
+        </div>
       </div>
 
       {/* Monitor Panel */}

@@ -193,6 +193,20 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat }: TaskListPro
                   <Users size={12} />
                   {t.active_sub_agents}
                 </button>
+                {subAgentsExpandedId === t.id && (
+                  <div className="absolute top-full mt-1 left-0 bg-gray-800 border border-gray-600 rounded shadow-lg z-20 min-w-[140px] py-1">
+                    {subAgentSummary && Object.keys(subAgentSummary.by_type).length > 0 ? (
+                      Object.entries(subAgentSummary.by_type).map(([type, counts]) => (
+                        <div key={type} className="px-3 py-1 text-xs text-gray-300 flex items-center justify-between gap-3">
+                          <span>{type.charAt(0).toUpperCase() + type.slice(1)}</span>
+                          <span className={counts.running > 0 ? 'text-green-400' : 'text-gray-500'}>{counts.running} running</span>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="px-3 py-1 text-xs text-gray-500">No sub-agents</div>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
             {/* Action buttons — always top-right aligned */}
@@ -280,21 +294,6 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat }: TaskListPro
               </div>
             </div>
           </div>
-          {/* Expandable sub-agents detail */}
-          {subAgentsExpandedId === t.id && (
-            <div className="mt-1 pl-[1.125rem] flex flex-wrap gap-1" data-subagents-dropdown>
-              {subAgentSummary && Object.entries(subAgentSummary.by_type).some(([, c]) => c.running > 0) ? (
-                Object.entries(subAgentSummary.by_type).filter(([, c]) => c.running > 0).map(([type, counts]) => (
-                  <span key={type} className="text-xs bg-teal-600/20 text-teal-300 px-2 py-0.5 rounded flex items-center gap-1">
-                    {type.charAt(0).toUpperCase() + type.slice(1)}:
-                    <span className="text-green-400">{counts.running} running</span>
-                  </span>
-                ))
-              ) : (
-                <span className="text-xs text-gray-500">No active sub-agents</span>
-              )}
-            </div>
-          )}
           {/* Row 2: title + description (full width) */}
           <div className="mt-1 pl-[1.125rem]">
             {/* Title (editable) */}
