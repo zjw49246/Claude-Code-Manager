@@ -35,6 +35,13 @@ class InstanceManager:
         self._last_stderr: dict[int, str] = {}  # instance_id -> stderr from last run
         self._launch_params: dict[int, dict] = {}  # instance_id -> params for re-launch on rotation
 
+        try:
+            from claude_pty.adapters.ccm import CCMBackend
+            self._pty_backend = CCMBackend(self)
+            logger.info("claude-pty detected, using PTY mode for Claude provider")
+        except ImportError:
+            self._pty_backend = None
+
     async def launch(self, instance_id: int, prompt: str, task_id: int | None = None, cwd: str | None = None, model: str | None = None, resume_session_id: str | None = None, loop_iteration: int | None = None, git_env: dict | None = None, thinking_budget: int | None = None, effort_level: str | None = None, chat_initiated: bool = False, config_dir: str | None = None, provider: str = "claude", enable_workflows: bool = False, enabled_skills: dict | None = None) -> int:
         """Launch a Claude Code subprocess for the given instance.
 
@@ -43,6 +50,50 @@ class InstanceManager:
         that loop-task chat history can be grouped by iteration in the frontend.
         """
         provider = (provider or "claude").lower()
+
+        # PTY mode: delegate to claude-pty backend if available
+        if self._pty_backend and provider == "claude":
+            mcp_config_path = None
+            if enabled_skills and task_id:
+                from backend.services.mcp_config import generate_mcp_config
+                mcp_config_path = generate_mcp_config(task_id, enabled_skills)
+
+            session_id = await self._pty_backend.launch_for_ccm(
+                instance_id=instance_id,
+                prompt=prompt,
+                task_id=task_id,
+                cwd=cwd,
+                model=model,
+                resume_session_id=resume_session_id,
+                loop_iteration=loop_iteration,
+                git_env=git_env,
+                thinking_budget=thinking_budget,
+                effort_level=effort_level,
+                chat_initiated=chat_initiated,
+                config_dir=config_dir,
+                enable_workflows=enable_workflows,
+                enabled_skills=enabled_skills,
+                mcp_config_path=str(mcp_config_path) if mcp_config_path else None,
+            )
+            async with self.db_factory() as db:
+                await db.execute(
+                    update(Instance)
+                    .where(Instance.id == instance_id)
+                    .values(
+                        status="running",
+                        current_task_id=task_id,
+                        started_at=datetime.utcnow(),
+                        last_heartbeat=datetime.utcnow(),
+                    )
+                )
+                if task_id:
+                    await db.execute(
+                        update(Task)
+                        .where(Task.id == task_id)
+                        .values(last_cwd=cwd or os.getcwd())
+                    )
+                await db.commit()
+            return 0  # PTY mode — no subprocess PID
 
         mcp_config_path = None
         if enabled_skills and provider == "claude" and task_id:
@@ -655,6 +706,34 @@ class InstanceManager:
         Sends SIGINT first so Claude can gracefully save session state,
         then falls back to SIGTERM and SIGKILL if needed.
         """
+        # PTY mode
+        if self._pty_backend and instance_id not in self.processes:
+            self._stopping.add(instance_id)
+            await self._pty_backend.stop(instance_id)
+            async with self.db_factory() as db:
+                inst = await db.get(Instance, instance_id)
+                task_id = inst.current_task_id if inst else None
+                await db.execute(
+                    update(Instance)
+                    .where(Instance.id == instance_id)
+                    .values(status="idle", pid=None, current_task_id=None)
+                )
+                if task_id:
+                    await db.execute(
+                        update(Task)
+                        .where(Task.id == task_id, Task.status == "executing")
+                        .values(status="completed", error_message=None)
+                    )
+                await db.commit()
+            if task_id:
+                await self.broadcaster.broadcast(f"task:{task_id}", {
+                    "event_type": "process_exit",
+                    "exit_code": 0,
+                    "stderr": None,
+                })
+            self._stopping.discard(instance_id)
+            return True
+
         process = self.processes.get(instance_id)
         if not process or process.returncode is not None:
             return False
@@ -705,6 +784,9 @@ class InstanceManager:
         return True
 
     def is_running(self, instance_id: int) -> bool:
+        if self._pty_backend and instance_id in self._pty_backend._sessions:
+            session = self._pty_backend._sessions[instance_id]
+            return session.is_alive
         process = self.processes.get(instance_id)
         return process is not None and process.returncode is None
 
