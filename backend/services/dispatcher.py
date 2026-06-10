@@ -914,6 +914,32 @@ class GlobalDispatcher:
         })
 
     async def _run_loop_lifecycle(self, instance_id: int, task: Task, cwd: str, git_env: dict | None = None, effort_level: str | None = None):
+        """Loop entry: run iterations, then always release the PTY session.
+
+        In PTY mode the whole loop shares one hot session (one iteration ==
+        one turn); releasing it afterwards keeps the pool free of one-shot
+        leftovers. No-op in -p mode.
+        """
+        try:
+            await self._run_loop_iterations(
+                instance_id, task, cwd, git_env, effort_level=effort_level
+            )
+        finally:
+            try:
+                async with self.db_factory() as db:
+                    t = await db.get(Task, task.id)
+                    sid = t.session_id if t else None
+                if sid:
+                    release = getattr(self.instance_manager, "release_pty_session", None)
+                    if release is not None:
+                        result = release(sid)
+                        import inspect as _inspect
+                        if _inspect.isawaitable(result):
+                            await result
+            except Exception:
+                logger.exception("Failed to release loop PTY session for task %d", task.id)
+
+    async def _run_loop_iterations(self, instance_id: int, task: Task, cwd: str, git_env: dict | None = None, effort_level: str | None = None):
         """Loop: repeatedly invoke Claude Code until it signals done or abort.
 
         Each iteration starts a fresh Claude Code subprocess. Claude reads the todo
@@ -971,12 +997,22 @@ class GlobalDispatcher:
                 task, iteration, str(signal_path), history, anchored_total, plan,
             )
 
+            # PTY mode: iterations after the first reuse the same hot session
+            # (one iteration == one turn) — no cold start, continuous context.
+            # -p mode keeps its stateless-per-iteration semantics (no resume).
+            resume_sid = None
+            if iteration > 0 and getattr(self.instance_manager, "pty_mode_enabled", False):
+                async with self.db_factory() as db:
+                    t = await db.get(Task, task.id)
+                    resume_sid = t.session_id if t else None
+
             await self.instance_manager.launch(
                 instance_id=instance_id,
                 prompt=prompt,
                 task_id=task.id,
                 cwd=cwd,
                 model=task.model,
+                resume_session_id=resume_sid,
                 loop_iteration=iteration,
                 git_env=git_env or {},
                 thinking_budget=task.thinking_budget,

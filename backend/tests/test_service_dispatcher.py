@@ -2494,3 +2494,68 @@ async def test_goal_deleted_during_execution(db_factory):
     async with db_factory() as db:
         t = await db.get(Task, task_obj.id)
         assert t is None
+
+
+# ---------- PTY 模式 loop：同一热会话，一个迭代一个 turn ----------
+
+async def _run_two_iteration_loop(d, db_factory, tmp_path, *, pty_enabled):
+    """Helper: run a loop that signals continue then done; capture launches."""
+    async with db_factory() as db:
+        inst = Instance(name="loop-pty-worker")
+        db.add(inst)
+        task = _make_loop_task(db, tmp_path)
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id, task_obj = inst.id, task
+
+    signal_path = tmp_path / ".claude-manager" / f"loop_signal_{task_obj.id}.json"
+    launches = []
+
+    async def fake_launch(*args, **kwargs):
+        launches.append(kwargs)
+        # 第一轮写 continue，第二轮写 done；并模拟 session_id 入库
+        signal_path.parent.mkdir(parents=True, exist_ok=True)
+        action = "continue" if len(launches) == 1 else "done"
+        _write_signal(signal_path, action, "step", f"{len(launches)}/2")
+        async with db_factory() as db:
+            t = await db.get(Task, task_obj.id)
+            t.session_id = "loop-sid-1"
+            await db.commit()
+        return 12345
+
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.wait = AsyncMock(return_value=0)
+    d.instance_manager.launch = AsyncMock(side_effect=fake_launch)
+    d.instance_manager.processes = {inst_id: mock_proc}
+    d.instance_manager.pty_mode_enabled = pty_enabled
+    d.instance_manager.release_pty_session = AsyncMock()
+
+    await d._run_loop_lifecycle(inst_id, task_obj, str(tmp_path))
+    return launches, d
+
+
+@pytest.mark.asyncio
+async def test_loop_pty_mode_reuses_session_per_iteration(db_factory, tmp_path):
+    d = _make_dispatcher(db_factory)
+    launches, d = await _run_two_iteration_loop(d, db_factory, tmp_path, pty_enabled=True)
+
+    assert len(launches) == 2
+    # 迭代 0 全新会话；迭代 1 复用同一会话（一个迭代一个 turn）
+    assert launches[0].get("resume_session_id") is None
+    assert launches[1].get("resume_session_id") == "loop-sid-1"
+    # loop 结束后会话归还，不污染池
+    d.instance_manager.release_pty_session.assert_awaited_once_with("loop-sid-1")
+
+
+@pytest.mark.asyncio
+async def test_loop_p_mode_stays_stateless(db_factory, tmp_path):
+    d = _make_dispatcher(db_factory)
+    launches, d = await _run_two_iteration_loop(d, db_factory, tmp_path, pty_enabled=False)
+
+    assert len(launches) == 2
+    # -p 模式语义不变：每轮无 resume
+    assert launches[0].get("resume_session_id") is None
+    assert launches[1].get("resume_session_id") is None
