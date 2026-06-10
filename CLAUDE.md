@@ -30,6 +30,7 @@ claude-manager/
 │   │   ├── instances.py         # 实例 CRUD + Ralph Loop 控制 + Dispatcher 端点
 │   │   ├── projects.py          # Project CRUD + git clone
 │   │   ├── monitor.py           # Monitor Session CRUD + 子 agent checks/complete endpoints
+│   │   ├── pr_monitor.py       # PR Monitor CRUD + GitHub webhook endpoint
 │   │   ├── sub_agents.py        # 通用子 Agent summary API (GET /tasks/{id}/sub-agents/summary)
 │   │   ├── ws.py                # WebSocket 端点
 │   │   ├── voice.py             # Whisper 语音转文字
@@ -41,6 +42,7 @@ claude-manager/
 │   │   ├── instance.py          # Claude Code 实例
 │   │   ├── project.py           # Project (name, git_url, local_path)
 │   │   ├── monitor_session.py   # MonitorSession + MonitorCheck (后台监控子 session)
+│   │   ├── pr_monitor.py       # MonitoredRepo + PRReview (PR 自动审核)
 │   │   ├── log_entry.py         # 执行日志
 │   │   └── worktree.py          # Git worktree 跟踪
 │   ├── schemas/                 # Pydantic 请求/响应模型
@@ -57,6 +59,7 @@ claude-manager/
 │       ├── stream_parser.py     # NDJSON stream-json 解析器
 │       ├── task_queue.py        # 优先级队列 (asc = 优先级越高)
 │       ├── worktree_manager.py  # Git worktree 创建/合并/删除 + rebase+push
+│       ├── pr_review_service.py  # PR 审核 prompt 构建 + task 创建 + 状态回查
 │       ├── ws_broadcaster.py    # WebSocket channel 广播
 │       ├── whisper_client.py    # OpenAI Whisper 客户端
 │       └── backup_service.py    # 数据库备份 (auto-backup SDK 封装, 可选)
@@ -101,8 +104,9 @@ claude-manager/
 - **环境变量清理**: 生成子进程前必须 unset `CLAUDECODE` / `CLAUDE_CODE`，避免嵌套检测
 - **停止顺序**: SIGTERM → 等 10s → SIGKILL
 - **备份服务**: `BackupService`（`backend/services/backup_service.py`）封装 auto-backup SDK，在 lifespan 中以后台线程（APScheduler）运行，支持 local / s3 / oss；`BACKUP_ENABLED=false` 时完全不加载
-- **WebSocket channels**: `instance:{id}`, `task:{id}`, `tasks`, `system`
-- **认证**: 除 `/api/system/health` 和 `/api/auth/login` 外，所有 API 需要 `Authorization: Bearer <token>`
+- **PR Monitor**: GitHub PR 自动审核功能。GitHub Webhook 推送 PR 事件 → 创建 CCM task 让 Claude 审核 → 审核通过可自动 merge。数据模型：`MonitoredRepo`（监控仓库配置）+ `PRReview`（审核记录）。Webhook 端点 `/api/github/webhook`（公开，HMAC-SHA256 验签）。前端独立页面 `PRMonitorPage`。Webhook URL: `https://youchengsong.claude-code-manager.com/api/github/webhook`
+- **WebSocket channels**: `instance:{id}`, `task:{id}`, `tasks`, `system`, `pr-monitor`
+- **认证**: 除 `/api/system/health`、`/api/auth/login`、`/api/github/webhook` 外，所有 API 需要 `Authorization: Bearer <token>`
 - **前端 type 导入**: 用 `import type { X }` 导入类型，`import { api }` 导入值（Vite 会去除 type-only exports）
 - **Tailwind v4**: 用 `@import "tailwindcss"` + `@tailwindcss/vite` 插件，无 tailwind.config
 - **主题**: 深色/浅色切换通过覆盖 `--color-gray-*` CSS 变量实现灰度反转，内容文字用 `text-foreground`（随主题变化），按钮文字保持 `text-white`
