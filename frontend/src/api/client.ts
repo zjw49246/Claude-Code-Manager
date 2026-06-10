@@ -38,6 +38,11 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return res.json();
 }
 
+export interface RuntimeSettings {
+  use_pty_mode: boolean;
+  pty_available: boolean;
+}
+
 export interface GlobalSettings {
   git_author_name: string | null;
   git_author_email: string | null;
@@ -341,6 +346,9 @@ export const api = {
     }),
 
   // Global Settings
+  getRuntimeSettings: () => request<RuntimeSettings>('/api/settings/runtime'),
+  updateRuntimeSettings: (data: { use_pty_mode: boolean }) =>
+    request<RuntimeSettings>('/api/settings/runtime', { method: 'PUT', body: JSON.stringify(data) }),
   getGitSettings: () => request<GlobalSettings>('/api/settings/git'),
   updateGitSettings: (data: Partial<GlobalSettings>) =>
     request<GlobalSettings>('/api/settings/git', { method: 'PUT', body: JSON.stringify(data) }),

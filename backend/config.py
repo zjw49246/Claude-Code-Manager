@@ -29,6 +29,12 @@ class Settings(BaseSettings):
     goal_evaluation_timeout: int = 120
     git_ssh_key_path: str = ""  # Instance-level SSH key, fallback when project has none
 
+    # --- PTY persistent-session mode (claude provider only) ---
+    # When true, claude tasks run in long-lived interactive PTY sessions
+    # (claude_pty): prompts are delivered via channel injection, events come
+    # from the session JSONL. Flip to false to fall back to `claude -p`.
+    use_pty_mode: bool = False
+
     # --- Claude account pool (auto-rotation on rate limit) ---
     pool_enabled: bool = False
     pool_config_path: str = "~/.claude-pool/accounts.json"

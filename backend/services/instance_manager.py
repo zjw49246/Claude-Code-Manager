@@ -35,6 +35,52 @@ class InstanceManager:
         self._last_stderr: dict[int, str] = {}  # instance_id -> stderr from last run
         self._launch_params: dict[int, dict] = {}  # instance_id -> params for re-launch on rotation
 
+        # PTY persistent-session backend (claude provider only).
+        # Runtime-switchable: env USE_PTY_MODE is the boot default, the
+        # /api/settings/runtime endpoint can flip it live (affects new
+        # launches only; running sessions finish on their current path).
+        self._pty_backend = None
+        self._pty_enabled = False
+        if settings.use_pty_mode:
+            self.set_pty_mode(True)
+
+    @property
+    def pty_mode_enabled(self) -> bool:
+        return self._pty_enabled and self._pty_backend is not None
+
+    async def drain_idle_pty_sessions(self) -> int:
+        """Stop idle PTY sessions (called after PTY mode is switched off).
+        In-flight turns are untouched and finish on the PTY path."""
+        if self._pty_backend is None:
+            return 0
+        return await self._pty_backend.drain_idle_sessions()
+
+    def set_pty_mode(self, enabled: bool) -> bool:
+        """Enable/disable PTY mode at runtime. Returns the effective state.
+
+        The backend is created lazily on first enable and kept on disable
+        (it may still manage sessions that started in PTY mode).
+        """
+        if enabled:
+            if self._pty_backend is None:
+                try:
+                    from claude_pty.adapters.ccm import CCMBackend
+                    self._pty_backend = CCMBackend(self)
+                    logger.info("PTY mode enabled (claude_pty persistent sessions)")
+                except ImportError:
+                    logger.warning(
+                        "PTY mode requested but claude_pty is not installed; "
+                        "staying on `claude -p` mode"
+                    )
+                    self._pty_enabled = False
+                    return False
+            self._pty_enabled = True
+        else:
+            if self._pty_enabled:
+                logger.info("PTY mode disabled; new launches use `claude -p`")
+            self._pty_enabled = False
+        return self._pty_enabled
+
     async def launch(self, instance_id: int, prompt: str, task_id: int | None = None, cwd: str | None = None, model: str | None = None, resume_session_id: str | None = None, loop_iteration: int | None = None, git_env: dict | None = None, thinking_budget: int | None = None, effort_level: str | None = None, chat_initiated: bool = False, config_dir: str | None = None, provider: str = "claude", enable_workflows: bool = False, enabled_skills: dict | None = None) -> int:
         """Launch a Claude Code subprocess for the given instance.
 
@@ -48,6 +94,25 @@ class InstanceManager:
         if enabled_skills and provider == "claude" and task_id:
             from backend.services.mcp_config import generate_mcp_config
             mcp_config_path = generate_mcp_config(task_id, enabled_skills)
+
+        if provider == "claude" and self.pty_mode_enabled:
+            return await self._launch_pty(
+                instance_id=instance_id,
+                prompt=prompt,
+                task_id=task_id,
+                cwd=cwd,
+                model=model,
+                resume_session_id=resume_session_id,
+                loop_iteration=loop_iteration,
+                git_env=git_env,
+                thinking_budget=thinking_budget,
+                effort_level=effort_level,
+                chat_initiated=chat_initiated,
+                config_dir=config_dir,
+                enable_workflows=enable_workflows,
+                enabled_skills=enabled_skills,
+                mcp_config_path=str(mcp_config_path) if mcp_config_path else None,
+            )
 
         cmd = self._build_command(
             provider=provider,
@@ -134,6 +199,75 @@ class InstanceManager:
         self._tasks[instance_id] = consumer
 
         return process.pid
+
+    async def _launch_pty(
+        self,
+        instance_id: int,
+        prompt: str,
+        task_id: int | None,
+        cwd: str | None,
+        model: str | None,
+        resume_session_id: str | None,
+        loop_iteration: int | None,
+        git_env: dict | None,
+        thinking_budget: int | None,
+        effort_level: str | None,
+        chat_initiated: bool,
+        config_dir: str | None,
+        enable_workflows: bool,
+        enabled_skills: dict | None,
+        mcp_config_path: str | None,
+    ) -> int:
+        """PTY-mode launch: delegate to claude_pty, mirror -p bookkeeping.
+
+        The backend installs a process proxy into self.processes and a
+        consumer into self._tasks; events flow back through _process_event,
+        so everything downstream (DB, WebSocket, dispatcher wait) is
+        unchanged.
+        """
+        await self._pty_backend.launch_for_ccm(
+            instance_id=instance_id,
+            prompt=prompt,
+            task_id=task_id,
+            cwd=cwd,
+            model=model if model and model != "default" else None,
+            resume_session_id=resume_session_id,
+            loop_iteration=loop_iteration,
+            git_env=git_env,
+            thinking_budget=thinking_budget,
+            effort_level=effort_level,
+            chat_initiated=chat_initiated,
+            config_dir=config_dir,
+            enable_workflows=enable_workflows,
+            enabled_skills=enabled_skills,
+            mcp_config_path=mcp_config_path,
+        )
+
+        process = self.processes.get(instance_id)
+        pid = getattr(process, "pid", 0) or 0
+
+        async with self.db_factory() as db:
+            await db.execute(
+                update(Instance)
+                .where(Instance.id == instance_id)
+                .values(
+                    pid=pid,
+                    status="running",
+                    current_task_id=task_id,
+                    started_at=datetime.utcnow(),
+                    last_heartbeat=datetime.utcnow(),
+                )
+            )
+            if task_id:
+                actual_cwd = cwd or os.getcwd()
+                await db.execute(
+                    update(Task)
+                    .where(Task.id == task_id)
+                    .values(last_cwd=actual_cwd)
+                )
+            await db.commit()
+
+        return pid
 
     def _build_command(
         self,
@@ -636,6 +770,17 @@ class InstanceManager:
             await self.broadcaster.broadcast(f"task:{task_id}", broadcast_data)
 
         # Persist and broadcast context usage
+        if context_usage and not context_usage.get("context_window"):
+            # Interactive (PTY) mode has no result event carrying contextWindow.
+            # Fill from the task's model choice: [1m] variants get 1M, else 200K.
+            model_name = ""
+            if task_id:
+                async with self.db_factory() as db:
+                    t = await db.get(Task, task_id)
+                    model_name = (t.model or "") if t else ""
+            context_usage["context_window"] = (
+                1_000_000 if "[1m]" in model_name else 200_000
+            )
         if context_usage and task_id:
             async with self.db_factory() as db:
                 await db.execute(
@@ -660,17 +805,31 @@ class InstanceManager:
             return False
 
         self._stopping.add(instance_id)
-        import signal
-        process.send_signal(signal.SIGINT)
-        try:
-            await asyncio.wait_for(process.wait(), timeout=10.0)
-        except asyncio.TimeoutError:
-            process.terminate()
+        pty_managed = (
+            self._pty_backend is not None
+            and instance_id in getattr(self._pty_backend, "_sessions", {})
+        )
+        if pty_managed:
+            # Esc-interrupt the turn, then tear the session down; the proxy's
+            # wait() is unblocked by the backend's on_exit.
+            await self._pty_backend.stop(instance_id)
             try:
-                await asyncio.wait_for(process.wait(), timeout=5.0)
+                await asyncio.wait_for(process.wait(), timeout=10.0)
             except asyncio.TimeoutError:
                 process.kill()
                 await process.wait()
+        else:
+            import signal
+            process.send_signal(signal.SIGINT)
+            try:
+                await asyncio.wait_for(process.wait(), timeout=10.0)
+            except asyncio.TimeoutError:
+                process.terminate()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    process.kill()
+                    await process.wait()
 
         # Cancel consumer task
         task = self._tasks.get(instance_id)

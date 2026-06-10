@@ -12,3 +12,12 @@ dist/
 .DS_Store
 *.log
 *.egg-info/
+
+# Runtime artifacts (never commit)
+uploads/
+claude_manager.db
+claude_manager.db-*
+ccm.db
+claude_manager_dev.db
+*.db-shm
+*.db-wal

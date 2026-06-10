@@ -1,4 +1,4 @@
-from sqlalchemy import Integer, String
+from sqlalchemy import Boolean, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.database import Base
@@ -17,3 +17,5 @@ class GlobalSettings(Base):
     git_ssh_key_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     git_https_username: Mapped[str | None] = mapped_column(String(200), nullable=True)
     git_https_token: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # Runtime mode switches (None = follow env default)
+    use_pty_mode: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
