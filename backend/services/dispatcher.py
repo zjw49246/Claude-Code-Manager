@@ -661,6 +661,8 @@ class GlobalDispatcher:
 
             logger.info(f"Task {task.id} ({task.title}) completed successfully on instance {instance_id}")
 
+            await self._handle_pr_review_completion(task)
+
         except asyncio.CancelledError:
             logger.info(f"Lifecycle cancelled for task {task.id} on instance {instance_id}")
             raise
@@ -675,11 +677,55 @@ class GlobalDispatcher:
                 "new_status": "failed",
                 "instance_id": instance_id,
             })
+            await self._handle_pr_review_failure(task, str(e))
         finally:
             from backend.services.mcp_config import cleanup_mcp_config
             cleanup_mcp_config(task.id)
             self._running_tasks.pop(instance_id, None)
             await self._reset_instance_if_stale(instance_id, task.id)
+
+    async def _handle_pr_review_completion(self, task: Task):
+        meta = task.metadata_ or {}
+        pr_review_id = meta.get("pr_review_id")
+        if not pr_review_id:
+            return
+        try:
+            from backend.models.pr_monitor import MonitoredRepo, PRReview
+            from backend.services.pr_review_service import check_and_update_review
+            async with self.db_factory() as db:
+                review = await db.get(PRReview, pr_review_id)
+                if not review:
+                    return
+                repo = await db.get(MonitoredRepo, review.repo_id)
+                if not repo:
+                    return
+                await check_and_update_review(db, pr_review_id, repo.repo_full_name)
+        except Exception as e:
+            logger.error(f"PR review completion handler error: {e}", exc_info=True)
+
+    async def _handle_pr_review_failure(self, task: Task, error: str):
+        meta = task.metadata_ or {}
+        pr_review_id = meta.get("pr_review_id")
+        if not pr_review_id:
+            return
+        try:
+            from backend.models.pr_monitor import PRReview
+            from datetime import datetime
+            async with self.db_factory() as db:
+                review = await db.get(PRReview, pr_review_id)
+                if review and review.status in ("pending", "reviewing"):
+                    review.status = "error"
+                    review.action_taken = "error"
+                    review.review_summary = f"Task failed: {error[:500]}"
+                    review.completed_at = datetime.utcnow()
+                    await db.commit()
+                    await self.broadcaster.broadcast("pr-monitor", {
+                        "type": "review_updated",
+                        "review_id": review.id,
+                        "status": "error",
+                    })
+        except Exception as e:
+            logger.error(f"PR review failure handler error: {e}", exc_info=True)
 
     async def _reset_instance_if_stale(self, instance_id: int, task_id: int):
         """Safety net: reset instance to idle if _consume_output didn't clean up."""

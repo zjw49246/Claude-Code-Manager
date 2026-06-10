@@ -42,6 +42,7 @@ export function Header({ currentPage, onNavigate }: HeaderProps) {
     { key: 'secrets', label: 'Secrets' },
     { key: 'files', label: 'Files' },
     { key: 'discussions', label: 'Discussions' },
+    { key: 'pr-monitor', label: 'PR Monitor' },
     ...(isCapacitor() ? [{ key: 'server', label: 'Server' }] : []),
   ];
 
