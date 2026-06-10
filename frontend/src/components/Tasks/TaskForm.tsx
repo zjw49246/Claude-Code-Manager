@@ -375,7 +375,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
           tagColorMap={Object.fromEntries(tagItems.map((t) => [t.name, t.color]))}
         />
         {isNewProject && (
-          <div className="flex gap-2">
+          <div className="flex flex-col sm:flex-row gap-2">
             <input
               className="flex-1 bg-gray-700 text-foreground rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
               placeholder="Project name (required)"
@@ -384,7 +384,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
               required
             />
             <input
-              className="flex-1 bg-gray-700 text-foreground rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              className="flex-1 min-w-0 bg-gray-700 text-foreground rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
               placeholder="Remote repo URL (optional)"
               value={newProjectUrl}
               onChange={(e) => setNewProjectUrl(e.target.value)}
