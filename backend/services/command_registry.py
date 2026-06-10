@@ -78,22 +78,3 @@ register_command(Command(
     disallowed_builtins=["Agent", "Monitor"],
 ))
 
-register_command(Command(
-    name="enable",
-    description="为当前 task 启用一个工具（持久生效）",
-    prompt_template=(
-        "用户请求启用工具。请调用 ccm_enable_skill 工具，参数为用户指定的工具名。"
-        "启用后告知用户结果。"
-    ),
-    always_available=True,
-))
-
-register_command(Command(
-    name="disable",
-    description="为当前 task 禁用一个工具（持久生效）",
-    prompt_template=(
-        "用户请求禁用工具。请调用 ccm_disable_skill 工具，参数为用户指定的工具名。"
-        "禁用后告知用户结果。注意: help 不可禁用。"
-    ),
-    always_available=True,
-))
