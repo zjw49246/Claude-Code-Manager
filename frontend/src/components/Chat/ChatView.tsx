@@ -8,7 +8,7 @@ import { Send, ArrowLeft, Loader2, ChevronDown, ChevronRight, ChevronUp, Copy, C
 import { SecretPicker } from '../Secrets/SecretPicker';
 import { QuickPhraseDropdown } from '../QuickPhrases/QuickPhraseDropdown';
 import { ExpandableText } from '../ExpandableText';
-import { formatMessageTime } from '../../config/timezone';
+import { formatMessageTime, formatDateTime } from '../../config/timezone';
 import { useFileDrop } from '../../hooks/useFileDrop';
 import { SubAgentIndicator } from './SubAgentIndicator';
 import { MonitorPanel } from './MonitorPanel';
@@ -612,6 +612,11 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
             <p className="hidden sm:inline text-xs text-gray-500 whitespace-nowrap">
               {task.session_id ? 'Session active' : 'No session yet'}
             </p>
+            {task.created_at && (
+              <span className="hidden sm:inline text-xs text-gray-600 whitespace-nowrap">
+                Created {formatDateTime(task.created_at)}
+              </span>
+            )}
             {contextUsage && <><span className="flex-1" /><span className="hidden sm:flex"><ContextUsageIndicator usage={contextUsage} /></span></>}
           </div>
           {editingTitle ? (

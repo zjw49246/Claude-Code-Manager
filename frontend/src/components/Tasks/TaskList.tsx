@@ -1,9 +1,10 @@
 import { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import { api } from '../../api/client';
 import type { Task, Project, SubAgentSummary } from '../../api/client';
-import { Trash2, RotateCcw, XCircle, MessageCircle, Archive, ArchiveRestore, Star, Copy, Check, MoreVertical, Pencil, Mail, MailOpen, Wrench, Users } from 'lucide-react';
+import { Trash2, RotateCcw, XCircle, MessageCircle, Archive, ArchiveRestore, Star, Copy, Check, MoreVertical, Pencil, Mail, MailOpen, Wrench, Users, Clock } from 'lucide-react';
 import { TAG_COLOR_OPTIONS } from '../TagColors';
 import { ExpandableText } from '../ExpandableText';
+import { formatDateTime } from '../../config/timezone';
 
 interface TaskListProps {
   tasks: Task[];
@@ -340,6 +341,12 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId 
             )}
             {t.target_repo && (
               <p className="text-gray-600 text-xs mt-0.5 truncate">{t.target_repo}</p>
+            )}
+            {t.created_at && (
+              <p className="text-gray-600 text-xs mt-0.5 flex items-center gap-1">
+                <Clock size={10} className="shrink-0" />
+                {formatDateTime(t.created_at)}
+              </p>
             )}
             {t.error_message && (
               <p className="text-red-400 text-xs mt-1">{t.error_message}</p>

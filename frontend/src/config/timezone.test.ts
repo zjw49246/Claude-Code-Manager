@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { formatMessageTime, resolveTimezone, getTimezone, setTimezone } from './timezone';
+import { formatMessageTime, formatDateTime, resolveTimezone, getTimezone, setTimezone } from './timezone';
 
 const mockStorage: Record<string, string> = {};
 beforeEach(() => {
@@ -124,5 +124,86 @@ describe('formatMessageTime', () => {
     const msg = '2026-05-15T23:59:00+08:00';
     const result = formatMessageTime(msg, now);
     expect(result).toMatch(/^05\/15\s+/);
+  });
+
+  it('treats naive timestamp (no Z) as UTC — same as with Z suffix', () => {
+    setTimezone('Asia/Shanghai');
+    const now = new Date('2026-05-16T12:00:00Z');
+    const naiveResult = formatMessageTime('2026-05-16T04:00:00', now);
+    const utcResult = formatMessageTime('2026-05-16T04:00:00Z', now);
+    expect(naiveResult).toBe(utcResult);
+  });
+
+  it('naive timestamp converts correctly to non-UTC timezone', () => {
+    setTimezone('Asia/Shanghai');
+    // 2026-05-16T02:00:00 UTC = 2026-05-16T10:00:00 Shanghai
+    const now = new Date('2026-05-16T12:00:00Z');
+    const result = formatMessageTime('2026-05-16T02:00:00', now);
+    // Should show 10:00 in Shanghai time (today → time only)
+    expect(result).toMatch(TIME_RE);
+    expect(result).not.toMatch(/\//);
+  });
+
+  it('naive timestamp with microseconds is handled', () => {
+    setTimezone('UTC');
+    const now = new Date('2026-05-16T12:00:00Z');
+    const result = formatMessageTime('2026-05-16T09:05:00.123456', now);
+    expect(result).toMatch(TIME_RE);
+    expect(result).not.toMatch(/\//);
+  });
+
+  it('timestamp with positive offset is preserved (not double-converted)', () => {
+    setTimezone('Asia/Shanghai');
+    const now = new Date('2026-05-16T12:00:00+08:00');
+    const result = formatMessageTime('2026-05-16T10:00:00+08:00', now);
+    expect(result).toMatch(TIME_RE);
+    expect(result).not.toMatch(/\//);
+  });
+
+  it('timestamp with negative offset is preserved', () => {
+    setTimezone('America/New_York');
+    const now = new Date('2026-05-16T12:00:00-04:00');
+    const result = formatMessageTime('2026-05-16T10:00:00-04:00', now);
+    expect(result).toMatch(TIME_RE);
+    expect(result).not.toMatch(/\//);
+  });
+});
+
+describe('formatDateTime', () => {
+  beforeEach(() => {
+    setTimezone('Asia/Shanghai');
+  });
+
+  it('always includes date even for today', () => {
+    const now = new Date('2026-05-16T10:00:00+08:00');
+    const msg = '2026-05-16T08:30:00+08:00';
+    const result = formatDateTime(msg, now);
+    expect(result).toMatch(/^05\/16\s+/);
+    expect(result).toMatch(TIME_RE);
+  });
+
+  it('shows YYYY prefix for different year', () => {
+    const now = new Date('2026-05-16T10:00:00+08:00');
+    const msg = '2025-12-31T23:59:00+08:00';
+    const result = formatDateTime(msg, now);
+    expect(result).toMatch(/^2025\/12\/31\s+/);
+    expect(result).toMatch(TIME_RE);
+  });
+
+  it('treats naive timestamp as UTC', () => {
+    setTimezone('Asia/Shanghai');
+    const now = new Date('2026-05-16T12:00:00Z');
+    const naiveResult = formatDateTime('2026-05-16T04:00:00', now);
+    const utcResult = formatDateTime('2026-05-16T04:00:00Z', now);
+    expect(naiveResult).toBe(utcResult);
+  });
+
+  it('converts UTC timestamp to user timezone for display', () => {
+    setTimezone('Asia/Shanghai');
+    // 2026-05-15T20:00:00 UTC = 2026-05-16T04:00:00 Shanghai
+    const now = new Date('2026-05-16T12:00:00Z');
+    const result = formatDateTime('2026-05-15T20:00:00Z', now);
+    // In Shanghai timezone, this is May 16 → same year → MM/DD format
+    expect(result).toMatch(/^05\/16\s+/);
   });
 });
