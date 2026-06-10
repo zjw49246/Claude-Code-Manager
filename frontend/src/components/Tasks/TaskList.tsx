@@ -140,10 +140,10 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat }: TaskListPro
     <div className="space-y-2">
       {tasks.map((t) => (
         <div key={t.id} className={`rounded-lg p-3 ${t.has_unread ? 'bg-indigo-900/50 ring-1 ring-indigo-500/50' : 'bg-gray-800'}`}>
-          {/* Row 1: status dot + badges + action buttons */}
+          {/* Row 1: status dot + badges (left, wraps) | action buttons (right, no wrap) */}
           <div className="flex items-center gap-2">
-            <span className={`w-2.5 h-2.5 rounded-full shrink-0 ${statusColors[t.status] || 'bg-gray-500'}`} />
-            <div className="flex items-center gap-2 flex-wrap flex-1 min-w-0">
+            <span className={`w-2.5 h-2.5 rounded-full shrink-0 self-start mt-[9px] ${statusColors[t.status] || 'bg-gray-500'}`} />
+            <div className="flex items-center gap-2 flex-wrap flex-1 min-w-0 min-h-[28px]">
               <span className="text-xs text-gray-500">#{t.id}</span>
               {t.project_id && projectMap[t.project_id] && (() => {
                 const proj = projectMap[t.project_id!];
@@ -195,92 +195,91 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat }: TaskListPro
                 </button>
               </div>
             </div>
-            {/* Action buttons */}
+            {/* Action buttons — always top-right aligned */}
             <div className="flex gap-1 shrink-0 items-center">
-            <button
-              onClick={() => handleStar(t.id)}
-              className={`p-1.5 transition-colors ${t.starred ? 'text-yellow-400 hover:text-yellow-300' : 'text-gray-600 hover:text-yellow-400'}`}
-              title={t.starred ? "Unstar" : "Star"}
-            >
-              <Star size={16} fill={t.starred ? 'currentColor' : 'none'} />
-            </button>
-            <button
-              onClick={() => handleToggleUnread(t.id, t.has_unread)}
-              className={`p-1.5 transition-colors ${t.has_unread ? 'text-indigo-400 hover:text-indigo-300' : 'text-gray-600 hover:text-indigo-400'}`}
-              title={t.has_unread ? "Mark as read" : "Mark as unread"}
-            >
-              {t.has_unread ? <MailOpen size={16} /> : <Mail size={16} />}
-            </button>
-            {t.session_id && (
               <button
-                onClick={() => onOpenChat(t)}
-                className="flex items-center gap-1 px-2 py-1 rounded text-xs font-medium bg-indigo-600/20 text-indigo-400 hover:bg-indigo-600/30"
-                title="Chat"
+                onClick={() => handleStar(t.id)}
+                className={`p-1.5 transition-colors ${t.starred ? 'text-yellow-400 hover:text-yellow-300' : 'text-gray-600 hover:text-yellow-400'}`}
+                title={t.starred ? "Unstar" : "Star"}
               >
-                <MessageCircle size={14} /><span className="hidden sm:inline"> Chat</span>
+                <Star size={16} fill={t.starred ? 'currentColor' : 'none'} />
               </button>
-            )}
-            <button
-              onClick={() => handleCopy(t)}
-              className="p-1.5 text-gray-600 hover:text-gray-300 transition-colors"
-              title="Copy prompt"
-            >
-              {copiedId === t.id ? <Check size={16} className="text-green-400" /> : <Copy size={16} />}
-            </button>
-            {/* Overflow menu */}
-            <div className="relative" ref={menuOpenId === t.id ? menuRef : undefined}>
               <button
-                onClick={() => setMenuOpenId(menuOpenId === t.id ? null : t.id)}
-                className="p-1.5 text-gray-600 hover:text-gray-300 transition-colors"
-                title="More actions"
+                onClick={() => handleToggleUnread(t.id, t.has_unread)}
+                className={`p-1.5 transition-colors ${t.has_unread ? 'text-indigo-400 hover:text-indigo-300' : 'text-gray-600 hover:text-indigo-400'}`}
+                title={t.has_unread ? "Mark as read" : "Mark as unread"}
               >
-                <MoreVertical size={16} />
+                {t.has_unread ? <MailOpen size={16} /> : <Mail size={16} />}
               </button>
-              {menuOpenId === t.id && (
-                <div className="absolute right-0 top-8 z-50 bg-gray-900 border border-gray-700 rounded-lg shadow-xl py-1 min-w-[140px]">
-                  <button
-                    onClick={() => { setTitleDraft(t.title || ''); setEditingTitleId(t.id); setMenuOpenId(null); }}
-                    className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-gray-300 hover:bg-gray-800 text-left"
-                  >
-                    <Pencil size={14} /> Edit title
-                  </button>
-                  {['in_progress', 'executing'].includes(t.status) && (
-                    <button
-                      onClick={() => { handleCancel(t.id); setMenuOpenId(null); }}
-                      className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-yellow-400 hover:bg-gray-800 text-left"
-                    >
-                      <XCircle size={14} /> Cancel
-                    </button>
-                  )}
-                  {t.status === 'failed' && (
-                    <button
-                      onClick={() => { handleRetry(t.id); setMenuOpenId(null); }}
-                      className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-blue-400 hover:bg-gray-800 text-left"
-                    >
-                      <RotateCcw size={14} /> Retry
-                    </button>
-                  )}
-                  <button
-                    onClick={() => { handleArchive(t.id); setMenuOpenId(null); }}
-                    className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-amber-400 hover:bg-gray-800 text-left"
-                  >
-                    {t.archived ? <ArchiveRestore size={14} /> : <Archive size={14} />}
-                    {t.archived ? 'Unarchive' : 'Archive'}
-                  </button>
-                  {['pending', 'failed', 'cancelled', 'completed'].includes(t.status) && (
-                    <button
-                      onClick={() => { handleDelete(t.id); setMenuOpenId(null); }}
-                      className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-red-400 hover:bg-gray-800 text-left"
-                    >
-                      <Trash2 size={14} /> Delete
-                    </button>
-                  )}
-                </div>
+              {t.session_id && (
+                <button
+                  onClick={() => onOpenChat(t)}
+                  className="flex items-center gap-1 px-2 py-1 rounded text-xs font-medium bg-indigo-600/20 text-indigo-400 hover:bg-indigo-600/30"
+                  title="Chat"
+                >
+                  <MessageCircle size={14} /><span className="hidden sm:inline"> Chat</span>
+                </button>
               )}
+              <button
+                onClick={() => handleCopy(t)}
+                className="p-1.5 text-gray-600 hover:text-gray-300 transition-colors"
+                title="Copy prompt"
+              >
+                {copiedId === t.id ? <Check size={16} className="text-green-400" /> : <Copy size={16} />}
+              </button>
+              {/* Overflow menu */}
+              <div className="relative" ref={menuOpenId === t.id ? menuRef : undefined}>
+                <button
+                  onClick={() => setMenuOpenId(menuOpenId === t.id ? null : t.id)}
+                  className="p-1.5 text-gray-600 hover:text-gray-300 transition-colors"
+                  title="More actions"
+                >
+                  <MoreVertical size={16} />
+                </button>
+                {menuOpenId === t.id && (
+                  <div className="absolute right-0 top-8 z-50 bg-gray-900 border border-gray-700 rounded-lg shadow-xl py-1 min-w-[140px]">
+                    <button
+                      onClick={() => { setTitleDraft(t.title || ''); setEditingTitleId(t.id); setMenuOpenId(null); }}
+                      className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-gray-300 hover:bg-gray-800 text-left"
+                    >
+                      <Pencil size={14} /> Edit title
+                    </button>
+                    {['in_progress', 'executing'].includes(t.status) && (
+                      <button
+                        onClick={() => { handleCancel(t.id); setMenuOpenId(null); }}
+                        className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-yellow-400 hover:bg-gray-800 text-left"
+                      >
+                        <XCircle size={14} /> Cancel
+                      </button>
+                    )}
+                    {t.status === 'failed' && (
+                      <button
+                        onClick={() => { handleRetry(t.id); setMenuOpenId(null); }}
+                        className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-blue-400 hover:bg-gray-800 text-left"
+                      >
+                        <RotateCcw size={14} /> Retry
+                      </button>
+                    )}
+                    <button
+                      onClick={() => { handleArchive(t.id); setMenuOpenId(null); }}
+                      className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-amber-400 hover:bg-gray-800 text-left"
+                    >
+                      {t.archived ? <ArchiveRestore size={14} /> : <Archive size={14} />}
+                      {t.archived ? 'Unarchive' : 'Archive'}
+                    </button>
+                    {['pending', 'failed', 'cancelled', 'completed'].includes(t.status) && (
+                      <button
+                        onClick={() => { handleDelete(t.id); setMenuOpenId(null); }}
+                        className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-red-400 hover:bg-gray-800 text-left"
+                      >
+                        <Trash2 size={14} /> Delete
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
           </div>
-          </div>
-          {/* Tools dropdown is now inline above */}
           {/* Expandable sub-agents detail */}
           {subAgentsExpandedId === t.id && (
             <div className="mt-1 pl-[1.125rem] flex flex-wrap gap-1" data-subagents-dropdown>
