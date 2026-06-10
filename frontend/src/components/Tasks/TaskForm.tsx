@@ -241,7 +241,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   };
 
   return (
-    <form ref={formRef} onSubmit={handleSubmit} className="bg-gray-800 rounded-lg p-4 space-y-3 overflow-hidden">
+    <form ref={formRef} onSubmit={handleSubmit} className="bg-gray-800 rounded-lg p-4 space-y-3 overflow-visible">
       <h3 className="text-sm font-semibold text-gray-300">New Task</h3>
       {dropError && (
         <div className="bg-yellow-900/50 border border-yellow-700 text-yellow-300 text-xs rounded px-3 py-2 flex items-center justify-between">

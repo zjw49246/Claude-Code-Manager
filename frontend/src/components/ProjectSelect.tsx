@@ -53,7 +53,7 @@ export function ProjectSelect({
       <button
         type="button"
         onClick={() => setOpen(!open)}
-        className={`flex items-center gap-1.5 w-full px-2.5 py-1 rounded text-xs font-medium transition-colors text-left border ${
+        className={`flex items-center gap-1.5 w-full min-w-[160px] px-2.5 py-1 rounded text-xs font-medium transition-colors text-left border ${
           selected
             ? 'bg-indigo-600/20 text-indigo-300 border-indigo-500/50 hover:bg-indigo-600/30'
             : 'bg-gray-800 text-gray-300 border-gray-600 hover:bg-gray-700'
