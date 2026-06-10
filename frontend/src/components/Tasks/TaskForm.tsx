@@ -48,7 +48,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   const [filePreviews, setFilePreviews] = useState<string[]>([]);
   const [selectedSecretIds, setSelectedSecretIds] = useState<number[]>([]);
   const [dropError, setDropError] = useState('');
-  const [enabledTools, setEnabledTools] = useState<Record<string, boolean>>({ help: true });
+  const [enabledTools, setEnabledTools] = useState<Record<string, boolean>>({ help: true, enable: true, disable: true });
   const [showToolsDropdown, setShowToolsDropdown] = useState(false);
   const [showConfigPanel, setShowConfigPanel] = useState(false);
   const [starOnCreate, setStarOnCreate] = useState(false);
@@ -92,7 +92,9 @@ export function TaskForm({ onCreated }: TaskFormProps) {
 
   const AVAILABLE_TOOLS = provider === 'claude'
     ? [
-        { key: 'help', label: 'Help', description: '$help command — list available commands' },
+        { key: 'help', label: 'Help', description: '$help — list available commands' },
+        { key: 'enable', label: 'Enable', description: '$enable — add a tool to this task' },
+        { key: 'disable', label: 'Disable', description: '$disable — remove a tool from this task' },
         { key: 'workflows', label: 'Workflows', description: 'Enable Workflow tool' },
         { key: 'monitor', label: 'Monitor', description: 'Background monitoring sub-agents' },
       ]
@@ -247,7 +249,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   };
 
   return (
-    <form ref={formRef} onSubmit={handleSubmit} className="bg-gray-800 rounded-lg p-4 space-y-3 overflow-hidden">
+    <form ref={formRef} onSubmit={handleSubmit} className="bg-gray-800 rounded-lg p-4 space-y-3 overflow-visible">
       <h3 className="text-sm font-semibold text-gray-300">New Task</h3>
       {dropError && (
         <div className="bg-yellow-900/50 border border-yellow-700 text-yellow-300 text-xs rounded px-3 py-2 flex items-center justify-between">
@@ -581,7 +583,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
             {showToolsDropdown && (
               <div className="absolute bottom-full mb-1 left-0 bg-gray-800 border border-gray-600 rounded shadow-lg z-20 min-w-[180px]">
                 {AVAILABLE_TOOLS.map((tool) => {
-                  const locked = tool.key === 'help';
+                  const locked = ['help', 'enable', 'disable'].includes(tool.key);
                   return (
                     <label
                       key={tool.key}
