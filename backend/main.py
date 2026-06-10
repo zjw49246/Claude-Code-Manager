@@ -30,6 +30,7 @@ from backend.api.monitor import router as monitor_router
 from backend.api.sub_agents import router as sub_agents_router
 from backend.api.discussions import router as discussions_router
 from backend.api.quick_phrases import router as quick_phrases_router
+from backend.api.pr_monitor import router as pr_monitor_router, webhook_router as pr_webhook_router
 from backend.middleware.auth import TokenAuthMiddleware
 from backend.services.ws_broadcaster import WebSocketBroadcaster
 from backend.services.instance_manager import InstanceManager
@@ -184,6 +185,8 @@ app.include_router(discussions_router)
 app.include_router(quick_phrases_router)
 app.include_router(monitor_router)
 app.include_router(sub_agents_router)
+app.include_router(pr_monitor_router)
+app.include_router(pr_webhook_router)
 
 # Serve frontend static files in production
 FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
