@@ -1,6 +1,6 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, field_serializer, model_validator
 
 
 class TaskCreate(BaseModel):
@@ -110,6 +110,15 @@ class TaskResponse(BaseModel):
     completed_at: datetime | None
 
     model_config = {"from_attributes": True}
+
+    @field_serializer("created_at", "started_at", "completed_at")
+    @classmethod
+    def _serialize_utc(cls, v: datetime | None) -> str | None:
+        if v is None:
+            return None
+        if v.tzinfo is None:
+            v = v.replace(tzinfo=timezone.utc)
+        return v.isoformat()
 
     @model_validator(mode="after")
     def _ensure_default_skills(self):

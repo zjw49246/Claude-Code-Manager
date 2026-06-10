@@ -238,7 +238,7 @@ async def get_chat_history(
             "tool_output": tool_output,
             "is_error": row.is_error,
             "loop_iteration": row.loop_iteration,
-            "timestamp": row.timestamp.isoformat() if row.timestamp else None,
+            "timestamp": (row.timestamp.isoformat() + "Z") if row.timestamp else None,
             "image_urls": image_urls or None,
             "attachments": attachments,
             "source": msg_source,

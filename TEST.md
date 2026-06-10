@@ -380,11 +380,40 @@ cd frontend && npx tsc --noEmit
 | 子 Agent 徽章 (Users) | `active_sub_agents > 0` 时显示计数 + pulse 动画 |
 | 子 Agent 详情展开 | 点击徽章调用 summary API，按类型显示 running/completed 计数 |
 
+### 时区与时间戳测试
+
+#### 后端 — 时间戳 UTC 序列化
+
+| 测试文件 | 测试用例 | 说明 |
+|----------|---------|------|
+| `test_task_schema.py` | `test_naive_created_at_serialized_with_utc_suffix` | 无时区 datetime 序列化为 `+00:00` |
+| `test_task_schema.py` | `test_aware_created_at_preserved` | 已有时区的 datetime 保留 UTC 标记 |
+| `test_task_schema.py` | `test_started_at_none_serialized_as_none` | None 保持 None |
+| `test_task_schema.py` | `test_started_at_naive_gets_utc_suffix` | started_at 同样加 UTC |
+| `test_task_schema.py` | `test_completed_at_naive_gets_utc_suffix` | completed_at 同样加 UTC |
+| `test_task_schema.py` | `test_all_three_timestamps_have_utc` | 三个时间字段全部含 UTC 后缀 |
+| `test_chat_timestamp.py` | `test_chat_history_timestamp_has_z_suffix` | 聊天历史时间戳带 Z 后缀 |
+| `test_chat_timestamp.py` | `test_chat_history_null_timestamp` | 空时间戳返回 None |
+
+#### 前端 — 时区转换与显示 (`timezone.test.ts`)
+
+| 测试用例 | 说明 |
+|---------|------|
+| `treats naive timestamp (no Z) as UTC` | 无 Z 后缀的时间戳按 UTC 解析 |
+| `naive timestamp converts correctly to non-UTC timezone` | 无 Z 后缀正确转换到用户时区 |
+| `naive timestamp with microseconds is handled` | 含微秒的无 Z 后缀时间戳正常处理 |
+| `timestamp with positive/negative offset is preserved` | 已有偏移量的时间戳不被二次转换 |
+| `formatDateTime always includes date even for today` | 通用格式化始终包含日期 |
+| `formatDateTime shows YYYY prefix for different year` | 不同年份显示完整年月日 |
+| `formatDateTime treats naive timestamp as UTC` | formatDateTime 同样按 UTC 解析 |
+| `formatDateTime converts UTC to user timezone` | 正确将 UTC 转为用户选定时区 |
+
 ### 前端检查
 
 | 检查 | 命令 | 说明 |
 |------|------|------|
 | TypeScript 类型检查 | `cd frontend && npx tsc --noEmit` | 确认无类型错误 |
+| 前端时区单元测试 | `cd frontend && npx vitest run src/config/timezone.test.ts` | 时区格式化测试 |
 | 构建检查 | `cd frontend && npm run build` | 确认生产构建成功 |
 
 ---
@@ -537,6 +566,9 @@ git branch
 | `backend/services/whisper_client.py` | `backend/tests/test_service_whisper_client.py` |
 | `backend/services/backup_service.py` | `backend/tests/test_service_backup.py` |
 | `backend/services/token_manager_service.py` | `backend/tests/test_service_token_manager.py` |
+| `backend/schemas/task.py` (datetime serialization) | `backend/tests/test_task_schema.py` |
+| `backend/api/chat.py` (timestamp Z suffix) | `backend/tests/test_chat_timestamp.py` |
+| `frontend/src/config/timezone.ts` | `frontend/src/config/timezone.test.ts` |
 | `backend/mcp/ccm_skills_server.py` | `backend/tests/test_mcp_server.py` |
 | `backend/models/monitor_session.py` | `backend/tests/test_monitor_models.py` |
 | `backend/services/mcp_config.py` | `backend/tests/test_mcp_config.py` |
