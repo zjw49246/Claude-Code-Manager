@@ -42,8 +42,7 @@ async def send_chat_message(
     stripped = body.message.strip()
     if stripped.startswith("$") and command is None:
         unknown_cmd = stripped.split(None, 1)[0]
-        available = ", ".join(f"${c}" for c in COMMAND_REGISTRY)
-        raise HTTPException(400, f"未知命令 {unknown_cmd}。可用命令: {available}")
+        raise HTTPException(400, f"未知命令 {unknown_cmd}，输入 $help 查看可用命令")
 
     # Build prompt — append secrets, skill instructions, and image paths
     prompt_parts = [body.message]
