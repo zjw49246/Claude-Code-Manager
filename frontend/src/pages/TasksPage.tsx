@@ -24,7 +24,7 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
   const [page, setPage] = useState(1);
   const [projects, setProjects] = useState<Project[]>([]);
   const [statusFilters, setStatusFilters] = useState<string[]>([]);
-  const [tagFilter, setTagFilter] = useState<string>('');
+  const [tagFilters, setTagFilters] = useState<string[]>([]);
   const [projectFilter, setProjectFilter] = useState<number | undefined>(undefined);
   const [starredFilter, setStarredFilter] = useState(false);
   const [unreadFilter, setUnreadFilter] = useState(false);
@@ -129,7 +129,7 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
     failed: 'bg-red-500',
   };
 
-  const activeFilterCount = statusFilters.length + (starredFilter ? 1 : 0) + (unreadFilter ? 1 : 0) + (showArchived ? 1 : 0) + (tagFilter ? 1 : 0);
+  const activeFilterCount = statusFilters.length + (starredFilter ? 1 : 0) + (unreadFilter ? 1 : 0) + (showArchived ? 1 : 0) + tagFilters.length;
 
   const visibleProjects = projects.filter((p) => p.show_in_selector);
 
@@ -141,8 +141,8 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
   for (const t of tagItems) tagColorMap[t.name] = t.color;
 
   // Projects filtered by tag (for the project dropdown)
-  const tagFilteredProjects = tagFilter
-    ? visibleProjects.filter((p) => p.tags.includes(tagFilter))
+  const tagFilteredProjects = tagFilters.length > 0
+    ? visibleProjects.filter((p) => tagFilters.some((t) => p.tags.includes(t)))
     : visibleProjects;
 
   const splitMode = isWide && chatTask;
@@ -253,15 +253,15 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
                   <div className="px-3 py-1 text-[10px] text-gray-500 uppercase tracking-wider">Tags</div>
                   {allProjectTags.map((tag) => {
                     const c = resolveTagColor(tag, tagColorMap[tag]);
-                    const active = tagFilter === tag;
+                    const active = tagFilters.includes(tag);
                     return (
                       <button
                         key={tag}
                         onClick={() => {
-                          const next = active ? '' : tag;
-                          setTagFilter(next);
-                          if (next && projectFilter !== undefined) {
-                            const filtered = visibleProjects.filter((p) => p.tags.includes(next));
+                          const next = active ? tagFilters.filter((t) => t !== tag) : [...tagFilters, tag];
+                          setTagFilters(next);
+                          if (next.length > 0 && projectFilter !== undefined) {
+                            const filtered = visibleProjects.filter((p) => next.some((t) => p.tags.includes(t)));
                             if (!filtered.some((p) => p.id === projectFilter)) {
                               setProjectFilter(undefined);
                             }
@@ -271,6 +271,9 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
                           active ? `${c.bg} ${c.text}` : 'text-gray-300 hover:bg-gray-800'
                         }`}
                       >
+                        <span className={`w-3 h-3 rounded border flex items-center justify-center text-[8px] ${active ? `${c.dot.replace('bg-', 'bg-')} border-current text-white` : 'border-gray-600'}`}>
+                          {active && '✓'}
+                        </span>
                         <span className={`w-2 h-2 rounded-full ${c.dot} ${active ? '' : 'opacity-60'}`} />
                         {tag}
                       </button>
@@ -284,7 +287,7 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
                 <>
                   <div className="border-t border-gray-700 my-1" />
                   <button
-                    onClick={() => { setStatusFilters([]); setStarredFilter(false); setUnreadFilter(false); setShowArchived(false); setTagFilter(''); }}
+                    onClick={() => { setStatusFilters([]); setStarredFilter(false); setUnreadFilter(false); setShowArchived(false); setTagFilters([]); }}
                     className="w-full px-3 py-1.5 text-xs text-red-400 hover:bg-gray-800 text-left"
                   >
                     Clear all filters

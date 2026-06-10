@@ -3,7 +3,6 @@ import { api } from '../../api/client';
 import type { Project, TagItem, Task, UploadResult } from '../../api/client';
 import { Plus, Paperclip, X, Star, Wrench, Settings } from 'lucide-react';
 import { ProjectSelect } from '../ProjectSelect';
-import { resolveTagColor } from '../TagColors';
 import { VoiceButton } from '../Voice/VoiceButton';
 import { SecretPicker } from '../Secrets/SecretPicker';
 import { useFileDrop } from '../../hooks/useFileDrop';
@@ -43,7 +42,6 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   const [error, setError] = useState('');
   const [projects, setProjects] = useState<Project[]>([]);
   const [tagItems, setTagItems] = useState<TagItem[]>([]);
-  const [tagFilter, setTagFilter] = useState<string>('');
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [filePreviews, setFilePreviews] = useState<string[]>([]);
   const [selectedSecretIds, setSelectedSecretIds] = useState<number[]>([]);
@@ -319,53 +317,8 @@ export function TaskForm({ onCreated }: TaskFormProps) {
         ))}
       </div>
       <div className="space-y-2">
-        {/* Tag filter pills */}
-        {(() => {
-          const allTags = Array.from(new Set(projects.filter((p) => p.show_in_selector).flatMap((p) => p.tags))).sort();
-          if (allTags.length === 0) return null;
-          const tcMap: Record<string, string> = {};
-          for (const t of tagItems) tcMap[t.name] = t.color;
-          return (
-            <div className="flex gap-1.5 flex-wrap">
-              <button
-                type="button"
-                onClick={() => setTagFilter('')}
-                className={`px-2 py-0.5 rounded text-xs transition-colors ${
-                  tagFilter === '' ? 'bg-indigo-600 text-white' : 'bg-gray-700 text-gray-400 hover:bg-gray-600'
-                }`}
-              >
-                All
-              </button>
-              {allTags.map((tag) => {
-                const c = resolveTagColor(tag, tcMap[tag]);
-                const active = tagFilter === tag;
-                return (
-                  <button
-                    key={tag}
-                    type="button"
-                    onClick={() => {
-                      setTagFilter(tagFilter === tag ? '' : tag);
-                      if (tagFilter !== tag && projectId) {
-                        const proj = projects.find((p) => p.id === Number(projectId));
-                        if (proj && !proj.tags.includes(tag)) {
-                          setProjectId('');
-                          setIsNewProject(false);
-                        }
-                      }
-                    }}
-                    className={`px-2 py-0.5 rounded text-xs transition-colors border ${c.bg} ${c.text} ${c.border} ${
-                      active ? 'opacity-100' : 'opacity-50 hover:opacity-80'
-                    }`}
-                  >
-                    {tag}
-                  </button>
-                );
-              })}
-            </div>
-          );
-        })()}
         <ProjectSelect
-          projects={projects.filter((p) => p.show_in_selector && (!tagFilter || p.tags.includes(tagFilter)))}
+          projects={projects.filter((p) => p.show_in_selector)}
           value={isNewProject ? NEW_PROJECT_VALUE : projectId || undefined}
           onChange={handleProjectChange}
           placeholder="Select project..."
