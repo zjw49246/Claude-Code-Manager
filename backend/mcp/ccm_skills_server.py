@@ -96,8 +96,10 @@ async def ccm_disable_skill(skill_name: str) -> str:
         skill_name: 要禁用的工具名称（如 monitor）。help 不可禁用。
     """
     try:
-        if skill_name == "help":
-            return json.dumps({"success": False, "error": "help 是内置命令，不可禁用"}, ensure_ascii=False)
+        from backend.services.command_registry import COMMAND_REGISTRY
+        cmd = COMMAND_REGISTRY.get(skill_name)
+        if cmd and cmd.always_available:
+            return json.dumps({"success": False, "error": f"{skill_name} 是内置命令，不可禁用"}, ensure_ascii=False)
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(_api_url(""), headers=_headers())
             resp.raise_for_status()
