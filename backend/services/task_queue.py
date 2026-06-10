@@ -36,7 +36,8 @@ class TaskQueue:
         elif not include_archived:
             stmt = stmt.where(Task.archived == False)
         if status:
-            stmt = stmt.where(Task.status == status)
+            parts = [s.strip() for s in status.split(",") if s.strip()]
+            stmt = stmt.where(Task.status.in_(parts)) if len(parts) > 1 else stmt.where(Task.status == parts[0])
         if project_id is not None:
             stmt = stmt.where(Task.project_id == project_id)
         if starred is not None:
@@ -59,7 +60,8 @@ class TaskQueue:
         elif not include_archived:
             stmt = stmt.where(Task.archived == False)
         if status:
-            stmt = stmt.where(Task.status == status)
+            parts = [s.strip() for s in status.split(",") if s.strip()]
+            stmt = stmt.where(Task.status.in_(parts)) if len(parts) > 1 else stmt.where(Task.status == parts[0])
         if project_id is not None:
             stmt = stmt.where(Task.project_id == project_id)
         if starred is not None:
