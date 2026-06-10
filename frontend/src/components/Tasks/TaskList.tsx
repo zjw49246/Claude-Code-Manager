@@ -185,13 +185,15 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat }: TaskListPro
                   </div>
                 )}
               </div>
-              <button
-                onClick={() => handleSubAgentsToggle(t.id)}
-                className={`text-xs bg-teal-600/30 text-teal-300 px-1.5 rounded cursor-pointer hover:bg-teal-600/40 flex items-center gap-0.5${t.active_sub_agents > 0 ? ' animate-pulse' : ''}`}
-              >
-                <Users size={12} />
-                {t.active_sub_agents}
-              </button>
+              <div className="relative" data-subagents-dropdown>
+                <button
+                  onClick={() => handleSubAgentsToggle(t.id)}
+                  className={`text-xs bg-teal-600/30 text-teal-300 px-1.5 rounded cursor-pointer hover:bg-teal-600/40 flex items-center gap-0.5${t.active_sub_agents > 0 ? ' animate-pulse' : ''}`}
+                >
+                  <Users size={12} />
+                  {t.active_sub_agents}
+                </button>
+              </div>
             </div>
             {/* Action buttons */}
             <div className="flex gap-1 shrink-0 items-center">
@@ -281,7 +283,7 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat }: TaskListPro
           {/* Tools dropdown is now inline above */}
           {/* Expandable sub-agents detail */}
           {subAgentsExpandedId === t.id && (
-            <div className="mt-1 pl-[1.125rem] flex flex-wrap gap-1">
+            <div className="mt-1 pl-[1.125rem] flex flex-wrap gap-1" data-subagents-dropdown>
               {subAgentSummary && Object.entries(subAgentSummary.by_type).some(([, c]) => c.running > 0) ? (
                 Object.entries(subAgentSummary.by_type).filter(([, c]) => c.running > 0).map(([type, counts]) => (
                   <span key={type} className="text-xs bg-teal-600/20 text-teal-300 px-2 py-0.5 rounded flex items-center gap-1">
