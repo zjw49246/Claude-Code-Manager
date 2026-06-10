@@ -48,6 +48,17 @@ class InstanceManager:
     def pty_mode_enabled(self) -> bool:
         return self._pty_enabled and self._pty_backend is not None
 
+    async def release_pty_session(self, session_id: str) -> None:
+        """Return a PTY session to nothing — stop it and remove from the pool.
+        Used when a workload (e.g. a loop task) is finished with its session.
+        No-op when PTY mode is not in use."""
+        if self._pty_backend is None or not session_id:
+            return
+        try:
+            await self._pty_backend._pool.remove(session_id)
+        except Exception:
+            logger.exception("Failed to release PTY session %s", session_id)
+
     async def drain_idle_pty_sessions(self) -> int:
         """Stop idle PTY sessions (called after PTY mode is switched off).
         In-flight turns are untouched and finish on the PTY path."""

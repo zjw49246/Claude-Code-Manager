@@ -1538,3 +1538,25 @@ async def test_launch_respects_disabled_pty_mode():
         with patch.object(im, "_consume_output", new=AsyncMock()):
             await im.launch(instance_id=1, prompt="x", provider="claude", cwd="/w")
     assert im.processes[1] is fake_proc
+
+
+@pytest.mark.asyncio
+async def test_release_pty_session():
+    im = InstanceManager(MagicMock(), MagicMock())
+    # no backend -> no-op
+    await im.release_pty_session("sid-x")
+
+    class FakePool:
+        removed = []
+
+        async def remove(self, sid):
+            FakePool.removed.append(sid)
+
+    class FakeBackend:
+        _pool = FakePool()
+
+    im._pty_backend = FakeBackend()
+    await im.release_pty_session("sid-x")
+    assert FakePool.removed == ["sid-x"]
+    await im.release_pty_session("")  # empty -> no-op
+    assert FakePool.removed == ["sid-x"]
