@@ -24,9 +24,12 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _RATE_LIMIT_RE = re.compile(
-    r"hit your limit"
+    # "hit your limit" / "hit your session limit" / "hit your weekly limit"...
+    r"hit your (?:\w+ )?limit"
     r"|usage limit reached"
-    r"|resets \d{1,2}[ap]m \(America/"
+    r"|session limit reached"
+    # "resets 5pm (America/...)" / "resets 5:50pm (UTC)" — 任意时区、可带分钟
+    r"|resets \d{1,2}(?::\d{2})?\s*[ap]m"
     r"|organization has been disabled"
     r"|organization has disabled"
     r"|account has been disabled"
