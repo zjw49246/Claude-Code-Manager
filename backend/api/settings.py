@@ -62,6 +62,14 @@ async def update_runtime_settings(
     from backend.main import instance_manager
 
     effective = instance_manager.set_pty_mode(body.use_pty_mode)
+    if not effective:
+        # Reclaim idle PTY processes; mid-turn sessions finish first.
+        drained = await instance_manager.drain_idle_pty_sessions()
+        if drained:
+            import logging
+            logging.getLogger(__name__).info(
+                "PTY mode off: drained %d idle session(s)", drained
+            )
     row = await _get_or_create(db)
     row.use_pty_mode = effective
     await db.commit()

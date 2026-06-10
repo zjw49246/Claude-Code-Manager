@@ -48,6 +48,13 @@ class InstanceManager:
     def pty_mode_enabled(self) -> bool:
         return self._pty_enabled and self._pty_backend is not None
 
+    async def drain_idle_pty_sessions(self) -> int:
+        """Stop idle PTY sessions (called after PTY mode is switched off).
+        In-flight turns are untouched and finish on the PTY path."""
+        if self._pty_backend is None:
+            return 0
+        return await self._pty_backend.drain_idle_sessions()
+
     def set_pty_mode(self, enabled: bool) -> bool:
         """Enable/disable PTY mode at runtime. Returns the effective state.
 
