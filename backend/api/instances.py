@@ -30,6 +30,21 @@ async def create_instance(body: InstanceCreate, db: AsyncSession = Depends(get_d
     return instance
 
 
+@router.delete("/cleanup")
+async def cleanup_instances(db: AsyncSession = Depends(get_db)):
+    from backend.main import instance_manager
+    result = await db.execute(
+        select(Instance).where(Instance.status.in_(["error", "stopped"]))
+    )
+    targets = list(result.scalars().all())
+    for inst in targets:
+        if instance_manager.is_running(inst.id):
+            await instance_manager.stop(inst.id)
+        await db.delete(inst)
+    await db.commit()
+    return {"ok": True, "deleted": len(targets)}
+
+
 @router.get("/{instance_id}", response_model=InstanceResponse)
 async def get_instance(instance_id: int, db: AsyncSession = Depends(get_db)):
     instance = await db.get(Instance, instance_id)
@@ -50,20 +65,6 @@ async def delete_instance(instance_id: int, db: AsyncSession = Depends(get_db)):
     await db.commit()
     return {"ok": True}
 
-
-@router.delete("/cleanup")
-async def cleanup_instances(db: AsyncSession = Depends(get_db)):
-    from backend.main import instance_manager
-    result = await db.execute(
-        select(Instance).where(Instance.status.in_(["error", "stopped"]))
-    )
-    targets = list(result.scalars().all())
-    for inst in targets:
-        if instance_manager.is_running(inst.id):
-            await instance_manager.stop(inst.id)
-        await db.delete(inst)
-    await db.commit()
-    return {"ok": True, "deleted": len(targets)}
 
 
 @router.post("/{instance_id}/stop")
