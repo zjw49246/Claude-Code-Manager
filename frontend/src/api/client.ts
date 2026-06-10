@@ -303,6 +303,37 @@ export interface SubAgentSummary {
   by_type: Record<string, SubAgentTypeSummary>;
 }
 
+export interface MonitoredRepo {
+  id: number;
+  repo_full_name: string;
+  project_id: number | null;
+  enabled: boolean;
+  auto_merge: boolean;
+  webhook_secret: string;
+  review_model: string | null;
+  default_branch: string;
+  allowed_authors: string[];
+  status: string;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PRReview {
+  id: number;
+  repo_id: number;
+  pr_number: number;
+  pr_title: string;
+  pr_author: string;
+  pr_url: string;
+  task_id: number | null;
+  status: string;
+  review_summary: string | null;
+  action_taken: string | null;
+  created_at: string;
+  completed_at: string | null;
+}
+
 export const api = {
   // Projects
   listProjects: () => request<Project[]>('/api/projects'),
@@ -548,6 +579,24 @@ export const api = {
   // Sub-Agents
   getSubAgentSummary: (taskId: number) =>
     request<SubAgentSummary>(`/api/tasks/${taskId}/sub-agents/summary`),
+
+  // PR Monitor
+  getMonitoredRepos: () =>
+    request<MonitoredRepo[]>('/api/pr-monitor/repos'),
+  createMonitoredRepo: (data: { repo_full_name: string; project_id?: number; auto_merge?: boolean; review_model?: string; default_branch?: string; allowed_authors?: string[] }) =>
+    request<MonitoredRepo>('/api/pr-monitor/repos', { method: 'POST', body: JSON.stringify(data) }),
+  updateMonitoredRepo: (id: number, data: { project_id?: number; auto_merge?: boolean; review_model?: string; default_branch?: string; allowed_authors?: string[]; enabled?: boolean }) =>
+    request<MonitoredRepo>(`/api/pr-monitor/repos/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteMonitoredRepo: (id: number) =>
+    request<{ ok: boolean }>(`/api/pr-monitor/repos/${id}`, { method: 'DELETE' }),
+  toggleMonitoredRepo: (id: number) =>
+    request<MonitoredRepo>(`/api/pr-monitor/repos/${id}/toggle`, { method: 'POST' }),
+  regenerateSecret: (id: number) =>
+    request<MonitoredRepo>(`/api/pr-monitor/repos/${id}/regenerate-secret`, { method: 'POST' }),
+  getRepoReviews: (repoId: number, page = 1, size = 20) =>
+    request<PRReview[]>(`/api/pr-monitor/repos/${repoId}/reviews?page=${page}&size=${size}`),
+  getReviewDetail: (reviewId: number) =>
+    request<PRReview>(`/api/pr-monitor/reviews/${reviewId}`),
 
   // System
   health: () => request<{ status: string }>('/api/system/health'),

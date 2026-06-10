@@ -534,6 +534,50 @@ git branch
 
 ---
 
+## PR Monitor 测试
+
+### 手动测试: CRUD API
+
+```bash
+# 创建监控仓库
+curl -X POST http://localhost:8000/api/pr-monitor/repos \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"repo_full_name": "test/repo", "auto_merge": true, "allowed_authors": ["user1"]}'
+
+# 列出仓库
+curl http://localhost:8000/api/pr-monitor/repos -H "Authorization: Bearer <token>"
+
+# 切换 enabled
+curl -X POST http://localhost:8000/api/pr-monitor/repos/1/toggle -H "Authorization: Bearer <token>"
+
+# 删除
+curl -X DELETE http://localhost:8000/api/pr-monitor/repos/1 -H "Authorization: Bearer <token>"
+```
+
+### 手动测试: Webhook（需要构造 HMAC 签名）
+
+```bash
+# 生成签名并发送模拟 webhook
+SECRET="<webhook_secret>"
+PAYLOAD='{"action":"opened","pull_request":{"number":1,"title":"Test PR","draft":false,"user":{"login":"user1"},"base":{"ref":"main"},"html_url":"https://github.com/test/repo/pull/1"},"repository":{"full_name":"test/repo"}}'
+SIG=$(echo -n "$PAYLOAD" | openssl dgst -sha256 -hmac "$SECRET" | awk '{print "sha256="$2}')
+
+curl -X POST http://localhost:8000/api/github/webhook \
+  -H "Content-Type: application/json" \
+  -H "X-GitHub-Event: pull_request" \
+  -H "X-Hub-Signature-256: $SIG" \
+  -d "$PAYLOAD"
+```
+
+### 前端测试
+
+1. 导航到 PR Monitor 页面
+2. 添加仓库 → 验证表格显示
+3. 点击仓库 → 验证详情页、Webhook 配置、复制按钮
+4. 切换 enabled → 验证开关状态
+5. 删除仓库 → 验证列表更新
+
 ## 开发规范
 
 ### Claude Code 开发时必须遵守：
@@ -576,4 +620,8 @@ git branch
 | `backend/services/dispatcher.py` (monitor) | `backend/tests/test_monitor_dispatcher.py` |
 | `backend/mcp/ccm_monitor_agent_server.py` | 集成测试（见「子 Agent 系统集成测试」） |
 | `backend/api/sub_agents.py` | 集成测试（见「子 Agent 系统集成测试」） |
+| `backend/models/pr_monitor.py` | Migration 验证（表创建） |
+| `backend/api/pr_monitor.py` | curl 测试 CRUD + webhook |
+| `backend/services/pr_review_service.py` | 集成测试（webhook → task 创建） |
+| `frontend/src/pages/PRMonitorPage.tsx` | TypeScript 类型检查 + 手动 UI 测试 |
 | `frontend/src/**` | TypeScript 类型检查 (`tsc --noEmit`) |

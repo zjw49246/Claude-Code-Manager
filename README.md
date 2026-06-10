@@ -19,6 +19,7 @@ Web 端调度和管理多个 Claude Code 实例并行工作。灵感来自胡渊
 - **语音输入** — 通过 OpenAI Whisper API 语音转文字创建任务
 - **PWA** — 手机浏览器 Add to Home Screen，原生 App 体验
 - **Android App** — 通过 Capacitor 打包原生 APK，App 内可配置远程服务器地址
+- **PR Monitor** — GitHub PR 自动审核，Webhook 接收 PR 事件后创建审核 Task，Claude 审核代码后自动 approve/merge 或 request-changes。支持白名单作者、auto-merge 开关、自定义审核模型
 - **Monitor Sub-Agent** — Agent 可自主创建持久监控子 Agent，子 Agent 拥有独立 MCP 工具（report_status / mark_complete / get_context），自主决定检查频率并通过 API 向系统汇报
 - **主题切换** — 支持浅色/深色主题，偏好持久化
 - **Token 认证** — Bearer Token 保护所有 API，安全远程访问
