@@ -36,6 +36,14 @@ from backend.services.instance_manager import InstanceManager
 from backend.services.ralph_loop import RalphLoop
 from backend.services.dispatcher import GlobalDispatcher
 
+# Logging: surface INFO from our services AND claude_pty in the server log.
+# Without this, PTY delivery/turn diagnostics are invisible (learned the
+# hard way while debugging silent message loss).
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+
 # Global singletons
 logger = logging.getLogger(__name__)
 broadcaster = WebSocketBroadcaster()
@@ -90,6 +98,12 @@ async def _reset_stale_discussion_agents():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    # Apply persisted runtime-settings override (frontend PTY toggle)
+    from backend.models.global_settings import GlobalSettings
+    async with async_session() as db:
+        row = await db.get(GlobalSettings, 1)
+        if row is not None and row.use_pty_mode is not None:
+            instance_manager.set_pty_mode(row.use_pty_mode)
     await _reset_stale_discussion_agents()
     await _sync_tags()
     if settings.auto_start_dispatcher:
@@ -121,6 +135,14 @@ async def lifespan(app: FastAPI):
     upload_cleanup_task = await start_upload_cleanup_loop()
 
     yield
+
+    # Stop all PTY sessions on shutdown — orphaned CC processes keep holding
+    # their session files and break cold resume after restart.
+    if instance_manager._pty_backend is not None:
+        try:
+            await instance_manager._pty_backend.shutdown()
+        except Exception:
+            logger.exception("PTY backend shutdown failed")
 
     upload_cleanup_task.cancel()
     # Stop all running Claude processes before shutdown

@@ -19,3 +19,12 @@ class GlobalSettingsResponse(BaseModel):
     git_https_token: str | None
 
     model_config = {"from_attributes": True}
+
+
+class RuntimeSettingsResponse(BaseModel):
+    use_pty_mode: bool
+    pty_available: bool
+
+
+class RuntimeSettingsUpdate(BaseModel):
+    use_pty_mode: bool
