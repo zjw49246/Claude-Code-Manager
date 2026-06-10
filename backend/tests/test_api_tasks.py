@@ -1138,3 +1138,66 @@ async def test_create_task_enable_workflows_persisted_in_db(client, session_fact
     async with session_factory() as db:
         task = await db.get(Task, task_id)
     assert task.enable_workflows is True
+
+
+@pytest.mark.asyncio
+async def test_stop_session_clears_pending_queue(client):
+    """POST /api/tasks/{id}/stop-session drops queued chat messages before stopping."""
+    create_resp = await client.post("/api/tasks", json={
+        "title": "Stop Queue", "description": "d", "target_repo": "/tmp",
+    })
+    task_id = create_resp.json()["id"]
+
+    import backend.main
+    with patch.object(backend.main.dispatcher, "clear_task_queue", return_value=2) as mock_clear, \
+         patch("backend.api.tasks._stop_task_process", new_callable=AsyncMock, return_value=True):
+        resp = await client.post(f"/api/tasks/{task_id}/stop-session")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["stopped"] is True
+    assert body["cleared_messages"] == 2
+    mock_clear.assert_called_once_with(task_id)
+
+
+@pytest.mark.asyncio
+async def test_stop_session_no_process_reports_not_stopped(client, session_factory):
+    """When no process is found but task is executing, response says stopped=False."""
+    from backend.models.task import Task
+    from sqlalchemy import update
+
+    create_resp = await client.post("/api/tasks", json={
+        "title": "No Proc", "description": "d", "target_repo": "/tmp",
+    })
+    task_id = create_resp.json()["id"]
+    async with session_factory() as db:
+        await db.execute(update(Task).where(Task.id == task_id).values(status="executing"))
+        await db.commit()
+
+    import backend.main
+    with patch.object(backend.main.dispatcher, "clear_task_queue", return_value=0), \
+         patch("backend.api.tasks._stop_task_process", new_callable=AsyncMock, return_value=False):
+        resp = await client.post(f"/api/tasks/{task_id}/stop-session")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["stopped"] is False
+    assert "note" in body
+
+
+@pytest.mark.asyncio
+async def test_stop_session_cleared_only_returns_ok(client):
+    """No process and task not executing, but messages were cleared -> 200 not 400."""
+    create_resp = await client.post("/api/tasks", json={
+        "title": "Cleared Only", "description": "d", "target_repo": "/tmp",
+    })
+    task_id = create_resp.json()["id"]
+
+    import backend.main
+    with patch.object(backend.main.dispatcher, "clear_task_queue", return_value=1), \
+         patch("backend.api.tasks._stop_task_process", new_callable=AsyncMock, return_value=False):
+        resp = await client.post(f"/api/tasks/{task_id}/stop-session")
+
+    assert resp.status_code == 200
+    assert resp.json()["stopped"] is False

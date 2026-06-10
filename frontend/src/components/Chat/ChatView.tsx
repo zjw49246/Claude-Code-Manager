@@ -702,10 +702,18 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
             onClick={async () => {
               setInterrupting(true);
               try {
-                await api.stopTaskSession(task.id);
+                const resp = await api.stopTaskSession(task.id);
                 setSending(false);
                 setStillRunning(false);
-                setError(null);
+                if (resp.stopped === false) {
+                  const cleared = resp.cleared_messages ?? 0;
+                  setError(
+                    `Interrupt: no running process found${cleared > 0 ? `, cleared ${cleared} queued message(s)` : ''}. ` +
+                    'If output keeps arriving, the session may still be finishing.'
+                  );
+                } else {
+                  setError(null);
+                }
               } catch (e) {
                 setError(`Interrupt failed: ${e instanceof Error ? e.message : String(e)}`);
               }
