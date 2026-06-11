@@ -6,6 +6,7 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     auth_token: str = ""
     max_concurrent_instances: int = 5
+    min_idle_instances: int = 10  # auto top-up idle workers to this count (0 = off)
     claude_binary: str = "claude"
     codex_binary: str = "codex"
     default_provider: str = "claude"

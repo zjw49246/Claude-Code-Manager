@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import re
 import shutil
 import time
 from dataclasses import dataclass, field
@@ -338,10 +339,41 @@ class GlobalDispatcher:
                 await db.commit()
             logger.info(f"Created {needed} worker instances")
 
+    async def _ensure_min_idle_instances(self):
+        """Auto top-up: keep at least min_idle_instances idle workers available.
+
+        Named worker-<N> continuing from the highest existing numeric suffix,
+        so deletions never produce duplicate names.
+        """
+        if settings.min_idle_instances <= 0:
+            return
+        async with self.db_factory() as db:
+            result = await db.execute(select(Instance))
+            existing = list(result.scalars().all())
+            idle_count = sum(1 for i in existing if i.status == "idle")
+            needed = settings.min_idle_instances - idle_count
+            if needed <= 0:
+                return
+            base = 0
+            for inst in existing:
+                m = re.match(r"worker-(\d+)$", inst.name or "")
+                if m:
+                    base = max(base, int(m.group(1)))
+            for i in range(needed):
+                db.add(Instance(name=f"worker-{base + i + 1}"))
+            await db.commit()
+        logger.info(
+            f"Auto-added {needed} worker instances "
+            f"(idle was {idle_count}, min_idle_instances={settings.min_idle_instances})"
+        )
+
     async def _dispatch_loop(self):
         """Poll for idle instances + pending tasks and dispatch."""
         while self._running:
             try:
+                # Top up idle workers before looking for capacity
+                await self._ensure_min_idle_instances()
+
                 # Find idle instances
                 async with self.db_factory() as db:
                     result = await db.execute(

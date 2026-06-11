@@ -8,7 +8,7 @@ import { ChatView } from '../components/Chat/ChatView';
 import { LoopChatView } from '../components/Chat/LoopChatView';
 import { ProjectSelect } from '../components/ProjectSelect';
 import { resolveTagColor } from '../components/TagColors';
-import { ChevronLeft, ChevronRight, ChevronDown, Filter, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
+import { ChevronLeft, ChevronRight, ChevronDown, Filter, PanelLeftClose, PanelLeftOpen, Search, X } from 'lucide-react';
 
 const PAGE_SIZE = 20;
 
@@ -95,6 +95,36 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
       prevFilter.current = { statusFilterParam, showArchived, projectFilter, starredFilter, unreadFilter };
     }
   }, [statusFilterParam, showArchived, projectFilter, starredFilter, unreadFilter]);
+
+  // Regex search over task titles (falls back to plain substring on invalid regex)
+  const [showSearch, setShowSearch] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<Task[] | null>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    const q = searchQuery.trim();
+    if (!q) {
+      setSearchResults(null);
+      return;
+    }
+    const handle = setTimeout(async () => {
+      try {
+        // Fetch across all pages so the search isn't limited to the current page
+        const all = await api.listTasks(undefined, false, undefined, undefined, 1000, 0, showArchived);
+        let re: RegExp | null = null;
+        try { re = new RegExp(q, 'i'); } catch { re = null; }
+        const matches = all.filter((t) => {
+          const title = t.title || t.description || '';
+          return re ? re.test(title) : title.toLowerCase().includes(q.toLowerCase());
+        });
+        setSearchResults(matches);
+      } catch {
+        setSearchResults([]);
+      }
+    }, 300);
+    return () => clearTimeout(handle);
+  }, [searchQuery, showArchived]);
 
   const statusOptions = ['pending', 'in_progress', 'executing', 'plan_review', 'completed', 'failed'];
   const [showFilterDropdown, setShowFilterDropdown] = useState(false);
@@ -305,17 +335,58 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
           placeholder="All Projects"
           tagColorMap={tagColorMap}
         />
+
+        <button
+          onClick={() => {
+            setShowSearch((s) => {
+              if (s) setSearchQuery('');
+              return !s;
+            });
+            setTimeout(() => searchInputRef.current?.focus(), 0);
+          }}
+          className={`flex items-center gap-1.5 px-3 py-2 rounded-lg border text-sm transition-colors ${
+            showSearch
+              ? 'bg-indigo-600/20 border-indigo-500 text-indigo-300'
+              : 'bg-gray-900 border-gray-700 text-gray-300 hover:border-gray-600'
+          }`}
+          title="Search task titles (regex)"
+        >
+          <Search size={15} />
+        </button>
+        {showSearch && (
+          <div className="relative flex-1 max-w-xs">
+            <input
+              ref={searchInputRef}
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Escape') { setSearchQuery(''); setShowSearch(false); } }}
+              placeholder="Regex search titles..."
+              className="w-full px-3 py-2 pr-8 rounded-lg bg-gray-900 border border-gray-700 text-sm text-gray-200 placeholder-gray-600 focus:border-indigo-500 focus:outline-none"
+            />
+            {searchQuery && (
+              <button
+                onClick={() => setSearchQuery('')}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-300"
+              >
+                <X size={14} />
+              </button>
+            )}
+          </div>
+        )}
+        {searchResults !== null && (
+          <span className="text-xs text-gray-500 whitespace-nowrap">{searchResults.length} match{searchResults.length === 1 ? '' : 'es'}</span>
+        )}
       </div>
 
       <TaskList
-        tasks={filteredTasks}
+        tasks={searchResults ?? filteredTasks}
         projects={projects}
         onRefresh={refresh}
         onOpenChat={handleOpenChat}
         activeTaskId={chatTask?.id ?? null}
       />
 
-      {totalPages > 1 && (
+      {totalPages > 1 && searchResults === null && (
         <div className="flex items-center justify-center gap-3 py-2">
           <button
             onClick={() => setPage((p) => Math.max(1, p - 1))}
@@ -400,7 +471,7 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
               ))}
             </div>
             <div className="flex-1 overflow-y-auto min-h-0">
-              {filteredTasks
+              {(searchResults ?? filteredTasks)
                 .filter((t) => !sidebarFilter || t.status === sidebarFilter)
                 .map((t) => (
                 <button

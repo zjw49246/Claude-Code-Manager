@@ -251,7 +251,8 @@ describe('ChatView', () => {
       render(<ChatView task={task} projects={projects} onBack={onBack} />);
 
       await waitFor(() => {
-        expect(api.getTaskChatHistory).toHaveBeenCalledWith(42);
+        // compact=true, limit=HISTORY_PAGE_SIZE (paginated initial load)
+        expect(api.getTaskChatHistory).toHaveBeenCalledWith(42, true, 200);
       });
     });
 
@@ -412,14 +413,14 @@ describe('ChatView', () => {
       const scrollContainer = container.querySelector('.overflow-y-auto')!;
       const userMsgNodes = scrollContainer.querySelectorAll('[data-user-msg]');
 
+      // Navigation is getBoundingClientRect-based: container top = 100;
+      // nodes below except nodes[2], which sits above the viewport (top = 0)
+      (scrollContainer as HTMLElement).getBoundingClientRect = () => ({ top: 100 } as DOMRect);
       const scrollIntoViewMock = vi.fn();
-      userMsgNodes.forEach((node) => {
+      userMsgNodes.forEach((node, i) => {
         (node as HTMLElement).scrollIntoView = scrollIntoViewMock;
-        Object.defineProperty(node, 'offsetTop', { value: 0, configurable: true });
+        (node as HTMLElement).getBoundingClientRect = () => ({ top: i === 2 ? 0 : 200 } as DOMRect);
       });
-
-      Object.defineProperty(userMsgNodes[2], 'offsetTop', { value: 500, configurable: true });
-      Object.defineProperty(scrollContainer, 'scrollTop', { value: 600, configurable: true, writable: true });
 
       await userEvent.click(screen.getByTitle('Previous user message'));
 
@@ -439,13 +440,14 @@ describe('ChatView', () => {
       const scrollContainer = container.querySelector('.overflow-y-auto')!;
       const userMsgNodes = scrollContainer.querySelectorAll('[data-user-msg]');
 
+      // Container top = 100; all nodes below the viewport top (top = 200)
+      // → "down" navigates to the first node past container top + threshold
+      (scrollContainer as HTMLElement).getBoundingClientRect = () => ({ top: 100 } as DOMRect);
       const scrollIntoViewMock = vi.fn();
-      userMsgNodes.forEach((node, i) => {
+      userMsgNodes.forEach((node) => {
         (node as HTMLElement).scrollIntoView = scrollIntoViewMock;
-        Object.defineProperty(node, 'offsetTop', { value: i * 300, configurable: true });
+        (node as HTMLElement).getBoundingClientRect = () => ({ top: 200 } as DOMRect);
       });
-
-      Object.defineProperty(scrollContainer, 'scrollTop', { value: 10, configurable: true, writable: true });
 
       await userEvent.click(screen.getByTitle('Next user message'));
 
@@ -502,6 +504,59 @@ describe('ChatView', () => {
       await userEvent.click(screen.getByTitle('Next user message'));
 
       expect(scrollIntoViewMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Draft buffering (localStorage)', () => {
+    const draftKey = (id: number) => `ccm-chat-draft-${id}`;
+
+    beforeEach(() => {
+      localStorage.clear();
+    });
+
+    it('persists typed input to localStorage', async () => {
+      const task = makeTask({ id: 7 });
+      render(<ChatView task={task} projects={projects} onBack={onBack} onTaskUpdated={onTaskUpdated} />);
+
+      const textarea = screen.getByPlaceholderText(/follow-up message/i);
+      fireEvent.change(textarea, { target: { value: 'unsent draft' } });
+
+      await waitFor(() => {
+        expect(localStorage.getItem(draftKey(7))).toBe('unsent draft');
+      });
+    });
+
+    it('restores the draft when re-entering the chat', async () => {
+      localStorage.setItem(draftKey(7), 'restored draft');
+      const task = makeTask({ id: 7 });
+      render(<ChatView task={task} projects={projects} onBack={onBack} onTaskUpdated={onTaskUpdated} />);
+
+      const textarea = screen.getByPlaceholderText(/follow-up message/i) as HTMLTextAreaElement;
+      expect(textarea.value).toBe('restored draft');
+    });
+
+    it('does not leak drafts between tasks', async () => {
+      localStorage.setItem(draftKey(7), 'task seven draft');
+      const task = makeTask({ id: 8 });
+      render(<ChatView task={task} projects={projects} onBack={onBack} onTaskUpdated={onTaskUpdated} />);
+
+      const textarea = screen.getByPlaceholderText(/follow-up message/i) as HTMLTextAreaElement;
+      expect(textarea.value).toBe('');
+    });
+
+    it('clears the draft after sending', async () => {
+      const task = makeTask({ id: 7 });
+      render(<ChatView task={task} projects={projects} onBack={onBack} onTaskUpdated={onTaskUpdated} />);
+
+      const textarea = screen.getByPlaceholderText(/follow-up message/i);
+      fireEvent.change(textarea, { target: { value: 'about to send' } });
+      await waitFor(() => expect(localStorage.getItem(draftKey(7))).toBe('about to send'));
+
+      fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter', ctrlKey: true });
+
+      await waitFor(() => {
+        expect(localStorage.getItem(draftKey(7))).toBeNull();
+      });
     });
   });
 });
