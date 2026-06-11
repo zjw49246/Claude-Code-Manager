@@ -283,3 +283,44 @@ async def test_gh_pr_view_spawn_failure_wrapped():
         with pytest.raises(GhError) as exc_info:
             await pr_review_service._gh_pr_view(7, "owner/repo")
     assert exc_info.value.is_auth is False
+
+
+@pytest.mark.asyncio
+async def test_review_task_assigned_to_pr_monitor_project(client, session_factory):
+    """审核任务自动归入 PR-Monitor 项目：无则创建，有则复用。"""
+    from sqlalchemy import select
+    from backend.models.project import Project
+    from backend.models.task import Task
+    from backend.models.pr_monitor import MonitoredRepo
+    from backend.services.pr_review_service import (
+        create_pr_review_task, PR_MONITOR_PROJECT_NAME,
+    )
+
+    pr_data = {"number": 7, "title": "t", "author": "alice",
+               "url": "https://github.com/o/r/pull/7"}
+
+    async with session_factory() as db:
+        repo = MonitoredRepo(repo_full_name="o/r", webhook_secret="s")
+        db.add(repo)
+        await db.flush()
+        review1 = await create_pr_review_task(db, repo, pr_data)
+
+    async with session_factory() as db:
+        proj = (await db.execute(
+            select(Project).where(Project.name == PR_MONITOR_PROJECT_NAME)
+        )).scalar_one()
+        t1 = await db.get(Task, review1.task_id)
+        assert t1.project_id == proj.id
+
+        # 第二次创建复用同一项目（不重复建）
+        repo2 = (await db.execute(select(MonitoredRepo))).scalars().first()
+        pr_data2 = dict(pr_data, number=8, url="https://github.com/o/r/pull/8")
+        review2 = await create_pr_review_task(db, repo2, pr_data2)
+
+    async with session_factory() as db:
+        count = (await db.execute(
+            select(Project).where(Project.name == PR_MONITOR_PROJECT_NAME)
+        )).scalars().all()
+        assert len(count) == 1
+        t2 = await db.get(Task, review2.task_id)
+        assert t2.project_id == proj.id
