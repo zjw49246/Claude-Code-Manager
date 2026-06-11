@@ -1683,8 +1683,10 @@ class GlobalDispatcher:
         try:
             async with self.db_factory() as db:
                 ms = await db.get(MonitorSession, monitor_session_id)
+                if not ms:
+                    return
                 task = await db.get(Task, ms.task_id)
-                if not ms or not task:
+                if not task:
                     return
                 task_id = ms.task_id
                 ms_description = ms.description
