@@ -89,6 +89,13 @@ claude-manager/
 └── pyproject.toml
 ```
 
+## 依赖链（重要）
+
+- 本仓库依赖 **claude-pty**（Claude-Code-PTY 仓库），git rev **pin 在 uv.lock**，不会自动浮动
+- PTY 框架更新后必须显式级联：`uv lock --upgrade-package claude-pty && uv sync`，提交 uv.lock
+- 生产（8002, ccm-b.service）要使依赖生效：`systemctl --user restart ccm-b`（重启时机需用户确认；启动属主与错库教训见 PROGRESS）
+- 领取任务时若涉及 PTY 接口/行为变化，先对比 uv.lock 中 pin 的 rev 与 Claude-Code-PTY main HEAD，落后则先 bump
+
 ## 关键约定
 
 - **优先级**: 数字越小优先级越高 (P0 > P1 > P2)，排序用 `.asc()`
