@@ -8,7 +8,9 @@ import { ChatView } from '../components/Chat/ChatView';
 import { LoopChatView } from '../components/Chat/LoopChatView';
 import { ProjectSelect } from '../components/ProjectSelect';
 import { resolveTagColor } from '../components/TagColors';
-import { ChevronLeft, ChevronRight, ChevronDown, Filter, PanelLeftClose, PanelLeftOpen, Search, X } from 'lucide-react';
+import { ChevronLeft, ChevronRight, ChevronDown, Filter, PanelLeftClose, PanelLeftOpen, Search, X, Star, Archive, ArchiveRestore } from 'lucide-react';
+import { ToolsBadge, SubAgentsBadge } from '../components/Tasks/TaskBadges';
+import { TAG_COLOR_OPTIONS } from '../components/TagColors';
 
 const PAGE_SIZE = 20;
 
@@ -435,15 +437,6 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
       failed: 'bg-red-500',
       cancelled: 'bg-gray-500',
     };
-    const sidebarStatusLabels: Record<string, string> = {
-      pending: 'Pending',
-      in_progress: 'In Progress',
-      executing: 'Executing',
-      plan_review: 'Plan Review',
-      completed: 'Completed',
-      failed: 'Failed',
-      cancelled: 'Cancelled',
-    };
     return (
       <div className="flex h-[calc(100vh-64px)] -mt-4 -mx-4">
         {sidebarOpen && (
@@ -463,29 +456,59 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
             </div>
             <div className="flex-1 overflow-y-auto min-h-0">
               {(searchResults ?? filteredTasks)
-                .map((t) => (
-                <button
+                .map((t) => {
+                const proj = t.project_id ? projects.find((p) => p.id === t.project_id) : undefined;
+                const colorDef = proj ? TAG_COLOR_OPTIONS.find((c) => c.key === proj.badge_color) : undefined;
+                return (
+                <div
                   key={t.id}
                   onClick={() => handleOpenChat(t)}
-                  className={`w-full text-left px-3 py-2.5 transition-colors border-b border-gray-800/50 ${
+                  className={`w-full text-left px-3 py-2.5 transition-colors border-b border-gray-800/50 cursor-pointer ${
                     chatTask?.id === t.id
                       ? 'bg-indigo-900/40 border-l-2 border-l-indigo-400'
                       : 'hover:bg-gray-800/50 border-l-2 border-l-transparent'
                   }`}
                 >
                   <div className="flex items-center gap-2">
-                    <span className={`w-2 h-2 rounded-full shrink-0 ${sidebarStatusColors[t.status] || 'bg-gray-500'}`} />
+                    {/* 状态只靠圆点颜色表达（绿=完成 红=失败 蓝=运行 黄=等待） */}
+                    <span className={`w-2 h-2 rounded-full shrink-0 ${sidebarStatusColors[t.status] || 'bg-gray-500'}`} title={t.status} />
                     <span className={`text-xs truncate flex-1 ${chatTask?.id === t.id ? 'text-foreground font-medium' : 'text-gray-300'}`}>
                       {t.title || t.description?.slice(0, 50) || `Task #${t.id}`}
                     </span>
                     {t.has_unread && <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 shrink-0" />}
                   </div>
-                  <div className="flex items-center gap-2 mt-1 ml-4">
+                  <div className="flex items-center gap-1.5 mt-1 ml-4 flex-wrap">
                     <span className="text-[10px] text-gray-500">#{t.id}</span>
-                    <span className="text-[10px] text-gray-600">{sidebarStatusLabels[t.status] || t.status}</span>
+                    {proj && (
+                      <span className={`text-[10px] px-1 rounded font-medium whitespace-nowrap ${colorDef ? `${colorDef.bg} ${colorDef.text}` : 'bg-emerald-600/30 text-emerald-300'}`}>
+                        {proj.name}
+                      </span>
+                    )}
+                    {t.model && (
+                      <span className="text-[10px] bg-gray-700 text-gray-300 px-1 rounded truncate max-w-[110px]">{t.model}</span>
+                    )}
                   </div>
-                </button>
-              ))}
+                  <div className="flex items-center gap-1.5 mt-1 ml-4" onClick={(e) => e.stopPropagation()}>
+                    <ToolsBadge task={t} onRefresh={refresh} />
+                    <SubAgentsBadge task={t} />
+                    <span className="flex-1" />
+                    <button
+                      onClick={async () => { await api.starTask(t.id); refresh(); }}
+                      className={`p-1 transition-colors ${t.starred ? 'text-yellow-400 hover:text-yellow-300' : 'text-gray-600 hover:text-yellow-400'}`}
+                      title={t.starred ? 'Unstar' : 'Star'}
+                    >
+                      <Star size={13} fill={t.starred ? 'currentColor' : 'none'} />
+                    </button>
+                    <button
+                      onClick={async () => { await api.archiveTask(t.id); refresh(); }}
+                      className="p-1 text-gray-600 hover:text-amber-400 transition-colors"
+                      title={t.archived ? 'Unarchive' : 'Archive'}
+                    >
+                      {t.archived ? <ArchiveRestore size={13} /> : <Archive size={13} />}
+                    </button>
+                  </div>
+                </div>
+              );})}
             </div>
             {totalPages > 1 && (
               <div className="flex items-center justify-center gap-2 py-1.5 border-t border-gray-800 shrink-0">

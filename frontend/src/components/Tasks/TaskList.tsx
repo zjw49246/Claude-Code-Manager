@@ -1,7 +1,8 @@
-import { useState, useMemo, useRef, useEffect, useCallback } from 'react';
+import { useState, useMemo, useRef, useEffect } from 'react';
 import { api } from '../../api/client';
-import type { Task, Project, SubAgentSummary } from '../../api/client';
-import { Trash2, RotateCcw, XCircle, MessageCircle, Archive, ArchiveRestore, Star, Copy, Check, MoreVertical, Pencil, Mail, MailOpen, Wrench, Users, Clock } from 'lucide-react';
+import type { Task, Project } from '../../api/client';
+import { Trash2, RotateCcw, XCircle, MessageCircle, Archive, ArchiveRestore, Star, Copy, Check, MoreVertical, Pencil, Mail, MailOpen, Clock } from 'lucide-react';
+import { ToolsBadge, SubAgentsBadge } from './TaskBadges';
 import { TAG_COLOR_OPTIONS } from '../TagColors';
 import { ExpandableText } from '../ExpandableText';
 import { formatDateTime } from '../../config/timezone';
@@ -13,12 +14,6 @@ interface TaskListProps {
   onOpenChat: (task: Task) => void;
   activeTaskId?: number | null;
 }
-
-const ALL_TOOLS = [
-  { key: 'help', label: 'Help' },
-  { key: 'workflows', label: 'Workflows' },
-  { key: 'monitor', label: 'Monitor' },
-];
 
 const statusColors: Record<string, string> = {
   pending: 'bg-yellow-500',
@@ -41,23 +36,8 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId 
   const [menuOpenId, setMenuOpenId] = useState<number | null>(null);
   const [editingTitleId, setEditingTitleId] = useState<number | null>(null);
   const [titleDraft, setTitleDraft] = useState('');
-  const [toolsExpandedId, setToolsExpandedId] = useState<number | null>(null);
-  const [subAgentsExpandedId, setSubAgentsExpandedId] = useState<number | null>(null);
-  const [subAgentSummary, setSubAgentSummary] = useState<SubAgentSummary | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const titleInputRef = useRef<HTMLInputElement>(null);
-
-  // Close dropdowns on outside click
-  useEffect(() => {
-    if (toolsExpandedId === null && subAgentsExpandedId === null) return;
-    const handleDropdownClick = (e: MouseEvent) => {
-      const target = e.target as HTMLElement;
-      if (toolsExpandedId !== null && !target.closest('[data-tools-dropdown]')) setToolsExpandedId(null);
-      if (subAgentsExpandedId !== null && !target.closest('[data-subagents-dropdown]')) setSubAgentsExpandedId(null);
-    };
-    document.addEventListener('mousedown', handleDropdownClick);
-    return () => document.removeEventListener('mousedown', handleDropdownClick);
-  }, [toolsExpandedId, subAgentsExpandedId]);
 
   // Close overflow menu on outside click
   useEffect(() => {
@@ -123,23 +103,6 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId 
     } catch { /* ignore */ }
   };
 
-  const handleSubAgentsToggle = useCallback(async (taskId: number) => {
-    if (subAgentsExpandedId === taskId) {
-      setSubAgentsExpandedId(null);
-      setSubAgentSummary(null);
-      return;
-    }
-    setSubAgentSummary(null);
-    try {
-      const summary = await api.getSubAgentSummary(taskId);
-      setSubAgentSummary(summary);
-      setSubAgentsExpandedId(taskId);
-    } catch {
-      setSubAgentSummary({ by_type: {} });
-      setSubAgentsExpandedId(taskId);
-    }
-  }, [subAgentsExpandedId]);
-
   if (tasks.length === 0) {
     return <p className="text-gray-500 text-sm text-center py-8">No tasks yet</p>;
   }
@@ -170,66 +133,8 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId 
               {t.model && (
                 <span className="hidden sm:inline text-xs bg-gray-700 text-gray-300 px-1.5 rounded">{t.model}</span>
               )}
-              <div className="relative" data-tools-dropdown>
-                <button
-                  onClick={() => setToolsExpandedId(toolsExpandedId === t.id ? null : t.id)}
-                  className="text-xs bg-amber-600/30 text-amber-300 px-1.5 rounded cursor-pointer hover:bg-amber-600/40 flex items-center gap-0.5"
-                >
-                  <Wrench size={12} />
-                  {t.enabled_skills ? Object.values(t.enabled_skills).filter(Boolean).length : 0}
-                </button>
-                {toolsExpandedId === t.id && (
-                  <div className="absolute top-full mt-1 left-0 bg-gray-800 border border-gray-600 rounded shadow-lg z-20 min-w-[160px] py-1">
-                    {ALL_TOOLS.map((tool) => {
-                      const enabled = !!(t.enabled_skills && t.enabled_skills[tool.key]);
-                      return (
-                        <button
-                          key={tool.key}
-                          onClick={async (e) => {
-                            e.stopPropagation();
-                            const newSkills = { ...(t.enabled_skills || {}), [tool.key]: !enabled };
-                            try {
-                              await api.updateTask(t.id, { enabled_skills: newSkills });
-                              onRefresh();
-                            } catch {}
-                          }}
-                          className="w-full px-3 py-1.5 text-xs text-left flex items-center gap-2 hover:bg-gray-700 transition-colors"
-                        >
-                          <span className={`w-3.5 h-3.5 rounded border flex items-center justify-center text-[9px] ${
-                            enabled ? 'bg-green-600 border-green-500 text-white' : 'border-gray-600'
-                          }`}>
-                            {enabled && '✓'}
-                          </span>
-                          <span className={enabled ? 'text-gray-200' : 'text-gray-400'}>{tool.label}</span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-              <div className="relative" data-subagents-dropdown>
-                <button
-                  onClick={() => handleSubAgentsToggle(t.id)}
-                  className={`text-xs bg-teal-600/30 text-teal-300 px-1.5 rounded cursor-pointer hover:bg-teal-600/40 flex items-center gap-0.5${t.active_sub_agents > 0 ? ' animate-pulse' : ''}`}
-                >
-                  <Users size={12} />
-                  {t.active_sub_agents}
-                </button>
-                {subAgentsExpandedId === t.id && (
-                  <div className="absolute top-full mt-1 left-0 bg-gray-800 border border-gray-600 rounded shadow-lg z-20 min-w-[140px] py-1">
-                    {subAgentSummary && Object.keys(subAgentSummary.by_type).length > 0 ? (
-                      Object.entries(subAgentSummary.by_type).map(([type, counts]) => (
-                        <div key={type} className="px-3 py-1 text-xs text-gray-300 flex items-center justify-between gap-3">
-                          <span>{type.charAt(0).toUpperCase() + type.slice(1)}</span>
-                          <span className={counts.running > 0 ? 'text-green-400' : 'text-gray-500'}>{counts.running} running</span>
-                        </div>
-                      ))
-                    ) : (
-                      <div className="px-3 py-1 text-xs text-gray-500">No sub-agents</div>
-                    )}
-                  </div>
-                )}
-              </div>
+              <ToolsBadge task={t} onRefresh={onRefresh} />
+              <SubAgentsBadge task={t} />
             </div>
             {/* Action buttons — always top-right aligned */}
             <div className="flex gap-1 shrink-0 items-center">
