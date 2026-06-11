@@ -28,12 +28,20 @@ vi.mock('../../api/client', () => ({
 
 import { api } from '../../api/client';
 
+async function openConfigPanel() {
+  // Mode/Model/Effort/Timeout 等选择器位于 Config 下拉面板内
+  await userEvent.click(screen.getByText('Config'));
+  await waitFor(() => screen.getByDisplayValue('Auto'));
+}
+
 async function selectLoopMode() {
+  await openConfigPanel();
   const modeSelect = screen.getByDisplayValue('Auto');
   await userEvent.selectOptions(modeSelect, 'loop');
 }
 
 async function selectGoalMode() {
+  await openConfigPanel();
   const modeSelect = screen.getByDisplayValue('Auto');
   await userEvent.selectOptions(modeSelect, 'goal');
 }
@@ -107,7 +115,7 @@ describe('TaskForm number input fields', () => {
       const todoInput = screen.getByPlaceholderText('Todo file path (e.g. TODO.md)');
       await userEvent.type(todoInput, 'TODO.md');
 
-      const submitBtn = screen.getByText('Create Task');
+      const submitBtn = screen.getByRole('button', { name: /create/i });
       await userEvent.click(submitBtn);
 
       await waitFor(() => {
@@ -129,7 +137,7 @@ describe('TaskForm number input fields', () => {
       const todoInput = screen.getByPlaceholderText('Todo file path (e.g. TODO.md)');
       await userEvent.type(todoInput, 'TODO.md');
 
-      const submitBtn = screen.getByText('Create Task');
+      const submitBtn = screen.getByRole('button', { name: /create/i });
       await userEvent.click(submitBtn);
 
       await waitFor(() => {
@@ -201,7 +209,7 @@ describe('TaskForm number input fields', () => {
       const goalInput = screen.getByPlaceholderText('Goal condition (e.g. all tests pass and lint is clean)');
       await userEvent.type(goalInput, 'all tests pass');
 
-      const submitBtn = screen.getByText('Create Task');
+      const submitBtn = screen.getByRole('button', { name: /create/i });
       await userEvent.click(submitBtn);
 
       await waitFor(() => {
@@ -282,9 +290,11 @@ describe('TaskForm copy-context-from select overflow fix', () => {
     expect(screen.queryByText('Copy context from:')).not.toBeInTheDocument();
   });
 
-  it('form has overflow-hidden to prevent horizontal page expansion', async () => {
+  it('form uses overflow-visible so dropdown panels are not clipped', async () => {
+    // 5c3e2c7 起 form 改为 overflow-visible（Config/Tools 下拉需要溢出渲染）；
+    // 横向溢出问题由 copy-context select 自身的宽度约束解决
     const { container } = render(<TaskForm onCreated={vi.fn()} />);
     const form = container.querySelector('form');
-    expect(form?.className).toContain('overflow-hidden');
+    expect(form?.className).toContain('overflow-visible');
   });
 });
