@@ -824,6 +824,11 @@ class InstanceManager:
             await self.broadcaster.broadcast(f"task:{task_id}", broadcast_data)
 
         # Persist and broadcast context usage
+        def _model_context_window(model_name: str) -> int:
+            # fable 系与 [1m] 变体为 1M 窗口，其余 200K
+            m = (model_name or "").lower()
+            return 1_000_000 if ("[1m]" in m or "fable" in m) else 200_000
+
         if context_usage and "total_input_tokens" not in context_usage:
             # Window-only refinement (result events carry just the
             # authoritative contextWindow — their usage numbers are cumulative
@@ -834,6 +839,10 @@ class InstanceManager:
                 async with self.db_factory() as db:
                     t = await db.get(Task, task_id)
                     stored = dict(t.context_window_usage) if (t and t.context_window_usage) else None
+                    model_name = (t.model or "") if t else ""
+                # modelUsage 上报的窗口对大上下文模型（fable）会低报 200K，
+                # 取上报值与模型启发式的较大者
+                window = max(window, _model_context_window(model_name))
                 if stored and stored.get("context_window") != window:
                     stored["context_window"] = window
                     context_usage = stored
@@ -846,9 +855,7 @@ class InstanceManager:
                 async with self.db_factory() as db:
                     t = await db.get(Task, task_id)
                     model_name = (t.model or "") if t else ""
-            context_usage["context_window"] = (
-                1_000_000 if "[1m]" in model_name else 200_000
-            )
+            context_usage["context_window"] = _model_context_window(model_name)
         if context_usage and task_id:
             async with self.db_factory() as db:
                 await db.execute(

@@ -162,6 +162,11 @@ async def get_chat_history(
     if not task:
         raise HTTPException(404, "Task not found")
 
+    # 访问优先排序：打开 chat（拉取历史）即视为访问
+    from datetime import datetime as _dt
+    task.last_accessed_at = _dt.utcnow()
+    await db.commit()
+
     allowed = ["user_message", "message", "result", "tool_use", "tool_result", "system_init", "system_event", "thinking", "process_exit"]
     # Noisy telemetry must be excluded in SQL, before LIMIT applies. Filtering
     # after the query made pages come back short (< limit), which the client

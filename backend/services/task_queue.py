@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import delete as sa_delete, func, select, update
+from sqlalchemy import Float, delete as sa_delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config import settings
@@ -30,7 +30,12 @@ class TaskQueue:
         has_unread: bool | None = None,
         limit: int = 50, offset: int = 0,
     ) -> list[Task]:
-        stmt = select(Task).order_by(Task.starred.desc(), Task.created_at.desc())
+        # 排序：标星置顶 → 手动排序键（拖拽设置）/ 最近访问时间，越大越靠前
+        effective_key = func.coalesce(
+            Task.sort_order,
+            func.cast(func.strftime("%s", func.coalesce(Task.last_accessed_at, Task.created_at)), Float),
+        )
+        stmt = select(Task).order_by(Task.starred.desc(), effective_key.desc(), Task.id.desc())
         if archived_only:
             stmt = stmt.where(Task.archived == True)
         elif not include_archived:

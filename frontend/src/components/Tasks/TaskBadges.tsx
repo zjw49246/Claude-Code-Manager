@@ -225,7 +225,7 @@ const THINKING_OPTIONS: { value: string; label: string }[] = [
 /** Per-task Config: gear button opening a panel to edit Model / Effort /
  * Timeout / Thinking in place (each change persists via updateTask).
  * Shared by the task list, the sidebar, and the chat header. */
-export function TaskConfigBadge({ task, onRefresh, openUp }: { task: Task; onRefresh: () => void; openUp?: boolean }) {
+export function TaskConfigBadge({ task, onRefresh, openUp, align }: { task: Task; onRefresh: () => void; openUp?: boolean; align?: 'left' | 'right' }) {
   const [open, setOpen] = useState(false);
   const [opts, setOpts] = useState<ConfigOptions | null>(null);
 
@@ -262,7 +262,7 @@ export function TaskConfigBadge({ task, onRefresh, openUp }: { task: Task; onRef
       </button>
       {open && (
         <div
-          className={`absolute ${openUp ? 'bottom-full mb-1' : 'top-full mt-1'} left-0 bg-gray-800 border border-gray-600 rounded shadow-lg z-30 p-3 min-w-[250px]`}
+          className={`absolute ${openUp ? 'bottom-full mb-1' : 'top-full mt-1'} ${align === 'right' ? 'right-0' : 'left-0'} bg-gray-800 border border-gray-600 rounded shadow-lg z-30 p-3 min-w-[250px] max-w-[calc(100vw-1rem)]`}
           onClick={(e) => e.stopPropagation()}
         >
           <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 items-center text-xs">

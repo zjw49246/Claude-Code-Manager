@@ -763,7 +763,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
           active={monitorCount > 0}
           onNavigate={() => setShowMonitorPanel(!showMonitorPanel)}
         />
-        <TaskConfigBadge task={task} onRefresh={() => onTaskUpdated?.()} />
+        <TaskConfigBadge task={task} onRefresh={() => onTaskUpdated?.()} align="right" />
         <button
           onClick={handleStar}
           className={`p-1.5 transition-colors ${starred ? 'text-yellow-400 hover:text-yellow-300' : 'text-gray-600 hover:text-yellow-400'}`}
@@ -1108,7 +1108,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
                   </button>
                   {modelOptions.map((m) => {
                     // 上下文超过目标模型窗口时给出警告（[1m] 变体 1M，其余按 200K 估算）
-                    const win = m.includes('[1m]') ? 1_000_000 : 200_000;
+                    const win = (m.includes('[1m]') || m.includes('fable')) ? 1_000_000 : 200_000;
                     const over = !!contextUsage && contextUsage.total_input_tokens > win;
                     return (
                     <button
