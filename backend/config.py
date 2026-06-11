@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     effort_options: str = "low,medium,high,xhigh,max"  # comma-separated
     host: str = "0.0.0.0"
     port: int = 8000
+    # Public base URL of this deployment (e.g. https://ccm.example.com),
+    # used to display the GitHub webhook URL on the PR Monitor page.
+    public_base_url: str = ""
     workspace_dir: str = "~/Projects"
     auto_start_dispatcher: bool = True
     merge_push_retries: int = 3

@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select, func, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.config import settings
 from backend.database import get_db
 from backend.models.pr_monitor import MonitoredRepo, PRReview
 from backend.schemas.pr_monitor import (
@@ -21,6 +22,13 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/pr-monitor", tags=["pr-monitor"])
 webhook_router = APIRouter(prefix="/api/github", tags=["pr-monitor"])
+
+
+@router.get("/webhook-info")
+async def webhook_info():
+    """Return the public webhook URL (from PUBLIC_BASE_URL), or null if unset."""
+    base = settings.public_base_url.strip().rstrip("/")
+    return {"webhook_url": f"{base}/api/github/webhook" if base else None}
 
 
 @router.get("/repos", response_model=list[MonitoredRepoResponse])

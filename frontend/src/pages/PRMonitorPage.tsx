@@ -3,7 +3,7 @@ import { api } from '../api/client';
 import type { MonitoredRepo, PRReview } from '../api/client';
 import { Plus, ArrowLeft, X, Copy, RefreshCw, ToggleLeft, ToggleRight, Trash2, GitPullRequest, Check } from 'lucide-react';
 
-const WEBHOOK_URL = 'https://youchengsong.claude-code-manager.com/api/github/webhook';
+const DEFAULT_WEBHOOK_URL = `${window.location.origin}/api/github/webhook`;
 
 const STATUS_COLORS: Record<string, string> = {
   pending: 'bg-yellow-500/20 text-yellow-400',
@@ -118,6 +118,13 @@ function RepoDetail({ repo, onBack, onRefresh }: { repo: MonitoredRepo; onBack: 
   const [authorsInput, setAuthorsInput] = useState((repo.allowed_authors || []).join(', '));
   const [saving, setSaving] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
+  const [webhookUrl, setWebhookUrl] = useState(DEFAULT_WEBHOOK_URL);
+
+  useEffect(() => {
+    api.getWebhookInfo()
+      .then(info => setWebhookUrl(info.webhook_url || DEFAULT_WEBHOOK_URL))
+      .catch(() => setWebhookUrl(DEFAULT_WEBHOOK_URL));
+  }, []);
 
   const loadDetail = useCallback(async () => {
     try {
@@ -209,8 +216,8 @@ function RepoDetail({ repo, onBack, onRefresh }: { repo: MonitoredRepo; onBack: 
           <div>
             <label className="block text-xs text-gray-400 mb-1">Payload URL</label>
             <div className="flex items-center gap-2">
-              <code className="flex-1 bg-gray-700 text-foreground text-xs rounded px-3 py-2 overflow-x-auto">{WEBHOOK_URL}</code>
-              <button onClick={() => handleCopy(WEBHOOK_URL, 'url')}
+              <code className="flex-1 bg-gray-700 text-foreground text-xs rounded px-3 py-2 overflow-x-auto">{webhookUrl}</code>
+              <button onClick={() => handleCopy(webhookUrl, 'url')}
                 className="p-2 text-gray-400 hover:text-white">
                 {copied === 'url' ? <Check size={16} className="text-green-400" /> : <Copy size={16} />}
               </button>

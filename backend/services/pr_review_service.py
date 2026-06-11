@@ -1,3 +1,5 @@
+import asyncio
+import json
 import logging
 from datetime import datetime
 
@@ -8,6 +10,47 @@ from backend.models.pr_monitor import MonitoredRepo, PRReview
 from backend.models.task import Task
 
 logger = logging.getLogger(__name__)
+
+# Markers in gh output that indicate an authentication problem (not transient).
+GH_AUTH_ERROR_MARKERS = ("gh auth login", "http 401", "http 403", "bad credentials")
+
+# Delay before the single retry of a transient gh failure (tests override this).
+GH_RETRY_DELAY_SECONDS = 2.0
+
+
+class GhError(Exception):
+    """A `gh` CLI invocation failed. `is_auth` distinguishes auth errors."""
+
+    def __init__(self, message: str):
+        super().__init__(message)
+        low = message.lower()
+        self.is_auth = any(marker in low for marker in GH_AUTH_ERROR_MARKERS)
+
+
+async def _gh_pr_view(pr_number: int, repo_full_name: str) -> dict:
+    """Run `gh pr view --json ...` and return parsed JSON. Raises GhError."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "gh", "pr", "view", str(pr_number),
+            "--repo", repo_full_name,
+            "--json", "state,mergedAt,reviews",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+    except GhError:
+        raise
+    except Exception as e:
+        raise GhError(str(e)) from e
+
+    if proc.returncode != 0:
+        output = ((stderr or b"") + b"\n" + (stdout or b"")).decode(errors="replace").strip()
+        raise GhError(output or f"gh exited with code {proc.returncode}")
+
+    try:
+        return json.loads(stdout.decode())
+    except Exception as e:
+        raise GhError(f"invalid gh output: {e}") from e
 
 
 def build_review_prompt(repo: MonitoredRepo, pr_data: dict) -> str:
@@ -111,8 +154,11 @@ async def create_pr_review_task(
             "pr_number": pr_data["number"],
             "task_id": task.id,
         })
-    except Exception:
-        logger.debug("WebSocket broadcast failed (non-critical)")
+    except Exception as e:
+        logger.warning(
+            "WebSocket broadcast failed for PR review %d (non-critical): %s",
+            review.id, e,
+        )
 
     return review
 
@@ -128,25 +174,31 @@ async def check_and_update_review(
     if review.status in ("approved", "merged", "commented", "error", "superseded"):
         return
 
-    import asyncio
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "gh", "pr", "view", str(review.pr_number),
-            "--repo", repo_full_name,
-            "--json", "state,mergedAt,reviews",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
-        import json
-        pr_info = json.loads(stdout.decode())
-    except Exception as e:
-        logger.error("Failed to check PR status: %s", e)
-        review.status = "error"
-        review.review_summary = f"Failed to check PR status: {e}"
-        review.completed_at = datetime.utcnow()
-        await db.commit()
-        return
+    pr_info = None
+    for attempt in (1, 2):
+        try:
+            pr_info = await _gh_pr_view(review.pr_number, repo_full_name)
+            break
+        except GhError as e:
+            if e.is_auth:
+                logger.error("gh authentication error while checking PR status: %s", e)
+                review.status = "error"
+                review.review_summary = (
+                    f"gh authentication error (run `gh auth login` for the backend user): {e}"
+                )
+                review.completed_at = datetime.utcnow()
+                await db.commit()
+                return
+            if attempt == 1:
+                logger.warning("gh pr view failed (attempt 1/2), retrying: %s", e)
+                await asyncio.sleep(GH_RETRY_DELAY_SECONDS)
+                continue
+            logger.error("Failed to check PR status after retry: %s", e)
+            review.status = "error"
+            review.review_summary = f"Failed to check PR status (network/other, after 1 retry): {e}"
+            review.completed_at = datetime.utcnow()
+            await db.commit()
+            return
 
     state = pr_info.get("state", "").upper()
     merged_at = pr_info.get("mergedAt")
