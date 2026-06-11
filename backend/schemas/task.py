@@ -51,6 +51,7 @@ class TaskUpdate(BaseModel):
     effort_level: str | None = None
     thinking_budget: int | None = None
     timeout_hours: float | None = None
+    sort_order: float | None = None
     description: str | None = None
     priority: int | None = None
     project_id: int | None = None
