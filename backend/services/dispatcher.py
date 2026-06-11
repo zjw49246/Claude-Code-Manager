@@ -559,7 +559,8 @@ class GlobalDispatcher:
             })
 
             # === Step 2: Determine cwd and update task ===
-            cwd = task.last_cwd or task.target_repo or "."
+            # 必须是绝对路径：PTY 模式按 cwd 推导 JSONL 轮询路径，"." 会落空
+            cwd = task.last_cwd or task.target_repo or os.getcwd()
             thinking_budget = task.thinking_budget
             effort_level = task.effort_level or settings.default_effort
             async with self.db_factory() as db:
