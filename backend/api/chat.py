@@ -319,16 +319,20 @@ async def inject_message(
     from backend.main import instance_manager, broadcaster
     if not instance_manager.pty_mode_enabled:
         raise HTTPException(400, "PTY 模式未开启，注入功能仅在 PTY 模式下可用")
-    if not task.instance_id:
-        raise HTTPException(400, "Task has no running instance")
+    if not task.session_id:
+        raise HTTPException(400, "Task has no session yet")
 
-    ok = await instance_manager.inject_pty_message(task.instance_id, body.message)
+    ok = await instance_manager.inject_pty_message(task.session_id, body.message)
     if not ok:
-        raise HTTPException(409, "没有存活的 PTY 会话（turn 未在运行或会话已结束），请用普通消息发送")
+        raise HTTPException(
+            409,
+            "没有存活的 PTY 会话——该任务最近一次运行不是 PTY 模式启动的"
+            "（开启 PTY 后需先发一条普通消息建立会话），或会话已被回收",
+        )
 
     # Record + broadcast so the injected text shows up in the chat thread
     db.add(LogEntry(
-        instance_id=task.instance_id,
+        instance_id=task.instance_id or 1,
         task_id=task_id,
         event_type="user_message",
         role="user",

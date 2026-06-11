@@ -48,22 +48,29 @@ class InstanceManager:
     def pty_mode_enabled(self) -> bool:
         return self._pty_enabled and self._pty_backend is not None
 
-    async def inject_pty_message(self, instance_id: int, content: str) -> bool:
-        """Inject text into the running turn of a live PTY session (PTY-only).
+    async def inject_pty_message(self, session_id: str, content: str) -> bool:
+        """Inject text into a live PTY session (PTY-only).
 
-        Delivered as a channel notification — CC consumes it at the next
-        tool-call boundary within the current turn. Returns False when PTY
-        mode is off, the session is gone, or injection fails.
+        Looked up by Claude session_id — the chat path picks a different
+        instance per message, so task.instance_id is NOT a reliable key.
+        Delivered as a channel notification; CC consumes it at the next
+        tool-call boundary (mid-turn) or at the start of the next turn.
+        Returns False when PTY mode is off, no live session exists, or
+        injection fails.
         """
-        if self._pty_backend is None or not content:
+        if self._pty_backend is None or not content or not session_id:
             return False
-        session = self._pty_backend._sessions.get(instance_id)
-        if session is None or not session.is_alive:
+        session = None
+        for sess in self._pty_backend._sessions.values():
+            if sess.session_id == session_id and sess.is_alive:
+                session = sess
+                break
+        if session is None:
             return False
         try:
             return await session.inject(content)
         except Exception:
-            logger.exception("PTY inject failed for instance %s", instance_id)
+            logger.exception("PTY inject failed for session %s", session_id)
             return False
 
     async def release_pty_session(self, session_id: str) -> None:

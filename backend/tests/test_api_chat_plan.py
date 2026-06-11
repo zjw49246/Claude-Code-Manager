@@ -544,10 +544,6 @@ async def test_inject_delivers_to_pty_session(client, session_factory):
     from backend.models.task import Task
 
     task_id = await _create_task_with_session(client, session_factory)
-    async with session_factory() as db:
-        t = await db.get(Task, task_id)
-        t.instance_id = 7
-        await db.commit()
 
     mock_im = MagicMock()
     mock_im.pty_mode_enabled = True
@@ -562,7 +558,10 @@ async def test_inject_delivers_to_pty_session(client, session_factory):
         )
 
     assert resp.status_code == 200
-    mock_im.inject_pty_message.assert_awaited_once_with(7, "focus on tests")
+    # 回归：chat 路径不更新 task.instance_id，必须按 session_id 定位 PTY 会话
+    mock_im.inject_pty_message.assert_awaited_once_with(
+        "test-session-123", "focus on tests"
+    )
     casts = [c for c in mock_broadcaster.broadcast.call_args_list
              if c[0][1].get("source") == "inject"]
     assert len(casts) == 1
@@ -574,10 +573,6 @@ async def test_inject_no_live_session_409(client, session_factory):
     from backend.models.task import Task
 
     task_id = await _create_task_with_session(client, session_factory)
-    async with session_factory() as db:
-        t = await db.get(Task, task_id)
-        t.instance_id = 7
-        await db.commit()
 
     mock_im = MagicMock()
     mock_im.pty_mode_enabled = True
