@@ -369,6 +369,32 @@ class GlobalDispatcher:
             f"(idle was {idle_count}, min_idle_instances={settings.min_idle_instances})"
         )
 
+    def _resolve_timeout(self, task) -> float | None:
+        """任务有效超时（秒）。None = 不限时。
+
+        task.timeout_hours: NULL = 全局默认（settings.task_timeout_seconds），
+        0 = 不限时，>0 = 指定小时数。
+        """
+        th = getattr(task, "timeout_hours", None)
+        if th is not None:
+            return th * 3600 if th > 0 else None
+        return settings.task_timeout_seconds
+
+    async def _wait_process(self, process, task, label: str) -> None:
+        """Wait for a launched process honoring the task-level timeout."""
+        timeout = self._resolve_timeout(task)
+        if timeout:
+            try:
+                await asyncio.wait_for(process.wait(), timeout=timeout)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"{label} (task {task.id}) timed out after {timeout:.0f}s, killing process"
+                )
+                process.kill()
+                await process.wait()
+        else:
+            await process.wait()
+
     async def _dispatch_loop(self):
         """Poll for idle instances + pending tasks and dispatch."""
         while self._running:
@@ -609,12 +635,7 @@ class GlobalDispatcher:
             # Wait for process to finish (with timeout)
             process = self.instance_manager.processes.get(instance_id)
             if process:
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=settings.task_timeout_seconds)
-                except asyncio.TimeoutError:
-                    logger.warning(f"Task {task.id} timed out after {settings.task_timeout_seconds}s, killing process")
-                    process.kill()
-                    await process.wait()
+                await self._wait_process(process, task, "Task run")
 
             # Wait for output consumer to finish processing all remaining
             # buffered output before judging the result. Without this the
@@ -869,11 +890,7 @@ class GlobalDispatcher:
         # Wait for process
         process = self.instance_manager.processes.get(instance_id)
         if process:
-            try:
-                await asyncio.wait_for(process.wait(), timeout=settings.task_timeout_seconds)
-            except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
+            await self._wait_process(process, task, "Pool retry run")
 
         consumer = self.instance_manager._tasks.get(instance_id)
         if consumer:
@@ -1007,6 +1024,9 @@ class GlobalDispatcher:
                 if t.status == "cancelled":
                     logger.info(f"Loop task {task.id} cancelled, stopping")
                     return
+                # 每轮刷新可变设置（用户可能在 Config 面板中修改了
+                # model/effort/thinking/timeout，下一轮立即生效）
+                task = t
 
             # Enforce max iterations limit
             if iteration >= max_iterations:
@@ -1053,7 +1073,7 @@ class GlobalDispatcher:
                 loop_iteration=iteration,
                 git_env=git_env or {},
                 thinking_budget=task.thinking_budget,
-                effort_level=effort_level,
+                effort_level=task.effort_level or effort_level,
                 provider=task.provider,
                 enable_workflows=task.enable_workflows,
                 enabled_skills=task.enabled_skills,
@@ -1061,12 +1081,7 @@ class GlobalDispatcher:
 
             process = self.instance_manager.processes.get(instance_id)
             if process:
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=settings.task_timeout_seconds)
-                except asyncio.TimeoutError:
-                    logger.warning(f"Loop task {task.id} iteration {iteration} timed out, killing")
-                    process.kill()
-                    await process.wait()
+                await self._wait_process(process, task, "Loop iteration")
 
             # P1: Check if task was cancelled/deleted while the iteration was running
             async with self.db_factory() as db:
@@ -1223,6 +1238,8 @@ class GlobalDispatcher:
                 if t.status == "cancelled":
                     logger.info(f"Goal task {task.id} cancelled, stopping")
                     return
+                # 每轮刷新可变设置（model/effort/thinking/timeout 下一轮生效）
+                task = t
 
             if turn == 0:
                 prompt = self._build_goal_initial_prompt(task)
@@ -1235,7 +1252,7 @@ class GlobalDispatcher:
                     loop_iteration=turn,
                     git_env=git_env or {},
                     thinking_budget=task.thinking_budget,
-                    effort_level=effort_level,
+                    effort_level=task.effort_level or effort_level,
                     provider=task.provider,
                     enable_workflows=task.enable_workflows,
                     enabled_skills=task.enabled_skills,
@@ -1252,7 +1269,7 @@ class GlobalDispatcher:
                     loop_iteration=turn,
                     git_env=git_env or {},
                     thinking_budget=task.thinking_budget,
-                    effort_level=effort_level,
+                    effort_level=task.effort_level or effort_level,
                     provider=task.provider,
                     enable_workflows=task.enable_workflows,
                     enabled_skills=task.enabled_skills,
@@ -1261,12 +1278,7 @@ class GlobalDispatcher:
             # Wait for process to finish
             process = self.instance_manager.processes.get(instance_id)
             if process:
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=settings.task_timeout_seconds)
-                except asyncio.TimeoutError:
-                    logger.warning(f"Goal task {task.id} turn {turn} timed out, killing")
-                    process.kill()
-                    await process.wait()
+                await self._wait_process(process, task, "Goal turn")
 
             # Check if cancelled/deleted during execution
             async with self.db_factory() as db:
@@ -1653,12 +1665,7 @@ class GlobalDispatcher:
         )
         process = self.instance_manager.processes.get(instance_id)
         if process:
-            try:
-                await asyncio.wait_for(process.wait(), timeout=settings.task_timeout_seconds)
-            except asyncio.TimeoutError:
-                logger.warning(f"Plan phase for task {task.id} timed out, killing process")
-                process.kill()
-                await process.wait()
+            await self._wait_process(process, task, "Plan phase")
 
         # Collect plan content from logs
         async with self.db_factory() as db:
@@ -2147,7 +2154,8 @@ class GlobalDispatcher:
         try:
             process = self.instance_manager.processes.get(inst_id)
             if process:
-                await process.wait()
+                # Chat 路径同样遵守任务级超时（此前 chat 无超时，可无限占住 instance）
+                await self._wait_process(process, task, "Chat run")
             # Status management is handled by _consume_output (chat_initiated=True)
         finally:
             # Phase 3: remove temporarily added skills (must run even on crash)

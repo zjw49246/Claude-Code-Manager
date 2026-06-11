@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Integer, String, Text, DateTime, JSON, select, func
+from sqlalchemy import Float, Integer, String, Text, DateTime, JSON, select, func
 from sqlalchemy.orm import Mapped, mapped_column, column_property
 
 from backend.database import Base
@@ -43,6 +43,8 @@ class Task(Base):
     model: Mapped[str | None] = mapped_column(String(100), nullable=True)
     effort_level: Mapped[str | None] = mapped_column(String(20), nullable=True)
     thinking_budget: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # NULL = 全局默认超时；0 = 不限时；>0 = 指定小时数
+    timeout_hours: Mapped[float | None] = mapped_column(Float, nullable=True)
     enable_workflows: Mapped[bool] = mapped_column(default=False, server_default="0")
     enabled_skills: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     tags: Mapped[dict | None] = mapped_column(JSON, nullable=True)

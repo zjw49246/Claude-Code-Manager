@@ -104,6 +104,17 @@ async def create_task(body: TaskCreate, queue: TaskQueue = Depends(_get_queue), 
             data["session_id"] = cloned["session_id"]
             data["last_cwd"] = cloned["last_cwd"]
 
+    # 设置归 Task：创建时填入全局默认值，后续不再依赖 instance fallback
+    from backend.config import settings as app_settings
+    if not data.get("model"):
+        data["model"] = (
+            app_settings.default_codex_model
+            if data.get("provider") == "codex"
+            else app_settings.default_model
+        )
+    if not data.get("effort_level"):
+        data["effort_level"] = app_settings.default_effort
+
     return await queue.create(**data)
 
 

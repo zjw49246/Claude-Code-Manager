@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Wrench, Users } from 'lucide-react';
+import { Wrench, Users, Settings } from 'lucide-react';
 import { api } from '../../api/client';
 import type { Task, SubAgentSummary } from '../../api/client';
 
@@ -124,17 +124,24 @@ export function SubAgentsBadge({ task }: { task: Task }) {
   );
 }
 
-// Model options cache (fetched once per page load)
-let _modelOptionsCache: { claude: string[]; codex: string[] } | null = null;
-async function fetchModelOptions(): Promise<{ claude: string[]; codex: string[] }> {
-  if (_modelOptionsCache) return _modelOptionsCache;
+// Config options cache (fetched once per page load)
+interface ConfigOptions {
+  claude: string[]; codex: string[];
+  effort: string[]; codexEffort: string[];
+}
+let _configOptionsCache: ConfigOptions | null = null;
+async function fetchConfigOptions(): Promise<ConfigOptions> {
+  if (_configOptionsCache) return _configOptionsCache;
   const c = await api.config();
-  _modelOptionsCache = {
+  _configOptionsCache = {
     claude: c.model_options.filter((m) => m !== 'default'),
     codex: c.codex_model_options.filter((m) => m !== 'default'),
+    effort: c.effort_options,
+    codexEffort: c.codex_effort_options,
   };
-  return _modelOptionsCache;
+  return _configOptionsCache;
 }
+const fetchModelOptions = fetchConfigOptions;
 
 /** Clickable model badge: dropdown to switch the task's model (persisted). */
 export function ModelBadge({ task, onRefresh, compact }: { task: Task; onRefresh: () => void; compact?: boolean }) {
@@ -186,6 +193,120 @@ export function ModelBadge({ task, onRefresh, compact }: { task: Task; onRefresh
               {m}
             </button>
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+const TIMEOUT_OPTIONS: { value: string; label: string }[] = [
+  { value: '', label: 'default' },
+  { value: '0.5', label: '30 min' },
+  { value: '1', label: '1 hour' },
+  { value: '2', label: '2 hours' },
+  { value: '4', label: '4 hours' },
+  { value: '8', label: '8 hours' },
+  { value: '12', label: '12 hours' },
+  { value: '24', label: '24 hours' },
+  { value: '0', label: 'No limit' },
+];
+
+const THINKING_OPTIONS: { value: string; label: string }[] = [
+  { value: '', label: 'default' },
+  { value: '4096', label: '4k' },
+  { value: '8192', label: '8k' },
+  { value: '16384', label: '16k' },
+  { value: '32768', label: '32k' },
+  { value: '65536', label: '64k' },
+  { value: '131072', label: '128k' },
+];
+
+/** Per-task Config: gear button opening a panel to edit Model / Effort /
+ * Timeout / Thinking in place (each change persists via updateTask).
+ * Shared by the task list, the sidebar, and the chat header. */
+export function TaskConfigBadge({ task, onRefresh, openUp }: { task: Task; onRefresh: () => void; openUp?: boolean }) {
+  const [open, setOpen] = useState(false);
+  const [opts, setOpts] = useState<ConfigOptions | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    fetchConfigOptions().then(setOpts).catch(() => {});
+    const handle = (e: MouseEvent) => {
+      if (!(e.target as HTMLElement).closest('[data-task-config]')) setOpen(false);
+    };
+    document.addEventListener('mousedown', handle);
+    return () => document.removeEventListener('mousedown', handle);
+  }, [open]);
+
+  const update = async (data: Parameters<typeof api.updateTask>[1]) => {
+    try {
+      await api.updateTask(task.id, data);
+      onRefresh();
+    } catch { /* keep current */ }
+  };
+
+  const isCodex = task.provider === 'codex';
+  const models = opts ? (isCodex ? opts.codex : opts.claude) : [];
+  const efforts = opts ? (isCodex ? opts.codexEffort : opts.effort) : [];
+
+  return (
+    <div className="relative" data-task-config>
+      <button
+        onClick={(e) => { e.stopPropagation(); setOpen(!open); }}
+        className="text-xs bg-gray-700 text-gray-300 px-1.5 rounded cursor-pointer hover:bg-gray-600 hover:text-gray-100 flex items-center gap-0.5"
+        title={`Config（model: ${task.model || 'default'}）`}
+      >
+        <Settings size={12} />
+        Config
+      </button>
+      {open && (
+        <div
+          className={`absolute ${openUp ? 'bottom-full mb-1' : 'top-full mt-1'} left-0 bg-gray-800 border border-gray-600 rounded shadow-lg z-30 p-3 min-w-[250px]`}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 items-center text-xs">
+            <span className="text-gray-400">Model</span>
+            <select
+              className="bg-gray-700 text-foreground rounded px-2 py-1 text-xs"
+              value={task.model || ''}
+              onChange={(e) => update({ model: e.target.value })}
+            >
+              {task.model && !models.includes(task.model) && (
+                <option value={task.model}>{task.model}</option>
+              )}
+              {models.map((m) => <option key={m} value={m}>{m}</option>)}
+            </select>
+
+            <span className="text-gray-400">Effort</span>
+            <select
+              className="bg-gray-700 text-foreground rounded px-2 py-1 text-xs"
+              value={task.effort_level || ''}
+              onChange={(e) => update({ effort_level: e.target.value })}
+            >
+              {!task.effort_level && <option value="">default</option>}
+              {efforts.map((m) => <option key={m} value={m}>{m}</option>)}
+            </select>
+
+            <span className="text-gray-400">Timeout</span>
+            <select
+              className="bg-gray-700 text-foreground rounded px-2 py-1 text-xs"
+              value={task.timeout_hours == null ? '' : String(task.timeout_hours)}
+              onChange={(e) => update({ timeout_hours: e.target.value === '' ? null : Number(e.target.value) })}
+            >
+              {TIMEOUT_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+
+            <span className="text-gray-400">Thinking</span>
+            <select
+              className="bg-gray-700 text-foreground rounded px-2 py-1 text-xs"
+              value={task.thinking_budget == null ? '' : String(task.thinking_budget)}
+              onChange={(e) => update({ thinking_budget: e.target.value === '' ? null : Number(e.target.value) })}
+            >
+              {THINKING_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+          </div>
+          <div className="mt-2 text-[10px] text-gray-500">修改在下一轮对话生效</div>
         </div>
       )}
     </div>

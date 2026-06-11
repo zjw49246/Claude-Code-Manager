@@ -8,6 +8,7 @@ import { Send, ArrowLeft, Loader2, ChevronDown, ChevronRight, ChevronUp, Copy, C
 import { SecretPicker } from '../Secrets/SecretPicker';
 import { QuickPhraseDropdown } from '../QuickPhrases/QuickPhraseDropdown';
 import { ListFilter, Syringe } from 'lucide-react';
+import { TaskConfigBadge } from '../Tasks/TaskBadges';
 import { ExpandableText } from '../ExpandableText';
 import { formatMessageTime, formatDateTime } from '../../config/timezone';
 import { useFileDrop } from '../../hooks/useFileDrop';
@@ -316,6 +317,11 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
   // losing messages when React batches rapid state updates.
   const handleWsMessage = useCallback((raw: Record<string, unknown>) => {
     const msg = raw as { channel?: string; data?: Record<string, unknown> };
+    // System channel: react to PTY mode toggling without a refresh
+    if (msg.channel === 'system' && msg.data?.event === 'runtime_settings_changed') {
+      setPtyMode(Boolean(msg.data.use_pty_mode));
+      return;
+    }
     if (msg.channel !== `task:${task.id}` || !msg.data) return;
 
     const eventType = msg.data.event_type as string || (msg.data.event as string);
@@ -450,7 +456,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
     fetchHistory();
   }, [fetchHistory]);
 
-  useWebSocket([`task:${task.id}`], handleWsMessage, handleReconnect);
+  useWebSocket([`task:${task.id}`, 'system'], handleWsMessage, handleReconnect);
 
   // Reset sending state when task reaches a terminal status
   // (catches cases where process_exit WebSocket event is missed — e.g. WS disconnect)
@@ -748,6 +754,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
           active={monitorCount > 0}
           onNavigate={() => setShowMonitorPanel(!showMonitorPanel)}
         />
+        <TaskConfigBadge task={task} onRefresh={() => onTaskUpdated?.()} />
         <button
           onClick={handleStar}
           className={`p-1.5 transition-colors ${starred ? 'text-yellow-400 hover:text-yellow-300' : 'text-gray-600 hover:text-yellow-400'}`}
@@ -1047,7 +1054,9 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
               ))}
             </div>
           )}
-          <div className="flex gap-2 items-end">
+          <div className="space-y-1.5">
+          {/* Row 1: action buttons */}
+          <div className="flex gap-1 items-center">
             <input
               ref={fileInputRef}
               type="file"
@@ -1059,7 +1068,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
               type="button"
               onClick={() => fileInputRef.current?.click()}
               disabled={!task.session_id || pendingFiles.length >= 10}
-              className="p-2.5 text-gray-500 hover:text-gray-300 disabled:opacity-40 disabled:cursor-not-allowed"
+              className="p-2 text-gray-500 hover:text-gray-300 disabled:opacity-40 disabled:cursor-not-allowed"
               title="Attach files"
             >
               <Paperclip size={18} />
@@ -1112,6 +1121,9 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
                 <Syringe size={18} />
               </button>
             )}
+          </div>
+          {/* Row 2: full-width input */}
+          <div className="flex gap-2 items-end">
             <textarea
               ref={textareaRef}
               value={input}
@@ -1137,6 +1149,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
             >
               {isProcessing ? <ListPlus size={18} /> : <Send size={18} />}
             </button>
+          </div>
           </div>
         </div>
       </div>

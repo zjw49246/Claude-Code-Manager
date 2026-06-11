@@ -73,6 +73,12 @@ async def update_runtime_settings(
     row = await _get_or_create(db)
     row.use_pty_mode = effective
     await db.commit()
+    # Notify open chat views so PTY-only controls (e.g. inject) appear/hide live
+    from backend.main import broadcaster
+    await broadcaster.broadcast("system", {
+        "event": "runtime_settings_changed",
+        "use_pty_mode": effective,
+    })
     return RuntimeSettingsResponse(
         use_pty_mode=effective,
         pty_available=_pty_available(),

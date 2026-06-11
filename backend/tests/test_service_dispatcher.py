@@ -2590,3 +2590,58 @@ async def test_clear_task_queue_no_queue_returns_zero(db_factory):
     """clear_task_queue on a task with no queue is a no-op returning 0."""
     dispatcher = _make_dispatcher(db_factory)
     assert dispatcher.clear_task_queue(999) == 0
+
+
+class TestResolveTimeout:
+    """任务级超时解析：NULL=全局默认，0=不限时，>0=小时数。"""
+
+    def _dispatcher(self):
+        from backend.services.dispatcher import GlobalDispatcher
+        return GlobalDispatcher.__new__(GlobalDispatcher)
+
+    def test_null_uses_global_default(self):
+        from backend.config import settings
+        from unittest.mock import MagicMock
+        t = MagicMock(timeout_hours=None)
+        assert self._dispatcher()._resolve_timeout(t) == settings.task_timeout_seconds
+
+    def test_zero_means_no_limit(self):
+        from unittest.mock import MagicMock
+        t = MagicMock(timeout_hours=0)
+        assert self._dispatcher()._resolve_timeout(t) is None
+
+    def test_hours_converted_to_seconds(self):
+        from unittest.mock import MagicMock
+        t = MagicMock(timeout_hours=2.5)
+        assert self._dispatcher()._resolve_timeout(t) == 9000
+
+    async def test_wait_process_kills_on_timeout(self):
+        import asyncio
+        from unittest.mock import MagicMock
+        d = self._dispatcher()
+        t = MagicMock(timeout_hours=0.0001, id=1)  # 0.36s
+
+        class FakeProc:
+            killed = False
+            async def wait(self):
+                if self.killed:
+                    return -9
+                await asyncio.sleep(5)
+            def kill(self):
+                self.killed = True
+        p = FakeProc()
+        await d._wait_process(p, t, "test")
+        assert p.killed is True
+
+
+@pytest.mark.asyncio
+async def test_create_task_fills_default_model_and_effort(client):
+    """创建任务不指定 model/effort → 自动填入全局默认值。"""
+    from backend.config import settings
+    resp = await client.post("/api/tasks", json={
+        "title": "T", "description": "d", "target_repo": "/tmp",
+    })
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["model"] == settings.default_model
+    assert data["effort_level"] == settings.default_effort
