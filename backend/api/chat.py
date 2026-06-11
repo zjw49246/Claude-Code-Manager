@@ -150,6 +150,7 @@ async def get_chat_history(
     limit: int = 0,
     before_id: int = 0,
     compact: bool = True,
+    touch: bool = False,
     db: AsyncSession = Depends(get_db),
 ):
     """Get chat-formatted history for a task.
@@ -157,6 +158,10 @@ async def get_chat_history(
     compact=True (default): tool_input/tool_output replaced with short summary.
     compact=False: full tool_input/tool_output included (truncated at 20k chars).
     before_id: only return messages with id < before_id (for pagination).
+    touch=True: count this fetch as a user access (move-to-front). Only the
+    frontend's initial page load sends it — pagination, background polling and
+    stale old-version clients must NOT reorder tasks (prod task 68 实录：
+    一个旧版前端残留标签页每隔十几分钟轮询一次，任务在列表里来回跳).
     """
     task = await db.get(Task, task_id)
     if not task:
@@ -164,29 +169,32 @@ async def get_chat_history(
 
     # 访问 = 移到同组（starred/非 starred）第一位：写 sort_order 为组内
     # 最大键 +60，其余任务相对顺序不变、整体后移一位（位置链表语义）
-    from datetime import datetime as _dt
-    from sqlalchemy import Float as _Float, func as _func
-    task.last_accessed_at = _dt.utcnow()
-    _eff = _func.coalesce(
-        Task.sort_order,
-        _func.cast(_func.strftime("%s", _func.coalesce(Task.last_accessed_at, Task.created_at)), _Float),
-    )
-    _max_key = (
-        await db.execute(
-            select(_func.max(_eff)).where(
-                Task.archived == False,  # noqa: E712
-                Task.starred == task.starred,
-                Task.id != task_id,
-            )
-        )
-    ).scalar()
-    if _max_key is not None:
+    if touch:
+        from datetime import datetime as _dt
+        from sqlalchemy import Float as _Float, func as _func
+        # 先取旧键再 touch——若先写 last_accessed_at=now，_own 永远大于
+        # 组内最大键，sort_order 写入分支对无 sort_order 的任务永远不触发
         _own = task.sort_order if task.sort_order is not None else (
-            task.last_accessed_at.timestamp() if task.last_accessed_at else 0
+            task.last_accessed_at.timestamp() if task.last_accessed_at
+            else (task.created_at.timestamp() if task.created_at else 0)
         )
-        if _own <= _max_key:
+        task.last_accessed_at = _dt.utcnow()
+        _eff = _func.coalesce(
+            Task.sort_order,
+            _func.cast(_func.strftime("%s", _func.coalesce(Task.last_accessed_at, Task.created_at)), _Float),
+        )
+        _max_key = (
+            await db.execute(
+                select(_func.max(_eff)).where(
+                    Task.archived == False,  # noqa: E712
+                    Task.starred == task.starred,
+                    Task.id != task_id,
+                )
+            )
+        ).scalar()
+        if _max_key is not None and _own <= _max_key:
             task.sort_order = _max_key + 60
-    await db.commit()
+        await db.commit()
 
     allowed = ["user_message", "message", "result", "tool_use", "tool_result", "system_init", "system_event", "thinking", "process_exit"]
     # Noisy telemetry must be excluded in SQL, before LIMIT applies. Filtering
