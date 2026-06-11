@@ -645,6 +645,8 @@ export const api = {
     request<PRReview[]>(`/api/pr-monitor/repos/${repoId}/reviews?page=${page}&size=${size}`),
   getReviewDetail: (reviewId: number) =>
     request<PRReview>(`/api/pr-monitor/reviews/${reviewId}`),
+  getWebhookInfo: () =>
+    request<{ webhook_url: string | null }>('/api/pr-monitor/webhook-info'),
 
   // System
   health: () => request<{ status: string }>('/api/system/health'),

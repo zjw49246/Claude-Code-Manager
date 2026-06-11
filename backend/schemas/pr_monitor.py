@@ -62,9 +62,12 @@ class MonitoredRepoResponse(BaseModel):
 class MonitoredRepoDetailResponse(MonitoredRepoResponse):
     """Full detail response — shows unmasked webhook_secret."""
 
+    # NOTE: must reuse the parent's validator method name ("mask_secret") so it
+    # actually overrides it in Pydantic v2; a differently-named validator would
+    # be registered IN ADDITION to the parent's, leaving the secret masked.
     @field_validator("webhook_secret", mode="before")
     @classmethod
-    def no_mask(cls, v: str) -> str:
+    def mask_secret(cls, v: str) -> str:
         return v
 
 

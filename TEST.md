@@ -186,6 +186,22 @@ cd frontend && npx tsc --noEmit
 | `test_task_delete_cleans_monitors` | task 删除 → MonitorCheck 和 MonitorSession 全部清理 |
 | `test_task_cancel_cancels_monitors` | task 取消 → 所有 running monitor 变为 cancelled |
 
+#### `test_api_pr_monitor.py` — PR Monitor API（CRUD + GitHub Webhook）
+
+| 测试 | 验证内容 |
+|------|---------|
+| `test_create_repo_success` / `test_create_repo_duplicate` / `test_create_repo_invalid_format` | 创建仓库成功（detail 返回完整 secret）/ 重复 → 409 / 非 `owner/repo` 格式 → 422 |
+| `test_list_repos_masks_secret` | 列表响应 secret 被掩码（前 4 位 + `***`） |
+| `test_update_repo_settings` / `test_update_repo_not_found` | 更新 auto_merge/branch/authors / 404 |
+| `test_toggle_repo` / `test_regenerate_secret` / `test_delete_repo` | 启停切换 / 重新生成 secret / 删除（级联清理 reviews） |
+| `test_webhook_info_configured` / `test_webhook_info_unconfigured` | PUBLIC_BASE_URL 设置时返回 webhook URL，否则 null |
+| `test_webhook_valid_signature_creates_review_and_task` | 合法 HMAC 签名 → 创建 PRReview + Task |
+| `test_webhook_invalid_signature_rejected` / `test_webhook_missing_signature_rejected` | 签名错误/缺失 → 403 |
+| `test_webhook_unknown_repo_ignored` / `test_webhook_disabled_repo_ignored` | 未监控/已禁用仓库忽略 |
+| `test_webhook_non_pull_request_event_ignored` / `test_webhook_draft_pr_ignored` / `test_webhook_wrong_base_branch_ignored` / `test_webhook_author_not_allowed_ignored` | 各类过滤条件忽略 |
+| `test_webhook_duplicate_opened_ignored_while_in_progress` | 进行中重复 opened 事件去重 |
+| `test_webhook_synchronize_supersedes_old_review` | synchronize 将旧 review 标记 superseded 并新建 |
+
 #### `test_mcp_server.py` — MCP Server 工具
 
 | 测试 | 验证内容 |
@@ -334,6 +350,19 @@ cd frontend && npx tsc --noEmit
 | `test_lifecycle_failure_retry` / `test_lifecycle_failure_max_retries` | 失败重试/达到上限 |
 | `test_lifecycle_exception` | 异常标记 task failed |
 | `test_plan_phase` | plan 模式进入 plan_review |
+
+##### `test_service_pr_review.py` — PR 审核服务
+
+| 测试 | 验证内容 |
+|------|---------|
+| `test_build_review_prompt_auto_merge_on` / `..._off` | auto_merge 开关影响 prompt（是否含 `gh pr merge`） |
+| `test_create_pr_review_task_happy_path` | 创建 PRReview + Task 并广播 `review_created` |
+| `test_create_pr_review_task_broadcast_failure_logged_not_raised` | 广播失败 → logger.warning，不中断流程 |
+| `test_check_and_update_review_merged` / `..._approved` / `..._changes_requested` | gh 状态映射 merged/approved/commented |
+| `test_check_and_update_review_skips_terminal_status` | 终态 review 不再调用 gh |
+| `test_check_and_update_review_auth_error_no_retry` | gh 认证错误（HTTP 401 等）→ 不重试，error 信息提示 `gh auth login` |
+| `test_check_and_update_review_transient_failure_retried_then_error` / `..._retry_succeeds` | 瞬时失败重试一次（失败→error / 成功→正常） |
+| `test_gh_pr_view_*` | subprocess mock：成功解析 / 401 → auth 分类 / 网络错误 → transient / spawn 失败包装为 GhError |
 
 ### 子 Agent 系统集成测试
 
