@@ -30,20 +30,14 @@ class TaskQueue:
         has_unread: bool | None = None,
         limit: int = 50, offset: int = 0,
     ) -> list[Task]:
-        # 排序：标星置顶 → 正在访问的 chat（全局最近一次访问）钉非星第一
-        # → 手动排序键（拖拽设置）/ 最近访问时间，越大越靠前
-        latest_access = select(func.max(Task.last_accessed_at)).scalar_subquery()
-        is_current = case(
-            (Task.last_accessed_at.isnot(None) & (Task.last_accessed_at == latest_access), 1),
-            else_=0,
-        )
+        # 排序：标星置顶 → 组内位置键（sort_order）降序。
+        # 访问/拖动都通过改写 sort_order 实现"移到某个位置"，因此
+        # 显示顺序严格等于键序——拖拽的中点插入才能成立。
         effective_key = func.coalesce(
             Task.sort_order,
             func.cast(func.strftime("%s", func.coalesce(Task.last_accessed_at, Task.created_at)), Float),
         )
-        stmt = select(Task).order_by(
-            Task.starred.desc(), is_current.desc(), effective_key.desc(), Task.id.desc()
-        )
+        stmt = select(Task).order_by(Task.starred.desc(), effective_key.desc(), Task.id.desc())
         if archived_only:
             stmt = stmt.where(Task.archived == True)
         elif not include_archived:

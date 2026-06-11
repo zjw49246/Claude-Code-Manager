@@ -162,9 +162,30 @@ async def get_chat_history(
     if not task:
         raise HTTPException(404, "Task not found")
 
-    # 访问优先排序：打开 chat（拉取历史）即视为访问
+    # 访问 = 移到同组（starred/非 starred）第一位：写 sort_order 为组内
+    # 最大键 +60，其余任务相对顺序不变、整体后移一位（位置链表语义）
     from datetime import datetime as _dt
+    from sqlalchemy import Float as _Float, func as _func
     task.last_accessed_at = _dt.utcnow()
+    _eff = _func.coalesce(
+        Task.sort_order,
+        _func.cast(_func.strftime("%s", _func.coalesce(Task.last_accessed_at, Task.created_at)), _Float),
+    )
+    _max_key = (
+        await db.execute(
+            select(_func.max(_eff)).where(
+                Task.archived == False,  # noqa: E712
+                Task.starred == task.starred,
+                Task.id != task_id,
+            )
+        )
+    ).scalar()
+    if _max_key is not None:
+        _own = task.sort_order if task.sort_order is not None else (
+            task.last_accessed_at.timestamp() if task.last_accessed_at else 0
+        )
+        if _own <= _max_key:
+            task.sort_order = _max_key + 60
     await db.commit()
 
     allowed = ["user_message", "message", "result", "tool_use", "tool_result", "system_init", "system_event", "thinking", "process_exit"]
