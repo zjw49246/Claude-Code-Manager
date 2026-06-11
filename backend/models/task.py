@@ -45,6 +45,10 @@ class Task(Base):
     thinking_budget: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # NULL = 全局默认超时；0 = 不限时；>0 = 指定小时数
     timeout_hours: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # 最近访问时间（打开 chat 时更新）——默认排序：最近访问优先
+    last_accessed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 手动拖拽排序键（NULL = 跟随最近访问排序；越大越靠前）
+    sort_order: Mapped[float | None] = mapped_column(Float, nullable=True)
     enable_workflows: Mapped[bool] = mapped_column(default=False, server_default="0")
     enabled_skills: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     tags: Mapped[dict | None] = mapped_column(JSON, nullable=True)

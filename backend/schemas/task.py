@@ -23,6 +23,7 @@ class TaskCreate(BaseModel):
     effort_level: str | None = None
     thinking_budget: int | None = None
     timeout_hours: float | None = None
+    sort_order: float | None = None
     enable_workflows: bool = False
     enabled_skills: dict | None = None
     tags: list[str] | None = None
@@ -101,6 +102,8 @@ class TaskResponse(BaseModel):
     effort_level: str | None
     thinking_budget: int | None
     timeout_hours: float | None = None
+    last_accessed_at: datetime | None = None
+    sort_order: float | None = None
     enable_workflows: bool
     enabled_skills: dict | None
     starred: bool

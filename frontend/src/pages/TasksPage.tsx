@@ -11,6 +11,7 @@ import { resolveTagColor } from '../components/TagColors';
 import { ChevronLeft, ChevronRight, ChevronDown, Filter, PanelLeftClose, PanelLeftOpen, Search, X, Star, Archive, ArchiveRestore } from 'lucide-react';
 import { ToolsBadge, SubAgentsBadge, TaskConfigBadge } from '../components/Tasks/TaskBadges';
 import { TAG_COLOR_OPTIONS } from '../components/TagColors';
+import { useTaskReorder } from '../hooks/useTaskReorder';
 
 const PAGE_SIZE = 20;
 
@@ -186,6 +187,10 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
         return proj ? tagFilters.some((tag) => proj.tags.includes(tag)) : false;
       })
     : tasks;
+
+  // 侧边栏拖拽排序（与主列表同一套逻辑）
+  const sidebarTasks = searchResults ?? filteredTasks;
+  const sidebarReorder = useTaskReorder(sidebarTasks, refresh);
 
   const handleOpenChat = useCallback((t: Task) => {
     setChatTaskWrapped(t);
@@ -455,15 +460,18 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
               {filterControls}
             </div>
             <div className="flex-1 overflow-y-auto min-h-0">
-              {(searchResults ?? filteredTasks)
-                .map((t) => {
+              {sidebarTasks
+                .map((t, idx) => {
                 const proj = t.project_id ? projects.find((p) => p.id === t.project_id) : undefined;
                 const colorDef = proj ? TAG_COLOR_OPTIONS.find((c) => c.key === proj.badge_color) : undefined;
                 return (
                 <div
                   key={t.id}
+                  {...sidebarReorder.itemProps(t, idx)}
                   onClick={() => handleOpenChat(t)}
                   className={`w-full text-left px-3 py-2.5 transition-colors border-b border-gray-800/50 cursor-pointer ${
+                    sidebarReorder.draggingId === t.id ? 'opacity-40' : ''
+                  } ${sidebarReorder.overIndex === idx && sidebarReorder.draggingId !== null && sidebarReorder.draggingId !== t.id ? 'ring-2 ring-inset ring-indigo-400' : ''} ${
                     chatTask?.id === t.id
                       ? 'bg-indigo-900/40 border-l-2 border-l-indigo-400'
                       : 'hover:bg-gray-800/50 border-l-2 border-l-transparent'

@@ -1203,3 +1203,52 @@ async def test_stop_session_cleared_only_returns_ok(client):
 
     assert resp.status_code == 200
     assert resp.json()["stopped"] is False
+
+
+@pytest.mark.asyncio
+async def test_list_order_starred_then_access_then_manual(client, session_factory):
+    """排序：标星置顶 → 手动 sort_order / 最近访问时间（越新越靠前）。"""
+    from datetime import datetime, timedelta
+    from backend.models.task import Task
+
+    ids = []
+    for i in range(4):
+        resp = await client.post("/api/tasks", json={
+            "title": f"T{i}", "description": "d", "target_repo": "/tmp",
+        })
+        ids.append(resp.json()["id"])
+
+    now = datetime.utcnow()
+    async with session_factory() as db:
+        a, b, c, d = [await db.get(Task, i) for i in ids]
+        a.last_accessed_at = now - timedelta(hours=3)
+        b.last_accessed_at = now - timedelta(hours=1)   # 最近访问
+        c.last_accessed_at = now - timedelta(hours=2)
+        c.starred = True                                 # 标星 → 置顶
+        d.last_accessed_at = now - timedelta(hours=4)
+        d.sort_order = now.timestamp() + 999             # 手动拖到最前（非星组）
+        await db.commit()
+
+    resp = await client.get("/api/tasks?limit=50")
+    order = [t["id"] for t in resp.json() if t["id"] in ids]
+    # c 标星置顶；d 手动键最大；b 比 a 访问得更近
+    assert order == [ids[2], ids[3], ids[1], ids[0]]
+
+
+@pytest.mark.asyncio
+async def test_chat_history_touches_last_accessed(client, session_factory):
+    """打开 chat（拉历史）应更新 last_accessed_at。"""
+    from backend.models.task import Task
+
+    resp = await client.post("/api/tasks", json={
+        "title": "T", "description": "d", "target_repo": "/tmp",
+    })
+    task_id = resp.json()["id"]
+    async with session_factory() as db:
+        t = await db.get(Task, task_id)
+        assert t.last_accessed_at is None
+
+    await client.get(f"/api/tasks/{task_id}/chat/history")
+    async with session_factory() as db:
+        t = await db.get(Task, task_id)
+        assert t.last_accessed_at is not None

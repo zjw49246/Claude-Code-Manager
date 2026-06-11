@@ -6,6 +6,7 @@ import { ToolsBadge, SubAgentsBadge, TaskConfigBadge } from './TaskBadges';
 import { TAG_COLOR_OPTIONS } from '../TagColors';
 import { ExpandableText } from '../ExpandableText';
 import { formatDateTime } from '../../config/timezone';
+import { useTaskReorder } from '../../hooks/useTaskReorder';
 
 interface TaskListProps {
   tasks: Task[];
@@ -103,14 +104,25 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId 
     } catch { /* ignore */ }
   };
 
+  // 拖拽排序（长按/拖动；标星置顶保留，仅同组内移动）
+  const { draggingId, overIndex, itemProps } = useTaskReorder(tasks, onRefresh);
+
   if (tasks.length === 0) {
     return <p className="text-gray-500 text-sm text-center py-8">No tasks yet</p>;
   }
 
   return (
     <div className="space-y-2">
-      {tasks.map((t) => (
-        <div key={t.id} className={`rounded-lg p-3 ${activeTaskId === t.id ? 'bg-indigo-900/60 ring-1 ring-indigo-400/60' : t.has_unread ? 'bg-indigo-900/50 ring-1 ring-indigo-500/50' : 'bg-gray-800'}`}>
+      {tasks.map((t, idx) => (
+        <div
+          key={t.id}
+          {...itemProps(t, idx)}
+          className={`rounded-lg p-3 transition-opacity ${
+            draggingId === t.id ? 'opacity-40' : ''
+          } ${overIndex === idx && draggingId !== null && draggingId !== t.id ? 'ring-2 ring-indigo-400' : ''} ${
+            activeTaskId === t.id ? 'bg-indigo-900/60 ring-1 ring-indigo-400/60' : t.has_unread ? 'bg-indigo-900/50 ring-1 ring-indigo-500/50' : 'bg-gray-800'
+          }`}
+        >
           {/* Row 1: status dot + badges (left, wraps) | action buttons (right, no wrap) */}
           <div className="flex items-center gap-2">
             <span className={`w-2.5 h-2.5 rounded-full shrink-0 self-start mt-[9px] ${statusColors[t.status] || 'bg-gray-500'}`} />

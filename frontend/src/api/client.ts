@@ -111,6 +111,8 @@ export interface Task {
   effort_level: string | null;
   thinking_budget?: number | null;
   timeout_hours?: number | null;
+  last_accessed_at?: string | null;
+  sort_order?: number | null;
   enable_workflows: boolean;
   enabled_skills: Record<string, boolean> | null;
   active_sub_agents: number;
@@ -499,7 +501,7 @@ export const api = {
     request<{ ok: boolean; stopped?: boolean; cleared_messages?: number; note?: string }>(`/api/tasks/${id}/stop-session`, { method: 'POST' }),
   createTask: (data: { title?: string; description?: string; project_id?: number; priority?: number; target_branch?: string; mode?: string; todo_file_path?: string; max_iterations?: number; goal_condition?: string; goal_max_turns?: number; goal_evaluator_model?: string; image_paths?: string[]; file_paths?: string[]; attachments?: { url: string; name: string; is_image: boolean }[]; secret_ids?: number[]; provider?: string; model?: string; effort_level?: string; thinking_budget?: number | null; timeout_hours?: number | null; enable_workflows?: boolean; enabled_skills?: Record<string, boolean>; starred?: boolean; clone_from_task_id?: number }) =>
     request<Task>('/api/tasks', { method: 'POST', body: JSON.stringify(data) }),
-  updateTask: (id: number, data: { title?: string; description?: string; priority?: number; enabled_skills?: Record<string, boolean>; model?: string; effort_level?: string; thinking_budget?: number | null; timeout_hours?: number | null }) =>
+  updateTask: (id: number, data: { title?: string; description?: string; priority?: number; enabled_skills?: Record<string, boolean>; model?: string; effort_level?: string; thinking_budget?: number | null; timeout_hours?: number | null; sort_order?: number | null }) =>
     request<Task>(`/api/tasks/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteTask: (id: number) =>
     request<{ ok: boolean }>(`/api/tasks/${id}`, { method: 'DELETE' }),
