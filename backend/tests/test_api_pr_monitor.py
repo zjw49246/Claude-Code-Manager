@@ -320,3 +320,33 @@ async def test_webhook_synchronize_supersedes_old_review(client, session_factory
         new = await db.get(PRReview, second_review_id)
         assert old.status == "superseded"
         assert new.status == "reviewing"
+
+
+@pytest.mark.asyncio
+async def test_webhook_self_pr_ignored(client, session_factory, monkeypatch):
+    """本机 gh 登录账号的 PR 自动屏蔽（self-approval 无意义）。"""
+    import backend.api.pr_monitor as prm
+    monkeypatch.setattr(prm, "_GH_LOGIN_CACHE", "machine-user")
+
+    repo = await _create_repo(client, "owner/self-test")
+    payload = _pr_payload("owner/self-test", number=9, author="machine-user")
+    resp = await _post_webhook(client, repo["webhook_secret"], payload)
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ignored"
+    assert "self PR" in resp.json()["reason"]
+
+
+@pytest.mark.asyncio
+async def test_webhook_self_pr_allowed_when_whitelisted(client, session_factory, monkeypatch):
+    """白名单显式包含本机账号时不屏蔽（测试后门）。"""
+    import backend.api.pr_monitor as prm
+    monkeypatch.setattr(prm, "_GH_LOGIN_CACHE", "machine-user")
+    from unittest.mock import AsyncMock, MagicMock, patch as _patch
+
+    repo = await _create_repo(client, "owner/self-wl", allowed_authors=["machine-user"])
+    payload = _pr_payload("owner/self-wl", number=10, author="machine-user")
+    with _patch("backend.services.pr_review_service.create_pr_review_task",
+                AsyncMock(return_value=MagicMock(id=1))):
+        resp = await _post_webhook(client, repo["webhook_secret"], payload)
+    assert resp.status_code == 200
+    assert resp.json()["status"] != "ignored"
