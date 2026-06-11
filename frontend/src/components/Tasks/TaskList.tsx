@@ -105,7 +105,7 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId 
   };
 
   // 拖拽排序（长按/拖动；标星置顶保留，仅同组内移动）
-  const { draggingId, overIndex, targetProps, handleProps } = useTaskReorder(tasks, onRefresh);
+  const { draggingId, overIndex, targetProps, pointerHandleProps, ghost } = useTaskReorder(tasks, onRefresh);
 
   if (tasks.length === 0) {
     return <p className="text-gray-500 text-sm text-center py-8">No tasks yet</p>;
@@ -113,6 +113,7 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId 
 
   return (
     <div className="space-y-2">
+      {ghost}
       {tasks.map((t, idx) => (
         <div
           key={t.id}
@@ -128,9 +129,9 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId 
             {/* 拖拽手柄：卡片正文是可选中文字，整卡 draggable 会被文本
                 选择手势抢走，必须用显式手柄拖动 */}
             <span
-              {...handleProps(t, idx)}
+              {...pointerHandleProps(t, idx)}
               className="shrink-0 self-start mt-[6px] -ml-1 cursor-grab active:cursor-grabbing text-gray-600 hover:text-gray-400 select-none"
-              title="拖动排序"
+              title="按住拖动排序"
             >
               <GripVertical size={14} />
             </span>
