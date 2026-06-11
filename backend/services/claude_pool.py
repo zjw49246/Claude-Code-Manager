@@ -101,6 +101,10 @@ class ClaudePool:
         self._accounts: list[PoolAccount] = []
         # account_id -> timestamp when cooldown expires
         self._cooldowns: dict[str, float] = {}
+        # Manual switch: preferred account is tried first by select(); if it's
+        # cooled down / excluded / fails the probe, selection falls back to
+        # the normal rotation order (auto rotation stays the safety net).
+        self._preferred_account_id: str | None = None
         self._usage_cache: list[dict] | None = None
         self._usage_cache_at: float = 0.0
         self._load()
@@ -149,8 +153,29 @@ class ClaudePool:
             "available": sum(1 for a in accounts if a["available"]),
             "cooldown": sum(1 for a in accounts if not a["available"] and a["enabled"]),
             "disabled": sum(1 for a in accounts if not a["enabled"]),
+            "preferred": self._preferred_account_id,
             "accounts": accounts,
         }
+
+    @property
+    def preferred_account_id(self) -> str | None:
+        return self._preferred_account_id
+
+    def set_preferred(self, account_id: str | None) -> bool:
+        """Pin an account as the preferred choice for subsequent launches.
+
+        None clears the pin (back to pure auto rotation). Returns False if
+        the account id is unknown.
+        """
+        if account_id is None:
+            self._preferred_account_id = None
+            logger.info("Pool preferred account cleared (auto rotation)")
+            return True
+        if not any(a.id == account_id for a in self._accounts):
+            return False
+        self._preferred_account_id = account_id
+        logger.info("Pool preferred account set to %s", account_id)
+        return True
 
     def select(self, *, exclude: set[str] | None = None, validate: bool = False) -> str | None:
         """Pick the best available account config_dir, excluding specified IDs.
@@ -175,6 +200,15 @@ class ClaudePool:
         # Simple round-robin: pick the one whose cooldown expired earliest
         # (or never had one), which naturally distributes load
         candidates.sort(key=lambda a: self._cooldowns.get(a.id, 0))
+        # Manual switch: preferred account jumps the queue; if it fails the
+        # probe below the normal order takes over (auto-rotation fallback)
+        if self._preferred_account_id:
+            preferred = next(
+                (a for a in candidates if a.id == self._preferred_account_id), None
+            )
+            if preferred:
+                candidates.remove(preferred)
+                candidates.insert(0, preferred)
         for chosen in candidates:
             if validate and not self._probe_account(chosen):
                 continue

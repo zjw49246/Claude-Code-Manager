@@ -365,6 +365,7 @@ export interface PoolUsageStatus {
   available: number;
   cooldown: number;
   disabled: number;
+  preferred?: string | null;
   accounts: PoolAccountUsage[];
 }
 
@@ -415,6 +416,8 @@ export const api = {
   getPoolUsage: () => request<PoolUsageStatus>('/api/pool/usage'),
   clearPoolCooldown: (accountId: string) =>
     request<{ ok: boolean }>(`/api/pool/accounts/${accountId}/clear-cooldown`, { method: 'POST' }),
+  setPoolPreferred: (accountId: string | null) =>
+    request<{ ok: boolean; preferred: string | null }>('/api/pool/preferred', { method: 'POST', body: JSON.stringify({ account_id: accountId }) }),
 
   // Global Settings
   getRuntimeSettings: () => request<RuntimeSettings>('/api/settings/runtime'),

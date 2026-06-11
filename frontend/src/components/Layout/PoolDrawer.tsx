@@ -37,15 +37,21 @@ function UsageBar({ label, window: w }: { label: string; window: PoolUsageWindow
   );
 }
 
-function AccountCard({ account, onClearCooldown }: { account: PoolAccountUsage; onClearCooldown: (id: string) => void }) {
+function AccountCard({ account, preferred, onClearCooldown, onSetPreferred }: {
+  account: PoolAccountUsage;
+  preferred: string | null;
+  onClearCooldown: (id: string) => void;
+  onSetPreferred: (id: string | null) => void;
+}) {
   const statusDot = !account.enabled
     ? { cls: 'bg-gray-500', label: '已禁用' }
     : account.available
       ? { cls: 'bg-green-500', label: '可用' }
       : { cls: 'bg-yellow-500', label: '冷却中' };
+  const isPreferred = preferred === account.id;
 
   return (
-    <div className="rounded-lg border border-gray-700 bg-gray-800 p-3 space-y-2">
+    <div className={`rounded-lg border bg-gray-800 p-3 space-y-2 ${isPreferred ? 'border-indigo-500' : 'border-gray-700'}`}>
       <div className="flex items-center gap-2">
         <span className={`h-2 w-2 shrink-0 rounded-full ${statusDot.cls}`} title={statusDot.label} />
         <span className="text-sm font-medium text-foreground truncate">{account.id}</span>
@@ -54,15 +60,41 @@ function AccountCard({ account, onClearCooldown }: { account: PoolAccountUsage; 
             {account.subscription_type}
           </span>
         )}
-        {!account.available && account.enabled && (
-          <button
-            onClick={() => onClearCooldown(account.id)}
-            className="ml-auto text-[10px] text-gray-400 hover:text-foreground underline"
-            title="清除冷却，立即恢复可用"
-          >
-            解除冷却
-          </button>
+        {isPreferred && (
+          <span className="px-1.5 py-0.5 rounded bg-green-600/30 text-green-300 text-[10px] font-semibold">
+            当前指定
+          </span>
         )}
+        <div className="ml-auto flex items-center gap-2">
+          {!account.available && account.enabled && (
+            <button
+              onClick={() => onClearCooldown(account.id)}
+              className="text-[10px] text-gray-400 hover:text-foreground underline"
+              title="清除冷却，立即恢复可用"
+            >
+              解除冷却
+            </button>
+          )}
+          {account.enabled && (
+            isPreferred ? (
+              <button
+                onClick={() => onSetPreferred(null)}
+                className="text-[10px] px-1.5 py-0.5 rounded border border-gray-600 text-gray-400 hover:text-foreground hover:border-gray-400"
+                title="取消指定，恢复自动轮换"
+              >
+                恢复自动
+              </button>
+            ) : (
+              <button
+                onClick={() => onSetPreferred(account.id)}
+                className="text-[10px] px-1.5 py-0.5 rounded border border-indigo-500/50 text-indigo-300 hover:bg-indigo-600/20"
+                title="下个 turn 起切换到此账号（session 自动迁移；若限流则自动回落其他账号）"
+              >
+                切换到此账号
+              </button>
+            )
+          )}
+        </div>
       </div>
       {account.email && <div className="text-xs text-gray-500 truncate">{account.email}</div>}
       {account.usage ? (
@@ -120,6 +152,15 @@ export function PoolDrawer() {
     }
   }, [loadUsage]);
 
+  const handleSetPreferred = useCallback(async (accountId: string | null) => {
+    try {
+      await api.setPoolPreferred(accountId);
+      await loadUsage();
+    } catch {
+      // 失败时保持原状态
+    }
+  }, [loadUsage]);
+
   if (!poolEnabled) return null;
 
   return (
@@ -165,7 +206,13 @@ export function PoolDrawer() {
               {error && <div className="text-xs text-red-400">{error}</div>}
               {loading && !status && <div className="text-xs text-gray-500">加载中…</div>}
               {status?.accounts.map((a) => (
-                <AccountCard key={a.id} account={a} onClearCooldown={handleClearCooldown} />
+                <AccountCard
+                  key={a.id}
+                  account={a}
+                  preferred={status?.preferred ?? null}
+                  onClearCooldown={handleClearCooldown}
+                  onSetPreferred={handleSetPreferred}
+                />
               ))}
             </div>
           </div>

@@ -350,23 +350,30 @@ def test_assistant_message_no_usage(parser):
 
 
 def test_result_with_model_usage(parser):
-    """result event with modelUsage → context_usage includes context_window."""
+    """result event with modelUsage → context_usage carries ONLY context_window.
+
+    Regression: result.usage is cumulative across all API requests of the run
+    (observed 45x the real context size on long tool-use turns), so the token
+    numbers must never be forwarded from here — per-request assistant events
+    are the accurate source.
+    """
     line = json.dumps({
         "type": "result",
         "session_id": "sess-789",
         "total_cost_usd": 0.05,
         "usage": {
+            # Cumulative run totals — NOT the current context size
             "input_tokens": 3,
-            "cache_read_input_tokens": 8698,
-            "cache_creation_input_tokens": 11488,
+            "cache_read_input_tokens": 868698,
+            "cache_creation_input_tokens": 511488,
             "output_tokens": 5,
         },
         "modelUsage": {
             "claude-opus-4-6[1m]": {
                 "inputTokens": 3,
                 "outputTokens": 5,
-                "cacheReadInputTokens": 8698,
-                "cacheCreationInputTokens": 11488,
+                "cacheReadInputTokens": 868698,
+                "cacheCreationInputTokens": 511488,
                 "contextWindow": 1000000,
                 "maxOutputTokens": 64000,
                 "costUSD": 0.05,
@@ -378,12 +385,8 @@ def test_result_with_model_usage(parser):
     assert result["cost_usd"] == 0.05
     assert "context_usage" in result
     cu = result["context_usage"]
-    assert cu["context_window"] == 1000000
-    assert cu["input_tokens"] == 3
-    assert cu["cache_read_input_tokens"] == 8698
-    assert cu["cache_creation_input_tokens"] == 11488
-    assert cu["output_tokens"] == 5
-    assert cu["total_input_tokens"] == 3 + 8698 + 11488  # 20189
+    assert cu == {"context_window": 1000000}
+    assert "total_input_tokens" not in cu
 
 
 def test_result_without_model_usage(parser):

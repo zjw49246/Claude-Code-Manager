@@ -158,22 +158,16 @@ class StreamParser:
             cost = data.get("total_cost_usd")
             if cost is not None:
                 event["cost_usd"] = cost
-            # Extract modelUsage for context window info
+            # NOTE: result.usage is CUMULATIVE across all API requests of the
+            # run (observed 45x the real context size on long tool-use turns)
+            # — never use it for the context indicator. The per-request
+            # assistant events already carry accurate usage; only forward the
+            # authoritative context_window here.
             model_usage = data.get("modelUsage")
             if isinstance(model_usage, dict):
-                for model_name, model_data in model_usage.items():
+                for _model_name, model_data in model_usage.items():
                     if isinstance(model_data, dict) and "contextWindow" in model_data:
-                        usage = data.get("usage", {})
-                        input_tokens = usage.get("input_tokens", 0) if isinstance(usage, dict) else 0
-                        cache_read = usage.get("cache_read_input_tokens", 0) if isinstance(usage, dict) else 0
-                        cache_creation = usage.get("cache_creation_input_tokens", 0) if isinstance(usage, dict) else 0
-                        output_tokens = usage.get("output_tokens", 0) if isinstance(usage, dict) else 0
                         event["context_usage"] = {
-                            "input_tokens": input_tokens,
-                            "cache_read_input_tokens": cache_read,
-                            "cache_creation_input_tokens": cache_creation,
-                            "output_tokens": output_tokens,
-                            "total_input_tokens": input_tokens + cache_read + cache_creation,
                             "context_window": model_data["contextWindow"],
                         }
                         break

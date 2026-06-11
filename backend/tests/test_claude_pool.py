@@ -543,3 +543,51 @@ class TestFetchUsage:
         first = counter["n"]
         await pool.fetch_usage()
         assert counter["n"] == first  # 第二次走缓存
+
+
+# ---------- 手动切号（preferred account）+ PTY 模式 limit 检测 ----------
+
+class TestPreferredAccount:
+    """手动切号：preferred 账号插队，不可用时回落自动轮换。"""
+
+    def test_preferred_jumps_queue(self, pool):
+        # 默认顺序会选 acc-1；置 preferred 后应选 acc-2
+        assert pool.set_preferred("acc-2") is True
+        assert pool.select() == pool._accounts[1].config_dir
+        assert pool.status()["preferred"] == "acc-2"
+
+    def test_preferred_falls_back_when_cooled(self, pool):
+        pool.set_preferred("acc-2")
+        pool.mark_rate_limited(pool._accounts[1].config_dir)
+        # acc-2 冷却中 → 自动回落 acc-1
+        assert pool.select() == pool._accounts[0].config_dir
+
+    def test_preferred_respects_exclude(self, pool):
+        pool.set_preferred("acc-2")
+        assert pool.select(exclude={"acc-2"}) == pool._accounts[0].config_dir
+
+    def test_clear_preferred(self, pool):
+        pool.set_preferred("acc-2")
+        assert pool.set_preferred(None) is True
+        assert pool.status()["preferred"] is None
+        assert pool.select() == pool._accounts[0].config_dir
+
+    def test_unknown_account_rejected(self, pool):
+        assert pool.set_preferred("nope") is False
+        assert pool.preferred_account_id is None
+
+
+class TestPtyModeRateLimitDetection:
+    """PTY 模式 limit 后切号：PTY 框架以错误 message 事件结束 turn，
+    其文案必须命中 is_rate_limited，使 _check_rate_limit_and_rotate 生效。"""
+
+    def test_pty_banner_message_matches(self):
+        # claude_pty session.py 在 rate-limit 时 yield 的固定文案
+        msg = ("usage limit reached — account hit its rate limit "
+               "(detected in PTY session)")
+        assert is_rate_limited(msg)
+        assert is_pool_rotatable(msg)
+
+    def test_pty_jsonl_rate_limit_event_content(self):
+        # jsonl_reader 对 rate_limit_event 的 normalize 内容
+        assert is_pool_rotatable("usage limit reached") is True
