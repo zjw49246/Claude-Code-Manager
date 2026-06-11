@@ -2,7 +2,7 @@ import { useState, useMemo, useRef, useEffect } from 'react';
 import { api } from '../../api/client';
 import type { Task, Project } from '../../api/client';
 import { Trash2, RotateCcw, XCircle, MessageCircle, Archive, ArchiveRestore, Star, Copy, Check, MoreVertical, Pencil, Mail, MailOpen, Clock } from 'lucide-react';
-import { ToolsBadge, SubAgentsBadge } from './TaskBadges';
+import { ToolsBadge, SubAgentsBadge, ModelBadge } from './TaskBadges';
 import { TAG_COLOR_OPTIONS } from '../TagColors';
 import { ExpandableText } from '../ExpandableText';
 import { formatDateTime } from '../../config/timezone';
@@ -130,9 +130,9 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId 
               <span className={`hidden sm:inline text-xs px-1.5 rounded font-medium ${t.provider === 'codex' ? 'bg-green-600/30 text-green-300' : 'bg-blue-600/30 text-blue-300'}`}>
                 {t.provider === 'codex' ? 'Codex' : 'Claude'}
               </span>
-              {t.model && (
-                <span className="hidden sm:inline text-xs bg-gray-700 text-gray-300 px-1.5 rounded">{t.model}</span>
-              )}
+              <span className="hidden sm:inline">
+                <ModelBadge task={t} onRefresh={onRefresh} />
+              </span>
               <ToolsBadge task={t} onRefresh={onRefresh} />
               <SubAgentsBadge task={t} />
             </div>

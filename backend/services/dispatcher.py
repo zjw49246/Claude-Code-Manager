@@ -46,6 +46,8 @@ class QueuedMessage:
     source: str = field(compare=False, default="user")
     user_message_text: str | None = field(compare=False, default=None)
     command_skills: dict | None = field(compare=False, default=None)
+    # One-shot model override for this message only (not persisted to task)
+    model_override: str | None = field(compare=False, default=None)
 
 
 def _binary_available(binary: str) -> bool:
@@ -1933,6 +1935,7 @@ class GlobalDispatcher:
         source: str = "user",
         user_message_text: str | None = None,
         command_skills: dict | None = None,
+        model_override: str | None = None,
     ):
         """Enqueue a message for the main agent of a task.
 
@@ -1946,6 +1949,7 @@ class GlobalDispatcher:
             source=source,
             user_message_text=user_message_text,
             command_skills=command_skills,
+            model_override=model_override,
         )
         await q.put(msg)
         self._ensure_queue_worker(task_id)
@@ -2091,7 +2095,7 @@ class GlobalDispatcher:
                 prompt=msg.prompt,
                 task_id=task_id,
                 cwd=task.last_cwd or task.target_repo or os.getcwd(),
-                model=task.model,
+                model=msg.model_override or task.model,
                 resume_session_id=task.session_id,
                 git_env=git_env,
                 thinking_budget=task.thinking_budget,
