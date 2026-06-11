@@ -638,6 +638,47 @@ async def test_chat_history_limit(client, session_factory):
 
 
 @pytest.mark.asyncio
+async def test_chat_history_noisy_rows_do_not_consume_limit(client, session_factory):
+    """Noisy system_event rows must be excluded before LIMIT, not after.
+
+    Regression: post-query filtering made pages return fewer than `limit`
+    messages, which the frontend reads as "history exhausted" — the
+    "Load older messages" button disappeared with older history unreachable
+    (production task 80: 258 of 631 messages were never displayed).
+    """
+    create_resp = await client.post("/api/tasks", json={
+        "title": "T", "description": "d", "target_repo": "/tmp",
+    })
+    task_id = create_resp.json()["id"]
+
+    async with session_factory() as db:
+        # 6 real messages interleaved with noisy telemetry
+        for i in range(6):
+            db.add(LogEntry(
+                instance_id=1, task_id=task_id,
+                event_type="message", role="assistant", content=f"msg-{i}", is_error=False,
+            ))
+            db.add(LogEntry(
+                instance_id=1, task_id=task_id,
+                event_type="system_event", content="task_progress", is_error=False,
+            ))
+        await db.commit()
+
+    # A full page of 4: noisy rows must not eat into the limit
+    resp = await client.get(f"/api/tasks/{task_id}/chat/history?limit=4")
+    msgs = resp.json()
+    assert len(msgs) == 4
+    assert [m["content"] for m in msgs] == ["msg-2", "msg-3", "msg-4", "msg-5"]
+
+    # Paginate older: before_id of the oldest returned message
+    resp = await client.get(
+        f"/api/tasks/{task_id}/chat/history?limit=4&before_id={msgs[0]['id']}"
+    )
+    older = resp.json()
+    assert [m["content"] for m in older] == ["msg-0", "msg-1"]
+
+
+@pytest.mark.asyncio
 async def test_chat_history_no_limit_returns_all(client, session_factory):
     """Default limit=0 should return all messages for a task."""
     create_resp = await client.post("/api/tasks", json={
