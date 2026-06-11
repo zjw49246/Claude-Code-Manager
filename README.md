@@ -158,6 +158,22 @@ JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home" \
 
 首次打开 App 在登录页展开 "Server URL" 输入服务器地址（如 Cloudflare Tunnel URL），然后输入 Token 登录。
 
+## 更新已部署的实例
+
+```bash
+git pull                      # 1. 拉取 CCM 最新代码
+./scripts/refresh_pty.sh      # 2. 刷新 claude-pty 依赖（见下）
+.venv/bin/alembic upgrade head  # 3. 数据库迁移
+cd frontend && npm run build && cd ..  # 4. 重建前端
+# 5. 重启服务（systemd / 手动）
+```
+
+> **为什么需要第 2 步**：`pyproject.toml` 里的 `claude-pty @ git+https://...` 是
+> **安装时快照**——`git pull` 只更新 CCM 自己的代码，不会带来新的 PTY 框架代码。
+> `scripts/refresh_pty.sh` 会对比已安装的 PTY commit 与远端 main HEAD，不一致时
+> 自动重装（editable/本地开发安装会自动跳过）。跳过这一步，PTY 模式会一直跑在
+> 安装当天的旧框架上。
+
 ## 使用流程
 
 ### 基本流程
