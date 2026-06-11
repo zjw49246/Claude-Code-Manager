@@ -3,7 +3,7 @@ import json
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select  # still used by chat history
+from sqlalchemy import and_, not_, select  # still used by chat history
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
@@ -160,13 +160,24 @@ async def get_chat_history(
         raise HTTPException(404, "Task not found")
 
     allowed = ["user_message", "message", "result", "tool_use", "tool_result", "system_init", "system_event", "thinking", "process_exit"]
+    # Noisy telemetry must be excluded in SQL, before LIMIT applies. Filtering
+    # after the query made pages come back short (< limit), which the client
+    # reads as "history exhausted" — older messages became unreachable.
+    noisy_system = ["task_progress", "thinking_tokens", "token_usage", "api_request", "api_response"]
     cols = [
         LogEntry.id, LogEntry.role, LogEntry.event_type, LogEntry.content,
         LogEntry.tool_name, LogEntry.tool_input, LogEntry.tool_output,
         LogEntry.is_error, LogEntry.loop_iteration, LogEntry.timestamp,
         LogEntry.raw_json,
     ]
-    conditions = [LogEntry.task_id == task_id, LogEntry.event_type.in_(allowed)]
+    conditions = [
+        LogEntry.task_id == task_id,
+        LogEntry.event_type.in_(allowed),
+        not_(and_(
+            LogEntry.event_type == "system_event",
+            LogEntry.content.in_(noisy_system),
+        )),
+    ]
     if before_id > 0:
         conditions.append(LogEntry.id < before_id)
 
@@ -193,10 +204,6 @@ async def get_chat_history(
     messages = []
     current_source = None  # track monitor context
     for row in rows:
-        # Skip noisy system events (heartbeats, telemetry subtypes)
-        if row.event_type == "system_event" and row.content in ("task_progress", "thinking_tokens", "token_usage", "api_request", "api_response"):
-            continue
-
         tool_input = row.tool_input
         tool_output = row.tool_output
 
