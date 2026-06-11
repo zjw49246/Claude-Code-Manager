@@ -253,11 +253,12 @@ describe('Drag reorder (main list)', () => {
     const rows = container.querySelectorAll('[data-reorder-idx]');
     expect(rows.length).toBe(3);
 
-    const dataTransfer = { effectAllowed: '', setData: vi.fn(), getData: vi.fn() };
-    // 把第 3 行拖到第 1 行（dragStart 发生在行内的拖拽手柄上）
-    const handle3 = rows[2].querySelector('[draggable="true"]')!;
+    // 把第 3 行拖到第 1 行：pointer 按下手柄启动拖拽，
+    // （jsdom 无布局，elementFromPoint 不可用，用行上的 drop 目标验证落点逻辑）
+    const handle3 = rows[2].querySelector('[title="按住拖动排序"]')!;
     expect(handle3).toBeTruthy();
-    fireEvent.dragStart(handle3, { dataTransfer });
+    fireEvent.pointerDown(handle3, { button: 0, clientX: 10, clientY: 300 });
+    const dataTransfer = { effectAllowed: '', setData: vi.fn(), getData: vi.fn() };
     fireEvent.dragOver(rows[0], { dataTransfer });
     fireEvent.drop(rows[0], { dataTransfer });
 

@@ -1,4 +1,4 @@
-import { useRef, useState, useCallback, useEffect } from 'react';
+import React, { useRef, useState, useCallback, useEffect } from 'react';
 import { api } from '../api/client';
 import type { Task } from '../api/client';
 
@@ -48,6 +48,11 @@ interface ReorderApi {
   /** 桌面拖拽手柄（行内有大段可选中文字时，整行 draggable 会被
    * 文本选择手势抢走 dragStart——主列表必须用显式手柄）。 */
   handleProps: (t: Task, idx: number) => Record<string, unknown>;
+  /** Pointer 拖拽手柄（自实现，不依赖 HTML5 DnD）：按住即拖，
+   * 配合 ghost 悬浮卡片使用。 */
+  pointerHandleProps: (t: Task, idx: number) => Record<string, unknown>;
+  /** 拖动中跟随光标的悬浮卡片，渲染在列表容器末尾。 */
+  ghost: React.ReactNode;
 }
 
 /**
@@ -67,6 +72,8 @@ export function useTaskReorder(tasks: Task[], onReordered: () => void): ReorderA
   tasksRef.current = tasks;
   const dragRef = useRef<number | null>(null);
   const overRef = useRef<number | null>(null);
+  const [ghostPos, setGhostPos] = useState<{ x: number; y: number } | null>(null);
+  const pointerMode = useRef(false);
 
   const commit = useCallback(async (fromId: number, toIdxRaw: number) => {
     const list = tasksRef.current;
@@ -89,13 +96,42 @@ export function useTaskReorder(tasks: Task[], onReordered: () => void): ReorderA
     overRef.current = null;
     setDraggingId(null);
     setOverIndex(null);
+    setGhostPos(null);
+    pointerMode.current = false;
     document.body.style.overflow = '';
+    document.body.style.userSelect = '';
     if (commitDrop && fromId != null && toIdx != null) void commit(fromId, toIdx);
   }, [commit]);
 
+  // Pointer 拖拽：document 级跟踪（鼠标/触控笔/触摸统一）
+  useEffect(() => {
+    if (draggingId == null || !pointerMode.current) return;
+    const onMove = (e: PointerEvent) => {
+      e.preventDefault();
+      setGhostPos({ x: e.clientX, y: e.clientY });
+      const el = document.elementFromPoint(e.clientX, e.clientY);
+      const item = el?.closest('[data-reorder-idx]');
+      if (item) {
+        const idx = Number(item.getAttribute('data-reorder-idx'));
+        overRef.current = idx;
+        setOverIndex(idx);
+      }
+    };
+    const onUp = () => endDrag(true);
+    const onCancel = () => endDrag(false);
+    document.addEventListener('pointermove', onMove);
+    document.addEventListener('pointerup', onUp);
+    document.addEventListener('pointercancel', onCancel);
+    return () => {
+      document.removeEventListener('pointermove', onMove);
+      document.removeEventListener('pointerup', onUp);
+      document.removeEventListener('pointercancel', onCancel);
+    };
+  }, [draggingId, endDrag]);
+
   // 移动端：激活后用 document 级监听器跟踪手指（非被动，可 preventDefault）
   useEffect(() => {
-    if (draggingId == null) return;
+    if (draggingId == null || pointerMode.current) return;
     const onMove = (e: TouchEvent) => {
       e.preventDefault(); // 阻止滚动接管，避免 touchcancel
       const touch = e.touches[0];
@@ -165,10 +201,41 @@ export function useTaskReorder(tasks: Task[], onReordered: () => void): ReorderA
     },
   }), [endDrag]);
 
+  const pointerHandleProps = useCallback((t: Task, idx: number) => ({
+    onPointerDown: (e: React.PointerEvent) => {
+      if (e.button !== 0) return;
+      e.preventDefault(); // 阻止文本选择与原生拖拽
+      pointerMode.current = true;
+      dragRef.current = t.id;
+      overRef.current = idx;
+      setDraggingId(t.id);
+      setGhostPos({ x: e.clientX, y: e.clientY });
+      document.body.style.userSelect = 'none';
+      if (e.pointerType === 'touch') document.body.style.overflow = 'hidden';
+    },
+    // touch-action: none 让触摸按下手柄时浏览器不接管滚动
+    style: { touchAction: 'none' } as React.CSSProperties,
+  }), []);
+
+  const dragTask = tasks.find((t) => t.id === draggingId);
+  const ghost: React.ReactNode = (draggingId != null && ghostPos && dragTask)
+    ? React.createElement(
+        'div',
+        {
+          style: {
+            position: 'fixed', left: ghostPos.x + 12, top: ghostPos.y - 16,
+            zIndex: 9999, pointerEvents: 'none', maxWidth: 320,
+          },
+          className: 'px-3 py-2 rounded-lg bg-gray-700/95 border border-indigo-400 shadow-2xl text-xs text-gray-100 truncate',
+        },
+        `#${dragTask.id} ${dragTask.title || dragTask.description || ''}`.slice(0, 60),
+      )
+    : null;
+
   const itemProps = useCallback((t: Task, idx: number) => ({
     ...targetProps(t, idx),
     ...handleProps(t, idx),
   }), [targetProps, handleProps]);
 
-  return { draggingId, overIndex, itemProps, targetProps, handleProps };
+  return { draggingId, overIndex, itemProps, targetProps, handleProps, pointerHandleProps, ghost };
 }
