@@ -1,4 +1,4 @@
-import { useRef, useState, useCallback } from 'react';
+import { useRef, useState, useCallback, useEffect } from 'react';
 import { api } from '../api/client';
 import type { Task } from '../api/client';
 
@@ -48,81 +48,113 @@ interface ReorderApi {
 /**
  * 任务拖拽排序（任务列表与侧边栏共用）。
  * - 桌面：HTML5 drag & drop
- * - 移动端：长按 450ms 激活后跟随手指
+ * - 移动端：长按 450ms 激活；激活后在 document 上挂非被动 touchmove
+ *   （preventDefault 阻止浏览器把手势接管成滚动 → 否则会收到 touchcancel
+ *   导致"浮起来但拖不动"）
  * - 标星置顶保留：只能在同 starred 分组内移动
  */
 export function useTaskReorder(tasks: Task[], onReordered: () => void): ReorderApi {
   const [draggingId, setDraggingId] = useState<number | null>(null);
   const [overIndex, setOverIndex] = useState<number | null>(null);
   const longPress = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const touchActive = useRef(false);
+  // 实时引用，供 document 级监听器读取（避免闭包过期）
+  const tasksRef = useRef(tasks);
+  tasksRef.current = tasks;
+  const dragRef = useRef<number | null>(null);
+  const overRef = useRef<number | null>(null);
 
-  const commit = useCallback(async (fromIdx: number, toIdxRaw: number) => {
-    const [gs, ge] = groupRange(tasks, fromIdx);
+  const commit = useCallback(async (fromId: number, toIdxRaw: number) => {
+    const list = tasksRef.current;
+    const fromIdx = list.findIndex((t) => t.id === fromId);
+    if (fromIdx < 0) return;
+    const [gs, ge] = groupRange(list, fromIdx);
     const toIdx = Math.min(Math.max(toIdxRaw, gs), ge);
     if (toIdx === fromIdx) return;
-    const sort = newSortFor(tasks, fromIdx, toIdx > fromIdx ? toIdx : toIdx);
+    const sort = newSortFor(list, fromIdx, toIdx);
     try {
-      await api.updateTask(tasks[fromIdx].id, { sort_order: sort });
+      await api.updateTask(fromId, { sort_order: sort });
       onReordered();
     } catch { /* keep order */ }
-  }, [tasks, onReordered]);
+  }, [onReordered]);
 
-  const finish = useCallback((fromId: number | null, toIdx: number | null) => {
+  const endDrag = useCallback((commitDrop: boolean) => {
+    const fromId = dragRef.current;
+    const toIdx = overRef.current;
+    dragRef.current = null;
+    overRef.current = null;
     setDraggingId(null);
     setOverIndex(null);
     document.body.style.overflow = '';
-    if (fromId == null || toIdx == null) return;
-    const fromIdx = tasks.findIndex((t) => t.id === fromId);
-    if (fromIdx < 0) return;
-    void commit(fromIdx, toIdx);
-  }, [tasks, commit]);
+    if (commitDrop && fromId != null && toIdx != null) void commit(fromId, toIdx);
+  }, [commit]);
+
+  // 移动端：激活后用 document 级监听器跟踪手指（非被动，可 preventDefault）
+  useEffect(() => {
+    if (draggingId == null) return;
+    const onMove = (e: TouchEvent) => {
+      e.preventDefault(); // 阻止滚动接管，避免 touchcancel
+      const touch = e.touches[0];
+      const el = document.elementFromPoint(touch.clientX, touch.clientY);
+      const item = el?.closest('[data-reorder-idx]');
+      if (item) {
+        const idx = Number(item.getAttribute('data-reorder-idx'));
+        overRef.current = idx;
+        setOverIndex(idx);
+      }
+    };
+    const onEnd = () => endDrag(true);
+    const onCancel = () => endDrag(false);
+    document.addEventListener('touchmove', onMove, { passive: false });
+    document.addEventListener('touchend', onEnd);
+    document.addEventListener('touchcancel', onCancel);
+    return () => {
+      document.removeEventListener('touchmove', onMove);
+      document.removeEventListener('touchend', onEnd);
+      document.removeEventListener('touchcancel', onCancel);
+    };
+  }, [draggingId, endDrag]);
 
   const itemProps = useCallback((t: Task, idx: number) => ({
     'data-reorder-idx': idx,
     draggable: true,
     onDragStart: (e: React.DragEvent) => {
       e.dataTransfer.effectAllowed = 'move';
+      dragRef.current = t.id;
       setDraggingId(t.id);
     },
     onDragOver: (e: React.DragEvent) => {
-      if (draggingId == null) return;
+      if (dragRef.current == null) return;
       e.preventDefault();
+      overRef.current = idx;
       setOverIndex(idx);
     },
     onDrop: (e: React.DragEvent) => {
       e.preventDefault();
-      finish(draggingId, idx);
+      overRef.current = idx;
+      endDrag(true);
     },
-    onDragEnd: () => { setDraggingId(null); setOverIndex(null); },
-    // 移动端长按拖动
+    onDragEnd: () => endDrag(false),
+    // 移动端长按激活
     onTouchStart: () => {
       longPress.current = setTimeout(() => {
-        touchActive.current = true;
+        dragRef.current = t.id;
+        overRef.current = idx;
         setDraggingId(t.id);
-        document.body.style.overflow = 'hidden'; // 拖动期间禁页面滚动
+        document.body.style.overflow = 'hidden';
         if (navigator.vibrate) navigator.vibrate(30);
       }, 450);
     },
-    onTouchMove: (e: React.TouchEvent) => {
-      if (!touchActive.current) {
-        // 长按未触发前移动 = 滚动意图，取消长按
-        if (longPress.current) { clearTimeout(longPress.current); longPress.current = null; }
-        return;
+    onTouchMove: () => {
+      // 长按未触发前移动 = 滚动意图，取消长按（激活后由 document 监听接管）
+      if (dragRef.current == null && longPress.current) {
+        clearTimeout(longPress.current);
+        longPress.current = null;
       }
-      const touch = e.touches[0];
-      const el = document.elementFromPoint(touch.clientX, touch.clientY);
-      const item = el?.closest('[data-reorder-idx]');
-      if (item) setOverIndex(Number(item.getAttribute('data-reorder-idx')));
     },
     onTouchEnd: () => {
       if (longPress.current) { clearTimeout(longPress.current); longPress.current = null; }
-      if (touchActive.current) {
-        touchActive.current = false;
-        finish(draggingId, overIndex);
-      }
     },
-  }), [draggingId, overIndex, finish]);
+  }), [endDrag]);
 
   return { draggingId, overIndex, itemProps };
 }
