@@ -418,7 +418,8 @@ export function TaskForm({ onCreated }: TaskFormProps) {
           className="flex items-center gap-1 text-xs px-2 py-1.5 rounded border transition-colors bg-gray-700 text-gray-400 border-gray-600 hover:bg-gray-600 hover:text-gray-300 disabled:opacity-40"
         >
           <Paperclip size={13} />
-          {pendingFiles.length > 0 ? `${pendingFiles.length}/10 files` : 'Attach files'}
+          <span className="hidden sm:inline">{pendingFiles.length > 0 ? `${pendingFiles.length}/10 files` : 'Attach files'}</span>
+          {pendingFiles.length > 0 && <span className="sm:hidden">{pendingFiles.length}</span>}
         </button>
         {/* Config dropdown */}
         <div ref={configRef} className="relative">
@@ -432,7 +433,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
             }`}
           >
             <Settings size={13} />
-            Config
+            <span className="hidden sm:inline">Config</span>
           </button>
           {showConfigPanel && (
             <div className="absolute bottom-full mb-1 left-0 bg-gray-800 border border-gray-600 rounded shadow-lg z-20 p-3 min-w-[280px]">
@@ -530,7 +531,8 @@ export function TaskForm({ onCreated }: TaskFormProps) {
               }`}
             >
               <Wrench size={13} />
-              Tools{enabledToolCount > 0 ? ` (${enabledToolCount})` : ''}
+              <span className="hidden sm:inline">Tools{enabledToolCount > 0 ? ` (${enabledToolCount})` : ''}</span>
+              {enabledToolCount > 0 && <span className="sm:hidden">{enabledToolCount}</span>}
             </button>
             {showToolsDropdown && (
               <div className="absolute bottom-full mb-1 left-0 bg-gray-800 border border-gray-600 rounded shadow-lg z-20 min-w-[180px]">
@@ -576,7 +578,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
           className="flex items-center gap-1 bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-1.5 rounded text-xs font-medium disabled:opacity-50 ml-auto"
         >
           <Plus size={14} />
-          {loading ? 'Creating...' : 'Create'}
+          <span className="hidden sm:inline">{loading ? 'Creating...' : 'Create'}</span>
         </button>
       </div>
     </form>
