@@ -235,3 +235,39 @@ describe('TaskList', () => {
     });
   });
 });
+
+
+describe('Drag reorder (main list)', () => {
+  it('drop on another row persists a new sort_order', async () => {
+    const onRefresh = vi.fn();
+    const now = Date.now() / 1000;
+    const tasks = [
+      makeTask({ id: 11, created_at: '2026-06-11T03:00:00Z', sort_order: now + 300 }),
+      makeTask({ id: 12, created_at: '2026-06-11T02:00:00Z', sort_order: now + 200 }),
+      makeTask({ id: 13, created_at: '2026-06-11T01:00:00Z', sort_order: now + 100 }),
+    ];
+    const { container } = render(
+      <TaskList tasks={tasks} projects={[]} onRefresh={onRefresh} onOpenChat={vi.fn()} />
+    );
+
+    const rows = container.querySelectorAll('[data-reorder-idx]');
+    expect(rows.length).toBe(3);
+
+    const dataTransfer = { effectAllowed: '', setData: vi.fn(), getData: vi.fn() };
+    // 把第 3 行拖到第 1 行（dragStart 发生在行内的拖拽手柄上）
+    const handle3 = rows[2].querySelector('[draggable="true"]')!;
+    expect(handle3).toBeTruthy();
+    fireEvent.dragStart(handle3, { dataTransfer });
+    fireEvent.dragOver(rows[0], { dataTransfer });
+    fireEvent.drop(rows[0], { dataTransfer });
+
+    await waitFor(() => {
+      expect(api.updateTask).toHaveBeenCalled();
+    });
+    const [id, data] = (api.updateTask as ReturnType<typeof vi.fn>).mock.calls.at(-1)!;
+    expect(id).toBe(13);
+    // 新键必须大于原第 1 行的键，才能真正排到最前
+    expect((data as { sort_order: number }).sort_order).toBeGreaterThan(now + 300);
+    await waitFor(() => expect(onRefresh).toHaveBeenCalled());
+  });
+});
