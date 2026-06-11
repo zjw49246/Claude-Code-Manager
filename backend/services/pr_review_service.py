@@ -110,6 +110,25 @@ PR_REVIEW_RESULT: <one of: approved_merged, lgtm_comment, review_comments, error
     )
 
 
+PR_MONITOR_PROJECT_NAME = "PR-Monitor"
+
+
+async def _get_or_create_pr_monitor_project(db: AsyncSession) -> int:
+    """审核任务统一归入 PR-Monitor 项目；不存在则创建。"""
+    from sqlalchemy import select
+    from backend.models.project import Project
+
+    result = await db.execute(
+        select(Project).where(Project.name == PR_MONITOR_PROJECT_NAME)
+    )
+    project = result.scalar_one_or_none()
+    if project is None:
+        project = Project(name=PR_MONITOR_PROJECT_NAME)
+        db.add(project)
+        await db.flush()
+    return project.id
+
+
 async def create_pr_review_task(
     db: AsyncSession, repo: MonitoredRepo, pr_data: dict
 ) -> PRReview:
@@ -133,6 +152,7 @@ async def create_pr_review_task(
         tags=["pr-review"],
         metadata_={"pr_review_id": review.id},
         model=repo.review_model,
+        project_id=await _get_or_create_pr_monitor_project(db),
     )
     db.add(task)
     await db.flush()
