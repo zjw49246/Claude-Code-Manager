@@ -105,6 +105,10 @@ class ClaudePool:
         # cooled down / excluded / fails the probe, selection falls back to
         # the normal rotation order (auto rotation stays the safety net).
         self._preferred_account_id: str | None = None
+        # Most recently selected account (display only — selection happens
+        # per-launch, there is no persistent "current" account)
+        self._last_selected_id: str | None = None
+        self._last_selected_at: float = 0.0
         self._usage_cache: list[dict] | None = None
         self._usage_cache_at: float = 0.0
         self._load()
@@ -154,6 +158,8 @@ class ClaudePool:
             "cooldown": sum(1 for a in accounts if not a["available"] and a["enabled"]),
             "disabled": sum(1 for a in accounts if not a["enabled"]),
             "preferred": self._preferred_account_id,
+            "last_selected": self._last_selected_id,
+            "last_selected_at": self._last_selected_at or None,
             "accounts": accounts,
         }
 
@@ -213,6 +219,8 @@ class ClaudePool:
             if validate and not self._probe_account(chosen):
                 continue
             logger.info("Pool selected account %s (%s)", chosen.id, chosen.config_dir)
+            self._last_selected_id = chosen.id
+            self._last_selected_at = time.time()
             return chosen.config_dir
 
         logger.warning("Pool has no healthy accounts after validation (exclude=%s)", exclude)

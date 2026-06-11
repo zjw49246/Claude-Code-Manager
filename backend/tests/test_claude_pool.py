@@ -591,3 +591,12 @@ class TestPtyModeRateLimitDetection:
     def test_pty_jsonl_rate_limit_event_content(self):
         # jsonl_reader 对 rate_limit_event 的 normalize 内容
         assert is_pool_rotatable("usage limit reached") is True
+
+
+class TestLastSelected:
+    def test_select_records_last_selected(self, pool):
+        pool.select()
+        assert pool.status()["last_selected"] == "acc-1"
+
+    def test_no_selection_yet(self, pool):
+        assert pool.status()["last_selected"] is None

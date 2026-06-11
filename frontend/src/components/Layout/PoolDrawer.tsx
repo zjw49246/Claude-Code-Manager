@@ -37,9 +37,10 @@ function UsageBar({ label, window: w }: { label: string; window: PoolUsageWindow
   );
 }
 
-function AccountCard({ account, preferred, onClearCooldown, onSetPreferred }: {
+function AccountCard({ account, preferred, lastSelected, onClearCooldown, onSetPreferred }: {
   account: PoolAccountUsage;
   preferred: string | null;
+  lastSelected: string | null;
   onClearCooldown: (id: string) => void;
   onSetPreferred: (id: string | null) => void;
 }) {
@@ -49,6 +50,7 @@ function AccountCard({ account, preferred, onClearCooldown, onSetPreferred }: {
       ? { cls: 'bg-green-500', label: '可用' }
       : { cls: 'bg-yellow-500', label: '冷却中' };
   const isPreferred = preferred === account.id;
+  const isLastSelected = lastSelected === account.id;
 
   return (
     <div className={`rounded-lg border bg-gray-800 p-3 space-y-2 ${isPreferred ? 'border-indigo-500' : 'border-gray-700'}`}>
@@ -63,6 +65,11 @@ function AccountCard({ account, preferred, onClearCooldown, onSetPreferred }: {
         {isPreferred && (
           <span className="px-1.5 py-0.5 rounded bg-green-600/30 text-green-300 text-[10px] font-semibold">
             当前指定
+          </span>
+        )}
+        {isLastSelected && (
+          <span className="px-1.5 py-0.5 rounded bg-cyan-600/30 text-cyan-300 text-[10px] font-semibold" title="最近一次 launch 选中的账号（每次发消息时重新选号）">
+            最近使用
           </span>
         )}
         <div className="ml-auto flex items-center gap-2">
@@ -210,6 +217,7 @@ export function PoolDrawer() {
                   key={a.id}
                   account={a}
                   preferred={status?.preferred ?? null}
+                  lastSelected={status?.last_selected ?? null}
                   onClearCooldown={handleClearCooldown}
                   onSetPreferred={handleSetPreferred}
                 />

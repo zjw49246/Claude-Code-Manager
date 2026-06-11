@@ -366,6 +366,7 @@ export interface PoolUsageStatus {
   cooldown: number;
   disabled: number;
   preferred?: string | null;
+  last_selected?: string | null;
   accounts: PoolAccountUsage[];
 }
 
