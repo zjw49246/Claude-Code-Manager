@@ -484,9 +484,6 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
                         {proj.name}
                       </span>
                     )}
-                    {t.model && (
-                      <span className="text-[10px] bg-gray-700 text-gray-300 px-1 rounded truncate max-w-[110px]">{t.model}</span>
-                    )}
                   </div>
                   <div className="flex items-center gap-1.5 mt-1 ml-4" onClick={(e) => e.stopPropagation()}>
                     <ToolsBadge task={t} onRefresh={refresh} />
