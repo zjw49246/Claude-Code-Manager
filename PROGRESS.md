@@ -300,6 +300,13 @@
 - **预防**: 中断语义必须覆盖"排队中"的工作，不只是"执行中"的进程；API 不应把 no-op 包装成成功
 - **Commit**: f4d24e5
 
+### Chat 撞限不自动切号（Pool 切换从未在 chat 路径生效）
+- **问题**: Chat 中途遇到 "You have hit your session limit" 不切号，任务直接 failed
+- **原因**: ① `_try_chat_pool_rotation` 用**位置参数**调用 keyword-only 的 `migrate_session(*, ...)`，TypeError 被外层 `except Exception` 吞掉，切号永远返回 False（无测试覆盖所以一直没暴露）；② 生产部署的旧版正则 `hit your limit` 匹配不到 "hit your **session** limit" 新文案（仓库已修但未部署）。两个问题叠加
+- **解决**: 改关键字调用 + 回归测试（先验证红再修绿）；顺带修了 probe 阻塞事件循环（`select_async` 走线程）、probe env 未剔除 `CLAUDECODE`、session 迁移源误用 env `CLAUDE_CONFIG_DIR`（改 `locate_session_config_dir` 全目录查找）
+- **预防**: keyword-only 函数防得住签名误用，但防不住异常被宽 `except` 吞掉——关键路径（如切号）必须有集成级测试断言"成功"而不仅是"不抛错"；修了 bug 要及时部署到生产，仓库修了 ≠ 线上修了
+- **Commit**: 8856d18
+
 ## 已知问题
 
 - `total_cost_usd` 仅在 Claude Code stream-json result 事件报告时更新
