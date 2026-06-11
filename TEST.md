@@ -408,6 +408,21 @@ cd frontend && npx tsc --noEmit
 | `formatDateTime treats naive timestamp as UTC` | formatDateTime 同样按 UTC 解析 |
 | `formatDateTime converts UTC to user timezone` | 正确将 UTC 转为用户选定时区 |
 
+#### Claude Pool (`test_claude_pool.py`)
+
+| 测试用例 | 说明 |
+|---------|------|
+| `TestRateLimitDetection` / `TestAuthFailureDetection` / `TestPoolRotatable` | 限速/认证失败文案检测（窄正则，含中英文与各时区变体） |
+| `TestClaudePool` | 账号加载、select 轮转、冷却标记/过期/清除、status 汇总 |
+| `TestSessionMigration` | session JSONL 硬链接迁移（成功/已链接/缺文件/inode 冲突） |
+| `TestChatPoolRotationRegression` | **回归**：chat 路径切号必须成功并迁移 session（曾因位置参数调用 keyword-only 的 `migrate_session` 静默失败） |
+| `TestLocateSessionConfigDir` | 在所有账号目录中定位 session 实际所在的 config_dir |
+| `TestSelectAsync` | `select_async` 在线程中执行，不阻塞事件循环 |
+| `TestProbeEnvCleanup` | 探测子进程 env 必须剔除 `CLAUDECODE` / `CLAUDE_CODE` |
+| `TestFetchUsage` | OAuth usage API 额度查询：正常返回、凭据缺失、token 过期、60s 缓存 |
+
+**Pool 额度抽屉（手动测试）**：`POOL_ENABLED=true` 时 Header 左侧出现 "Pro" 徽标 → 点击打开抽屉 → 每个账号显示 5h/7d 利用率进度条（<60% 绿 / 60–85% 黄 / ≥85% 红）、冷却状态与解除冷却按钮；`GET /api/pool/usage` 返回合并了 usage 的账号列表。
+
 ### 前端检查
 
 | 检查 | 命令 | 说明 |

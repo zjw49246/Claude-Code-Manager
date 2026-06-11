@@ -18,6 +18,20 @@ async def pool_status():
     return pool.status()
 
 
+@router.get("/usage")
+async def pool_usage():
+    """Pool status merged with per-account quota utilization (OAuth usage API)."""
+    pool = _get_pool()
+    status = pool.status()
+    usage_by_id = {u["id"]: u for u in await pool.fetch_usage()}
+    for account in status["accounts"]:
+        u = usage_by_id.get(account["id"], {})
+        account["subscription_type"] = u.get("subscription_type")
+        account["usage"] = u.get("usage")
+        account["usage_error"] = u.get("error")
+    return status
+
+
 @router.post("/reload")
 async def pool_reload():
     pool = _get_pool()

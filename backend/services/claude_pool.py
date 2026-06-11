@@ -70,6 +70,8 @@ def is_pool_rotatable(text: str) -> bool:
 
 DEFAULT_CONFIG_PATH = Path.home() / ".claude-pool" / "accounts.json"
 DEFAULT_COOLDOWN_SECONDS = 300  # 5 minutes
+USAGE_API_URL = "https://api.anthropic.com/api/oauth/usage"
+USAGE_CACHE_TTL = 60  # seconds
 
 
 class PoolAccount:
@@ -99,6 +101,8 @@ class ClaudePool:
         self._accounts: list[PoolAccount] = []
         # account_id -> timestamp when cooldown expires
         self._cooldowns: dict[str, float] = {}
+        self._usage_cache: list[dict] | None = None
+        self._usage_cache_at: float = 0.0
         self._load()
 
     @property
@@ -180,12 +184,17 @@ class ClaudePool:
         logger.warning("Pool has no healthy accounts after validation (exclude=%s)", exclude)
         return None
 
+    async def select_async(self, *, exclude: set[str] | None = None, validate: bool = False) -> str | None:
+        """Async wrapper for :meth:`select` — runs probe subprocesses in a thread
+        so validation doesn't block the event loop (up to 30s per account)."""
+        import asyncio
+        return await asyncio.to_thread(self.select, exclude=exclude, validate=validate)
+
     def _probe_account(self, account: PoolAccount) -> bool:
         """Run a small Claude CLI probe before assigning work to an account."""
-        env = {
-            **os.environ,
-            "CLAUDE_CONFIG_DIR": account.config_dir,
-        }
+        # Same nested-session cleanup as InstanceManager.launch
+        env = {k: v for k, v in os.environ.items() if k.upper() not in ("CLAUDECODE", "CLAUDE_CODE")}
+        env["CLAUDE_CONFIG_DIR"] = account.config_dir
         try:
             proc = subprocess.run(
                 ["claude", "-p", "reply ok only"],
@@ -243,6 +252,93 @@ class ClaudePool:
     def clear_cooldown(self, account_id: str):
         self._cooldowns.pop(account_id, None)
         logger.info("Pool cooldown cleared for account %s", account_id)
+
+    def locate_session_config_dir(self, session_id: str, extra_dirs: list[str] | None = None) -> str | None:
+        """Find which config dir actually holds the session JSONL.
+
+        Searches all pool account dirs plus the env CLAUDE_CONFIG_DIR and the
+        default ``~/.claude``, so session migration doesn't depend on callers
+        knowing which account a session was created under.
+        """
+        candidates = [a.config_dir for a in self._accounts]
+        env_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+        if env_dir:
+            candidates.append(env_dir)
+        candidates.append(str(Path.home() / ".claude"))
+        if extra_dirs:
+            candidates.extend(extra_dirs)
+        seen: set[str] = set()
+        for d in candidates:
+            d = os.path.expanduser(d)
+            if d in seen:
+                continue
+            seen.add(d)
+            try:
+                if next(Path(d).glob(f"projects/*/{session_id}.jsonl"), None):
+                    return d
+            except OSError:
+                continue
+        return None
+
+    async def fetch_usage(self) -> list[dict]:
+        """Per-account quota utilization from the Anthropic OAuth usage API.
+
+        Reads each account's OAuth access token from
+        ``<config_dir>/.credentials.json`` and queries the usage endpoint.
+        Results are cached for USAGE_CACHE_TTL seconds.
+        """
+        import asyncio
+
+        import httpx
+
+        now = time.time()
+        if self._usage_cache is not None and now - self._usage_cache_at < USAGE_CACHE_TTL:
+            return self._usage_cache
+
+        async def fetch_one(account: PoolAccount) -> dict:
+            base = {"id": account.id, "email": account.email, "enabled": account.enabled,
+                    "subscription_type": None, "error": None, "usage": None}
+            cred_path = Path(account.config_dir) / ".credentials.json"
+            try:
+                creds = json.loads(cred_path.read_text(encoding="utf-8"))["claudeAiOauth"]
+            except (OSError, ValueError, KeyError):
+                base["error"] = "no_credentials"
+                return base
+            base["subscription_type"] = creds.get("subscriptionType")
+            if creds.get("expiresAt", 0) / 1000 < now:
+                base["error"] = "token_expired"
+                return base
+            try:
+                async with httpx.AsyncClient(timeout=15) as client:
+                    resp = await client.get(USAGE_API_URL, headers={
+                        "Authorization": f"Bearer {creds['accessToken']}",
+                        "anthropic-beta": "oauth-2025-04-20",
+                    })
+            except httpx.HTTPError as exc:
+                base["error"] = f"request_failed: {exc}"[:200]
+                return base
+            if resp.status_code != 200:
+                base["error"] = f"http_{resp.status_code}"
+                return base
+            data = resp.json()
+
+            def window(w: dict | None) -> dict | None:
+                if not w:
+                    return None
+                return {"utilization": w.get("utilization"), "resets_at": w.get("resets_at")}
+
+            base["usage"] = {
+                "five_hour": window(data.get("five_hour")),
+                "seven_day": window(data.get("seven_day")),
+                "seven_day_opus": window(data.get("seven_day_opus")),
+                "seven_day_sonnet": window(data.get("seven_day_sonnet")),
+            }
+            return base
+
+        results = await asyncio.gather(*(fetch_one(a) for a in self._accounts))
+        self._usage_cache = list(results)
+        self._usage_cache_at = now
+        return self._usage_cache
 
 
 # ---------------------------------------------------------------------------

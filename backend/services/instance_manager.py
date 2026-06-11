@@ -532,7 +532,14 @@ class InstanceManager:
                 session_id = task.session_id
                 cwd = task.last_cwd or task.target_repo
 
-            migrate_session(old_config_dir, new_config_dir, session_id)
+            # The session may have been created under a different account dir
+            # than the one this instance launched with — locate it
+            source_dir = dispatcher.pool.locate_session_config_dir(session_id) or old_config_dir
+            migrate_session(
+                old_config_dir=source_dir,
+                new_config_dir=new_config_dir,
+                session_id=session_id,
+            )
 
             new_account_id = dispatcher.pool.account_id_from_config_dir(new_config_dir)
             logger.info("Chat pool rotation: task %d switching %s -> %s",
