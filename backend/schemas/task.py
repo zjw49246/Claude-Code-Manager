@@ -45,6 +45,7 @@ class TaskCreate(BaseModel):
 
 class TaskUpdate(BaseModel):
     title: str | None = None
+    model: str | None = None
     description: str | None = None
     priority: int | None = None
     project_id: int | None = None

@@ -497,7 +497,7 @@ export const api = {
     request<{ ok: boolean; stopped?: boolean; cleared_messages?: number; note?: string }>(`/api/tasks/${id}/stop-session`, { method: 'POST' }),
   createTask: (data: { title?: string; description?: string; project_id?: number; priority?: number; target_branch?: string; mode?: string; todo_file_path?: string; max_iterations?: number; goal_condition?: string; goal_max_turns?: number; goal_evaluator_model?: string; image_paths?: string[]; file_paths?: string[]; attachments?: { url: string; name: string; is_image: boolean }[]; secret_ids?: number[]; provider?: string; model?: string; effort_level?: string; thinking_budget?: number | null; enable_workflows?: boolean; enabled_skills?: Record<string, boolean>; starred?: boolean; clone_from_task_id?: number }) =>
     request<Task>('/api/tasks', { method: 'POST', body: JSON.stringify(data) }),
-  updateTask: (id: number, data: { title?: string; description?: string; priority?: number; enabled_skills?: Record<string, boolean> }) =>
+  updateTask: (id: number, data: { title?: string; description?: string; priority?: number; enabled_skills?: Record<string, boolean>; model?: string }) =>
     request<Task>(`/api/tasks/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteTask: (id: number) =>
     request<{ ok: boolean }>(`/api/tasks/${id}`, { method: 'DELETE' }),
@@ -541,8 +541,10 @@ export const api = {
     request<{ ok: boolean }>('/api/dispatcher/stop', { method: 'POST' }),
 
   // Chat (task-based)
-  sendTaskChat: (taskId: number, message: string, filePaths?: string[], secretIds?: number[]) =>
-    request<{ ok: boolean; pid: number; instance_id: number; session_id: string }>(`/api/tasks/${taskId}/chat`, { method: 'POST', body: JSON.stringify({ message, file_paths: filePaths, secret_ids: secretIds }) }),
+  sendTaskChat: (taskId: number, message: string, filePaths?: string[], secretIds?: number[], model?: string | null) =>
+    request<{ ok: boolean; pid: number; instance_id: number; session_id: string }>(`/api/tasks/${taskId}/chat`, { method: 'POST', body: JSON.stringify({ message, file_paths: filePaths, secret_ids: secretIds, ...(model ? { model } : {}) }) }),
+  injectTaskMessage: (taskId: number, message: string) =>
+    request<{ ok: boolean; injected: boolean }>(`/api/tasks/${taskId}/inject`, { method: 'POST', body: JSON.stringify({ message }) }),
   getTaskChatHistory: (taskId: number, compact = true, limit = 0, beforeId = 0) =>
     request<ChatMessage[]>(`/api/tasks/${taskId}/chat/history?compact=${compact}${limit ? `&limit=${limit}` : ''}${beforeId ? `&before_id=${beforeId}` : ''}`),
   getMessageDetail: (taskId: number, messageId: number) =>

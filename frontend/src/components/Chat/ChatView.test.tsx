@@ -13,6 +13,9 @@ vi.mock('../../api/client', () => ({
     stopTaskSession: vi.fn().mockResolvedValue({}),
     uploadImages: vi.fn().mockResolvedValue([]),
     listMonitorSessions: vi.fn().mockResolvedValue([]),
+    getRuntimeSettings: vi.fn().mockResolvedValue({ use_pty_mode: false, pty_available: false }),
+    config: vi.fn().mockResolvedValue({ model_options: ['claude-opus-4-6'], codex_model_options: [] }),
+    injectTaskMessage: vi.fn().mockResolvedValue({ ok: true, injected: true }),
   },
 }));
 

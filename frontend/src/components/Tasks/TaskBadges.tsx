@@ -123,3 +123,71 @@ export function SubAgentsBadge({ task }: { task: Task }) {
     </div>
   );
 }
+
+// Model options cache (fetched once per page load)
+let _modelOptionsCache: { claude: string[]; codex: string[] } | null = null;
+async function fetchModelOptions(): Promise<{ claude: string[]; codex: string[] }> {
+  if (_modelOptionsCache) return _modelOptionsCache;
+  const c = await api.config();
+  _modelOptionsCache = {
+    claude: c.model_options.filter((m) => m !== 'default'),
+    codex: c.codex_model_options.filter((m) => m !== 'default'),
+  };
+  return _modelOptionsCache;
+}
+
+/** Clickable model badge: dropdown to switch the task's model (persisted). */
+export function ModelBadge({ task, onRefresh, compact }: { task: Task; onRefresh: () => void; compact?: boolean }) {
+  const [open, setOpen] = useState(false);
+  const [options, setOptions] = useState<string[]>([]);
+
+  useEffect(() => {
+    if (!open) return;
+    fetchModelOptions().then((o) => setOptions(task.provider === 'codex' ? o.codex : o.claude)).catch(() => {});
+    const handle = (e: MouseEvent) => {
+      if (!(e.target as HTMLElement).closest('[data-model-dropdown]')) setOpen(false);
+    };
+    document.addEventListener('mousedown', handle);
+    return () => document.removeEventListener('mousedown', handle);
+  }, [open, task.provider]);
+
+  const label = task.model || 'default';
+
+  return (
+    <div className="relative" data-model-dropdown>
+      <button
+        onClick={(e) => { e.stopPropagation(); setOpen(!open); }}
+        className={`text-xs bg-gray-700 text-gray-300 px-1.5 rounded cursor-pointer hover:bg-gray-600 hover:text-gray-100 ${compact ? 'max-w-[120px] truncate' : ''}`}
+        title="切换模型（持久化到该任务）"
+      >
+        {label}
+      </button>
+      {open && (
+        <div className="absolute top-full mt-1 left-0 bg-gray-800 border border-gray-600 rounded shadow-lg z-20 min-w-[180px] py-1 max-h-60 overflow-y-auto">
+          {options.length === 0 && (
+            <div className="px-3 py-1.5 text-xs text-gray-500">Loading…</div>
+          )}
+          {options.map((m) => (
+            <button
+              key={m}
+              onClick={async (e) => {
+                e.stopPropagation();
+                setOpen(false);
+                if (m === task.model) return;
+                try {
+                  await api.updateTask(task.id, { model: m });
+                  onRefresh();
+                } catch { /* keep current */ }
+              }}
+              className={`w-full px-3 py-1.5 text-xs text-left transition-colors hover:bg-gray-700 ${
+                m === task.model ? 'text-indigo-300 bg-indigo-600/20' : 'text-gray-300'
+              }`}
+            >
+              {m}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}

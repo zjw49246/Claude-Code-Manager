@@ -7,6 +7,7 @@ import { useWebSocket } from '../../hooks/useWebSocket';
 import { Send, ArrowLeft, Loader2, ChevronDown, ChevronRight, ChevronUp, Copy, Check, Paperclip, X, StopCircle, Pencil, ArrowDown, Star, ListPlus, Trash2 } from 'lucide-react';
 import { SecretPicker } from '../Secrets/SecretPicker';
 import { QuickPhraseDropdown } from '../QuickPhrases/QuickPhraseDropdown';
+import { ListFilter, Syringe } from 'lucide-react';
 import { ExpandableText } from '../ExpandableText';
 import { formatMessageTime, formatDateTime } from '../../config/timezone';
 import { useFileDrop } from '../../hooks/useFileDrop';
@@ -135,6 +136,47 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [showScrollBottom, setShowScrollBottom] = useState(false);
   const [starred, setStarred] = useState(task.starred);
+
+  // Temp model override (one-shot per message, not persisted to the task)
+  const [modelOverride, setModelOverride] = useState<string | null>(null);
+  const [showModelMenu, setShowModelMenu] = useState(false);
+  const [modelOptions, setModelOptions] = useState<string[]>([]);
+  const [ptyMode, setPtyMode] = useState(false);
+  const [injecting, setInjecting] = useState(false);
+
+  useEffect(() => {
+    api.getRuntimeSettings().then((s) => setPtyMode(s.use_pty_mode)).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!showModelMenu) return;
+    if (modelOptions.length === 0) {
+      api.config().then((c) => {
+        const opts = (task.provider === 'codex' ? c.codex_model_options : c.model_options).filter((m) => m !== 'default');
+        setModelOptions(opts);
+      }).catch(() => {});
+    }
+    const handle = (e: MouseEvent) => {
+      if (!(e.target as HTMLElement).closest('[data-temp-model]')) setShowModelMenu(false);
+    };
+    document.addEventListener('mousedown', handle);
+    return () => document.removeEventListener('mousedown', handle);
+  }, [showModelMenu, modelOptions.length, task.provider]);
+
+  const handleInject = async () => {
+    const text = input.trim();
+    if (!text || injecting) return;
+    setInjecting(true);
+    setError(null);
+    try {
+      await api.injectTaskMessage(task.id, text);
+      setInput('');
+    } catch (e) {
+      setError(`注入失败: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setInjecting(false);
+    }
+  };
 
   // Persist the draft as the user types; cleared when input empties (e.g. send)
   useEffect(() => {
@@ -615,7 +657,8 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
       };
       setMessages((prev) => [...prev, userMsg]);
 
-      await api.sendTaskChat(task.id, text || '(files attached)', uploadedPaths, selectedSecretIds.length > 0 ? selectedSecretIds : undefined);
+      await api.sendTaskChat(task.id, text || '(files attached)', uploadedPaths, selectedSecretIds.length > 0 ? selectedSecretIds : undefined, modelOverride);
+      setModelOverride(null);
     } catch (e) {
       setSending(false);
       const errMsg = String(e);
@@ -1023,6 +1066,52 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
             </button>
             <SecretPicker selectedIds={selectedSecretIds} onChange={setSelectedSecretIds} disabled={!task.session_id} />
             <QuickPhraseDropdown onSelect={(text) => handleSend(text)} disabled={!task.session_id} />
+            {/* Temp model override (one-shot) */}
+            <div className="relative" data-temp-model>
+              <button
+                type="button"
+                onClick={() => setShowModelMenu((v) => !v)}
+                disabled={!task.session_id}
+                className={`p-2 rounded-lg transition-colors disabled:opacity-40 ${
+                  modelOverride ? 'text-indigo-300 bg-indigo-600/20' : 'text-gray-500 hover:text-gray-300'
+                }`}
+                title={modelOverride ? `下一条消息用 ${modelOverride}（点击更换）` : '临时切换模型（仅下一条消息）'}
+              >
+                <ListFilter size={18} />
+              </button>
+              {showModelMenu && (
+                <div className="absolute bottom-full mb-1 left-0 bg-gray-800 border border-gray-600 rounded shadow-lg z-30 min-w-[200px] py-1 max-h-60 overflow-y-auto">
+                  <div className="px-3 py-1 text-[10px] text-gray-500 uppercase tracking-wider">下一条消息使用</div>
+                  <button
+                    onClick={() => { setModelOverride(null); setShowModelMenu(false); }}
+                    className={`w-full px-3 py-1.5 text-xs text-left hover:bg-gray-700 ${!modelOverride ? 'text-indigo-300 bg-indigo-600/20' : 'text-gray-300'}`}
+                  >
+                    默认（{task.model || 'default'}）
+                  </button>
+                  {modelOptions.map((m) => (
+                    <button
+                      key={m}
+                      onClick={() => { setModelOverride(m === task.model ? null : m); setShowModelMenu(false); }}
+                      className={`w-full px-3 py-1.5 text-xs text-left hover:bg-gray-700 ${modelOverride === m ? 'text-indigo-300 bg-indigo-600/20' : 'text-gray-300'}`}
+                    >
+                      {m}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+            {/* PTY-only: inject into the running turn */}
+            {ptyMode && (
+              <button
+                type="button"
+                onClick={handleInject}
+                disabled={!task.session_id || !input.trim() || injecting}
+                className="p-2 rounded-lg text-gray-500 hover:text-teal-300 transition-colors disabled:opacity-40"
+                title="注入消息到正在运行的 turn（PTY 模式独有；不开启新 turn，CC 在下个工具调用边界看到）"
+              >
+                <Syringe size={18} />
+              </button>
+            )}
             <textarea
               ref={textareaRef}
               value={input}

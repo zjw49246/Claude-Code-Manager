@@ -48,6 +48,24 @@ class InstanceManager:
     def pty_mode_enabled(self) -> bool:
         return self._pty_enabled and self._pty_backend is not None
 
+    async def inject_pty_message(self, instance_id: int, content: str) -> bool:
+        """Inject text into the running turn of a live PTY session (PTY-only).
+
+        Delivered as a channel notification — CC consumes it at the next
+        tool-call boundary within the current turn. Returns False when PTY
+        mode is off, the session is gone, or injection fails.
+        """
+        if self._pty_backend is None or not content:
+            return False
+        session = self._pty_backend._sessions.get(instance_id)
+        if session is None or not session.is_alive:
+            return False
+        try:
+            return await session.inject(content)
+        except Exception:
+            logger.exception("PTY inject failed for instance %s", instance_id)
+            return False
+
     async def release_pty_session(self, session_id: str) -> None:
         """Return a PTY session to nothing — stop it and remove from the pool.
         Used when a workload (e.g. a loop task) is finished with its session.

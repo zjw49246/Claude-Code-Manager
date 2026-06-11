@@ -478,3 +478,113 @@ async def test_process_queued_message_cwd_falls_back_to_target_repo(db_factory):
 
     kwargs = dispatcher.instance_manager.launch.call_args.kwargs
     assert kwargs["cwd"] == "/tmp"
+
+
+@pytest.mark.asyncio
+async def test_chat_send_with_model_override(client, session_factory):
+    """临时模型：body.model 透传为 enqueue 的 model_override，不落库。"""
+    from backend.models.task import Task
+
+    task_id = await _create_task_with_session(client, session_factory)
+
+    mock_d = _mock_dispatcher()
+    mock_broadcaster = MagicMock()
+    mock_broadcaster.broadcast = AsyncMock()
+
+    with patch("backend.main.dispatcher", mock_d), \
+         patch("backend.main.broadcaster", mock_broadcaster):
+        resp = await client.post(
+            f"/api/tasks/{task_id}/chat",
+            json={"message": "hard problem", "model": "claude-opus-4-8"},
+        )
+
+    assert resp.status_code == 200
+    kwargs = mock_d.enqueue_message.call_args.kwargs
+    assert kwargs["model_override"] == "claude-opus-4-8"
+
+    # task.model 不被修改
+    async with session_factory() as db:
+        t = await db.get(Task, task_id)
+        assert t.model != "claude-opus-4-8"
+
+
+@pytest.mark.asyncio
+async def test_update_task_model_persists(client, session_factory):
+    """持久模型切换：PATCH/PUT task.model 生效。"""
+    from backend.models.task import Task
+
+    task_id = await _create_task_with_session(client, session_factory)
+    resp = await client.put(
+        f"/api/tasks/{task_id}", json={"model": "claude-sonnet-4-6"}
+    )
+    assert resp.status_code == 200
+    async with session_factory() as db:
+        t = await db.get(Task, task_id)
+        assert t.model == "claude-sonnet-4-6"
+
+
+@pytest.mark.asyncio
+async def test_inject_requires_pty_mode(client, session_factory):
+    """PTY 模式关闭时注入返回 400。"""
+    task_id = await _create_task_with_session(client, session_factory)
+
+    mock_im = MagicMock()
+    mock_im.pty_mode_enabled = False
+    with patch("backend.main.instance_manager", mock_im), \
+         patch("backend.main.broadcaster", MagicMock(broadcast=AsyncMock())):
+        resp = await client.post(
+            f"/api/tasks/{task_id}/inject", json={"message": "hint"}
+        )
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_inject_delivers_to_pty_session(client, session_factory):
+    """PTY 注入成功：调用 inject_pty_message 并广播 source=inject 的 user_message。"""
+    from backend.models.task import Task
+
+    task_id = await _create_task_with_session(client, session_factory)
+    async with session_factory() as db:
+        t = await db.get(Task, task_id)
+        t.instance_id = 7
+        await db.commit()
+
+    mock_im = MagicMock()
+    mock_im.pty_mode_enabled = True
+    mock_im.inject_pty_message = AsyncMock(return_value=True)
+    mock_broadcaster = MagicMock()
+    mock_broadcaster.broadcast = AsyncMock()
+
+    with patch("backend.main.instance_manager", mock_im), \
+         patch("backend.main.broadcaster", mock_broadcaster):
+        resp = await client.post(
+            f"/api/tasks/{task_id}/inject", json={"message": "focus on tests"}
+        )
+
+    assert resp.status_code == 200
+    mock_im.inject_pty_message.assert_awaited_once_with(7, "focus on tests")
+    casts = [c for c in mock_broadcaster.broadcast.call_args_list
+             if c[0][1].get("source") == "inject"]
+    assert len(casts) == 1
+
+
+@pytest.mark.asyncio
+async def test_inject_no_live_session_409(client, session_factory):
+    """会话不存活时注入返回 409。"""
+    from backend.models.task import Task
+
+    task_id = await _create_task_with_session(client, session_factory)
+    async with session_factory() as db:
+        t = await db.get(Task, task_id)
+        t.instance_id = 7
+        await db.commit()
+
+    mock_im = MagicMock()
+    mock_im.pty_mode_enabled = True
+    mock_im.inject_pty_message = AsyncMock(return_value=False)
+    with patch("backend.main.instance_manager", mock_im), \
+         patch("backend.main.broadcaster", MagicMock(broadcast=AsyncMock())):
+        resp = await client.post(
+            f"/api/tasks/{task_id}/inject", json={"message": "x"}
+        )
+    assert resp.status_code == 409

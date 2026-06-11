@@ -18,6 +18,8 @@ class ChatMessage(BaseModel):
     image_paths: list[str] | None = None  # kept for backwards compatibility
     file_paths: list[str] | None = None
     secret_ids: list[int] | None = None
+    # One-shot model override for this message (does not change task.model)
+    model: str | None = None
 
 
 @router.post("/{task_id}/chat")
@@ -115,6 +117,7 @@ async def send_chat_message(
         priority=PRIORITY_USER,
         source="user",
         command_skills=command_skills,
+        model_override=body.model,
     )
 
     return {"ok": True, "queued": True, "session_id": task.session_id}
@@ -291,3 +294,53 @@ async def get_message_detail(
         "tool_output": tool_output,
         "content": row.content,
     }
+
+
+class InjectMessage(BaseModel):
+    message: str
+
+
+@router.post("/{task_id}/inject")
+async def inject_message(
+    task_id: int,
+    body: InjectMessage,
+    db: AsyncSession = Depends(get_db),
+):
+    """Inject a message into the RUNNING turn of a PTY session (PTY-only).
+
+    Unlike /chat (which queues a new turn), this delivers the text into CC's
+    context mid-execution via the channel bridge — CC sees it at the next
+    tool-call boundary. Fails when PTY mode is off or no live session exists.
+    """
+    task = await db.get(Task, task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+
+    from backend.main import instance_manager, broadcaster
+    if not instance_manager.pty_mode_enabled:
+        raise HTTPException(400, "PTY 模式未开启，注入功能仅在 PTY 模式下可用")
+    if not task.instance_id:
+        raise HTTPException(400, "Task has no running instance")
+
+    ok = await instance_manager.inject_pty_message(task.instance_id, body.message)
+    if not ok:
+        raise HTTPException(409, "没有存活的 PTY 会话（turn 未在运行或会话已结束），请用普通消息发送")
+
+    # Record + broadcast so the injected text shows up in the chat thread
+    db.add(LogEntry(
+        instance_id=task.instance_id,
+        task_id=task_id,
+        event_type="user_message",
+        role="user",
+        content=body.message,
+        raw_json=json.dumps({"source": "inject"}),
+        is_error=False,
+    ))
+    await db.commit()
+    await broadcaster.broadcast(f"task:{task_id}", {
+        "event_type": "user_message",
+        "role": "user",
+        "content": body.message,
+        "source": "inject",
+    })
+    return {"ok": True, "injected": True}
