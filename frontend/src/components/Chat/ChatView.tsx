@@ -1580,7 +1580,8 @@ const MessageBubble = memo(function MessageBubble({ message }: { message: ChatMe
   }
 
   const isMonitor = message.source === 'monitor';
-  const isInjected = message.source === 'inject';
+  // 仅用户消息标注注入；回复不标注
+  const isInjected = message.source === 'inject' && isUser;
 
   return (
     <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'}`} {...(isUser ? { 'data-user-msg': '' } : {})}>
