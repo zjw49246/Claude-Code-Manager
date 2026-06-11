@@ -1286,3 +1286,29 @@ async def test_open_chat_moves_task_to_front_of_group(client, session_factory):
     resp = await client.get("/api/tasks?limit=50")
     order = [t["id"] for t in resp.json() if t["id"] in ids]
     assert order == [ids[1], ids[0], ids[2]]
+
+
+@pytest.mark.asyncio
+async def test_update_sort_order_via_api_moves_task(client):
+    """回归：sort_order 曾只加在 TaskCreate 上，PUT 被 pydantic 丢弃 →
+    前端拖拽永远不生效。必须走 API 全链路验证。"""
+    ids = []
+    for i in range(3):
+        resp = await client.post("/api/tasks", json={
+            "title": f"T{i}", "description": "d", "target_repo": "/tmp",
+        })
+        ids.append(resp.json()["id"])
+
+    # 默认按创建时间倒序：[t2, t1, t0]；把 t0 拖到第一
+    resp = await client.get("/api/tasks?limit=10")
+    order = [t["id"] for t in resp.json() if t["id"] in ids]
+    assert order == [ids[2], ids[1], ids[0]]
+
+    import time
+    resp = await client.put(f"/api/tasks/{ids[0]}", json={"sort_order": time.time() + 9999})
+    assert resp.status_code == 200
+    assert resp.json()["sort_order"] is not None
+
+    resp = await client.get("/api/tasks?limit=10")
+    order = [t["id"] for t in resp.json() if t["id"] in ids]
+    assert order == [ids[0], ids[2], ids[1]]
