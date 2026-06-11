@@ -20,6 +20,25 @@ from backend.schemas.pr_monitor import (
 
 logger = logging.getLogger(__name__)
 
+_GH_LOGIN_CACHE: str | None = None
+
+
+def _gh_login() -> str:
+    """本机 gh CLI 登录的用户名（缓存；未登录返回空串）。"""
+    global _GH_LOGIN_CACHE
+    if _GH_LOGIN_CACHE is None:
+        import subprocess
+        try:
+            r = subprocess.run(
+                ["gh", "api", "user", "-q", ".login"],
+                capture_output=True, text=True, timeout=10,
+            )
+            _GH_LOGIN_CACHE = r.stdout.strip() if r.returncode == 0 else ""
+        except Exception:
+            _GH_LOGIN_CACHE = ""
+    return _GH_LOGIN_CACHE
+
+
 router = APIRouter(prefix="/api/pr-monitor", tags=["pr-monitor"])
 webhook_router = APIRouter(prefix="/api/github", tags=["pr-monitor"])
 
@@ -222,6 +241,12 @@ async def github_webhook(request: Request, db: AsyncSession = Depends(get_db)):
     allowed = repo.allowed_authors or []
     if allowed and pr_author not in allowed:
         return {"status": "ignored", "reason": f"author not allowed: {pr_author}"}
+
+    # 自动屏蔽本机 gh 登录账号的 PR：审核者与作者同账号时 GitHub 禁止
+    # self-approval，审了也无法 approve；除非白名单显式包含该账号
+    own_login = _gh_login()
+    if own_login and pr_author == own_login and pr_author not in allowed:
+        return {"status": "ignored", "reason": f"self PR (gh login: {own_login})"}
 
     pr_number = pr.get("number")
     pr_title = pr.get("title", "")

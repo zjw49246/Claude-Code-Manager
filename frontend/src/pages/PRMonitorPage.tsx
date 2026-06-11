@@ -5,6 +5,14 @@ import { Plus, ArrowLeft, X, Copy, RefreshCw, ToggleLeft, ToggleRight, Trash2, G
 
 const DEFAULT_WEBHOOK_URL = `${window.location.origin}/api/github/webhook`;
 
+function useModelOptions(): string[] {
+  const [options, setOptions] = useState<string[]>([]);
+  useEffect(() => {
+    api.config().then((c) => setOptions(c.model_options.filter((m) => m !== 'default'))).catch(() => {});
+  }, []);
+  return options;
+}
+
 const STATUS_COLORS: Record<string, string> = {
   pending: 'bg-yellow-500/20 text-yellow-400',
   reviewing: 'bg-blue-500/20 text-blue-400',
@@ -23,6 +31,7 @@ function AddRepoModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =
   const [repoName, setRepoName] = useState('');
   const [autoMerge, setAutoMerge] = useState(false);
   const [reviewModel, setReviewModel] = useState('');
+  const modelOptions = useModelOptions();
   const [defaultBranch, setDefaultBranch] = useState('main');
   const [allowedAuthors, setAllowedAuthors] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -74,11 +83,13 @@ function AddRepoModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =
           </div>
           <div>
             <label className="block text-xs text-gray-400 mb-1">Review Model (optional)</label>
-            <input
+            <select
               className="w-full bg-gray-700 text-foreground text-sm rounded px-3 py-2 outline-none focus:ring-1 focus:ring-indigo-500"
               value={reviewModel} onChange={(e) => setReviewModel(e.target.value)}
-              placeholder="e.g. claude-sonnet-4-6"
-            />
+            >
+              <option value="">default</option>
+              {modelOptions.map((m) => <option key={m} value={m}>{m}</option>)}
+            </select>
           </div>
           <div>
             <label className="block text-xs text-gray-400 mb-1">Default Branch</label>
@@ -114,6 +125,7 @@ function RepoDetail({ repo, onBack, onRefresh }: { repo: MonitoredRepo; onBack: 
   const [page, setPage] = useState(1);
   const [autoMerge, setAutoMerge] = useState(repo.auto_merge);
   const [reviewModel, setReviewModel] = useState(repo.review_model || '');
+  const modelOptions = useModelOptions();
   const [defaultBranch, setDefaultBranch] = useState(repo.default_branch);
   const [authorsInput, setAuthorsInput] = useState((repo.allowed_authors || []).join(', '));
   const [saving, setSaving] = useState(false);
@@ -189,8 +201,14 @@ function RepoDetail({ repo, onBack, onRefresh }: { repo: MonitoredRepo; onBack: 
           </div>
           <div>
             <label className="block text-xs text-gray-400 mb-1">Review Model</label>
-            <input className="w-full bg-gray-700 text-foreground text-sm rounded px-3 py-2 outline-none focus:ring-1 focus:ring-indigo-500"
-              value={reviewModel} onChange={(e) => setReviewModel(e.target.value)} placeholder="Default" />
+            <select className="w-full bg-gray-700 text-foreground text-sm rounded px-3 py-2 outline-none focus:ring-1 focus:ring-indigo-500"
+              value={reviewModel} onChange={(e) => setReviewModel(e.target.value)}>
+              <option value="">default</option>
+              {reviewModel && !modelOptions.includes(reviewModel) && (
+                <option value={reviewModel}>{reviewModel}</option>
+              )}
+              {modelOptions.map((m) => <option key={m} value={m}>{m}</option>)}
+            </select>
           </div>
           <div>
             <label className="block text-xs text-gray-400 mb-1">Default Branch</label>
