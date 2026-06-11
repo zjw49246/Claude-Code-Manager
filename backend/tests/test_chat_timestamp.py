@@ -28,6 +28,8 @@ async def test_chat_history_timestamp_has_z_suffix():
     """Naive UTC datetime from DB should be serialized with Z suffix."""
     mock_task = MagicMock()
     mock_task.__bool__ = lambda self: True
+    mock_task.sort_order = None
+    mock_task.starred = False
 
     row = _make_log_row(timestamp=datetime(2026, 6, 10, 14, 30, 45, 123456))
 
@@ -36,6 +38,7 @@ async def test_chat_history_timestamp_has_z_suffix():
 
     mock_result = MagicMock()
     mock_result.all.return_value = [row]
+    mock_result.scalar.return_value = None  # 访问置顶的组内 max-key 子查询
     mock_db.execute.return_value = mock_result
 
     messages = await get_chat_history(task_id=1, limit=0, compact=True, db=mock_db)
@@ -51,6 +54,8 @@ async def test_chat_history_null_timestamp():
     """Null timestamp should remain None."""
     mock_task = MagicMock()
     mock_task.__bool__ = lambda self: True
+    mock_task.sort_order = None
+    mock_task.starred = False
 
     row = MagicMock()
     row.id = 2
@@ -70,6 +75,7 @@ async def test_chat_history_null_timestamp():
 
     mock_result = MagicMock()
     mock_result.all.return_value = [row]
+    mock_result.scalar.return_value = None  # 访问置顶的组内 max-key 子查询
     mock_db.execute.return_value = mock_result
 
     messages = await get_chat_history(task_id=1, limit=0, compact=True, db=mock_db)
