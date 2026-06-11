@@ -789,9 +789,23 @@ class InstanceManager:
             await self.broadcaster.broadcast(f"task:{task_id}", broadcast_data)
 
         # Persist and broadcast context usage
-        if context_usage and not context_usage.get("context_window"):
-            # Interactive (PTY) mode has no result event carrying contextWindow.
-            # Fill from the task's model choice: [1m] variants get 1M, else 200K.
+        if context_usage and "total_input_tokens" not in context_usage:
+            # Window-only refinement (result events carry just the
+            # authoritative contextWindow — their usage numbers are cumulative
+            # and unusable). Merge into the stored per-request usage.
+            window = context_usage.get("context_window")
+            context_usage = None
+            if window and task_id:
+                async with self.db_factory() as db:
+                    t = await db.get(Task, task_id)
+                    stored = dict(t.context_window_usage) if (t and t.context_window_usage) else None
+                if stored and stored.get("context_window") != window:
+                    stored["context_window"] = window
+                    context_usage = stored
+        elif context_usage and not context_usage.get("context_window"):
+            # Per-request usage without a window (PTY interactive mode and -p
+            # assistant events). Fill from the task's model choice: [1m]
+            # variants get 1M, else 200K.
             model_name = ""
             if task_id:
                 async with self.db_factory() as db:

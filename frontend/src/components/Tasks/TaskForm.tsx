@@ -282,15 +282,6 @@ export function TaskForm({ onCreated }: TaskFormProps) {
           className="hidden"
           onChange={handleFileSelect}
         />
-        <button
-          type="button"
-          onClick={() => fileInputRef.current?.click()}
-          disabled={pendingFiles.length >= 10}
-          className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-200 px-2 py-1 rounded border border-gray-600 hover:border-gray-400 disabled:opacity-40"
-        >
-          <Paperclip size={13} />
-          {pendingFiles.length > 0 ? `${pendingFiles.length}/10 files` : 'Attach files'}
-        </button>
         <SecretPicker selectedIds={selectedSecretIds} onChange={setSelectedSecretIds} />
         {pendingFiles.map((file, idx) => (
           <div key={idx} className="relative rounded overflow-hidden border border-gray-600">
@@ -419,6 +410,16 @@ export function TaskForm({ onCreated }: TaskFormProps) {
       )}
       {/* Bottom action row */}
       <div className="flex items-center gap-2">
+        {/* Attach files */}
+        <button
+          type="button"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={pendingFiles.length >= 10}
+          className="flex items-center gap-1 text-xs px-2 py-1.5 rounded border transition-colors bg-gray-700 text-gray-400 border-gray-600 hover:bg-gray-600 hover:text-gray-300 disabled:opacity-40"
+        >
+          <Paperclip size={13} />
+          {pendingFiles.length > 0 ? `${pendingFiles.length}/10 files` : 'Attach files'}
+        </button>
         {/* Config dropdown */}
         <div ref={configRef} className="relative">
           <button

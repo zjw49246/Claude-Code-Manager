@@ -848,3 +848,67 @@ async def test_chat_send_broadcasts_user_message(client, session_factory):
     ]
     assert len(task_broadcasts) == 1
     assert task_broadcasts[0][0][1]["content"] == "hello"
+
+
+@pytest.mark.asyncio
+async def test_context_usage_window_only_merges_into_stored(client, session_factory):
+    """result 事件只带 context_window（usage 数字是累计值已被剥离）——
+    应合并进已存的 per-request usage，而不是整体覆盖。"""
+    from unittest.mock import AsyncMock, MagicMock
+    from backend.services.instance_manager import InstanceManager
+    from backend.models.task import Task
+
+    create_resp = await client.post("/api/tasks", json={
+        "title": "T", "description": "d", "target_repo": "/tmp",
+    })
+    task_id = create_resp.json()["id"]
+
+    stored = {"input_tokens": 10, "cache_read_input_tokens": 20,
+              "cache_creation_input_tokens": 30, "output_tokens": 5,
+              "total_input_tokens": 60, "context_window": 200_000}
+    async with session_factory() as db:
+        t = await db.get(Task, task_id)
+        t.context_window_usage = stored
+        await db.commit()
+
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    im = InstanceManager(db_factory=session_factory, broadcaster=broadcaster)
+
+    # result 事件：只带 context_window=1M
+    await im._process_event(
+        instance_id=1, task_id=task_id,
+        event={"event_type": "result", "context_usage": {"context_window": 1_000_000}},
+    )
+
+    async with session_factory() as db:
+        t = await db.get(Task, task_id)
+        cu = t.context_window_usage
+    assert cu["total_input_tokens"] == 60      # token 数字保留
+    assert cu["context_window"] == 1_000_000   # window 被修正
+
+
+@pytest.mark.asyncio
+async def test_context_usage_window_only_without_stored_is_dropped(client, session_factory):
+    """没有已存 usage 时，window-only 事件不应写入半截数据。"""
+    from unittest.mock import AsyncMock, MagicMock
+    from backend.services.instance_manager import InstanceManager
+    from backend.models.task import Task
+
+    create_resp = await client.post("/api/tasks", json={
+        "title": "T", "description": "d", "target_repo": "/tmp",
+    })
+    task_id = create_resp.json()["id"]
+
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    im = InstanceManager(db_factory=session_factory, broadcaster=broadcaster)
+
+    await im._process_event(
+        instance_id=1, task_id=task_id,
+        event={"event_type": "result", "context_usage": {"context_window": 200_000}},
+    )
+
+    async with session_factory() as db:
+        t = await db.get(Task, task_id)
+    assert t.context_window_usage is None

@@ -665,7 +665,6 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
                 Created {formatDateTime(task.created_at)}
               </span>
             )}
-            {contextUsage && <><span className="flex-1" /><span className="hidden sm:flex"><ContextUsageIndicator usage={contextUsage} /></span></>}
           </div>
           {editingTitle ? (
             <input
@@ -696,6 +695,11 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
           )}
         </div>
         <div className="flex items-center gap-1 shrink-0">
+        {contextUsage && (
+          <span className="hidden sm:flex items-center mr-1">
+            <ContextUsageIndicator usage={contextUsage} />
+          </span>
+        )}
         <SubAgentIndicator
           count={monitorCount}
           active={monitorCount > 0}

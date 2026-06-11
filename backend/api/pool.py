@@ -44,3 +44,20 @@ async def clear_cooldown(account_id: str):
     pool = _get_pool()
     pool.clear_cooldown(account_id)
     return {"ok": True, "account_id": account_id}
+
+
+@router.post("/preferred")
+async def set_preferred(body: dict):
+    """Pin an account for subsequent launches (manual switch).
+
+    Body: {"account_id": "account-1"} or {"account_id": null} to clear.
+    Session continuity is handled by the existing launch path: every launch
+    re-selects an account and hardlink-migrates the session JSONL, so the
+    next turn resumes seamlessly on the pinned account. If the pinned
+    account is rate-limited, auto rotation falls back to the others.
+    """
+    pool = _get_pool()
+    account_id = body.get("account_id")
+    if not pool.set_preferred(account_id):
+        raise HTTPException(status_code=404, detail=f"Unknown account: {account_id}")
+    return {"ok": True, "preferred": pool.preferred_account_id}
