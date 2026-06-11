@@ -112,7 +112,10 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
   }, [task.project_id, projects]);
   const providerLabel = task.provider === 'codex' ? 'Codex' : 'Claude';
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [input, setInput] = useState('');
+  // Draft buffer: unsent input survives refresh / re-entering the chat
+  const [input, setInput] = useState(() => {
+    try { return localStorage.getItem(`ccm-chat-draft-${task.id}`) || ''; } catch { return ''; }
+  });
   const [sending, setSending] = useState(false);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [interrupting, setInterrupting] = useState(false);
@@ -132,6 +135,14 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const [showScrollBottom, setShowScrollBottom] = useState(false);
   const [starred, setStarred] = useState(task.starred);
+
+  // Persist the draft as the user types; cleared when input empties (e.g. send)
+  useEffect(() => {
+    try {
+      if (input) localStorage.setItem(`ccm-chat-draft-${task.id}`, input);
+      else localStorage.removeItem(`ccm-chat-draft-${task.id}`);
+    } catch { /* storage may be unavailable */ }
+  }, [input, task.id]);
   const [monitorSessions, setMonitorSessions] = useState<MonitorSession[]>([]);
   const [showMonitorPanel, setShowMonitorPanel] = useState(false);
   const isProcessing = sending || ['in_progress', 'executing'].includes(task.status);
