@@ -1231,8 +1231,9 @@ async def test_list_order_starred_then_access_then_manual(client, session_factor
 
     resp = await client.get("/api/tasks?limit=50")
     order = [t["id"] for t in resp.json() if t["id"] in ids]
-    # c 标星置顶；d 手动键最大；b 比 a 访问得更近
-    assert order == [ids[2], ids[3], ids[1], ids[0]]
+    # c 标星置顶；b 是全局最近访问（正在访问）→ 钉非星第一；
+    # d 手动键最大排其后；a 最后
+    assert order == [ids[2], ids[1], ids[3], ids[0]]
 
 
 @pytest.mark.asyncio
