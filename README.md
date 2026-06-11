@@ -178,6 +178,14 @@ JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home" \
 
 任务创建表单的标题和描述字段旁有 🎙 按钮，点击后录音，松开自动转文字填入。
 
+### PR Monitor 前置条件
+
+PR Monitor 的审核流程会在后端 shell out 调用 `gh pr view` / `gh pr review` / `gh pr merge`，使用前需满足：
+
+1. **gh CLI 已认证**：运行后端的系统用户必须先执行 `gh auth login` 完成 GitHub 认证
+2. **账号权限**：该 GitHub 账号需要对被监控仓库有 push / review 权限（auto-merge 还需要 merge 权限）
+3. **PUBLIC_BASE_URL**：在 `.env` 中设置 `PUBLIC_BASE_URL`（如 `https://ccm.example.com`），PR Monitor 页面才能显示正确的 Webhook Payload URL；未设置时前端回退为当前页面的 origin
+
 ## API
 
 | 模块 | 端点 | 说明 |
@@ -228,6 +236,7 @@ JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home" \
 |----------|--------|------|
 | `AUTH_TOKEN` | (必填) | API 认证 Token |
 | `PORT` | `8000` | 主服务监听端口 |
+| `PUBLIC_BASE_URL` | （空） | 部署的公网地址（如 `https://ccm.example.com`），用于 PR Monitor 页面展示 Webhook URL |
 | `OPENAI_API_KEY` | (可选) | 语音功能所需 |
 | `DATABASE_URL` | `sqlite+aiosqlite:///./claude_manager.db` | 数据库连接 |
 | `WORKSPACE_DIR` | `~/Projects` | 项目 clone 目标目录 |
