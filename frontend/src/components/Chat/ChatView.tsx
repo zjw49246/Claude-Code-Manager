@@ -144,6 +144,8 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
   const [modelOptions, setModelOptions] = useState<string[]>([]);
   const [ptyMode, setPtyMode] = useState(false);
   const [injecting, setInjecting] = useState(false);
+  // 注入模式开关：开启后「发送」走 PTY 注入逻辑而不是排队新 turn
+  const [injectMode, setInjectMode] = useState(false);
 
   useEffect(() => {
     api.getRuntimeSettings().then((s) => setPtyMode(s.use_pty_mode)).catch(() => {});
@@ -606,6 +608,12 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
   const handleSend = async (overrideText?: string, fromQueue?: boolean, preUploadedResults?: UploadResult[]) => {
     const text = (overrideText ?? input).trim();
     if (!text && pendingFiles.length === 0 && !preUploadedResults?.length) return;
+
+    // 注入模式：发送动作改走 PTY 注入（仅文本；不开新 turn、不排队）
+    if (injectMode && ptyMode && !fromQueue) {
+      if (text) await handleInject();
+      return;
+    }
 
     // If currently sending and not from auto-dequeue, add to queue (with files)
     if (isProcessing && !fromQueue) {
@@ -1109,14 +1117,18 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
                 </div>
               )}
             </div>
-            {/* PTY-only: inject into the running turn */}
+            {/* PTY-only: inject mode toggle — when on, Send delivers via injection */}
             {ptyMode && (
               <button
                 type="button"
-                onClick={handleInject}
-                disabled={!task.session_id || !input.trim() || injecting}
-                className="p-2 rounded-lg text-gray-500 hover:text-teal-300 transition-colors disabled:opacity-40"
-                title="注入消息到正在运行的 turn（PTY 模式独有；不开启新 turn，CC 在下个工具调用边界看到）"
+                onClick={() => setInjectMode((v) => !v)}
+                disabled={!task.session_id}
+                className={`p-2 rounded-lg transition-colors disabled:opacity-40 ${
+                  injectMode ? 'text-teal-300 bg-teal-600/20' : 'text-gray-500 hover:text-teal-300'
+                }`}
+                title={injectMode
+                  ? '注入模式已开启：发送的消息将注入运行中的 turn（点击关闭）'
+                  : '开启注入模式：发送改走 PTY turn 内注入（不开新 turn）'}
               >
                 <Syringe size={18} />
               </button>
@@ -1132,9 +1144,11 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
               placeholder={
                 !task.session_id
                   ? 'Run the task first to start a session...'
-                  : isProcessing
-                    ? 'Type next message to queue...'
-                    : 'Type a follow-up message...'
+                  : injectMode && ptyMode
+                    ? '注入模式：消息将直接注入运行中的 turn...'
+                    : isProcessing
+                      ? 'Type next message to queue...'
+                      : 'Type a follow-up message...'
               }
               disabled={!task.session_id}
               rows={1}
@@ -1145,9 +1159,12 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
               onClick={() => handleSend()}
               disabled={(!input.trim() && pendingFiles.length === 0) || !task.session_id}
               title={isProcessing ? 'Add to queue (Ctrl+Enter)' : 'Send (Ctrl+Enter)'}
-              className={`p-2.5 text-white rounded-lg disabled:opacity-40 disabled:cursor-not-allowed ${isProcessing ? 'bg-amber-600 hover:bg-amber-700' : 'bg-indigo-600 hover:bg-indigo-700'}`}
+              className={`p-2.5 text-white rounded-lg disabled:opacity-40 disabled:cursor-not-allowed ${
+                injectMode && ptyMode ? 'bg-teal-600 hover:bg-teal-700'
+                : isProcessing ? 'bg-amber-600 hover:bg-amber-700' : 'bg-indigo-600 hover:bg-indigo-700'
+              }`}
             >
-              {isProcessing ? <ListPlus size={18} /> : <Send size={18} />}
+              {injectMode && ptyMode ? <Syringe size={18} /> : isProcessing ? <ListPlus size={18} /> : <Send size={18} />}
             </button>
           </div>
           </div>
