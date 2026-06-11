@@ -1231,9 +1231,8 @@ async def test_list_order_starred_then_access_then_manual(client, session_factor
 
     resp = await client.get("/api/tasks?limit=50")
     order = [t["id"] for t in resp.json() if t["id"] in ids]
-    # c 标星置顶；b 是全局最近访问（正在访问）→ 钉非星第一；
-    # d 手动键最大排其后；a 最后
-    assert order == [ids[2], ids[1], ids[3], ids[0]]
+    # c 标星置顶；非星组按位置键：d 手动键最大 → b（访问较近）→ a
+    assert order == [ids[2], ids[3], ids[1], ids[0]]
 
 
 @pytest.mark.asyncio
@@ -1253,3 +1252,37 @@ async def test_chat_history_touches_last_accessed(client, session_factory):
     async with session_factory() as db:
         t = await db.get(Task, task_id)
         assert t.last_accessed_at is not None
+
+
+@pytest.mark.asyncio
+async def test_open_chat_moves_task_to_front_of_group(client, session_factory):
+    """访问 = 移到同组第一位：打开 chat 后排到非星组最前，
+    其余任务相对顺序不变（依次后移一位）。"""
+    from datetime import datetime
+    from backend.models.task import Task
+
+    ids = []
+    for i in range(3):
+        resp = await client.post("/api/tasks", json={
+            "title": f"T{i}", "description": "d", "target_repo": "/tmp",
+        })
+        ids.append(resp.json()["id"])
+
+    now = datetime.utcnow().timestamp()
+    async with session_factory() as db:
+        # 手动把 t2 拖到最前，t1 次之
+        (await db.get(Task, ids[2])).sort_order = now + 1000
+        (await db.get(Task, ids[1])).sort_order = now + 500
+        await db.commit()
+
+    # 访问 t0 → t0 应升到非星组第一，t2/t1 依次后移
+    await client.get(f"/api/tasks/{ids[0]}/chat/history")
+    resp = await client.get("/api/tasks?limit=50")
+    order = [t["id"] for t in resp.json() if t["id"] in ids]
+    assert order == [ids[0], ids[2], ids[1]]
+
+    # 再访问 t1 → t1 第一，t0 第二（用户描述的 (b) 场景）
+    await client.get(f"/api/tasks/{ids[1]}/chat/history")
+    resp = await client.get("/api/tasks?limit=50")
+    order = [t["id"] for t in resp.json() if t["id"] in ids]
+    assert order == [ids[1], ids[0], ids[2]]
