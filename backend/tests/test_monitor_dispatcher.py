@@ -1,7 +1,18 @@
-"""Tests for Dispatcher monitor lifecycle — subprocess management and state transitions."""
+"""Tests for the monitor sub-agent lifecycle (persistent subprocess design).
+
+Current design (replaces the old per-check subprocess loop):
+- ``start_monitor_session`` spawns ``_monitor_session_lifecycle`` as an asyncio task.
+- The lifecycle launches ONE persistent Claude subprocess (``_launch_monitor_agent``)
+  with a dedicated MCP config; the sub-agent loops internally and reports back via
+  MCP tools that call the CCM API (POST .../checks, POST .../complete).
+- MonitorCheck records and per-check broadcasts are therefore written by the API
+  endpoints, not by the dispatcher; tests for those live at the API level below.
+"""
 import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+from sqlalchemy import select, update
 
 from backend.models.task import Task
 from backend.models.monitor_session import MonitorSession, MonitorCheck
@@ -24,35 +35,61 @@ def dispatcher(db_factory, mock_broadcaster):
     d._running_tasks = {}
     d._monitor_tasks = {}
     d._monitor_processes = {}
+    d._monitor_log_fhs = {}
     return d
 
 
-async def _seed_task_and_monitor(db_factory, status="in_progress", max_checks=50, interval=1):
+async def _seed_task_and_monitor(
+    db_factory, status="in_progress", max_checks=50, interval=1, context=None
+):
     async with db_factory() as db:
-        task = Task(title="t", description="d", status=status, enabled_skills={"monitor": True}, target_repo="/tmp")
+        task = Task(
+            title="t", description="d", status=status,
+            enabled_skills={"monitor": True}, target_repo="/tmp",
+        )
         db.add(task)
         await db.commit()
         await db.refresh(task)
-        ms = MonitorSession(task_id=task.id, description="test monitor", interval=interval, max_checks=max_checks)
+        ms = MonitorSession(
+            task_id=task.id, description="test monitor",
+            interval=interval, max_checks=max_checks, monitor_context=context,
+        )
         db.add(ms)
         await db.commit()
         await db.refresh(ms)
         return task.id, ms.id
 
 
-def test_build_monitor_prompt(dispatcher):
-    prompt = dispatcher._build_monitor_prompt(0, "watch build", "tail -f /tmp/log")
-    assert "第 1 次检查" in prompt
+def _fake_proc(returncode=0):
+    proc = MagicMock()
+    proc.returncode = returncode
+    proc.pid = 12345
+    proc.wait = AsyncMock(return_value=returncode)
+    proc.kill = MagicMock()
+    return proc
+
+
+# === Prompt building ===
+
+
+def test_build_monitor_agent_prompt(dispatcher):
+    prompt = dispatcher._build_monitor_agent_prompt("watch build", "tail -f /tmp/log")
+    assert "监控目标" in prompt
     assert "watch build" in prompt
+    assert "上下文" in prompt
     assert "tail -f /tmp/log" in prompt
-    assert "STATUS:" in prompt
-    assert "SUMMARY:" in prompt
+    # The sub-agent must be told about its MCP callback tools
+    assert "report_status" in prompt
+    assert "mark_complete" in prompt
 
 
-def test_build_monitor_prompt_no_context(dispatcher):
-    prompt = dispatcher._build_monitor_prompt(2, "test", None)
-    assert "第 3 次检查" in prompt
+def test_build_monitor_agent_prompt_no_context(dispatcher):
+    prompt = dispatcher._build_monitor_agent_prompt("test", None)
+    assert "test" in prompt
     assert "上下文" not in prompt
+
+
+# === start_monitor_session ===
 
 
 @pytest.mark.asyncio
@@ -69,144 +106,102 @@ async def test_start_monitor_session(dispatcher):
         pass
 
 
-@pytest.mark.asyncio
-async def test_lifecycle_max_checks_reached(dispatcher, db_factory, mock_broadcaster):
-    task_id, ms_id = await _seed_task_and_monitor(db_factory, max_checks=1, interval=0)
+# === Lifecycle: persistent subprocess state transitions ===
 
-    mock_output = "SUMMARY: All good\nSTATUS: running"
-    with patch.object(dispatcher, "_run_monitor_subprocess", new_callable=AsyncMock, return_value=mock_output):
+
+@pytest.mark.asyncio
+async def test_lifecycle_completed_by_subagent(dispatcher, db_factory, mock_broadcaster):
+    """Sub-agent calls mark_complete (via API) then exits → session stays completed."""
+    task_id, ms_id = await _seed_task_and_monitor(db_factory)
+
+    proc = _fake_proc(returncode=0)
+
+    async def wait_and_complete():
+        # Simulate the sub-agent's mark_complete MCP call before exiting
+        async with db_factory() as db:
+            await db.execute(
+                update(MonitorSession).where(MonitorSession.id == ms_id)
+                .values(status="completed")
+            )
+            await db.commit()
+        return 0
+
+    proc.wait = AsyncMock(side_effect=wait_and_complete)
+
+    with patch.object(dispatcher, "_launch_monitor_agent", new_callable=AsyncMock, return_value=proc) as mock_launch, \
+         patch("backend.services.mcp_config.cleanup_monitor_agent_mcp_config") as mock_cleanup:
         await dispatcher._monitor_session_lifecycle(ms_id)
+
+    # Launched once with the monitor prompt and the session's cwd
+    mock_launch.assert_awaited_once()
+    launch_kwargs = mock_launch.call_args.kwargs
+    assert "test monitor" in launch_kwargs["prompt"]
+    assert launch_kwargs["monitor_session_id"] == ms_id
 
     async with db_factory() as db:
         ms = await db.get(MonitorSession, ms_id)
-        assert ms.checks_done == 1
         assert ms.status == "completed"
-        assert ms.completed_at is not None
 
+    # No "failed" broadcast for a clean completion
+    failed_events = [
+        c for c in mock_broadcaster.broadcast.call_args_list
+        if c[0][1].get("event") == "monitor_session_status" and c[0][1].get("status") == "failed"
+    ]
+    assert failed_events == []
 
-@pytest.mark.asyncio
-async def test_lifecycle_task_ended(dispatcher, db_factory, mock_broadcaster):
-    task_id, ms_id = await _seed_task_and_monitor(db_factory, status="completed")
-
-    await dispatcher._monitor_session_lifecycle(ms_id)
-
-    async with db_factory() as db:
-        ms = await db.get(MonitorSession, ms_id)
-        assert ms.status == "completed"
-
-
-@pytest.mark.asyncio
-async def test_lifecycle_subprocess_timeout(dispatcher, db_factory, mock_broadcaster):
-    task_id, ms_id = await _seed_task_and_monitor(db_factory, max_checks=1, interval=0)
-
-    with patch.object(dispatcher, "_run_monitor_subprocess", new_callable=AsyncMock, side_effect=asyncio.TimeoutError):
-        await dispatcher._monitor_session_lifecycle(ms_id)
-
-    async with db_factory() as db:
-        ms = await db.get(MonitorSession, ms_id)
-        assert ms.checks_done == 1
-        assert ms.last_summary == "Monitor check timed out"
-
-        from sqlalchemy import select
-        result = await db.execute(
-            select(MonitorCheck).where(MonitorCheck.monitor_session_id == ms_id)
-        )
-        check = result.scalars().first()
-        assert check.status == "failed"
-
-
-@pytest.mark.asyncio
-async def test_lifecycle_subprocess_crash(dispatcher, db_factory, mock_broadcaster):
-    task_id, ms_id = await _seed_task_and_monitor(db_factory, max_checks=1, interval=0)
-
-    with patch.object(dispatcher, "_run_monitor_subprocess", new_callable=AsyncMock, side_effect=RuntimeError("segfault")):
-        await dispatcher._monitor_session_lifecycle(ms_id)
-
-    async with db_factory() as db:
-        ms = await db.get(MonitorSession, ms_id)
-        assert ms.checks_done == 1
-        assert "segfault" in ms.last_summary
-
-        from sqlalchemy import select
-        result = await db.execute(
-            select(MonitorCheck).where(MonitorCheck.monitor_session_id == ms_id)
-        )
-        check = result.scalars().first()
-        assert check.status == "failed"
-
-
-@pytest.mark.asyncio
-async def test_lifecycle_cancelled(dispatcher, db_factory, mock_broadcaster):
-    task_id, ms_id = await _seed_task_and_monitor(db_factory, interval=9999)
-
-    async def slow_subprocess(**kwargs):
-        await asyncio.sleep(9999)
-        return ""
-
-    with patch.object(dispatcher, "_run_monitor_subprocess", side_effect=slow_subprocess):
-        lifecycle_task = asyncio.create_task(dispatcher._monitor_session_lifecycle(ms_id))
-        await asyncio.sleep(0.05)
-        lifecycle_task.cancel()
-        try:
-            await lifecycle_task
-        except asyncio.CancelledError:
-            pass
-
+    # MCP config cleaned up, bookkeeping dicts emptied
+    mock_cleanup.assert_called_once_with(ms_id)
     assert ms_id not in dispatcher._monitor_tasks
     assert ms_id not in dispatcher._monitor_processes
 
 
 @pytest.mark.asyncio
-async def test_lifecycle_done_status(dispatcher, db_factory, mock_broadcaster):
-    task_id, ms_id = await _seed_task_and_monitor(db_factory, max_checks=10, interval=0)
+async def test_lifecycle_abnormal_exit_marks_failed(dispatcher, db_factory, mock_broadcaster):
+    """Process exits without mark_complete → session marked failed + broadcast."""
+    task_id, ms_id = await _seed_task_and_monitor(db_factory)
 
-    mock_output = "SUMMARY: Build finished successfully\nSTATUS: done"
-    with patch.object(dispatcher, "_run_monitor_subprocess", new_callable=AsyncMock, return_value=mock_output):
+    proc = _fake_proc(returncode=1)
+    with patch.object(dispatcher, "_launch_monitor_agent", new_callable=AsyncMock, return_value=proc):
         await dispatcher._monitor_session_lifecycle(ms_id)
 
     async with db_factory() as db:
         ms = await db.get(MonitorSession, ms_id)
-        assert ms.status == "completed"
-        assert ms.checks_done == 1
-        assert ms.last_summary == "Build finished successfully"
+        assert ms.status == "failed"
+        assert ms.completed_at is not None
+
+    failed_events = [
+        c for c in mock_broadcaster.broadcast.call_args_list
+        if c[0][1].get("event") == "monitor_session_status" and c[0][1].get("status") == "failed"
+    ]
+    assert len(failed_events) == 1
+    assert failed_events[0][0][0] == f"task:{task_id}"
+    assert failed_events[0][0][1]["monitor_session_id"] == ms_id
 
 
 @pytest.mark.asyncio
-async def test_lifecycle_unexpected_exception_marks_failed(dispatcher, db_factory, mock_broadcaster):
+async def test_lifecycle_timeout_kills_process(dispatcher, db_factory, mock_broadcaster):
+    """Overall lifecycle timeout → process killed, session marked failed."""
     task_id, ms_id = await _seed_task_and_monitor(db_factory)
 
-    async def _bad_lifecycle(self_id):
-        raise ValueError("unexpected bug")
+    proc = _fake_proc(returncode=None)
 
-    original = dispatcher._monitor_session_lifecycle
+    async def fake_wait_for(coro, timeout=None):
+        coro.close()
+        raise asyncio.TimeoutError
 
-    async def patched_lifecycle(monitor_session_id):
-        from backend.models.monitor_session import MonitorSession as MS, MonitorCheck as MC
-        try:
-            async with dispatcher.db_factory() as db:
-                ms = await db.get(MS, monitor_session_id)
-                task = await db.get(Task, ms.task_id)
-                if not ms or not task:
-                    return
-            raise ValueError("unexpected bug")
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            try:
-                async with dispatcher.db_factory() as db:
-                    ms = await db.get(MS, monitor_session_id)
-                    if ms and ms.status == "running":
-                        ms.status = "failed"
-                        from datetime import datetime
-                        ms.completed_at = datetime.utcnow()
-                        await db.commit()
-            except Exception:
-                pass
-        finally:
-            dispatcher._monitor_tasks.pop(monitor_session_id, None)
-            dispatcher._monitor_processes.pop(monitor_session_id, None)
+    killed = []
 
-    await patched_lifecycle(ms_id)
+    def kill():
+        proc.returncode = -9
+        killed.append(True)
+
+    proc.kill = MagicMock(side_effect=kill)
+
+    with patch.object(dispatcher, "_launch_monitor_agent", new_callable=AsyncMock, return_value=proc), \
+         patch("backend.services.dispatcher.asyncio.wait_for", fake_wait_for):
+        await dispatcher._monitor_session_lifecycle(ms_id)
+
+    assert killed, "process should be killed on timeout"
 
     async with db_factory() as db:
         ms = await db.get(MonitorSession, ms_id)
@@ -214,36 +209,221 @@ async def test_lifecycle_unexpected_exception_marks_failed(dispatcher, db_factor
 
 
 @pytest.mark.asyncio
-async def test_lifecycle_writes_check_record(dispatcher, db_factory, mock_broadcaster):
-    task_id, ms_id = await _seed_task_and_monitor(db_factory, max_checks=1, interval=0)
+async def test_lifecycle_cancelled(dispatcher, db_factory, mock_broadcaster):
+    """Cancelling the lifecycle task kills the subprocess and cleans up."""
+    task_id, ms_id = await _seed_task_and_monitor(db_factory)
 
-    mock_output = "SUMMARY: Process running at 45% CPU\nSTATUS: running"
-    with patch.object(dispatcher, "_run_monitor_subprocess", new_callable=AsyncMock, return_value=mock_output):
+    proc = _fake_proc(returncode=None)
+
+    async def hang():
+        await asyncio.sleep(9999)
+
+    proc.wait = AsyncMock(side_effect=hang)
+    killed = []
+
+    def kill():
+        proc.returncode = -9
+        proc.wait = AsyncMock(return_value=-9)
+        killed.append(True)
+
+    proc.kill = MagicMock(side_effect=kill)
+
+    async def launch_and_register(**kwargs):
+        dispatcher._monitor_processes[ms_id] = proc
+        return proc
+
+    with patch.object(dispatcher, "_launch_monitor_agent", side_effect=launch_and_register):
+        lifecycle_task = asyncio.create_task(dispatcher._monitor_session_lifecycle(ms_id))
+        await asyncio.sleep(0.1)
+        lifecycle_task.cancel()
+        try:
+            await lifecycle_task
+        except asyncio.CancelledError:
+            pass
+
+    assert killed, "subprocess should be killed on cancellation"
+    assert ms_id not in dispatcher._monitor_tasks
+    assert ms_id not in dispatcher._monitor_processes
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_launch_failure_marks_failed(dispatcher, db_factory, mock_broadcaster):
+    """Unexpected exception (e.g. launch crash) → session marked failed."""
+    task_id, ms_id = await _seed_task_and_monitor(db_factory)
+
+    with patch.object(
+        dispatcher, "_launch_monitor_agent",
+        new_callable=AsyncMock, side_effect=RuntimeError("spawn failed"),
+    ):
         await dispatcher._monitor_session_lifecycle(ms_id)
 
     async with db_factory() as db:
-        from sqlalchemy import select
+        ms = await db.get(MonitorSession, ms_id)
+        assert ms.status == "failed"
+        assert ms.completed_at is not None
+
+
+# === API callbacks: MonitorCheck records + broadcasts ===
+# In the new design the sub-agent reports via MCP tools that hit these endpoints,
+# so the per-check persistence/broadcast coverage moved here.
+
+
+async def _seed_via_api(client, session_factory, max_checks=50):
+    resp = await client.post("/api/tasks", json={
+        "title": "T", "description": "d", "target_repo": "/tmp",
+        "enabled_skills": {"monitor": True},
+    })
+    task_id = resp.json()["id"]
+    async with session_factory() as db:
+        await db.execute(update(Task).where(Task.id == task_id).values(status="in_progress"))
+        ms = MonitorSession(task_id=task_id, description="api monitor", max_checks=max_checks)
+        db.add(ms)
+        await db.commit()
+        await db.refresh(ms)
+        return task_id, ms.id
+
+
+def _mock_main_dispatcher():
+    d = MagicMock()
+    d.broadcaster = MagicMock()
+    d.broadcaster.broadcast = AsyncMock()
+    d.enqueue_message = AsyncMock()
+    d._monitor_processes = {}
+    return d
+
+
+@pytest.mark.asyncio
+async def test_report_check_writes_record_and_broadcasts(client, session_factory):
+    task_id, ms_id = await _seed_via_api(client, session_factory)
+    mock_d = _mock_main_dispatcher()
+
+    with patch("backend.main.dispatcher", mock_d):
+        resp = await client.post(
+            f"/api/tasks/{task_id}/monitor-sessions/{ms_id}/checks",
+            json={"summary": "Process running at 45% CPU", "status": "success"},
+        )
+    assert resp.status_code == 200
+
+    async with session_factory() as db:
+        ms = await db.get(MonitorSession, ms_id)
+        assert ms.checks_done == 1
+        assert ms.last_summary == "Process running at 45% CPU"
+        assert ms.status == "running"
+
         result = await db.execute(
             select(MonitorCheck).where(MonitorCheck.monitor_session_id == ms_id)
         )
-        check = result.scalars().first()
-        assert check is not None
+        check = result.scalars().one()
         assert check.check_number == 1
         assert check.status == "success"
         assert check.summary == "Process running at 45% CPU"
 
+    events = [
+        c for c in mock_d.broadcaster.broadcast.call_args_list
+        if c[0][1].get("event") == "monitor_check"
+    ]
+    assert len(events) == 1
+    assert events[0][0][0] == f"task:{task_id}"
+    assert events[0][0][1]["summary"] == "Process running at 45% CPU"
+    # Non-important routine check does not interrupt the main agent
+    mock_d.enqueue_message.assert_not_awaited()
+
 
 @pytest.mark.asyncio
-async def test_lifecycle_broadcasts_check_event(dispatcher, db_factory, mock_broadcaster):
-    task_id, ms_id = await _seed_task_and_monitor(db_factory, max_checks=1, interval=0)
+async def test_report_check_important_enqueues_to_main_agent(client, session_factory):
+    task_id, ms_id = await _seed_via_api(client, session_factory)
+    mock_d = _mock_main_dispatcher()
 
-    mock_output = "SUMMARY: ok\nSTATUS: running"
-    with patch.object(dispatcher, "_run_monitor_subprocess", new_callable=AsyncMock, return_value=mock_output):
-        await dispatcher._monitor_session_lifecycle(ms_id)
+    with patch("backend.main.dispatcher", mock_d):
+        resp = await client.post(
+            f"/api/tasks/{task_id}/monitor-sessions/{ms_id}/checks",
+            json={"summary": "Build FAILED", "status": "success", "is_important": True},
+        )
+    assert resp.status_code == 200
 
-    calls = [c for c in mock_broadcaster.broadcast.call_args_list
-             if c[0][1].get("event") == "monitor_check"]
-    assert len(calls) >= 1
-    event = calls[0][0][1]
-    assert event["is_monitor"] is True
-    assert event["summary"] == "ok"
+    mock_d.enqueue_message.assert_awaited_once()
+    kwargs = mock_d.enqueue_message.call_args.kwargs
+    assert kwargs["task_id"] == task_id
+    assert kwargs["source"] == "monitor:report"
+    assert "Build FAILED" in kwargs["prompt"]
+
+
+@pytest.mark.asyncio
+async def test_report_check_max_checks_auto_completes(client, session_factory):
+    task_id, ms_id = await _seed_via_api(client, session_factory, max_checks=1)
+    mock_d = _mock_main_dispatcher()
+
+    with patch("backend.main.dispatcher", mock_d):
+        resp = await client.post(
+            f"/api/tasks/{task_id}/monitor-sessions/{ms_id}/checks",
+            json={"summary": "still running", "status": "success"},
+        )
+    assert resp.status_code == 200
+
+    async with session_factory() as db:
+        ms = await db.get(MonitorSession, ms_id)
+        assert ms.status == "completed"
+        assert ms.checks_done == 1
+        assert ms.completed_at is not None
+
+    status_events = [
+        c for c in mock_d.broadcaster.broadcast.call_args_list
+        if c[0][1].get("event") == "monitor_session_status"
+    ]
+    assert len(status_events) == 1
+    assert status_events[0][0][1]["status"] == "completed"
+
+    mock_d.enqueue_message.assert_awaited_once()
+    assert mock_d.enqueue_message.call_args.kwargs["source"] == "monitor:complete"
+
+
+@pytest.mark.asyncio
+async def test_mark_complete_endpoint(client, session_factory):
+    task_id, ms_id = await _seed_via_api(client, session_factory)
+    mock_d = _mock_main_dispatcher()
+
+    with patch("backend.main.dispatcher", mock_d):
+        resp = await client.post(
+            f"/api/tasks/{task_id}/monitor-sessions/{ms_id}/complete",
+            json={"reason": "Build finished successfully"},
+        )
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+
+    async with session_factory() as db:
+        ms = await db.get(MonitorSession, ms_id)
+        assert ms.status == "completed"
+        assert ms.completed_at is not None
+        assert ms.last_summary == "Build finished successfully"
+
+        result = await db.execute(
+            select(MonitorCheck).where(MonitorCheck.monitor_session_id == ms_id)
+        )
+        check = result.scalars().one()
+        assert check.status == "completed"
+        assert check.summary == "Build finished successfully"
+
+    events = {c[0][1].get("event") for c in mock_d.broadcaster.broadcast.call_args_list}
+    assert "monitor_check" in events
+    assert "monitor_session_status" in events
+
+    # Completion is relayed to the main agent
+    mock_d.enqueue_message.assert_awaited_once()
+    assert mock_d.enqueue_message.call_args.kwargs["source"] == "monitor:complete"
+
+
+@pytest.mark.asyncio
+async def test_report_check_session_not_running(client, session_factory):
+    task_id, ms_id = await _seed_via_api(client, session_factory)
+    async with session_factory() as db:
+        await db.execute(
+            update(MonitorSession).where(MonitorSession.id == ms_id)
+            .values(status="completed")
+        )
+        await db.commit()
+
+    resp = await client.post(
+        f"/api/tasks/{task_id}/monitor-sessions/{ms_id}/checks",
+        json={"summary": "late report", "status": "success"},
+    )
+    assert resp.status_code == 400

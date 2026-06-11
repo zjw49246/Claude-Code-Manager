@@ -226,7 +226,11 @@ async def test_plan_reject_not_found(client):
     assert resp.status_code == 404
 
 
-# === Chat send extra tests ===
+# === Chat send: enqueue contract ===
+# POST /chat no longer launches an instance directly. It stores + broadcasts
+# the user message and enqueues the prompt via dispatcher.enqueue_message;
+# launch-time concerns (model/effort/cwd) moved to the dispatcher's
+# _process_queued_message (tested below at the dispatcher level).
 
 
 async def _create_task_with_session(client, session_factory, **extra_fields):
@@ -242,101 +246,72 @@ async def _create_task_with_session(client, session_factory, **extra_fields):
     return task_id
 
 
+def _mock_dispatcher():
+    d = MagicMock()
+    d.enqueue_message = AsyncMock()
+    return d
+
+
 @pytest.mark.asyncio
-async def test_chat_send_no_idle_instance(client, session_factory):
-    """Task has session but no idle instances exist."""
+async def test_chat_send_enqueues_message(client, session_factory):
+    """Chat send returns 200 queued=True and enqueues via the dispatcher."""
+    from backend.services.dispatcher import PRIORITY_USER
+
     task_id = await _create_task_with_session(client, session_factory)
 
-    mock_im = MagicMock()
-    mock_im.processes = {}
+    mock_d = _mock_dispatcher()
     mock_broadcaster = MagicMock()
     mock_broadcaster.broadcast = AsyncMock()
 
-    with patch("backend.main.instance_manager", mock_im), \
+    with patch("backend.main.dispatcher", mock_d), \
          patch("backend.main.broadcaster", mock_broadcaster):
         resp = await client.post(f"/api/tasks/{task_id}/chat", json={"message": "hi"})
-    assert resp.status_code == 400
-    assert "no idle instance" in resp.json()["detail"].lower()
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["ok"] is True
+    assert data["queued"] is True
+    assert data["session_id"] == "test-session-123"
+
+    mock_d.enqueue_message.assert_awaited_once()
+    kwargs = mock_d.enqueue_message.call_args.kwargs
+    assert kwargs["task_id"] == task_id
+    assert kwargs["prompt"] == "hi"
+    assert kwargs["priority"] == PRIORITY_USER
+    assert kwargs["source"] == "user"
+
+    # User message broadcast to task channel before enqueue
+    task_broadcasts = [
+        c for c in mock_broadcaster.broadcast.call_args_list
+        if c[0][0] == f"task:{task_id}" and c[0][1].get("event_type") == "user_message"
+    ]
+    assert len(task_broadcasts) == 1
+    assert task_broadcasts[0][0][1]["content"] == "hi"
 
 
 @pytest.mark.asyncio
-async def test_chat_send_task_being_processed(client, session_factory):
-    """Task has session but an instance is currently processing it."""
+async def test_chat_send_queues_even_when_task_busy(client, session_factory):
+    """Busy/no-idle-instance states no longer 4xx at the endpoint — the
+    message is queued and the dispatcher serializes processing."""
     task_id = await _create_task_with_session(client, session_factory)
 
-    # Create an instance that's "running" this task
+    # An instance currently "running" this task — irrelevant to the endpoint now
     async with session_factory() as db:
         inst = Instance(name="busy-inst", status="idle", current_task_id=task_id)
         db.add(inst)
         await db.commit()
-        await db.refresh(inst)
-        inst_id = inst.id
 
-    # Mock a process with returncode=None (still running) for this instance
-    mock_proc = MagicMock()
-    mock_proc.returncode = None
-    mock_im = MagicMock()
-    mock_im.processes = {inst_id: mock_proc}
-
-    with patch("backend.main.instance_manager", mock_im):
-        resp = await client.post(f"/api/tasks/{task_id}/chat", json={"message": "hi"})
-    assert resp.status_code == 409
-    assert "currently being processed" in resp.json()["detail"].lower()
-
-
-@pytest.mark.asyncio
-async def test_chat_send_cwd_uses_last_cwd(client, session_factory):
-    """When last_cwd exists, uses it as cwd."""
-    task_id = await _create_task_with_session(
-        client, session_factory,
-        last_cwd="/tmp",  # /tmp exists
-    )
-
-    # Create an idle instance
-    async with session_factory() as db:
-        inst = Instance(name="idle-inst", status="idle")
-        db.add(inst)
-        await db.commit()
-
-    mock_im = MagicMock()
-    mock_im.processes = {}
-    mock_im.launch = AsyncMock(return_value=42)
+    mock_d = _mock_dispatcher()
     mock_broadcaster = MagicMock()
     mock_broadcaster.broadcast = AsyncMock()
 
-    with patch("backend.main.instance_manager", mock_im), \
+    with patch("backend.main.dispatcher", mock_d), \
          patch("backend.main.broadcaster", mock_broadcaster):
-        resp = await client.post(f"/api/tasks/{task_id}/chat", json={"message": "followup"})
+        resp = await client.post(f"/api/tasks/{task_id}/chat", json={"message": "hi"})
+
     assert resp.status_code == 200
-    mock_im.launch.assert_awaited_once()
-    call_kwargs = mock_im.launch.call_args
-    assert call_kwargs.kwargs.get("cwd") == "/tmp" or call_kwargs[1].get("cwd") == "/tmp"
-
-
-@pytest.mark.asyncio
-async def test_chat_send_cwd_not_found(client, session_factory):
-    """When cwd doesn't exist -> 400."""
-    task_id = await _create_task_with_session(
-        client, session_factory,
-        last_cwd="/nonexistent/a",
-    )
-
-    # Create an idle instance
-    async with session_factory() as db:
-        inst = Instance(name="idle-inst-2", status="idle")
-        db.add(inst)
-        await db.commit()
-
-    mock_im = MagicMock()
-    mock_im.processes = {}
-    mock_broadcaster = MagicMock()
-    mock_broadcaster.broadcast = AsyncMock()
-
-    with patch("backend.main.instance_manager", mock_im), \
-         patch("backend.main.broadcaster", mock_broadcaster):
-        resp = await client.post(f"/api/tasks/{task_id}/chat", json={"message": "hi"})
-    assert resp.status_code == 400
-    assert "directory" in resp.json()["detail"].lower()
+    assert resp.json()["queued"] is True
+    mock_d.enqueue_message.assert_awaited_once()
 
 
 # === Chat with image_paths ===
@@ -344,24 +319,14 @@ async def test_chat_send_cwd_not_found(client, session_factory):
 
 @pytest.mark.asyncio
 async def test_chat_send_with_image_paths_appends_to_prompt(client, session_factory):
-    """When image_paths are provided, prompt passed to launch includes image list."""
-    task_id = await _create_task_with_session(
-        client, session_factory,
-        last_cwd="/tmp",
-    )
+    """When image_paths are provided, the enqueued prompt includes the file list."""
+    task_id = await _create_task_with_session(client, session_factory)
 
-    async with session_factory() as db:
-        inst = Instance(name="idle-img-inst", status="idle")
-        db.add(inst)
-        await db.commit()
-
-    mock_im = MagicMock()
-    mock_im.processes = {}
-    mock_im.launch = AsyncMock(return_value=99)
+    mock_d = _mock_dispatcher()
     mock_broadcaster = MagicMock()
     mock_broadcaster.broadcast = AsyncMock()
 
-    with patch("backend.main.instance_manager", mock_im), \
+    with patch("backend.main.dispatcher", mock_d), \
          patch("backend.main.broadcaster", mock_broadcaster):
         resp = await client.post(
             f"/api/tasks/{task_id}/chat",
@@ -369,9 +334,7 @@ async def test_chat_send_with_image_paths_appends_to_prompt(client, session_fact
         )
     assert resp.status_code == 200
 
-    # Verify launch was called with a prompt that includes the image paths
-    call_kwargs = mock_im.launch.call_args
-    prompt_used = call_kwargs.kwargs.get("prompt") or call_kwargs[1].get("prompt") or call_kwargs[0][1]
+    prompt_used = mock_d.enqueue_message.call_args.kwargs["prompt"]
     assert "/uploads/img1.png" in prompt_used
     assert "/uploads/img2.jpg" in prompt_used
     assert "Read" in prompt_used  # the instruction to use the Read tool
@@ -379,34 +342,21 @@ async def test_chat_send_with_image_paths_appends_to_prompt(client, session_fact
 
 @pytest.mark.asyncio
 async def test_chat_send_without_image_paths_plain_prompt(client, session_factory):
-    """When no image_paths are provided, prompt is just the message text."""
-    task_id = await _create_task_with_session(
-        client, session_factory,
-        last_cwd="/tmp",
-    )
+    """When no image_paths are provided, the enqueued prompt is just the message."""
+    task_id = await _create_task_with_session(client, session_factory)
 
-    async with session_factory() as db:
-        inst = Instance(name="idle-plain-inst", status="idle")
-        db.add(inst)
-        await db.commit()
-
-    mock_im = MagicMock()
-    mock_im.processes = {}
-    mock_im.launch = AsyncMock(return_value=100)
+    mock_d = _mock_dispatcher()
     mock_broadcaster = MagicMock()
     mock_broadcaster.broadcast = AsyncMock()
 
-    with patch("backend.main.instance_manager", mock_im), \
+    with patch("backend.main.dispatcher", mock_d), \
          patch("backend.main.broadcaster", mock_broadcaster):
         resp = await client.post(
             f"/api/tasks/{task_id}/chat",
             json={"message": "plain message"},
         )
     assert resp.status_code == 200
-
-    call_kwargs = mock_im.launch.call_args
-    prompt_used = call_kwargs.kwargs.get("prompt") or call_kwargs[1].get("prompt") or call_kwargs[0][1]
-    assert prompt_used == "plain message"
+    assert mock_d.enqueue_message.call_args.kwargs["prompt"] == "plain message"
 
 
 @pytest.mark.asyncio
@@ -415,23 +365,13 @@ async def test_chat_send_with_image_paths_stores_original_message(client, sessio
     from backend.models.log_entry import LogEntry
     from sqlalchemy import select
 
-    task_id = await _create_task_with_session(
-        client, session_factory,
-        last_cwd="/tmp",
-    )
+    task_id = await _create_task_with_session(client, session_factory)
 
-    async with session_factory() as db:
-        inst = Instance(name="idle-log-inst", status="idle")
-        db.add(inst)
-        await db.commit()
-
-    mock_im = MagicMock()
-    mock_im.processes = {}
-    mock_im.launch = AsyncMock(return_value=101)
+    mock_d = _mock_dispatcher()
     mock_broadcaster = MagicMock()
     mock_broadcaster.broadcast = AsyncMock()
 
-    with patch("backend.main.instance_manager", mock_im), \
+    with patch("backend.main.dispatcher", mock_d), \
          patch("backend.main.broadcaster", mock_broadcaster):
         await client.post(
             f"/api/tasks/{task_id}/chat",
@@ -449,64 +389,92 @@ async def test_chat_send_with_image_paths_stores_original_message(client, sessio
     assert log.content == "my message"
 
 
-# === Chat model/effort resolution tests ===
+# === Dispatcher: queued message → launch resolution (model/effort/cwd) ===
+
+
+from backend.services.dispatcher import GlobalDispatcher, QueuedMessage, PRIORITY_USER
+
+
+def _make_dispatcher(db_factory):
+    mock_im = MagicMock()
+    mock_im.processes = {}
+    mock_im.launch = AsyncMock()
+    mock_broadcaster = MagicMock()
+    mock_broadcaster.broadcast = AsyncMock()
+    return GlobalDispatcher(db_factory, mock_im, mock_broadcaster)
+
+
+async def _seed_task_for_queue(db_factory, **task_fields):
+    async with db_factory() as db:
+        task = Task(
+            title="t", description="d", status="completed", target_repo="/tmp",
+            session_id="sess-1", **task_fields,
+        )
+        db.add(task)
+        inst = Instance(name="idle-inst", status="idle")
+        db.add(inst)
+        await db.commit()
+        await db.refresh(task)
+        return task.id
+
+
+def _queued(prompt="hi"):
+    import time
+    return QueuedMessage(
+        priority=PRIORITY_USER, timestamp=time.monotonic(),
+        prompt=prompt, source="user",
+    )
 
 
 @pytest.mark.asyncio
-async def test_chat_send_uses_task_model_not_instance_model(client, session_factory):
-    """Chat resume should use task.model (the model that created the session),
-    not the instance's model."""
-    task_id = await _create_task_with_session(
-        client, session_factory,
-        last_cwd="/tmp",
-        model="claude-opus-4-6",  # task was created with opus 4.6
-    )
+async def test_process_queued_message_uses_task_model(db_factory):
+    """Queued message launch resumes with task.model (the model that created
+    the session), not any instance-level model."""
+    dispatcher = _make_dispatcher(db_factory)
+    task_id = await _seed_task_for_queue(db_factory, model="claude-opus-4-6", last_cwd="/tmp")
 
-    async with session_factory() as db:
-        inst = Instance(name="inst-diff-model", status="idle")
-        db.add(inst)
-        await db.commit()
+    await dispatcher._process_queued_message(task_id, _queued())
 
-    mock_im = MagicMock()
-    mock_im.processes = {}
-    mock_im.launch = AsyncMock(return_value=42)
-    mock_broadcaster = MagicMock()
-    mock_broadcaster.broadcast = AsyncMock()
-
-    with patch("backend.main.instance_manager", mock_im), \
-         patch("backend.main.broadcaster", mock_broadcaster):
-        resp = await client.post(f"/api/tasks/{task_id}/chat", json={"message": "hi"})
-    assert resp.status_code == 200
-
-    call_kwargs = mock_im.launch.call_args.kwargs
-    # Should use task's model, not instance's
-    assert call_kwargs["model"] == "claude-opus-4-6"
+    dispatcher.instance_manager.launch.assert_awaited_once()
+    kwargs = dispatcher.instance_manager.launch.call_args.kwargs
+    assert kwargs["model"] == "claude-opus-4-6"
+    assert kwargs["resume_session_id"] == "sess-1"
+    assert kwargs["prompt"] == "hi"
+    assert kwargs["chat_initiated"] is True
 
 
 @pytest.mark.asyncio
-async def test_chat_send_effort_uses_task_effort(client, session_factory):
-    """Chat resume effort_level should use task's effort_level."""
-    task_id = await _create_task_with_session(
-        client, session_factory,
-        last_cwd="/tmp",
-        effort_level="high",
-    )
+async def test_process_queued_message_effort_uses_task_effort(db_factory):
+    """Queued message launch uses task.effort_level."""
+    dispatcher = _make_dispatcher(db_factory)
+    task_id = await _seed_task_for_queue(db_factory, effort_level="high", last_cwd="/tmp")
 
-    async with session_factory() as db:
-        inst = Instance(name="inst-effort", status="idle")
-        db.add(inst)
-        await db.commit()
+    await dispatcher._process_queued_message(task_id, _queued())
 
-    mock_im = MagicMock()
-    mock_im.processes = {}
-    mock_im.launch = AsyncMock(return_value=44)
-    mock_broadcaster = MagicMock()
-    mock_broadcaster.broadcast = AsyncMock()
+    kwargs = dispatcher.instance_manager.launch.call_args.kwargs
+    assert kwargs["effort_level"] == "high"
 
-    with patch("backend.main.instance_manager", mock_im), \
-         patch("backend.main.broadcaster", mock_broadcaster):
-        resp = await client.post(f"/api/tasks/{task_id}/chat", json={"message": "hi"})
-    assert resp.status_code == 200
 
-    call_kwargs = mock_im.launch.call_args.kwargs
-    assert call_kwargs["effort_level"] == "high"
+@pytest.mark.asyncio
+async def test_process_queued_message_cwd_uses_last_cwd(db_factory):
+    """When last_cwd is set, the launch cwd uses it."""
+    dispatcher = _make_dispatcher(db_factory)
+    task_id = await _seed_task_for_queue(db_factory, last_cwd="/tmp/somewhere")
+
+    await dispatcher._process_queued_message(task_id, _queued())
+
+    kwargs = dispatcher.instance_manager.launch.call_args.kwargs
+    assert kwargs["cwd"] == "/tmp/somewhere"
+
+
+@pytest.mark.asyncio
+async def test_process_queued_message_cwd_falls_back_to_target_repo(db_factory):
+    """Without last_cwd, the launch cwd falls back to task.target_repo
+    (the old endpoint-level 400-on-missing-cwd check no longer exists)."""
+    dispatcher = _make_dispatcher(db_factory)
+    task_id = await _seed_task_for_queue(db_factory, last_cwd=None)
+
+    await dispatcher._process_queued_message(task_id, _queued())
+
+    kwargs = dispatcher.instance_manager.launch.call_args.kwargs
+    assert kwargs["cwd"] == "/tmp"
