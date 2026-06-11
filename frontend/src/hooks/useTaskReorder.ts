@@ -41,8 +41,13 @@ function groupRange(list: Task[], idx: number): [number, number] {
 interface ReorderApi {
   draggingId: number | null;
   overIndex: number | null;
-  /** 给每个任务行/项 spread 的属性（含桌面 DnD + 移动端长按拖动）。 */
+  /** 整行可拖（侧边栏用）：targetProps + handleProps 合并。 */
   itemProps: (t: Task, idx: number) => Record<string, unknown>;
+  /** 拖放目标 + 移动端长按（行容器用）。 */
+  targetProps: (t: Task, idx: number) => Record<string, unknown>;
+  /** 桌面拖拽手柄（行内有大段可选中文字时，整行 draggable 会被
+   * 文本选择手势抢走 dragStart——主列表必须用显式手柄）。 */
+  handleProps: (t: Task, idx: number) => Record<string, unknown>;
 }
 
 /**
@@ -114,14 +119,19 @@ export function useTaskReorder(tasks: Task[], onReordered: () => void): ReorderA
     };
   }, [draggingId, endDrag]);
 
-  const itemProps = useCallback((t: Task, idx: number) => ({
-    'data-reorder-idx': idx,
+  const handleProps = useCallback((t: Task, _idx: number) => ({
     draggable: true,
     onDragStart: (e: React.DragEvent) => {
       e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', String(t.id)); // Firefox 需要 setData 才会启动拖拽
       dragRef.current = t.id;
       setDraggingId(t.id);
     },
+    onDragEnd: () => endDrag(false),
+  }), [endDrag]);
+
+  const targetProps = useCallback((t: Task, idx: number) => ({
+    'data-reorder-idx': idx,
     onDragOver: (e: React.DragEvent) => {
       if (dragRef.current == null) return;
       e.preventDefault();
@@ -133,7 +143,6 @@ export function useTaskReorder(tasks: Task[], onReordered: () => void): ReorderA
       overRef.current = idx;
       endDrag(true);
     },
-    onDragEnd: () => endDrag(false),
     // 移动端长按激活
     onTouchStart: () => {
       longPress.current = setTimeout(() => {
@@ -156,5 +165,10 @@ export function useTaskReorder(tasks: Task[], onReordered: () => void): ReorderA
     },
   }), [endDrag]);
 
-  return { draggingId, overIndex, itemProps };
+  const itemProps = useCallback((t: Task, idx: number) => ({
+    ...targetProps(t, idx),
+    ...handleProps(t, idx),
+  }), [targetProps, handleProps]);
+
+  return { draggingId, overIndex, itemProps, targetProps, handleProps };
 }

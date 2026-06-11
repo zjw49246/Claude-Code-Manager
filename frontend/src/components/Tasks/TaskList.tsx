@@ -1,7 +1,7 @@
 import { useState, useMemo, useRef, useEffect } from 'react';
 import { api } from '../../api/client';
 import type { Task, Project } from '../../api/client';
-import { Trash2, RotateCcw, XCircle, MessageCircle, Archive, ArchiveRestore, Star, Copy, Check, MoreVertical, Pencil, Mail, MailOpen, Clock } from 'lucide-react';
+import { Trash2, RotateCcw, XCircle, MessageCircle, Archive, ArchiveRestore, Star, Copy, Check, MoreVertical, Pencil, Mail, MailOpen, Clock, GripVertical } from 'lucide-react';
 import { ToolsBadge, SubAgentsBadge, TaskConfigBadge } from './TaskBadges';
 import { TAG_COLOR_OPTIONS } from '../TagColors';
 import { ExpandableText } from '../ExpandableText';
@@ -105,7 +105,7 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId 
   };
 
   // 拖拽排序（长按/拖动；标星置顶保留，仅同组内移动）
-  const { draggingId, overIndex, itemProps } = useTaskReorder(tasks, onRefresh);
+  const { draggingId, overIndex, targetProps, handleProps } = useTaskReorder(tasks, onRefresh);
 
   if (tasks.length === 0) {
     return <p className="text-gray-500 text-sm text-center py-8">No tasks yet</p>;
@@ -116,7 +116,7 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId 
       {tasks.map((t, idx) => (
         <div
           key={t.id}
-          {...itemProps(t, idx)}
+          {...targetProps(t, idx)}
           className={`rounded-lg p-3 transition-opacity ${
             draggingId === t.id ? 'opacity-40' : ''
           } ${overIndex === idx && draggingId !== null && draggingId !== t.id ? 'ring-2 ring-indigo-400' : ''} ${
@@ -125,6 +125,15 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId 
         >
           {/* Row 1: status dot + badges (left, wraps) | action buttons (right, no wrap) */}
           <div className="flex items-center gap-2">
+            {/* 拖拽手柄：卡片正文是可选中文字，整卡 draggable 会被文本
+                选择手势抢走，必须用显式手柄拖动 */}
+            <span
+              {...handleProps(t, idx)}
+              className="shrink-0 self-start mt-[6px] -ml-1 cursor-grab active:cursor-grabbing text-gray-600 hover:text-gray-400 select-none"
+              title="拖动排序"
+            >
+              <GripVertical size={14} />
+            </span>
             <span className={`w-2.5 h-2.5 rounded-full shrink-0 self-start mt-[9px] ${statusColors[t.status] || 'bg-gray-500'}`} />
             <div className="flex items-center gap-2 flex-wrap flex-1 min-w-0 min-h-[28px]">
               <span className="text-xs text-gray-500">#{t.id}</span>
