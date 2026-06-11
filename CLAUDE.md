@@ -169,6 +169,10 @@ pending → in_progress → executing → completed
 uv sync              # 安装生产依赖
 uv sync --group dev  # 安装生产 + 开发依赖（pytest 等）
 
+# 刷新 claude-pty 到 PTY 仓库 main 最新（git 依赖是安装时快照，
+# git pull 不会更新它——部署同步时必须跑；editable 安装自动跳过）
+./scripts/refresh_pty.sh
+
 # 一键启动 (后端 + 前端)
 ./scripts/dev.sh
 
