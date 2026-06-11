@@ -255,7 +255,7 @@ describe('ChatView', () => {
 
       await waitFor(() => {
         // compact=true, limit=HISTORY_PAGE_SIZE (paginated initial load)
-        expect(api.getTaskChatHistory).toHaveBeenCalledWith(42, true, 200);
+        expect(api.getTaskChatHistory).toHaveBeenCalledWith(42, true, 200, 0, true);
       });
     });
 

@@ -414,7 +414,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
 
   const fetchHistory = useCallback(() => {
     setHistoryLoading(true);
-    api.getTaskChatHistory(task.id, true, HISTORY_PAGE_SIZE).then((msgs) => {
+    api.getTaskChatHistory(task.id, true, HISTORY_PAGE_SIZE, 0, true).then((msgs) => {
       const filtered = msgs.filter((m) =>
         !((m.event_type === 'message' || m.event_type === 'result') && !m.content)
       );

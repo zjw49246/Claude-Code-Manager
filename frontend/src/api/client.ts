@@ -549,8 +549,10 @@ export const api = {
     request<{ ok: boolean; pid: number; instance_id: number; session_id: string }>(`/api/tasks/${taskId}/chat`, { method: 'POST', body: JSON.stringify({ message, file_paths: filePaths, secret_ids: secretIds, ...(model ? { model } : {}) }) }),
   injectTaskMessage: (taskId: number, message: string) =>
     request<{ ok: boolean; injected: boolean }>(`/api/tasks/${taskId}/inject`, { method: 'POST', body: JSON.stringify({ message }) }),
-  getTaskChatHistory: (taskId: number, compact = true, limit = 0, beforeId = 0) =>
-    request<ChatMessage[]>(`/api/tasks/${taskId}/chat/history?compact=${compact}${limit ? `&limit=${limit}` : ''}${beforeId ? `&before_id=${beforeId}` : ''}`),
+  // touch=true 仅在用户真正打开聊天（首页加载）时传——后端以此更新访问排序；
+  // 分页翻旧消息不传，避免后台轮询/旧版客户端把任务在列表里来回顶到最前
+  getTaskChatHistory: (taskId: number, compact = true, limit = 0, beforeId = 0, touch = false) =>
+    request<ChatMessage[]>(`/api/tasks/${taskId}/chat/history?compact=${compact}${limit ? `&limit=${limit}` : ''}${beforeId ? `&before_id=${beforeId}` : ''}${touch ? '&touch=true' : ''}`),
   getMessageDetail: (taskId: number, messageId: number) =>
     request<{ id: number; tool_input: string | null; tool_output: string | null; content: string | null }>(`/api/tasks/${taskId}/chat/${messageId}/detail`),
 
