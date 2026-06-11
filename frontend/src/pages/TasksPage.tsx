@@ -192,12 +192,9 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
     }
   }, [setChatTaskWrapped]);
 
-  const taskListContent = (
-    <>
-      <TaskForm onCreated={refresh} />
-
-      <PlanPanel tasks={allTasks} onRefresh={refresh} />
-
+  // Filter / Projects / Search controls — shared between the full task list
+  // and the split-mode sidebar
+  const filterControls = (
       <div className="flex gap-2 flex-wrap items-center">
         <div className="relative" ref={filterDropdownRef}>
           <button
@@ -216,7 +213,7 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
             <ChevronDown size={12} className={`transition-transform ${showFilterDropdown ? 'rotate-180' : ''}`} />
           </button>
           {showFilterDropdown && (
-            <div className="absolute top-full mt-1 left-0 bg-gray-900 border border-gray-700 rounded-lg shadow-xl z-30 min-w-[180px] py-1 max-h-[400px] overflow-y-auto">
+            <div className="absolute top-full mt-1 left-0 bg-gray-900 border border-gray-700 rounded-lg shadow-xl z-30 min-w-[180px] py-1 max-h-72 overflow-y-auto">
               {/* Status section */}
               <div className="px-3 py-1 text-[10px] text-gray-500 uppercase tracking-wider">Status</div>
               {statusOptions.map((f) => {
@@ -332,7 +329,7 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
           projects={tagFilteredProjects}
           value={projectFilter}
           onChange={(v) => setProjectFilter(v ? Number(v) : undefined)}
-          placeholder="All Projects"
+          placeholder="Projects"
           tagColorMap={tagColorMap}
         />
 
@@ -344,14 +341,14 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
             });
             setTimeout(() => searchInputRef.current?.focus(), 0);
           }}
-          className={`flex items-center gap-1.5 px-3 py-2 rounded-lg border text-sm transition-colors ${
+          className={`flex items-center gap-1 text-xs px-2 py-1.5 rounded border transition-colors ${
             showSearch
-              ? 'bg-indigo-600/20 border-indigo-500 text-indigo-300'
-              : 'bg-gray-900 border-gray-700 text-gray-300 hover:border-gray-600'
+              ? 'bg-indigo-600/30 text-indigo-300 border-indigo-500/50 hover:bg-indigo-600/40'
+              : 'bg-gray-700 text-gray-400 border-gray-600 hover:bg-gray-600 hover:text-gray-300'
           }`}
           title="Search task titles (regex)"
         >
-          <Search size={15} />
+          <Search size={13} />
         </button>
         {showSearch && (
           <div className="relative flex-1 max-w-xs">
@@ -377,6 +374,15 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
           <span className="text-xs text-gray-500 whitespace-nowrap">{searchResults.length} match{searchResults.length === 1 ? '' : 'es'}</span>
         )}
       </div>
+  );
+
+  const taskListContent = (
+    <>
+      <TaskForm onCreated={refresh} />
+
+      <PlanPanel tasks={allTasks} onRefresh={refresh} />
+
+      {filterControls}
 
       <TaskList
         tasks={searchResults ?? filteredTasks}
@@ -418,7 +424,6 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
   );
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [sidebarFilter, setSidebarFilter] = useState('');
 
   if (splitMode) {
     const sidebarStatusColors: Record<string, string> = {
@@ -439,8 +444,6 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
       failed: 'Failed',
       cancelled: 'Cancelled',
     };
-    const sidebarFilters = ['', 'executing', 'in_progress', 'pending', 'completed', 'failed'];
-    const sidebarFilterLabels: Record<string, string> = { '': 'All', executing: 'Running', in_progress: 'Active', pending: 'Pending', completed: 'Done', failed: 'Failed' };
     return (
       <div className="flex h-[calc(100vh-64px)] -mt-4 -mx-4">
         {sidebarOpen && (
@@ -455,24 +458,11 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
                 <PanelLeftClose size={14} />
               </button>
             </div>
-            <div className="flex gap-1 px-2 py-1.5 border-b border-gray-800 shrink-0 flex-wrap">
-              {sidebarFilters.map((f) => (
-                <button
-                  key={f}
-                  onClick={() => setSidebarFilter(f)}
-                  className={`px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors ${
-                    sidebarFilter === f
-                      ? 'bg-indigo-600 text-white'
-                      : 'text-gray-500 hover:text-gray-300 hover:bg-gray-800'
-                  }`}
-                >
-                  {sidebarFilterLabels[f] || f}
-                </button>
-              ))}
+            <div className="px-2 py-1.5 border-b border-gray-800 shrink-0">
+              {filterControls}
             </div>
             <div className="flex-1 overflow-y-auto min-h-0">
               {(searchResults ?? filteredTasks)
-                .filter((t) => !sidebarFilter || t.status === sidebarFilter)
                 .map((t) => (
                 <button
                   key={t.id}
