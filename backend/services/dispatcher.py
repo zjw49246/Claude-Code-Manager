@@ -392,11 +392,13 @@ class GlobalDispatcher:
                 logger.error(f"Dispatch loop error: {e}", exc_info=True)
                 await asyncio.sleep(5)
 
-    def _pool_select(self, exclude: set[str] | None = None) -> str | None:
+    async def _pool_select(self, exclude: set[str] | None = None) -> str | None:
         """Select a pool account config_dir, or None if pool is off / exhausted."""
         if not self.pool:
             return None
-        return self.pool.select(exclude=exclude, validate=True)
+        # validate=True probes accounts with a blocking subprocess (up to 30s
+        # each) — must run off the event loop
+        return await self.pool.select_async(exclude=exclude, validate=True)
 
     async def _check_rate_limit_and_rotate(
         self,
@@ -441,7 +443,7 @@ class GlobalDispatcher:
         old_account_id = self.pool.account_id_from_config_dir(old_config_dir)
         excluded = {old_account_id} if old_account_id else set()
 
-        new_config_dir = self._pool_select(exclude=excluded)
+        new_config_dir = await self._pool_select(exclude=excluded)
         if not new_config_dir:
             logger.warning("Pool exhausted — no alternative account for task %d", task_id)
             return None
@@ -452,8 +454,9 @@ class GlobalDispatcher:
             session_id = t.session_id if t else None
 
         if session_id:
+            source_dir = self.pool.locate_session_config_dir(session_id) or old_config_dir
             migrate_session(
-                old_config_dir=old_config_dir,
+                old_config_dir=source_dir,
                 new_config_dir=new_config_dir,
                 session_id=session_id,
             )
@@ -551,7 +554,7 @@ class GlobalDispatcher:
             full_prompt = "\n\n".join(parts)
 
             # Pool: select an account for the initial launch
-            pool_config_dir = self._pool_select()
+            pool_config_dir = await self._pool_select()
 
             await self.instance_manager.launch(
                 instance_id=instance_id,
@@ -2021,10 +2024,12 @@ class GlobalDispatcher:
             # Pool
             config_dir = None
             if self.pool and self.pool.enabled:
-                config_dir = self.pool.select(validate=True)
+                config_dir = await self.pool.select_async(validate=True)
                 if config_dir and task.session_id:
                     from backend.services.claude_pool import migrate_session
-                    old_config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+                    # The session may live under any pool account dir (whichever
+                    # ran the previous turn), not necessarily env CLAUDE_CONFIG_DIR
+                    old_config_dir = self.pool.locate_session_config_dir(task.session_id)
                     if old_config_dir and old_config_dir != config_dir:
                         migrate_session(
                             old_config_dir=old_config_dir,

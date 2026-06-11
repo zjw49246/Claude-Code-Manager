@@ -21,6 +21,7 @@ Web 端调度和管理多个 Claude Code 实例并行工作。灵感来自胡渊
 - **Android App** — 通过 Capacitor 打包原生 APK，App 内可配置远程服务器地址
 - **PR Monitor** — GitHub PR 自动审核，Webhook 接收 PR 事件后创建审核 Task，Claude 审核代码后自动 approve/merge 或 request-changes。支持白名单作者、auto-merge 开关、自定义审核模型
 - **Monitor Sub-Agent** — Agent 可自主创建持久监控子 Agent，子 Agent 拥有独立 MCP 工具（report_status / mark_complete / get_context），自主决定检查频率并通过 API 向系统汇报
+- **Claude Pool** — 多账号池自动切换：撞限/认证失败时自动换号并硬链接 session 实现无缝 `--resume`；Header 的 "Pro" 徽标可打开额度抽屉，查看每个账号 5h/7d 窗口的利用率（绿/黄/红进度条）、冷却状态，并可手动解除冷却
 - **主题切换** — 支持浅色/深色主题，偏好持久化
 - **Token 认证** — Bearer Token 保护所有 API，安全远程访问
 - **远程访问** — 通过 Cloudflare Tunnel 隧道暴露到公网
@@ -207,6 +208,10 @@ JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home" \
 | Dispatcher | `GET /api/dispatcher/status` | 调度器状态 |
 | | `POST /api/dispatcher/start` | 启动调度器 |
 | | `POST /api/dispatcher/stop` | 停止调度器 |
+| Pool | `GET /api/pool/status` | 账号池状态（可用/冷却/禁用） |
+| | `GET /api/pool/usage` | 账号池状态 + 每账号额度利用率（5h/7d 窗口） |
+| | `POST /api/pool/reload` | 重新加载账号配置 |
+| | `POST /api/pool/accounts/{id}/clear-cooldown` | 手动清除账号冷却 |
 | Voice | `POST /api/voice/transcribe` | 语音转文字 |
 | WebSocket | `ws://host/ws` | 实时推送（subscribe channel） |
 | Auth | `POST /api/auth/login` | Token 登录 |
@@ -231,6 +236,9 @@ JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home" \
 | `MERGE_PUSH_RETRIES` | `3` | rebase + push 最大重试次数 |
 | `AUTO_PUSH_TO_ORIGIN` | `true` | 完成后是否自动 push |
 | `TASK_TIMEOUT_SECONDS` | `1800` | 单个任务最长执行时间（秒），超时后 kill 进程 |
+| `POOL_ENABLED` | `false` | 启用 Claude 账号池自动切换 |
+| `POOL_CONFIG_PATH` | `~/.claude-pool/accounts.json` | 账号池配置文件路径 |
+| `POOL_COOLDOWN_SECONDS` | `300` | 撞限账号的冷却时长（秒） |
 
 ### 数据库自动备份（可选）
 

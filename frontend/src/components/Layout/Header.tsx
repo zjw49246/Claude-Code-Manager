@@ -5,6 +5,7 @@ import type { RuntimeSettings } from '../../api/client';
 import { isCapacitor } from '../../config/server';
 import { getTheme, toggleTheme } from '../../config/theme';
 import { getTimezone, setTimezone, TIMEZONE_OPTIONS } from '../../config/timezone';
+import { PoolDrawer } from './PoolDrawer';
 
 interface HeaderProps {
   currentPage: string;
@@ -72,6 +73,7 @@ export function Header({ currentPage, onNavigate }: HeaderProps) {
           ))}
         </nav>
         <div className="ml-auto flex items-center gap-1">
+          <PoolDrawer />
           {runtime && (
             <div
               className="flex items-center gap-1.5 mr-1 px-2 py-1 rounded bg-gray-800 border border-gray-700"

@@ -30,6 +30,7 @@ claude-manager/
 │   │   ├── instances.py         # 实例 CRUD + Ralph Loop 控制 + Dispatcher 端点
 │   │   ├── projects.py          # Project CRUD + git clone
 │   │   ├── monitor.py           # Monitor Session CRUD + 子 agent checks/complete endpoints
+│   │   ├── pool.py              # Claude 账号池 status/usage/reload/clear-cooldown
 │   │   ├── pr_monitor.py       # PR Monitor CRUD + GitHub webhook endpoint
 │   │   ├── sub_agents.py        # 通用子 Agent summary API (GET /tasks/{id}/sub-agents/summary)
 │   │   ├── ws.py                # WebSocket 端点
@@ -55,6 +56,7 @@ claude-manager/
 │       ├── dispatcher.py        # 全局调度器 (9 步任务生命周期, 含 goal 模式 + monitor 子 agent)
 │       ├── goal_evaluator.py    # Goal 条件评估器 (claude -p 子进程)
 │       ├── mcp_config.py        # MCP config 动态生成 (主 agent + 子 agent)
+│       ├── claude_pool.py       # Claude 账号池 (限速检测/自动切换/session 迁移/额度查询)
 │       ├── ralph_loop.py        # 自动取活循环 (legacy, 保留兼容)
 │       ├── stream_parser.py     # NDJSON stream-json 解析器
 │       ├── task_queue.py        # 优先级队列 (asc = 优先级越高)
@@ -76,6 +78,7 @@ claude-manager/
 │       │   ├── Chat/MonitorPanel.tsx          # Monitor 面板 (活跃 monitor 列表 + 历史 checks)
 │       │   ├── Instances/              # InstanceGrid, InstanceLog
 │       │   ├── Tasks/                  # TaskForm (含 Monitor skill 勾选), TaskList
+│       │   ├── Layout/PoolDrawer.tsx   # Pool 额度抽屉 (Header "Pro" 徽标 + 账号额度进度条)
 │       │   ├── PlanReview/PlanPanel.tsx # Plan 审批
 │       │   └── Voice/VoiceButton.tsx   # MediaRecorder → Whisper
 │       └── hooks/useWebSocket.ts
@@ -103,6 +106,7 @@ claude-manager/
 - **MCP 架构**: 主 Agent 用 `ccm_skills_server.py`，子 Agent 用 `ccm_monitor_agent_server.py`，均为 FastMCP server，通过 stdio 与 Claude CLI 通信，通过 HTTP 调用 CCM 后端 API。配置文件动态生成到 `/tmp/ccm_mcp_{task_id}.json`（主 Agent）和 `/tmp/ccm_monitor_agent_{session_id}.json`（子 Agent），结束后自动清理
 - **环境变量清理**: 生成子进程前必须 unset `CLAUDECODE` / `CLAUDE_CODE`，避免嵌套检测
 - **停止顺序**: SIGTERM → 等 10s → SIGKILL
+- **Claude Pool**: 多账号自动切换（`backend/services/claude_pool.py`，`POOL_ENABLED=true` + `~/.claude-pool/accounts.json` 启用）。进程失败后用窄正则检测限速/认证失败 → 标记冷却（限速 5min，认证失败永久直到手动清除）→ `select` 换号（`validate=True` 会用 `claude -p` 探测，必须经 `select_async` 走线程避免阻塞事件循环）→ `migrate_session` 硬链接 session JSONL 到新账号 config_dir 实现 `--resume` 续上下文。**注意 `migrate_session` 参数是 keyword-only，必须用关键字调用**；session 实际所在目录用 `locate_session_config_dir` 查找，不要假设在 env `CLAUDE_CONFIG_DIR` 下。额度查询走 OAuth usage API（`fetch_usage`，缓存 60s），前端 Header 的 "Pro" 徽标 → PoolDrawer 抽屉展示 5h/7d 利用率
 - **备份服务**: `BackupService`（`backend/services/backup_service.py`）封装 auto-backup SDK，在 lifespan 中以后台线程（APScheduler）运行，支持 local / s3 / oss；`BACKUP_ENABLED=false` 时完全不加载
 - **PR Monitor**: GitHub PR 自动审核功能。GitHub Webhook 推送 PR 事件 → 创建 CCM task 让 Claude 审核 → 审核通过可自动 merge。数据模型：`MonitoredRepo`（监控仓库配置）+ `PRReview`（审核记录）。Webhook 端点 `/api/github/webhook`（公开，HMAC-SHA256 验签）。前端独立页面 `PRMonitorPage`。Webhook URL: `https://youchengsong.claude-code-manager.com/api/github/webhook`
 - **WebSocket channels**: `instance:{id}`, `task:{id}`, `tasks`, `system`, `pr-monitor`

@@ -334,6 +334,40 @@ export interface PRReview {
   completed_at: string | null;
 }
 
+export interface PoolUsageWindow {
+  utilization: number | null;
+  resets_at: string | null;
+}
+
+export interface PoolAccountUsage {
+  id: string;
+  config_dir: string;
+  email: string;
+  role: string;
+  enabled: boolean;
+  available: boolean;
+  cooldown_until: number | null;
+  cooldown_remaining: number;
+  // 仅 /api/pool/usage 返回以下字段（/status 不含）
+  subscription_type?: string | null;
+  usage?: {
+    five_hour: PoolUsageWindow | null;
+    seven_day: PoolUsageWindow | null;
+    seven_day_opus: PoolUsageWindow | null;
+    seven_day_sonnet: PoolUsageWindow | null;
+  } | null;
+  usage_error?: string | null;
+}
+
+export interface PoolUsageStatus {
+  enabled: boolean;
+  total: number;
+  available: number;
+  cooldown: number;
+  disabled: number;
+  accounts: PoolAccountUsage[];
+}
+
 export const api = {
   // Projects
   listProjects: () => request<Project[]>('/api/projects'),
@@ -375,6 +409,12 @@ export const api = {
     request<{ tracked: string[]; discovered: string[] }>(`/api/projects/${projectId}/scan-env-files`, {
       method: 'POST',
     }),
+
+  // Claude Pool
+  getPoolStatus: () => request<PoolUsageStatus>('/api/pool/status'),
+  getPoolUsage: () => request<PoolUsageStatus>('/api/pool/usage'),
+  clearPoolCooldown: (accountId: string) =>
+    request<{ ok: boolean }>(`/api/pool/accounts/${accountId}/clear-cooldown`, { method: 'POST' }),
 
   // Global Settings
   getRuntimeSettings: () => request<RuntimeSettings>('/api/settings/runtime'),

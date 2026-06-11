@@ -341,7 +341,8 @@ class TestDispatcherPoolIntegration:
         dispatcher = GlobalDispatcher(db_factory=mock_db, instance_manager=im, broadcaster=broadcaster)
         assert dispatcher.pool is None
 
-    def test_pool_select_returns_none_when_no_pool(self):
+    @pytest.mark.asyncio
+    async def test_pool_select_returns_none_when_no_pool(self):
         from backend.services.dispatcher import GlobalDispatcher
         from backend.services.instance_manager import InstanceManager
         from backend.services.ws_broadcaster import WebSocketBroadcaster
@@ -350,7 +351,7 @@ class TestDispatcherPoolIntegration:
         broadcaster = WebSocketBroadcaster()
         im = InstanceManager(db_factory=mock_db, broadcaster=broadcaster)
         dispatcher = GlobalDispatcher(db_factory=mock_db, instance_manager=im, broadcaster=broadcaster)
-        assert dispatcher._pool_select() is None
+        assert await dispatcher._pool_select() is None
 
 
 # ---------- 2026-06-10 生产事故回归：新版 CC 限流文案未被识别 ----------
@@ -382,3 +383,163 @@ class TestRateLimitWordingVariants:
         from backend.services.claude_pool import is_rate_limited
         assert not is_rate_limited("I implemented the rate limiter middleware as requested")
         assert not is_rate_limited("the function resets the counter")
+
+
+# ---------- 2026-06-11 修复回归：chat 路径 pool 切换 + probe + 额度 ----------
+
+class TestChatPoolRotationRegression:
+    """回归：_try_chat_pool_rotation 曾用位置参数调用 keyword-only 的
+    migrate_session，TypeError 被吞掉导致 chat 路径切换从未生效。"""
+
+    @pytest.mark.asyncio
+    async def test_chat_rotation_succeeds_and_migrates_session(self, pool, tmp_path, monkeypatch):
+        from backend.services.instance_manager import InstanceManager
+
+        # session jsonl 存在于 acc-1 的 config dir 下
+        old_dir = tmp_path / "claude-1"
+        proj = old_dir / "projects" / "-home-user-repo"
+        proj.mkdir(parents=True)
+        (proj / "sess-123.jsonl").write_text("{}")
+
+        import backend.main
+        fake_dispatcher = MagicMock()
+        fake_dispatcher.pool = pool
+        monkeypatch.setattr(backend.main, "dispatcher", fake_dispatcher)
+
+        task = MagicMock()
+        task.session_id = "sess-123"
+        task.last_cwd = "/home/user/repo"
+        task.target_repo = None
+
+        db = AsyncMock()
+        db.get = AsyncMock(return_value=task)
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=db)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        db_factory = MagicMock(return_value=ctx)
+
+        broadcaster = MagicMock()
+        broadcaster.broadcast = AsyncMock()
+
+        im = InstanceManager(db_factory=db_factory, broadcaster=broadcaster)
+        im._config_dirs[1] = str(old_dir)
+        im._launch_params[1] = {"prompt": "hello"}
+        im.get_recent_log_contents = AsyncMock(return_value=["You've hit your limit"])
+        im.launch = AsyncMock()
+
+        ok = await im._try_chat_pool_rotation(1, 42, 1, "You've hit your limit")
+
+        assert ok is True
+        im.launch.assert_awaited_once()
+        # session 已硬链接到新账号 (acc-2)
+        new_jsonl = tmp_path / "claude-2" / "projects" / "-home-user-repo" / "sess-123.jsonl"
+        assert new_jsonl.exists()
+        assert im.launch.await_args.kwargs["config_dir"] == str(tmp_path / "claude-2")
+
+
+class TestLocateSessionConfigDir:
+    def test_finds_session_under_account_dir(self, pool, tmp_path):
+        proj = tmp_path / "claude-2" / "projects" / "-x"
+        proj.mkdir(parents=True)
+        (proj / "sid-9.jsonl").write_text("{}")
+        assert pool.locate_session_config_dir("sid-9") == str(tmp_path / "claude-2")
+
+    def test_returns_none_when_not_found(self, pool):
+        assert pool.locate_session_config_dir("nope") is None
+
+
+class TestSelectAsync:
+    @pytest.mark.asyncio
+    async def test_select_async_without_validate(self, pool, tmp_path):
+        result = await pool.select_async()
+        assert result in [str(tmp_path / "claude-1"), str(tmp_path / "claude-2")]
+
+
+class TestProbeEnvCleanup:
+    def test_probe_strips_nested_session_vars(self, pool, monkeypatch):
+        monkeypatch.setenv("CLAUDECODE", "1")
+        monkeypatch.setenv("CLAUDE_CODE", "1")
+        captured = {}
+
+        def fake_run(cmd, *, env, **kwargs):
+            captured["env"] = env
+            r = MagicMock()
+            r.returncode = 0
+            r.stdout, r.stderr = "ok", ""
+            return r
+
+        monkeypatch.setattr("backend.services.claude_pool.subprocess.run", fake_run)
+        account = pool._accounts[0]
+        assert pool._probe_account(account) is True
+        assert "CLAUDECODE" not in captured["env"]
+        assert "CLAUDE_CODE" not in captured["env"]
+        assert captured["env"]["CLAUDE_CONFIG_DIR"] == account.config_dir
+
+
+class TestFetchUsage:
+    def _write_creds(self, config_dir, expires_in_ms=10**15):
+        config_dir.mkdir(parents=True, exist_ok=True)
+        (config_dir / ".credentials.json").write_text(json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "sk-ant-oat01-test",
+                "expiresAt": expires_in_ms,
+                "subscriptionType": "max",
+            }
+        }))
+
+    def _fake_client(self, payload, status_code=200, counter=None):
+        class FakeResp:
+            def __init__(self):
+                self.status_code = status_code
+            def json(self):
+                return payload
+
+        class FakeClient:
+            def __init__(self, *a, **k):
+                pass
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *a):
+                return False
+            async def get(self, url, headers=None):
+                if counter is not None:
+                    counter["n"] += 1
+                return FakeResp()
+
+        return FakeClient
+
+    @pytest.mark.asyncio
+    async def test_fetch_usage_returns_utilization(self, pool, tmp_path, monkeypatch):
+        self._write_creds(tmp_path / "claude-1")
+        payload = {
+            "five_hour": {"utilization": 14.0, "resets_at": "2026-06-11T06:59:59+00:00"},
+            "seven_day": {"utilization": 38.0, "resets_at": "2026-06-12T17:59:59+00:00"},
+        }
+        monkeypatch.setattr("httpx.AsyncClient", self._fake_client(payload))
+        results = await pool.fetch_usage()
+        by_id = {r["id"]: r for r in results}
+        assert by_id["acc-1"]["usage"]["five_hour"]["utilization"] == 14.0
+        assert by_id["acc-1"]["usage"]["seven_day"]["utilization"] == 38.0
+        assert by_id["acc-1"]["subscription_type"] == "max"
+        # acc-2 没有 credentials 文件
+        assert by_id["acc-2"]["error"] == "no_credentials"
+        assert by_id["acc-2"]["usage"] is None
+
+    @pytest.mark.asyncio
+    async def test_fetch_usage_expired_token(self, pool, tmp_path, monkeypatch):
+        self._write_creds(tmp_path / "claude-1", expires_in_ms=1000)
+        monkeypatch.setattr("httpx.AsyncClient", self._fake_client({}))
+        results = await pool.fetch_usage()
+        by_id = {r["id"]: r for r in results}
+        assert by_id["acc-1"]["error"] == "token_expired"
+
+    @pytest.mark.asyncio
+    async def test_fetch_usage_cached(self, pool, tmp_path, monkeypatch):
+        self._write_creds(tmp_path / "claude-1")
+        counter = {"n": 0}
+        payload = {"five_hour": {"utilization": 1.0, "resets_at": None}}
+        monkeypatch.setattr("httpx.AsyncClient", self._fake_client(payload, counter=counter))
+        await pool.fetch_usage()
+        first = counter["n"]
+        await pool.fetch_usage()
+        assert counter["n"] == first  # 第二次走缓存
