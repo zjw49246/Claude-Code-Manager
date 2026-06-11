@@ -1106,15 +1106,21 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
                   >
                     默认（{task.model || 'default'}）
                   </button>
-                  {modelOptions.map((m) => (
+                  {modelOptions.map((m) => {
+                    // 上下文超过目标模型窗口时给出警告（[1m] 变体 1M，其余按 200K 估算）
+                    const win = m.includes('[1m]') ? 1_000_000 : 200_000;
+                    const over = !!contextUsage && contextUsage.total_input_tokens > win;
+                    return (
                     <button
                       key={m}
                       onClick={() => { setModelOverride(m === task.model ? null : m); setShowModelMenu(false); }}
-                      className={`w-full px-3 py-1.5 text-xs text-left hover:bg-gray-700 ${modelOverride === m ? 'text-indigo-300 bg-indigo-600/20' : 'text-gray-300'}`}
+                      className={`w-full px-3 py-1.5 text-xs text-left hover:bg-gray-700 flex items-center justify-between gap-2 ${modelOverride === m ? 'text-indigo-300 bg-indigo-600/20' : over ? 'text-amber-400/80' : 'text-gray-300'}`}
+                      title={over ? `当前上下文（${Math.round(contextUsage!.total_input_tokens/1000)}K tokens）可能超出该模型 ${win/1000}K 窗口，会报 Prompt is too long` : undefined}
                     >
-                      {m}
+                      <span>{m}</span>
+                      {over && <span className="shrink-0">⚠</span>}
                     </button>
-                  ))}
+                  );})}
                 </div>
               )}
             </div>
