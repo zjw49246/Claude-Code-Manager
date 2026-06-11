@@ -38,6 +38,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   const [goalCondition, setGoalCondition] = useState('');
   const [goalMaxTurns, setGoalMaxTurns] = useState('30');
   const [thinkingBudget, setThinkingBudget] = useState('');
+  const [timeoutHours, setTimeoutHours] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [projects, setProjects] = useState<Project[]>([]);
@@ -110,7 +111,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [showToolsDropdown, showConfigPanel]);
 
-  const hasNonDefaultConfig = priority !== 0 || mode !== 'auto' || provider !== (providerOptions[0] || 'claude') || model !== '' || effort !== '' || thinkingBudget !== '';
+  const hasNonDefaultConfig = priority !== 0 || mode !== 'auto' || provider !== (providerOptions[0] || 'claude') || model !== '' || effort !== '' || thinkingBudget !== '' || timeoutHours !== '';
 
   const activeDefaultModel = provider === 'codex' ? defaultCodexModel : defaultModel;
   const activeModelOptions = provider === 'codex' ? codexModelOptions : modelOptions;
@@ -216,6 +217,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
         model: model || activeDefaultModel,
         ...(effort ? { effort_level: effort } : {}),
         ...(thinkingBudget ? { thinking_budget: parseInt(thinkingBudget) || null } : {}),
+        ...(timeoutHours !== '' ? { timeout_hours: Number(timeoutHours) } : {}),
         enable_workflows: !!enabledTools['workflows'],
         enabled_skills: (() => {
           const skills = Object.entries(enabledTools)
@@ -235,6 +237,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
       setModel('');
       setEffort('');
       setThinkingBudget('');
+      setTimeoutHours('');
       setCloneFromTaskId('');
       onCreated();
     } catch (err) {
@@ -513,6 +516,23 @@ export function TaskForm({ onCreated }: TaskFormProps) {
                   <option value="32768">32k</option>
                   <option value="65536">64k</option>
                   <option value="131072">128k</option>
+                </select>
+
+                <span className="text-gray-400">Timeout</span>
+                <select
+                  className="bg-gray-700 text-foreground rounded px-2 py-1 text-xs"
+                  value={timeoutHours}
+                  onChange={(e) => setTimeoutHours(e.target.value)}
+                >
+                  <option value="">default</option>
+                  <option value="0.5">30 min</option>
+                  <option value="1">1 hour</option>
+                  <option value="2">2 hours</option>
+                  <option value="4">4 hours</option>
+                  <option value="8">8 hours</option>
+                  <option value="12">12 hours</option>
+                  <option value="24">24 hours</option>
+                  <option value="0">No limit</option>
                 </select>
               </div>
             </div>

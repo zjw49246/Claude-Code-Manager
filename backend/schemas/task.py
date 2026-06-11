@@ -22,6 +22,7 @@ class TaskCreate(BaseModel):
     model: str | None = None
     effort_level: str | None = None
     thinking_budget: int | None = None
+    timeout_hours: float | None = None
     enable_workflows: bool = False
     enabled_skills: dict | None = None
     tags: list[str] | None = None
@@ -46,6 +47,9 @@ class TaskCreate(BaseModel):
 class TaskUpdate(BaseModel):
     title: str | None = None
     model: str | None = None
+    effort_level: str | None = None
+    thinking_budget: int | None = None
+    timeout_hours: float | None = None
     description: str | None = None
     priority: int | None = None
     project_id: int | None = None
@@ -96,6 +100,7 @@ class TaskResponse(BaseModel):
     model: str | None
     effort_level: str | None
     thinking_budget: int | None
+    timeout_hours: float | None = None
     enable_workflows: bool
     enabled_skills: dict | None
     starred: bool

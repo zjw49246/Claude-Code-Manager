@@ -409,13 +409,14 @@ async def test_create_task_with_model(client):
 
 
 @pytest.mark.asyncio
-async def test_create_task_without_model_returns_null(client):
-    """Task created without model field has model=None."""
+async def test_create_task_without_model_fills_default(client):
+    """设置归 Task：不指定 model 时创建即填入全局默认值。"""
+    from backend.config import settings
     resp = await client.post("/api/tasks", json={
         "title": "No model", "description": "d", "target_repo": "/tmp",
     })
     assert resp.status_code == 201
-    assert resp.json()["model"] is None
+    assert resp.json()["model"] == settings.default_model
 
 
 @pytest.mark.asyncio
@@ -503,13 +504,14 @@ async def test_create_task_with_effort_level(client):
 
 
 @pytest.mark.asyncio
-async def test_create_task_without_effort_level_returns_null(client):
-    """Task created without effort_level has effort_level=None."""
+async def test_create_task_without_effort_level_fills_default(client):
+    """设置归 Task：不指定 effort 时创建即填入全局默认值。"""
+    from backend.config import settings
     resp = await client.post("/api/tasks", json={
         "title": "No effort", "description": "d", "target_repo": "/tmp",
     })
     assert resp.status_code == 201
-    assert resp.json()["effort_level"] is None
+    assert resp.json()["effort_level"] == settings.default_effort
 
 
 @pytest.mark.asyncio
