@@ -326,8 +326,8 @@ async def inject_message(
     if not ok:
         raise HTTPException(
             409,
-            "没有存活的 PTY 会话——该任务最近一次运行不是 PTY 模式启动的"
-            "（开启 PTY 后需先发一条普通消息建立会话），或会话已被回收",
+            "注入失败：没有正在运行的 turn。注入仅在任务执行中可用"
+            "（用于中途补充指令）；空闲时请关闭注入模式直接发普通消息",
         )
 
     # Record + broadcast so the injected text shows up in the chat thread

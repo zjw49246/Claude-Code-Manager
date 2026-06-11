@@ -407,6 +407,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
       timestamp: new Date().toISOString(),
       image_urls: (msg.data.image_urls as string[]) || null,
       attachments: (msg.data.attachments as FileAttachment[]) || null,
+      source: (msg.data.source as string) || null,
     };
     setMessages((prev) => [...prev, entry]);
   }, [task.id]);
@@ -1157,8 +1158,10 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
             />
             <button
               onClick={() => handleSend()}
-              disabled={(!input.trim() && pendingFiles.length === 0) || !task.session_id}
-              title={isProcessing ? 'Add to queue (Ctrl+Enter)' : 'Send (Ctrl+Enter)'}
+              disabled={(!input.trim() && pendingFiles.length === 0) || !task.session_id || (injectMode && ptyMode && !isProcessing)}
+              title={injectMode && ptyMode
+                ? (isProcessing ? '注入到运行中的 turn (Ctrl+Enter)' : '注入模式：仅在 turn 运行中可用，空闲时请关闭注入模式')
+                : isProcessing ? 'Add to queue (Ctrl+Enter)' : 'Send (Ctrl+Enter)'}
               className={`p-2.5 text-white rounded-lg disabled:opacity-40 disabled:cursor-not-allowed ${
                 injectMode && ptyMode ? 'bg-teal-600 hover:bg-teal-700'
                 : isProcessing ? 'bg-amber-600 hover:bg-amber-700' : 'bg-indigo-600 hover:bg-indigo-700'
@@ -1577,6 +1580,7 @@ const MessageBubble = memo(function MessageBubble({ message }: { message: ChatMe
   }
 
   const isMonitor = message.source === 'monitor';
+  const isInjected = message.source === 'inject';
 
   return (
     <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'}`} {...(isUser ? { 'data-user-msg': '' } : {})}>
@@ -1584,6 +1588,11 @@ const MessageBubble = memo(function MessageBubble({ message }: { message: ChatMe
         {isMonitor && !isUser && (
           <div className="flex items-center gap-1 mb-0.5 pl-1">
             <span className="text-xs bg-teal-600/30 text-teal-300 px-1.5 py-0.5 rounded">Monitor</span>
+          </div>
+        )}
+        {isInjected && (
+          <div className="flex items-center gap-1 mb-0.5 pr-1 justify-end">
+            <span className="text-xs bg-teal-600/30 text-teal-300 px-1.5 py-0.5 rounded" title="通过 PTY 注入到运行中的 turn">💉 注入</span>
           </div>
         )}
         <div

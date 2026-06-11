@@ -61,11 +61,21 @@ class InstanceManager:
         if self._pty_backend is None or not content or not session_id:
             return False
         session = None
-        for sess in self._pty_backend._sessions.values():
+        key = None
+        for k, sess in self._pty_backend._sessions.items():
             if sess.session_id == session_id and sess.is_alive:
-                session = sess
+                session, key = sess, k
                 break
         if session is None:
+            return False
+        # 仅允许注入到【正在运行的 turn】：turn 结束后 consumer 退出，
+        # 此时注入的 channel 消息会唤醒一个无人采集的"孤儿 turn"——
+        # 回复只进 JSONL，CCM 永远看不到（生产 task 51 实录）。
+        consumer = self._pty_backend._consumers.get(key)
+        if consumer is None or consumer.done():
+            logger.info(
+                "PTY inject rejected for session %s: no running turn", session_id
+            )
             return False
         try:
             return await session.inject(content)
