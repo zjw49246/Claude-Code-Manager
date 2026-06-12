@@ -74,6 +74,30 @@ class SSHExecutor:
 
         await asyncio.to_thread(_sync)
 
+    async def rsync_from(
+        self,
+        remote_path: str,
+        local_path: str,
+        timeout: int = 600,
+        delete: bool = True,
+    ) -> None:
+        """rsync 远端目录/文件到本地（迁移用：全量含 .git 与未提交改动，无过滤）。"""
+        import os as _os
+        _os.makedirs(_os.path.dirname(local_path.rstrip("/")) or "/", exist_ok=True)
+        ssh_opt = (
+            f"ssh -i {shlex.quote(self.key_path)} "
+            "-o StrictHostKeyChecking=accept-new -o ConnectTimeout=15"
+        )
+        cmd = ["rsync", "-az"] + (["--delete"] if delete else []) + [
+            "-e", ssh_opt, f"{self.user}@{self.host}:{remote_path}", local_path]
+
+        def _sync() -> None:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            if r.returncode != 0:
+                raise RuntimeError(f"rsync from failed ({r.returncode}): {r.stderr[-2000:]}")
+
+        await asyncio.to_thread(_sync)
+
     async def rsync_to(
         self,
         local_path: str,

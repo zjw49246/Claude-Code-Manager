@@ -66,6 +66,7 @@ dispatcher = GlobalDispatcher(
 worker_provisioner = None
 worker_relay = None
 worker_proxy = None
+task_migrator = None
 if settings.worker_enabled:
     try:
         from backend.services.cloud_provider import get_cloud_provider
@@ -73,8 +74,13 @@ if settings.worker_enabled:
         from backend.services.worker_relay import WorkerRelay
         from backend.services.worker_proxy import WorkerProxy
 
+        from backend.services.task_migrator import TaskMigrator
+
         worker_relay = WorkerRelay(db_factory=async_session, broadcaster=broadcaster)
         worker_proxy = WorkerProxy(db_factory=async_session, relay=worker_relay)
+        task_migrator = TaskMigrator(
+            db_factory=async_session, relay=worker_relay, broadcaster=broadcaster,
+        )
         worker_provisioner = WorkerProvisioner(
             db_factory=async_session,
             cloud=get_cloud_provider(settings.worker_cloud_provider),

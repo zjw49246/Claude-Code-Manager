@@ -228,6 +228,13 @@ const THINKING_OPTIONS: { value: string; label: string }[] = [
 export function TaskConfigBadge({ task, onRefresh, openUp, align }: { task: Task; onRefresh: () => void; openUp?: boolean; align?: 'left' | 'right' }) {
   const [open, setOpen] = useState(false);
   const [opts, setOpts] = useState<ConfigOptions | null>(null);
+  const [workers, setWorkers] = useState<{ id: number; name: string; status: string }[]>([]);
+  const [migrating, setMigrating] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    api.listWorkers().then(setWorkers).catch(() => {});
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -266,6 +273,34 @@ export function TaskConfigBadge({ task, onRefresh, openUp, align }: { task: Task
           onClick={(e) => e.stopPropagation()}
         >
           <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 items-center text-xs">
+            <span className="text-gray-400">Run on</span>
+            <select
+              className="bg-gray-700 text-foreground rounded px-2 py-1 text-xs disabled:opacity-50"
+              value={task.worker_id == null ? '' : String(task.worker_id)}
+              disabled={migrating || task.status === 'executing' || task.status === 'migrating'}
+              title={task.status === 'executing' ? '运行中不能切换，先 Stop' : '切换执行位置（迁移 session + 工作目录）'}
+              onChange={async (e) => {
+                const target = e.target.value === '' ? -1 : parseInt(e.target.value);
+                if ((target === -1 && task.worker_id == null) || target === task.worker_id) return;
+                setMigrating(true);
+                try {
+                  await api.updateTask(task.id, { worker_id: target });
+                  onRefresh();
+                } catch (err) {
+                  window.alert(String(err));
+                } finally {
+                  setMigrating(false);
+                }
+              }}
+            >
+              <option value="">本机</option>
+              {workers.map((w) => (
+                <option key={w.id} value={w.id} disabled={w.status !== 'ready'}>
+                  {w.name}{w.status !== 'ready' ? ` (${w.status})` : ''}
+                </option>
+              ))}
+            </select>
+
             <span className="text-gray-400">Model</span>
             <select
               className="bg-gray-700 text-foreground rounded px-2 py-1 text-xs"

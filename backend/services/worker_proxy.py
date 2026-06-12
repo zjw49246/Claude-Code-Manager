@@ -80,10 +80,19 @@ class WorkerProxy:
             if not project:
                 raise RuntimeError(f"项目 {task.project_id} 不存在")
             if not project.git_url:
-                raise RuntimeError(
-                    f"项目 {project.name} 没有 git remote——纯本地项目暂不支持远程执行"
-                    "（Phase 3 落地后支持），请切回本机"
+                # 纯本地项目：先把整个项目目录（含 .git 和未提交改动）rsync 到
+                # worker 同路径，worker 的 _init_local_repo 见 .git 存在即跳过 init
+                import os as _os
+                from backend.config import settings as _settings
+                from backend.services.ssh_executor import SSHExecutor as _SSH
+                path = _os.path.expanduser(project.local_path).rstrip("/")
+                if not _os.path.isdir(path):
+                    raise RuntimeError(f"项目目录不存在: {path}")
+                ssh = _SSH(
+                    host=worker.private_ip, user=worker.ssh_user,
+                    key_path=worker.ssh_key_path or _settings.worker_ssh_key_path,
                 )
+                await ssh.rsync_to(path + "/", path + "/", excludes=[], timeout=1200)
 
             async with httpx.AsyncClient(timeout=30) as c:
                 # 同名项目可能已存在（之前转发过/手工建过）

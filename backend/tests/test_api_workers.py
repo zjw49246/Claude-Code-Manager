@@ -111,7 +111,15 @@ async def test_stop_requires_ready(client, session_factory, fake_provisioner):
     assert resp.status_code == 409
 
 
-async def test_stop_start_destroy_flow(client, session_factory, fake_provisioner):
+async def test_stop_start_destroy_flow(client, session_factory, fake_provisioner, monkeypatch, db_factory):
+    # destroy 链路现在先批量迁回（真实实现查 async_session），测试注入 in-memory factory
+    import backend.api.workers as workers_api
+    real = workers_api._migrate_back_then_destroy
+    async def _patched(prov, worker_id, db_factory_arg=None):
+        await real(prov, worker_id, db_factory=db_factory)
+    monkeypatch.setattr(workers_api, "_migrate_back_then_destroy", _patched)
+    monkeypatch.setattr(main_module, "task_migrator", AsyncMock())
+    monkeypatch.setattr(main_module, "worker_relay", AsyncMock())
     wid = await _insert_worker(session_factory, status="ready")
     assert (await client.post(f"/api/workers/{wid}/stop")).status_code == 200
     await asyncio.sleep(0)
@@ -125,7 +133,8 @@ async def test_stop_start_destroy_flow(client, session_factory, fake_provisioner
     fake_provisioner.start_worker.assert_called_once_with(wid)
 
     assert (await client.post(f"/api/workers/{wid}/destroy")).status_code == 200
-    await asyncio.sleep(0)
+    for _ in range(20):
+        await asyncio.sleep(0)
     fake_provisioner.destroy_worker.assert_called_once_with(wid)
 
 

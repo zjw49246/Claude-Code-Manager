@@ -135,9 +135,41 @@ async def destroy_worker(worker_id: int, db: AsyncSession = Depends(get_db)):
     worker.status = "destroying"
     await db.commit()
     await db.refresh(worker)
-    # Phase 3 接 TaskMigrator：销毁前把该 worker 的 task 全部迁回本机
-    _spawn(prov.destroy_worker(worker.id))
+    # 先把该 worker 的 task 全部迁回本机（执行态无损），再销毁实例
+    _spawn(_migrate_back_then_destroy(prov, worker.id))
     return worker
+
+
+async def _migrate_back_then_destroy(prov, worker_id: int, db_factory=None):
+    """销毁 = 批量 migrate(task, 本机) + terminate（设计 §10.3）。
+
+    单个 task 迁移失败不阻塞销毁（日志/状态在 Manager 本就完整，丢的只是
+    session 续聊能力），但要记到 task.error_message 让用户知情。"""
+    from backend.main import task_migrator, worker_relay
+    from backend.models.task import Task
+    from sqlalchemy import select
+
+    if db_factory is None:
+        from backend.database import async_session as db_factory
+
+    async with db_factory() as db:
+        result = await db.execute(select(Task).where(Task.worker_id == worker_id))
+        tasks = result.scalars().all()
+    for task in tasks:
+        try:
+            if task_migrator is not None:
+                await task_migrator.migrate(task.id, None)
+        except Exception as e:
+            logger.warning("destroy: migrate task %s back failed: %s", task.id, e)
+            async with db_factory() as db:
+                t = await db.get(Task, task.id)
+                if t:
+                    t.worker_id = None  # 指针总要切回，否则 task 永远指向死 worker
+                    t.error_message = (t.error_message or "") + f"\n[销毁迁移失败: {e}]"
+                    await db.commit()
+    if worker_relay is not None:
+        await worker_relay.stop_worker(worker_id)
+    await prov.destroy_worker(worker_id)
 
 
 @router.post("/{worker_id}/retry", response_model=WorkerResponse)
