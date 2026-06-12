@@ -307,6 +307,13 @@
 - **预防**: keyword-only 函数防得住签名误用，但防不住异常被宽 `except` 吞掉——关键路径（如切号）必须有集成级测试断言"成功"而不仅是"不抛错"；修了 bug 要及时部署到生产，仓库修了 ≠ 线上修了
 - **Commit**: 8856d18
 
+### 2026-06-12 — task 87 PTY 回复错位 + 子 agent 通用化
+
+- **问题**: PTY 模式下模型开后台子 agent（内置 Monitor）后，harness 自主唤醒的 turn 无 consumer 消费；下一条用户消息的 send_prompt 读到积压、认了旧 turn 的 turn_duration → 回复永久 +1 错位（用户问 A 得到上一问 B 的答案，直到会话结束）
+- **解决**: PTY 仓库（commit 14ce6a0）turn 以 prompt 回显为起点 + 常驻空闲 watcher；CCM 侧把 monitor 表通用化为 sub_agent_sessions（agent_type 分类），PTY 观测到的原生子 agent（native-agent/native-monitor）镜像入库，徽章/面板/WS 与 $monitor 同一套展示
+- **预防**: 哨兵协议必须校验"turn 归属"；接收方可能自己说话的通道必须有常驻消费者。另：调研结论要在目标分支上复核——"drain_idle_pty_sessions 无调用点"在 main 上不成立（settings API 已接），险些重复实现造成双重 drain
+- **Commit**: 71c4fdb（CCM task-from-main）、14ce6a0（claude-pty，本地未推送）
+
 ## 已知问题
 
 - `total_cost_usd` 仅在 Claude Code stream-json result 事件报告时更新
