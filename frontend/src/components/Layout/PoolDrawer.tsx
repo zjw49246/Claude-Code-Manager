@@ -37,12 +37,14 @@ function UsageBar({ label, window: w }: { label: string; window: PoolUsageWindow
   );
 }
 
-function AccountCard({ account, preferred, lastSelected, onClearCooldown, onSetPreferred }: {
+function AccountCard({ account, preferred, lastSelected, onClearCooldown, onSetPreferred, onRelogin, reloginState }: {
   account: PoolAccountUsage;
   preferred: string | null;
   lastSelected: string | null;
   onClearCooldown: (id: string) => void;
   onSetPreferred: (id: string | null) => void;
+  onRelogin: (id: string) => void;
+  reloginState?: { status: string; message?: string };
 }) {
   const statusDot = !account.enabled
     ? { cls: 'bg-gray-500', label: '已禁用' }
@@ -111,10 +113,28 @@ function AccountCard({ account, preferred, lastSelected, onClearCooldown, onSetP
           <UsageBar label="Opus" window={account.usage.seven_day_opus} />
         </div>
       ) : (
-        <div className="text-xs text-red-400">
-          {account.usage_error === 'no_credentials' && '未找到凭据文件'}
-          {account.usage_error === 'token_expired' && 'Token 已过期，需重新登录'}
-          {account.usage_error && !['no_credentials', 'token_expired'].includes(account.usage_error) && `额度获取失败: ${account.usage_error}`}
+        <div className="text-xs text-red-400 space-y-1">
+          <div className="flex items-center gap-2">
+            <span>
+              {account.usage_error === 'no_credentials' && '未找到凭据文件'}
+              {/* 后端已先尝试 OAuth refresh，走到这说明 refreshToken 也失效了 */}
+              {account.usage_error === 'token_expired' && 'Token 刷新失败，需重新登录'}
+              {account.usage_error && !['no_credentials', 'token_expired'].includes(account.usage_error) && `额度获取失败: ${account.usage_error}`}
+            </span>
+            {account.usage_error && (
+              <button
+                onClick={() => onRelogin(account.id)}
+                disabled={reloginState?.status === 'running'}
+                className="shrink-0 text-[10px] px-1.5 py-0.5 rounded border border-red-500/50 text-red-300 hover:bg-red-600/20 disabled:opacity-50"
+                title="先尝试刷新 OAuth token；刷新失败则后台跑 auto_login 重新登录"
+              >
+                {reloginState?.status === 'running' ? '登录中…' : '重新登录'}
+              </button>
+            )}
+          </div>
+          {reloginState?.message && (
+            <div className="text-[10px] text-gray-400 whitespace-pre-wrap break-all">{reloginState.message}</div>
+          )}
         </div>
       )}
     </div>
@@ -165,6 +185,37 @@ export function PoolDrawer() {
       await loadUsage();
     } catch {
       // 失败时保持原状态
+    }
+  }, [loadUsage]);
+
+  const [relogin, setRelogin] = useState<Record<string, { status: string; message?: string }>>({});
+
+  const handleRelogin = useCallback(async (accountId: string) => {
+    setRelogin((m) => ({ ...m, [accountId]: { status: 'running' } }));
+    try {
+      const res = await api.poolRelogin(accountId);
+      if (res.status === 'success') {
+        // OAuth refresh 直接成功（最常见）
+        setRelogin((m) => ({ ...m, [accountId]: { status: 'success' } }));
+        await loadUsage();
+        return;
+      }
+      // auto_login 后台跑，轮询直到结束
+      const poll = async () => {
+        const s = await api.poolReloginStatus(accountId);
+        if (s.status === 'running') { setTimeout(poll, 5000); return; }
+        setRelogin((m) => ({ ...m, [accountId]: {
+          status: s.status,
+          message: s.status === 'failed' ? `登录失败：${(s.detail || '').slice(-300)}` : undefined,
+        } }));
+        if (s.status === 'success') await loadUsage();
+      };
+      setTimeout(poll, 5000);
+    } catch (e) {
+      setRelogin((m) => ({ ...m, [accountId]: {
+        status: 'failed',
+        message: e instanceof Error ? e.message : '重新登录失败',
+      } }));
     }
   }, [loadUsage]);
 
@@ -220,6 +271,8 @@ export function PoolDrawer() {
                   lastSelected={status?.last_selected ?? null}
                   onClearCooldown={handleClearCooldown}
                   onSetPreferred={handleSetPreferred}
+                  onRelogin={handleRelogin}
+                  reloginState={relogin[a.id]}
                 />
               ))}
             </div>

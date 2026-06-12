@@ -423,6 +423,11 @@ export const api = {
     request<{ ok: boolean }>(`/api/pool/accounts/${accountId}/clear-cooldown`, { method: 'POST' }),
   setPoolPreferred: (accountId: string | null) =>
     request<{ ok: boolean; preferred: string | null }>('/api/pool/preferred', { method: 'POST', body: JSON.stringify({ account_id: accountId }) }),
+  // 重新登录：后端先试 OAuth refresh（秒回 success），失败才后台跑 auto_login（running，需轮询）
+  poolRelogin: (accountId: string) =>
+    request<{ ok: boolean; method: string; status: string }>(`/api/pool/accounts/${accountId}/relogin`, { method: 'POST' }),
+  poolReloginStatus: (accountId: string) =>
+    request<{ status: string; detail?: string }>(`/api/pool/accounts/${accountId}/relogin`),
 
   // Global Settings
   getRuntimeSettings: () => request<RuntimeSettings>('/api/settings/runtime'),

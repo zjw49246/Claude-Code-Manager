@@ -477,22 +477,25 @@ class TestProbeEnvCleanup:
 
 
 class TestFetchUsage:
-    def _write_creds(self, config_dir, expires_in_ms=10**15):
+    def _write_creds(self, config_dir, expires_in_ms=10**15, refresh_token=None):
         config_dir.mkdir(parents=True, exist_ok=True)
-        (config_dir / ".credentials.json").write_text(json.dumps({
-            "claudeAiOauth": {
-                "accessToken": "sk-ant-oat01-test",
-                "expiresAt": expires_in_ms,
-                "subscriptionType": "max",
-            }
-        }))
+        creds = {
+            "accessToken": "sk-ant-oat01-test",
+            "expiresAt": expires_in_ms,
+            "subscriptionType": "max",
+        }
+        if refresh_token:
+            creds["refreshToken"] = refresh_token
+        (config_dir / ".credentials.json").write_text(json.dumps({"claudeAiOauth": creds}))
 
-    def _fake_client(self, payload, status_code=200, counter=None):
+    def _fake_client(self, payload, status_code=200, counter=None,
+                     post_payload=None, post_status=200):
         class FakeResp:
-            def __init__(self):
-                self.status_code = status_code
+            def __init__(self, status, body):
+                self.status_code = status
+                self._body = body
             def json(self):
-                return payload
+                return self._body
 
         class FakeClient:
             def __init__(self, *a, **k):
@@ -504,7 +507,9 @@ class TestFetchUsage:
             async def get(self, url, headers=None):
                 if counter is not None:
                     counter["n"] += 1
-                return FakeResp()
+                return FakeResp(status_code, payload)
+            async def post(self, url, json=None, headers=None):
+                return FakeResp(post_status, post_payload or {})
 
         return FakeClient
 
@@ -527,8 +532,38 @@ class TestFetchUsage:
 
     @pytest.mark.asyncio
     async def test_fetch_usage_expired_token(self, pool, tmp_path, monkeypatch):
+        # 无 refreshToken → 无法刷新，报 token_expired
         self._write_creds(tmp_path / "claude-1", expires_in_ms=1000)
         monkeypatch.setattr("httpx.AsyncClient", self._fake_client({}))
+        results = await pool.fetch_usage()
+        by_id = {r["id"]: r for r in results}
+        assert by_id["acc-1"]["error"] == "token_expired"
+
+    @pytest.mark.asyncio
+    async def test_fetch_usage_expired_token_auto_refresh(self, pool, tmp_path, monkeypatch):
+        # 过期但有 refreshToken → 自动刷新成功，正常返回 usage 并写回新凭证
+        self._write_creds(tmp_path / "claude-1", expires_in_ms=1000, refresh_token="sk-ant-ort01-old")
+        payload = {"five_hour": {"utilization": 5.0, "resets_at": None}}
+        monkeypatch.setattr("httpx.AsyncClient", self._fake_client(
+            payload,
+            post_payload={"access_token": "sk-ant-oat01-new",
+                          "refresh_token": "sk-ant-ort01-new", "expires_in": 28800},
+        ))
+        results = await pool.fetch_usage()
+        by_id = {r["id"]: r for r in results}
+        assert by_id["acc-1"]["error"] is None
+        assert by_id["acc-1"]["usage"]["five_hour"]["utilization"] == 5.0
+        # refresh token 轮换后必须落盘
+        saved = json.loads((tmp_path / "claude-1" / ".credentials.json").read_text())["claudeAiOauth"]
+        assert saved["accessToken"] == "sk-ant-oat01-new"
+        assert saved["refreshToken"] == "sk-ant-ort01-new"
+        assert saved["expiresAt"] / 1000 > __import__("time").time()
+
+    @pytest.mark.asyncio
+    async def test_fetch_usage_expired_token_refresh_fails(self, pool, tmp_path, monkeypatch):
+        # refresh 被拒（refreshToken 失效）→ 才真正报 token_expired
+        self._write_creds(tmp_path / "claude-1", expires_in_ms=1000, refresh_token="sk-ant-ort01-revoked")
+        monkeypatch.setattr("httpx.AsyncClient", self._fake_client({}, post_status=401))
         results = await pool.fetch_usage()
         by_id = {r["id"]: r for r in results}
         assert by_id["acc-1"]["error"] == "token_expired"

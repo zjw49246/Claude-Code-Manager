@@ -72,6 +72,10 @@ DEFAULT_CONFIG_PATH = Path.home() / ".claude-pool" / "accounts.json"
 DEFAULT_COOLDOWN_SECONDS = 300  # 5 minutes
 USAGE_API_URL = "https://api.anthropic.com/api/oauth/usage"
 USAGE_CACHE_TTL = 60  # seconds
+OAUTH_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
+OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"  # Claude Code 公开 client_id
+# Cloudflare 拦默认 python UA（403 error 1010），必须用 CLI 形态的 UA
+OAUTH_USER_AGENT = "claude-cli/2.1.0 (external, cli)"
 
 
 class PoolAccount:
@@ -111,6 +115,8 @@ class ClaudePool:
         self._last_selected_at: float = 0.0
         self._usage_cache: list[dict] | None = None
         self._usage_cache_at: float = 0.0
+        # account_id -> asyncio.Lock，防并发重复 refresh（refresh token 会轮换）
+        self._refresh_locks: dict[str, object] = {}
         self._load()
 
     @property
@@ -322,6 +328,77 @@ class ClaudePool:
                 continue
         return None
 
+    def account(self, account_id: str) -> "PoolAccount | None":
+        return next((a for a in self._accounts if a.id == account_id), None)
+
+    async def refresh_oauth_token(self, account_id: str) -> bool:
+        """手动触发某账号的 OAuth refresh（重新登录按钮的第一步）。
+
+        成功后清掉 usage 缓存，让前端下次拉取立即看到恢复。
+        """
+        acc = self.account(account_id)
+        if acc is None:
+            raise KeyError(account_id)
+        creds = await self._refresh_oauth(acc, Path(acc.config_dir) / ".credentials.json")
+        if creds is None:
+            return False
+        self._usage_cache = None
+        return True
+
+    async def _refresh_oauth(self, account: "PoolAccount", cred_path: Path) -> dict | None:
+        """accessToken 过期时用 refreshToken 换新（与 Claude CLI 自动刷新行为一致）。
+
+        过期 ≠ 需要重新登录：CLI 平时跑着就会自己刷，闲置账号才会看到过期。
+        成功：原子写回 .credentials.json（refresh token 会轮换，必须立即持久化）
+        并返回新 creds；失败/无 refreshToken：返回 None——此时才真正需要重新登录。
+        """
+        import asyncio
+        import tempfile
+
+        import httpx
+
+        lock = self._refresh_locks.setdefault(account.id, asyncio.Lock())
+        async with lock:  # type: ignore[attr-defined]
+            try:
+                full = json.loads(cred_path.read_text(encoding="utf-8"))
+                creds = full["claudeAiOauth"]
+            except (OSError, ValueError, KeyError):
+                return None
+            # 等锁期间可能已被并发请求（或 CLI 进程自己）刷新过
+            if creds.get("expiresAt", 0) / 1000 > time.time() + 60:
+                return creds
+            refresh_token = creds.get("refreshToken")
+            if not refresh_token:
+                return None
+            try:
+                async with httpx.AsyncClient(timeout=20) as client:
+                    resp = await client.post(OAUTH_TOKEN_URL, json={
+                        "grant_type": "refresh_token",
+                        "refresh_token": refresh_token,
+                        "client_id": OAUTH_CLIENT_ID,
+                    }, headers={"User-Agent": OAUTH_USER_AGENT})
+            except httpx.HTTPError as exc:
+                logger.warning("pool %s: token refresh request failed: %s", account.id, exc)
+                return None
+            if resp.status_code != 200:
+                logger.warning("pool %s: token refresh got HTTP %s", account.id, resp.status_code)
+                return None
+            data = resp.json()
+            creds["accessToken"] = data["access_token"]
+            if data.get("refresh_token"):
+                creds["refreshToken"] = data["refresh_token"]
+            creds["expiresAt"] = int((time.time() + data.get("expires_in", 28800)) * 1000)
+            try:
+                fd, tmp = tempfile.mkstemp(dir=str(cred_path.parent), prefix=".credentials.")
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(full, f)
+                os.chmod(tmp, 0o600)
+                os.replace(tmp, cred_path)
+            except OSError as exc:
+                logger.error("pool %s: refreshed token write-back failed: %s", account.id, exc)
+            logger.info("pool %s: OAuth token refreshed", account.id)
+            return creds
+
     async def fetch_usage(self) -> list[dict]:
         """Per-account quota utilization from the Anthropic OAuth usage API.
 
@@ -348,8 +425,12 @@ class ClaudePool:
                 return base
             base["subscription_type"] = creds.get("subscriptionType")
             if creds.get("expiresAt", 0) / 1000 < now:
-                base["error"] = "token_expired"
-                return base
+                # 先尝试 refresh——过期不等于要重新登录，刷不动才是
+                creds = await self._refresh_oauth(account, cred_path)
+                if creds is None:
+                    base["error"] = "token_expired"
+                    return base
+                base["subscription_type"] = creds.get("subscriptionType") or base["subscription_type"]
             try:
                 async with httpx.AsyncClient(timeout=15) as client:
                     resp = await client.get(USAGE_API_URL, headers={
