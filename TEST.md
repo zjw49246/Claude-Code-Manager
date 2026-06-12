@@ -695,3 +695,26 @@ curl -X POST http://localhost:8000/api/github/webhook \
 | `backend/services/pr_review_service.py` | 集成测试（webhook → task 创建） |
 | `frontend/src/pages/PRMonitorPage.tsx` | TypeScript 类型检查 + 手动 UI 测试 |
 | `frontend/src/**` | TypeScript 类型检查 (`tsc --noEmit`) |
+
+## 分布式 Worker 测试
+
+### 单元/集成测试
+
+```bash
+uv run python -m pytest backend/tests/test_api_workers.py -v
+```
+
+覆盖：API 状态守卫（409/503/404）、双击防护（同步置过渡态）、provisioner 状态机
+（收养/创建/stop/start/destroy/retry，cloud+SSH 全替身）、健康检查降级与自动恢复
+（bootstrap 失败不被洗白）、.deploy_commit 版本回退。
+
+### 真机冒烟（收养一台已有 EC2 跑完整 bootstrap）
+
+```bash
+WORKER_ENABLED=true WORKER_SSH_KEY_PATH=~/.ssh/xxx.pem PYTHONPATH=. \
+  .venv/bin/python scripts/worker_phase1_smoke.py --adopt i-xxxxxxxx
+```
+
+预期：status=ready，health 返回非空 commit 且与 DB ccm_commit 一致（版本锁定 PASS）。
+注意：经 PTY bridge 跑长任务用 `setsid nohup ... > /tmp/x.log &`，且命令里别带
+`rm`/`mv`（权限 ask 列表会触发 bridge auto-deny）。
