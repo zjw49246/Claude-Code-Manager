@@ -22,6 +22,9 @@ class SubAgentSession(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     task_id: Mapped[int] = mapped_column(Integer, index=True)
+    # 远程 task 的 sub-agent 镜像：worker 上的 session id（本地 id 与 worker id
+    # 各自自增会碰撞，代理删除时用 remote_id 翻译）
+    remote_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # 类别（monitor / native-agent / native-monitor / ...）
     agent_type: Mapped[str] = mapped_column(String(50), default="monitor")
     # 启动方：ccm（$命令经 CCM API 启动）| native（模型在 session 内自己开）

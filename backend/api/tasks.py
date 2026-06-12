@@ -82,6 +82,8 @@ async def list_tasks(
 @router.post("", response_model=TaskResponse, status_code=201)
 async def create_task(body: TaskCreate, queue: TaskQueue = Depends(_get_queue), db: AsyncSession = Depends(get_db)):
     data = body.model_dump()
+    if data.get("id") is None:
+        data.pop("id", None)  # 未指定 → 正常自增；指定 → 用 Manager 分配的全局 ID
     image_paths = data.pop("image_paths", None)
     file_paths = data.pop("file_paths", None)
     attachments = data.pop("attachments", None)
@@ -160,6 +162,32 @@ async def delete_task(task_id: int, queue: TaskQueue = Depends(_get_queue)):
     return {"ok": True}
 
 
+
+async def _worker_task_or_none(db: AsyncSession, task_id: int) -> Task | None:
+    """task 在 Worker 上则返回之（代理路径），本机返回 None。"""
+    task = await db.get(Task, task_id)
+    return task if (task and task.worker_id is not None) else None
+
+
+async def _proxy(task: Task, method: str, path: str, body=None):
+    from backend.main import worker_proxy
+    if worker_proxy is None:
+        raise HTTPException(503, "Worker 功能未启用")
+    return await worker_proxy.proxy_to_worker(task, method, path, body)
+
+
+async def _sync_task_from_worker_response(db: AsyncSession, task: Task, result):
+    """代理响应是 worker 的 task JSON 时，同步关键字段（status 等 relay 也会同步，
+    这里立即写一份让 API 响应不滞后）。"""
+    if isinstance(result, dict) and result.get("id") == task.id:
+        for f in ("status", "plan_approved", "error_message", "loop_progress"):
+            if f in result and result[f] is not None:
+                setattr(task, f, result[f])
+        await db.commit()
+        await db.refresh(task)
+    return task
+
+
 @router.post("/{task_id}/stop-session")
 async def stop_task_session(task_id: int, db: AsyncSession = Depends(get_db)):
     """Stop the running Claude Code session for a task.
@@ -167,6 +195,10 @@ async def stop_task_session(task_id: int, db: AsyncSession = Depends(get_db)):
     Clears pending queued chat messages first so the queue consumer does not
     immediately relaunch after the current process is stopped.
     """
+    wt = await _worker_task_or_none(db, task_id)
+    if wt is not None:
+        return await _proxy(wt, "POST", f"/api/tasks/{task_id}/stop-session")
+
     from backend.main import dispatcher
     cleared = dispatcher.clear_task_queue(task_id)
     stopped = await _stop_task_process(task_id, db)
@@ -189,6 +221,11 @@ async def stop_task_session(task_id: int, db: AsyncSession = Depends(get_db)):
 
 @router.post("/{task_id}/cancel", response_model=TaskResponse)
 async def cancel_task(task_id: int, queue: TaskQueue = Depends(_get_queue), db: AsyncSession = Depends(get_db)):
+    wt = await _worker_task_or_none(db, task_id)
+    if wt is not None:
+        result = await _proxy(wt, "POST", f"/api/tasks/{task_id}/cancel")
+        return await _sync_task_from_worker_response(db, wt, result)
+
     task = await queue.cancel(task_id)
     if not task:
         raise HTTPException(400, "Cannot cancel task")
@@ -214,7 +251,12 @@ async def cancel_task(task_id: int, queue: TaskQueue = Depends(_get_queue), db: 
 
 
 @router.post("/{task_id}/retry", response_model=TaskResponse)
-async def retry_task(task_id: int, queue: TaskQueue = Depends(_get_queue)):
+async def retry_task(task_id: int, queue: TaskQueue = Depends(_get_queue), db: AsyncSession = Depends(get_db)):
+    wt = await _worker_task_or_none(db, task_id)
+    if wt is not None:
+        result = await _proxy(wt, "POST", f"/api/tasks/{task_id}/retry")
+        return await _sync_task_from_worker_response(db, wt, result)
+
     task = await queue.retry(task_id)
     if not task:
         raise HTTPException(404, "Task not found")
@@ -264,6 +306,10 @@ async def approve_plan(task_id: int, queue: TaskQueue = Depends(_get_queue)):
     task = await queue.get(task_id)
     if not task:
         raise HTTPException(404, "Task not found")
+    if task.worker_id is not None:
+        result = await _proxy(task, "POST", f"/api/tasks/{task_id}/plan/approve")
+        # worker 上回到 pending 由 worker 自己的 Dispatcher 接力执行
+        return await _sync_task_from_worker_response(queue.db, task, result)
     if task.mode != "plan" or task.status != "plan_review":
         raise HTTPException(400, "Task is not in plan review state")
     task = await queue.update_task(task_id, plan_approved=True, status="pending")
@@ -276,6 +322,9 @@ async def reject_plan(task_id: int, queue: TaskQueue = Depends(_get_queue)):
     task = await queue.get(task_id)
     if not task:
         raise HTTPException(404, "Task not found")
+    if task.worker_id is not None:
+        result = await _proxy(task, "POST", f"/api/tasks/{task_id}/plan/reject")
+        return await _sync_task_from_worker_response(queue.db, task, result)
     if task.mode != "plan" or task.status != "plan_review":
         raise HTTPException(400, "Task is not in plan review state")
     task = await queue.update_task(task_id, plan_approved=False, status="cancelled")

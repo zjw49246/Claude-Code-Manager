@@ -44,10 +44,11 @@ class BootstrapError(Exception):
 
 
 class WorkerProvisioner:
-    def __init__(self, db_factory, cloud: CloudProvider, broadcaster=None):
+    def __init__(self, db_factory, cloud: CloudProvider, broadcaster=None, relay=None):
         self.db_factory = db_factory
         self.cloud = cloud
         self.broadcaster = broadcaster
+        self.relay = relay  # WorkerRelay（可选；关机/销毁前断流，恢复后重建）
         # "."（默认）解析为本仓库根（从 __file__ 推导），不依赖进程 cwd——
         # cwd 配错时 rsync --delete 整个 $HOME 到 worker 是灾难
         src = settings.worker_deploy_source_dir
@@ -362,6 +363,9 @@ sudo systemctl restart ccm-worker
 
     async def stop_worker(self, worker_id: int):
         worker = await self._update(worker_id, status="stopping")
+        # 必须先断 relay 再关机，否则触发约 17 分钟的指数退避重连风暴
+        if self.relay is not None:
+            await self.relay.stop_worker(worker_id)
         try:
             if not worker.cloud_instance_id:
                 # bootstrap 在开机前就失败过的 worker：没有实例可停
@@ -400,10 +404,12 @@ sudo systemctl restart ccm-worker
             await self._step_ssh_wait(ssh)
             # systemd enable 过，等服务自启
             await self._step_health_check(worker_id, timeout=180)
-            await self._update(
+            worker = await self._update(
                 worker_id, status="ready", last_heartbeat=datetime.utcnow(),
                 bootstrap_error=None, bootstrap_step=None,
             )
+            if self.relay is not None and worker is not None:
+                await self.relay.recover(worker)
         except Exception as e:
             # bootstrap_step=None：允许健康检查在服务自行恢复后自动回 ready
             await self._update(
@@ -413,6 +419,8 @@ sudo systemctl restart ccm-worker
     async def destroy_worker(self, worker_id: int):
         """销毁实例。任务迁移由调用方先行完成（Phase 3 接 TaskMigrator）。"""
         worker = await self._update(worker_id, status="destroying")
+        if self.relay is not None:
+            await self.relay.stop_worker(worker_id)
         try:
             if worker.cloud_instance_id:
                 if worker.adopted:
@@ -471,7 +479,9 @@ sudo systemctl restart ccm-worker
                 fields["bootstrap_error"] = None
                 recovered = True
             # 心跳是常态写入：不广播，省得所有前端 tab 每 30s 空转
-            await self._update(worker.id, broadcast=recovered, **fields)
+            updated = await self._update(worker.id, broadcast=recovered, **fields)
+            if recovered and self.relay is not None and updated is not None:
+                await self.relay.recover(updated)
         except Exception:
             fail_counts[worker.id] = fail_counts.get(worker.id, 0) + 1
             if fail_counts[worker.id] >= 3 and worker.status == "ready":

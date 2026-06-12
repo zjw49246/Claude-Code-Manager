@@ -14,7 +14,8 @@ class LogEntry(Base):
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    instance_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    # nullable：Worker 上执行的远程 task 的日志副本没有本地 instance
+    instance_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     task_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     event_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
     role: Mapped[str | None] = mapped_column(String(20), nullable=True)

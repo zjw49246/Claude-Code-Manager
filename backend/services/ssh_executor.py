@@ -53,6 +53,27 @@ class SSHExecutor:
         except Exception:
             return False
 
+    async def copy_file(self, local_path: str, remote_path: str, timeout: int = 120) -> None:
+        """复制单个文件到远端同路径（先 mkdir -p 再 rsync，无 filter）。"""
+        import os as _os
+        remote_dir = _os.path.dirname(remote_path)
+        code, out = await self.run(f"mkdir -p {shlex.quote(remote_dir)}", timeout=30)
+        if code != 0:
+            raise RuntimeError(f"mkdir failed: {out[-500:]}")
+        ssh_opt = (
+            f"ssh -i {shlex.quote(self.key_path)} "
+            "-o StrictHostKeyChecking=accept-new -o ConnectTimeout=15"
+        )
+        cmd = ["rsync", "-az", "-e", ssh_opt, local_path,
+               f"{self.user}@{self.host}:{remote_path}"]
+
+        def _sync() -> None:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            if r.returncode != 0:
+                raise RuntimeError(f"rsync file failed ({r.returncode}): {r.stderr[-1000:]}")
+
+        await asyncio.to_thread(_sync)
+
     async def rsync_to(
         self,
         local_path: str,

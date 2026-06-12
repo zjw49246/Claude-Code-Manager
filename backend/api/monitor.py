@@ -29,6 +29,17 @@ async def create_monitor_session(
     task = await db.get(Task, task_id)
     if not task:
         raise HTTPException(404, "Task not found")
+    if task.worker_id is not None:
+        # Worker task：monitor 子进程依赖 task 所在机器的文件系统（ps/tail/signal
+        # file），必须在 worker 上跑。本地镜像行由 relay 的 monitor_session_created
+        # 事件落库（带 remote_id），这里直接透传 worker 响应。
+        from backend.main import worker_proxy
+        if worker_proxy is None:
+            raise HTTPException(503, "Worker 功能未启用")
+        return await worker_proxy.proxy_to_worker(
+            task, "POST", f"/api/tasks/{task_id}/monitor-sessions",
+            body=body.model_dump(),
+        )
     skills = task.enabled_skills or {}
     if not skills.get("monitor"):
         raise HTTPException(403, "Monitor skill not enabled for this task")
@@ -96,6 +107,23 @@ async def delete_monitor_session(
     ms = await db.get(MonitorSession, session_id)
     if not ms or ms.task_id != task_id:
         raise HTTPException(404, "Monitor session not found")
+
+    task = await db.get(Task, task_id)
+    if task is not None and task.worker_id is not None:
+        # 本地行是镜像（id 是 Manager 自增），worker 端要用 remote_id
+        from backend.main import worker_proxy
+        if worker_proxy is None:
+            raise HTTPException(503, "Worker 功能未启用")
+        if ms.remote_id is None:
+            raise HTTPException(409, "该 monitor 缺少 worker 侧 id（remote_id），无法远程删除")
+        result = await worker_proxy.proxy_to_worker(
+            task, "DELETE", f"/api/tasks/{task_id}/monitor-sessions/{ms.remote_id}",
+        )
+        if ms.status == "running":
+            ms.status = "cancelled"
+            ms.completed_at = datetime.utcnow()
+            await db.commit()
+        return result
 
     if ms.status == "running":
         ms.status = "cancelled"

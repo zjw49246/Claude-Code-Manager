@@ -32,6 +32,9 @@ async def send_chat_message(
     task = await db.get(Task, task_id)
     if not task:
         raise HTTPException(404, "Task not found")
+    if task.worker_id is not None:
+        # Worker task：代理到 Worker CCM（session 在 worker 上，由 worker 校验）
+        return await _send_worker_chat(task, body, db)
     if not task.session_id:
         raise HTTPException(400, "No previous session on this task. Run the task first.")
 
@@ -121,6 +124,85 @@ async def send_chat_message(
     )
 
     return {"ok": True, "queued": True, "session_id": task.session_id}
+
+
+async def _send_worker_chat(task: Task, body: ChatMessage, db: AsyncSession):
+    """Worker task 的 chat 代理（elastic-worker 设计 §6.3）。
+
+    顺序很重要：存 user_message → 广播 → 推附件 → 订阅 relay → 转发 →
+    同步 session_id（worker 广播前会 pop session_id，只有 chat 响应里有）。
+    """
+    from backend.main import broadcaster, worker_proxy
+    if worker_proxy is None:
+        raise HTTPException(503, "Worker 功能未启用")
+    if body.secret_ids:
+        # secrets 存在 Manager DB，worker 解析不了 manager 的 secret id
+        raise HTTPException(400, "Worker task 暂不支持引用 Secrets（Phase 3）")
+
+    worker = await worker_proxy.require_ready_worker(task.worker_id)
+
+    all_paths = body.file_paths or body.image_paths or []
+    _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+    attachments = [
+        {
+            "url": f"/api/uploads/{os.path.basename(p)}",
+            "name": os.path.basename(p),
+            "is_error": False,
+            "is_image": os.path.splitext(p)[1].lower() in _IMAGE_EXTS,
+        }
+        for p in all_paths
+    ]
+
+    # 1. Manager DB 存 user_message（日志完整性；relay 会跳过 worker 回传的同条）
+    db.add(LogEntry(
+        instance_id=None,
+        task_id=task.id,
+        event_type="user_message",
+        role="user",
+        content=body.message,
+        raw_json=json.dumps({"attachments": attachments}) if attachments else None,
+        is_error=False,
+    ))
+    await db.commit()
+
+    # 2. 广播到 Manager 前端
+    await broadcaster.broadcast(f"task:{task.id}", {
+        "event_type": "user_message",
+        "role": "user",
+        "content": body.message,
+        "image_paths": body.image_paths or [],
+    })
+
+    # 3. 附件推到 worker 同一路径（worker 上 Claude 用 Read 读）
+    if all_paths:
+        try:
+            await worker_proxy.push_files(worker, all_paths)
+        except Exception as e:
+            raise HTTPException(503, f"附件同步到 Worker 失败: {e}")
+
+    # 4. 确保 relay 订阅（幂等；Manager 重启后已完成 task 不在恢复列表里，
+    #    此时 chat 若不补订阅，worker 的响应事件全丢）
+    await worker_proxy.relay.subscribe_task(worker, task.id)
+
+    # 5. 转发到 Worker CCM（worker 自己做 $command/skill 展开）
+    result = await worker_proxy.proxy_to_worker(
+        task, "POST", f"/api/tasks/{task.id}/chat",
+        body={
+            "message": body.message,
+            "image_paths": body.image_paths,
+            "file_paths": body.file_paths,
+            "model": body.model,
+        },
+    )
+
+    # 6. 同步 session_id（worker instance_manager 广播前 pop 掉了，relay 收不到）
+    if isinstance(result, dict) and result.get("session_id"):
+        task.session_id = result["session_id"]
+        await db.commit()
+
+    if isinstance(result, dict):
+        result["instance_id"] = None  # worker 的 instance_id 对 Manager 无意义
+    return result
 
 
 def _tool_summary(tool_input: str | None) -> str:

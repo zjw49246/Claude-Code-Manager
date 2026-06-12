@@ -22,6 +22,9 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   const [priority, setPriority] = useState(0);
   const [mode, setMode] = useState('auto');
   const [provider, setProvider] = useState('claude');
+  // 分布式 Worker：执行位置（'' = 本机）
+  const [workerId, setWorkerId] = useState('');
+  const [workers, setWorkers] = useState<{ id: number; name: string; status: string }[]>([]);
   const [model, setModel] = useState('');
   const [providerOptions, setProviderOptions] = useState<string[]>(['claude', 'codex']);
   const [effort, setEffort] = useState('');
@@ -168,6 +171,10 @@ export function TaskForm({ onCreated }: TaskFormProps) {
     (mode !== 'goal' || goalCondition) &&
     (projectId || (isNewProject && newProjectName));
 
+  useEffect(() => {
+    api.listWorkers().then(setWorkers).catch(() => {});
+  }, []);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!canSubmit) return;
@@ -213,6 +220,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
         ...(uploadedPaths.length > 0 ? { file_paths: uploadedPaths } : {}),
         ...(attachments.length > 0 ? { attachments } : {}),
         ...(selectedSecretIds.length > 0 ? { secret_ids: selectedSecretIds } : {}),
+        ...(workerId ? { worker_id: parseInt(workerId) } : {}),
         provider,
         model: model || activeDefaultModel,
         ...(effort ? { effort_level: effort } : {}),
@@ -462,6 +470,20 @@ export function TaskForm({ onCreated }: TaskFormProps) {
                   <option value="plan">Plan</option>
                   <option value="loop">Loop</option>
                   <option value="goal">Goal</option>
+                </select>
+
+                <span className="text-gray-400">Run on</span>
+                <select
+                  className="bg-gray-700 text-foreground rounded px-2 py-1 text-xs"
+                  value={workerId}
+                  onChange={(e) => setWorkerId(e.target.value)}
+                >
+                  <option value="">本机</option>
+                  {workers.map((w) => (
+                    <option key={w.id} value={w.id} disabled={w.status !== 'ready'}>
+                      {w.name}{w.status !== 'ready' ? ` (${w.status})` : ''}
+                    </option>
+                  ))}
                 </select>
 
                 <span className="text-gray-400">CLI</span>
