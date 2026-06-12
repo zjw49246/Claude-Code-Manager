@@ -32,6 +32,7 @@ from backend.api.sub_agents import router as sub_agents_router
 from backend.api.discussions import router as discussions_router
 from backend.api.quick_phrases import router as quick_phrases_router
 from backend.api.pr_monitor import router as pr_monitor_router, webhook_router as pr_webhook_router
+from backend.api.workers import router as workers_router
 from backend.middleware.auth import TokenAuthMiddleware
 from backend.services.ws_broadcaster import WebSocketBroadcaster
 from backend.services.instance_manager import InstanceManager
@@ -60,6 +61,21 @@ dispatcher = GlobalDispatcher(
     instance_manager=instance_manager,
     broadcaster=broadcaster,
 )
+
+# 分布式 Worker（可选，WORKER_ENABLED=true 且装了 boto3 才启用）
+worker_provisioner = None
+if settings.worker_enabled:
+    try:
+        from backend.services.cloud_provider import get_cloud_provider
+        from backend.services.worker_provisioner import WorkerProvisioner
+
+        worker_provisioner = WorkerProvisioner(
+            db_factory=async_session,
+            cloud=get_cloud_provider(settings.worker_cloud_provider),
+            broadcaster=broadcaster,
+        )
+    except Exception:
+        logger.exception("Worker provisioner init failed — workers disabled")
 
 
 async def _sync_tags():
@@ -113,6 +129,12 @@ async def lifespan(app: FastAPI):
     if settings.auto_start_dispatcher:
         await dispatcher.start()
 
+    # Worker 健康监控循环
+    worker_health_task = None
+    if worker_provisioner is not None:
+        import asyncio as _asyncio
+        worker_health_task = _asyncio.create_task(worker_provisioner.health_check_loop())
+
     # Start periodic database backup (optional — requires BACKUP_ENABLED=true in .env)
     backup_svc = None
     if settings.backup_enabled:
@@ -148,6 +170,8 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.exception("PTY backend shutdown failed")
 
+    if worker_health_task is not None:
+        worker_health_task.cancel()
     upload_cleanup_task.cancel()
     # Stop all running Claude processes before shutdown
     for inst_id in list(instance_manager.processes.keys()):
@@ -190,6 +214,7 @@ app.include_router(monitor_router)
 app.include_router(sub_agents_router)
 app.include_router(pr_monitor_router)
 app.include_router(pr_webhook_router)
+app.include_router(workers_router)
 
 # Serve frontend static files in production
 FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"

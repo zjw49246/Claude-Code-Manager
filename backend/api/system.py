@@ -9,10 +9,28 @@ from backend.models.instance import Instance
 
 router = APIRouter(prefix="/api/system", tags=["system"])
 
+_GIT_COMMIT: str | None = None
+
+
+def _git_commit() -> str:
+    """本服务运行代码的 commit（缓存）。Manager/Worker 版本锁定校验用。"""
+    global _GIT_COMMIT
+    if _GIT_COMMIT is None:
+        import subprocess
+        try:
+            r = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                capture_output=True, text=True, timeout=10,
+            )
+            _GIT_COMMIT = r.stdout.strip() if r.returncode == 0 else ""
+        except Exception:
+            _GIT_COMMIT = ""
+    return _GIT_COMMIT
+
 
 @router.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {"status": "ok", "commit": _git_commit()}
 
 
 @router.get("/stats")

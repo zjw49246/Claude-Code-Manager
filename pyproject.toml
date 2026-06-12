@@ -17,6 +17,8 @@ dependencies = [
     "auto-backup @ git+https://github.com/zjw49246/auto-backup",
     "paramiko>=3.0.0",
     "mcp>=1.0.0",
+    # 分布式 Worker（EC2 provisioning）；WORKER_ENABLED=false 时不 import
+    "boto3>=1.34.0",
     # PTY 模式（持久交互会话）；缺失时优雅降级为 `claude -p`
     "claude-pty @ git+https://github.com/zjw49246/Claude-Code-PTY",
 ]
