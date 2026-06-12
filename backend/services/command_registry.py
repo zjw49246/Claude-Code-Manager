@@ -75,6 +75,9 @@ register_command(Command(
         "可用工具: create_monitor（创建监控子agent）/ check_monitors（查看状态）/ stop_monitor（停止监控）。"
     ),
     required_skills={"monitor": True},
-    disallowed_builtins=["Agent", "Monitor"],
+    # 只禁内置 Monitor（监控必须走 $monitor / CCM 子 agent 体系）；
+    # Agent/Task 保持可用——原生子 agent 由 PTY 层观测并镜像进
+    # sub_agent_sessions（native-agent），不需要一刀切禁掉
+    disallowed_builtins=["Monitor"],
 ))
 
