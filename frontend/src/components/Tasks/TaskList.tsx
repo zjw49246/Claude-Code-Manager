@@ -118,23 +118,23 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId 
         <div
           key={t.id}
           {...targetProps(t, idx)}
-          className={`rounded-lg p-3 transition-opacity ${
+          className={`relative rounded-lg p-3 transition-opacity ${
             draggingId === t.id ? 'opacity-40' : ''
           } ${overIndex === idx && draggingId !== null && draggingId !== t.id ? 'ring-2 ring-indigo-400' : ''} ${
             activeTaskId === t.id ? 'bg-indigo-900/60 ring-1 ring-indigo-400/60' : t.has_unread ? 'bg-indigo-900/50 ring-1 ring-indigo-500/50' : 'bg-gray-800'
           }`}
         >
+          {/* 拖拽手柄（右下角，空间更宽裕）：卡片正文是可选中文字，整卡
+              draggable 会被文本选择手势抢走，必须用显式手柄拖动 */}
+          <span
+            {...pointerHandleProps(t, idx)}
+            className="absolute bottom-1.5 right-1.5 p-1 cursor-grab active:cursor-grabbing text-gray-600 hover:text-gray-400 select-none"
+            title="按住拖动排序"
+          >
+            <GripVertical size={16} />
+          </span>
           {/* Row 1: status dot + badges (left, wraps) | action buttons (right, no wrap) */}
           <div className="flex items-center gap-2">
-            {/* 拖拽手柄：卡片正文是可选中文字，整卡 draggable 会被文本
-                选择手势抢走，必须用显式手柄拖动 */}
-            <span
-              {...pointerHandleProps(t, idx)}
-              className="shrink-0 self-start mt-[6px] -ml-1 cursor-grab active:cursor-grabbing text-gray-600 hover:text-gray-400 select-none"
-              title="按住拖动排序"
-            >
-              <GripVertical size={14} />
-            </span>
             <span className={`w-2.5 h-2.5 rounded-full shrink-0 self-start mt-[9px] ${statusColors[t.status] || 'bg-gray-500'}`} />
             <div className="flex items-center gap-2 flex-wrap flex-1 min-w-0 min-h-[28px]">
               <span className="text-xs text-gray-500">#{t.id}</span>
@@ -243,8 +243,8 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId 
               </div>
             </div>
           </div>
-          {/* Row 2: title + description (full width) */}
-          <div className="mt-1 pl-[1.125rem]">
+          {/* Row 2: title + description (full width; pr 留出右下角手柄位) */}
+          <div className="mt-1 pl-[1.125rem] pr-7">
             {/* Title (editable) */}
             {editingTitleId === t.id ? (
               <input
