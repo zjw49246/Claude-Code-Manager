@@ -169,7 +169,7 @@ class TaskMigrator:
             wt = r.json()
         async with self.db_factory() as db:
             task = await db.get(Task, task_id)
-            for f in ("session_id", "last_cwd", "error_message"):
+            for f in ("session_id", "last_cwd", "target_repo", "error_message"):
                 if wt.get(f):
                     setattr(task, f, wt[f])
             await db.commit()
