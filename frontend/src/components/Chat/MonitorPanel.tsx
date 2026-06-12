@@ -24,10 +24,29 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
+/** 类别小徽章：monitor（$命令）/ native-agent / native-monitor（模型自己开的） */
+function TypeChip({ agentType, source }: { agentType: string; source: string }) {
+  const isNative = source === 'native';
+  return (
+    <span
+      className={`px-1 py-0.5 text-[10px] rounded border shrink-0 ${
+        isNative
+          ? 'bg-purple-900/40 text-purple-300 border-purple-700'
+          : 'bg-teal-900/40 text-teal-300 border-teal-700'
+      }`}
+      title={isNative ? '模型原生子 agent（PTY 观测）' : 'CCM $monitor 子 agent'}
+    >
+      {agentType}
+    </span>
+  );
+}
+
 function MonitorSessionRow({ session, taskId, onStopped }: { session: MonitorSession; taskId: number; onStopped: () => void }) {
   const [expanded, setExpanded] = useState(false);
   const [checks, setChecks] = useState<MonitorCheck[]>([]);
   const [stopping, setStopping] = useState(false);
+  // native 子 agent 由模型/harness 自管：没有可停的子进程，也没有 checks 明细
+  const isNative = session.source === 'native';
 
   const loadChecks = useCallback(() => {
     api.getMonitorChecks(taskId, session.id).then(setChecks).catch(() => {});
@@ -52,25 +71,30 @@ function MonitorSessionRow({ session, taskId, onStopped }: { session: MonitorSes
   return (
     <div className="border border-gray-700 rounded">
       <div className="flex items-center gap-2 px-3 py-2">
-        <button
-          className="text-gray-400 hover:text-gray-200"
-          onClick={() => setExpanded(!expanded)}
-        >
-          {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-        </button>
+        {!isNative && (
+          <button
+            className="text-gray-400 hover:text-gray-200"
+            onClick={() => setExpanded(!expanded)}
+          >
+            {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+          </button>
+        )}
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
+            <TypeChip agentType={session.agent_type} source={session.source} />
             <span className="text-sm text-gray-200 truncate">{session.description}</span>
             <StatusBadge status={session.status} />
           </div>
           <div className="text-xs text-gray-500 mt-0.5">
-            {session.checks_done}/{session.max_checks} checks
+            {isNative
+              ? (session.checks_done > 0 ? `${session.checks_done} updates` : null)
+              : `${session.checks_done}/${session.max_checks} checks`}
             {session.last_summary && (
               <span className="ml-2 text-gray-400">— {session.last_summary}</span>
             )}
           </div>
         </div>
-        {session.status === 'running' && (
+        {session.status === 'running' && !isNative && (
           <button
             className="text-gray-400 hover:text-red-400 p-1 disabled:opacity-50"
             onClick={handleStop}
@@ -117,7 +141,7 @@ export function MonitorPanel({ taskId, sessions, onSessionsChange, onClose }: Mo
       <div className="flex items-center justify-between px-3 py-2 border-b border-gray-700">
         <div className="flex items-center gap-2 text-sm font-medium text-gray-300">
           <Activity size={14} className="text-emerald-400" />
-          Monitor Sessions
+          Sub-Agents
           <span className="text-xs text-gray-500">({sessions.length})</span>
         </div>
         <button className="text-gray-400 hover:text-gray-200" onClick={onClose}>
@@ -126,7 +150,7 @@ export function MonitorPanel({ taskId, sessions, onSessionsChange, onClose }: Mo
       </div>
       <div className="p-2 space-y-2 max-h-64 overflow-y-auto">
         {sessions.length === 0 ? (
-          <div className="text-xs text-gray-500 text-center py-3">No monitor sessions</div>
+          <div className="text-xs text-gray-500 text-center py-3">No sub-agents</div>
         ) : (
           sessions.map((s) => (
             <MonitorSessionRow

@@ -277,6 +277,8 @@ export interface DiscussionDetail {
 export interface MonitorSession {
   id: number;
   task_id: number;
+  agent_type: string;   // monitor | native-agent | native-monitor | ...
+  source: string;       // ccm（$命令启动）| native（模型自己开的）
   description: string;
   monitor_context: string | null;
   interval: number;

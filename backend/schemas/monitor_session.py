@@ -27,6 +27,8 @@ class MonitorSessionCreate(BaseModel):
 class MonitorSessionResponse(BaseModel):
     id: int
     task_id: int
+    agent_type: str = "monitor"
+    source: str = "ccm"
     description: str
     monitor_context: str | None
     interval: int

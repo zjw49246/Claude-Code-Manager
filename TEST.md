@@ -169,6 +169,22 @@ cd frontend && npx tsc --noEmit
 | `test_dispatcher_status/start/stop` | 调度器控制 |
 | `test_ralph_start/stop/status` | Ralph Loop 控制 |
 
+#### `test_native_sub_agents.py` — 原生子 Agent 接入（通用 sub_agent 表）
+
+| 测试 | 验证内容 |
+|------|---------|
+| `test_generic_model_defaults` | SubAgentSession 默认 agent_type=monitor / source=ccm |
+| `test_native_agent_record` | native-agent 记录 + meta JSON（tool_use_id） |
+| `test_legacy_aliases_still_work` | MonitorSession/MonitorCheck 别名 + monitor_session_id synonym 兼容 |
+| `test_spawn_progress_done_lifecycle` | spawn→progress→done 生命周期 + 去重 + sub_agent_* 广播 |
+| `test_progress_for_unknown_agent_is_noop` | 未注册 tool_use_id 的 progress 为 no-op |
+| `test_missing_tool_use_id_ignored` | 无 tool_use_id 不入库 |
+| `test_summary_groups_by_agent_type` | /sub-agents/summary 按 agent_type 分组，running/completed 恒存在 |
+
+> PTY 侧 turn 对齐与子 agent 观测的测试在 PTY 仓库 `tests/test_turn_alignment.py`
+>（task87 错位回归：backlog orphan、in-flight turn_duration 不结束新 turn、
+> 空闲 watcher 消费自主 turn、挂起子 agent 的 session 不被驱逐）。
+
 #### `test_api_monitor.py` — Monitor API 端点
 
 | 测试 | 验证内容 |
