@@ -7,30 +7,17 @@ from backend.database import get_db
 from backend.models.task import Task
 from backend.models.instance import Instance
 
+from backend.services.git_info import git_head_commit
+
 router = APIRouter(prefix="/api/system", tags=["system"])
 
-_GIT_COMMIT: str | None = None
-
-
-def _git_commit() -> str:
-    """本服务运行代码的 commit（缓存）。Manager/Worker 版本锁定校验用。"""
-    global _GIT_COMMIT
-    if _GIT_COMMIT is None:
-        import subprocess
-        try:
-            r = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                capture_output=True, text=True, timeout=10,
-            )
-            _GIT_COMMIT = r.stdout.strip() if r.returncode == 0 else ""
-        except Exception:
-            _GIT_COMMIT = ""
-    return _GIT_COMMIT
+# import 时一次性求值（~10ms）：health 端点保持零阻塞；cwd 固定仓库根
+_GIT_COMMIT: str = git_head_commit()
 
 
 @router.get("/health")
 async def health():
-    return {"status": "ok", "commit": _git_commit()}
+    return {"status": "ok", "commit": _GIT_COMMIT}
 
 
 @router.get("/stats")

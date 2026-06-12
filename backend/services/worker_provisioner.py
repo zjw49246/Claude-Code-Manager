@@ -12,9 +12,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import secrets as pysecrets
-import socket
-import subprocess
 from datetime import datetime
 
 import httpx
@@ -23,15 +22,15 @@ from sqlalchemy import select
 from backend.config import settings
 from backend.models.worker import Worker
 from backend.services.cloud_provider import CloudProvider
+from backend.services.git_info import REPO_ROOT, git_head_commit
 from backend.services.ssh_executor import SSHExecutor
 
 logger = logging.getLogger(__name__)
 
-# rsync 部署时排除（机器本地状态，不属于代码）
+# rsync 部署时排除。.gitignore 经 --filter 自动生效（.venv/node_modules/db 等），
+# 这里只列 .gitignore 之外必须排除的（.git 要保留——版本锁定靠它）
 DEPLOY_EXCLUDES = [
-    ".venv", "node_modules", "frontend/dist", "__pycache__", ".pytest_cache",
-    "*.db", "*.db-shm", "*.db-wal", ".env", ".env.*", "uploads/",
-    ".claude-manager/", "archive-do-not-use/",
+    ".env", ".env.*", "uploads/", ".claude-manager/", "archive-do-not-use/",
 ]
 
 
@@ -47,23 +46,36 @@ class WorkerProvisioner:
         self.db_factory = db_factory
         self.cloud = cloud
         self.broadcaster = broadcaster
-        self._repo_dir = settings.worker_deploy_source_dir
+        # "."（默认）解析为本仓库根（从 __file__ 推导），不依赖进程 cwd——
+        # cwd 配错时 rsync --delete 整个 $HOME 到 worker 是灾难
+        src = settings.worker_deploy_source_dir
+        self._repo_dir = REPO_ROOT if src in (".", "") else os.path.abspath(src)
 
     # ------------------------------------------------------------------
     # 工具
     # ------------------------------------------------------------------
 
-    async def _update(self, worker_id: int, **fields) -> Worker:
+    async def _update(
+        self, worker_id: int, log_line: str | None = None,
+        broadcast: bool = True, **fields,
+    ) -> Worker | None:
+        """更新字段 +（可选）追加日志行，一次 DB 往返。worker 已删除返回 None。"""
         async with self.db_factory() as db:
             worker = await db.get(Worker, worker_id)
+            if worker is None:
+                return None
+            if log_line is not None:
+                stamp = datetime.utcnow().strftime("%H:%M:%S")
+                worker.bootstrap_log = (worker.bootstrap_log or "") + f"[{stamp}] {log_line}\n"
             for k, v in fields.items():
                 setattr(worker, k, v)
             await db.commit()
             await db.refresh(worker)
-        await self._broadcast(worker)
+        if broadcast:
+            await self._broadcast(worker, log_line)
         return worker
 
-    async def _broadcast(self, worker: Worker):
+    async def _broadcast(self, worker: Worker, log_line: str | None = None):
         if self.broadcaster:
             await self.broadcaster.broadcast("workers", {
                 "event_type": "worker_update",
@@ -72,17 +84,13 @@ class WorkerProvisioner:
                 "bootstrap_step": worker.bootstrap_step,
                 "bootstrap_error": worker.bootstrap_error,
                 "private_ip": worker.private_ip,
+                # 带增量日志行，前端无需回头拉全量日志
+                "log_line": log_line,
             })
 
-    async def _log(self, worker_id: int, line: str):
+    async def _log(self, worker_id: int, line: str, **fields):
         logger.info("worker %s: %s", worker_id, line.strip())
-        async with self.db_factory() as db:
-            worker = await db.get(Worker, worker_id)
-            stamp = datetime.utcnow().strftime("%H:%M:%S")
-            worker.bootstrap_log = (worker.bootstrap_log or "") + f"[{stamp}] {line}\n"
-            await db.commit()
-            await db.refresh(worker)
-        await self._broadcast(worker)
+        return await self._update(worker_id, log_line=line, **fields)
 
     def _ssh(self, worker: Worker) -> SSHExecutor:
         return SSHExecutor(
@@ -91,21 +99,26 @@ class WorkerProvisioner:
             key_path=worker.ssh_key_path or settings.worker_ssh_key_path,
         )
 
-    @staticmethod
-    def _manager_hostname() -> str:
-        return socket.gethostname()
+    async def _probe_health(self, worker: Worker, client: httpx.AsyncClient) -> dict:
+        """探活 worker CCM。返回 health JSON；非 200/连接失败抛异常。"""
+        r = await client.get(
+            f"http://{worker.private_ip}:{worker.ccm_port}/api/system/health",
+            timeout=10,
+        )
+        r.raise_for_status()
+        return r.json()
 
-    @staticmethod
-    def _manager_commit() -> str:
-        try:
-            r = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=settings.worker_deploy_source_dir,
-                capture_output=True, text=True, timeout=10,
-            )
-            return r.stdout.strip() if r.returncode == 0 else ""
-        except Exception:
-            return ""
+    async def _probe_auth(self, worker: Worker, client: httpx.AsyncClient) -> None:
+        """验证 auth_token 真的可用。/api/system/health 在 PUBLIC_PATHS 不校验
+        token，必须打一个需认证的端点，否则 .env 没写对也会被标 ready。"""
+        r = await client.get(
+            f"http://{worker.private_ip}:{worker.ccm_port}/api/system/stats",
+            headers={"Authorization": f"Bearer {worker.auth_token}"},
+            timeout=10,
+        )
+        if r.status_code == 401:
+            raise BootstrapError("health-check", "auth_token 校验失败（worker .env 未生效？）")
+        r.raise_for_status()
 
     # ------------------------------------------------------------------
     # 创建 / 收养
@@ -129,18 +142,20 @@ class WorkerProvisioner:
                 info = await self.cloud.describe_instance(adopt_instance_id)
                 if info["state"] == "stopped":
                     await self.cloud.start_instance(adopt_instance_id)
-                private_ip = await self.cloud.wait_until_running(adopt_instance_id)
+                iid = adopt_instance_id
                 worker = await self._update(
-                    worker_id, cloud_instance_id=adopt_instance_id,
-                    private_ip=private_ip, adopted=True,
+                    worker_id, cloud_instance_id=iid, adopted=True,
                 )
             else:
                 await self._log(worker_id, "creating EC2 instance (config inherited from manager)")
                 iid = await self.cloud.create_instance(worker.name)
                 worker = await self._update(worker_id, cloud_instance_id=iid)
-                private_ip = await self.cloud.wait_until_running(iid)
-                worker = await self._update(worker_id, private_ip=private_ip)
 
+            private_ip = await self.cloud.wait_until_running(iid)
+            info = await self.cloud.describe_instance(iid)
+            worker = await self._update(
+                worker_id, private_ip=private_ip, public_ip=info.get("public_ip"),
+            )
             await self._log(worker_id, f"instance running, private_ip={private_ip}")
             await self._bootstrap(worker_id, accounts or [])
 
@@ -171,8 +186,10 @@ class WorkerProvisioner:
         ssh = self._ssh(worker)
 
         async def run_step(step: str, coro):
-            await self._update(worker_id, status="bootstrapping", bootstrap_step=step)
-            await self._log(worker_id, f"step: {step}")
+            await self._log(
+                worker_id, f"step: {step}",
+                status="bootstrapping", bootstrap_step=step,
+            )
             try:
                 await coro
             except BootstrapError:
@@ -185,7 +202,7 @@ class WorkerProvisioner:
         await run_step("ccm-deploy", self._step_ccm_deploy(ssh, worker, worker_id))
         await run_step("ccm-config", self._step_ccm_config(ssh, worker_id))
         await run_step("account-login", self._step_account_login(ssh, worker_id, accounts))
-        await run_step("ccm-service", self._step_ccm_service(ssh))
+        await run_step("ccm-service", self._step_ccm_service(ssh, worker))
         await run_step("health-check", self._step_health_check(worker_id))
 
     async def _step_ssh_wait(self, ssh: SSHExecutor, timeout: int = 180):
@@ -217,7 +234,7 @@ echo "node=$(node --version) uv=$($HOME/.local/bin/uv --version 2>/dev/null || u
 
     async def _step_ccm_deploy(self, ssh: SSHExecutor, worker: Worker, worker_id: int):
         remote_dir = settings.worker_remote_dir
-        commit = self._manager_commit()
+        commit = git_head_commit(self._repo_dir)
         await self._log(worker_id, f"rsync repo @ {commit[:8]} -> {ssh.host}:{remote_dir}")
         await ssh.run(f"mkdir -p {remote_dir}")
         # 版本锁定：直接同步 Manager 工作区（含 .git），Worker 上即 Manager 同款 commit
@@ -279,7 +296,7 @@ echo deploy-ok
         if all(r["status"] == "failed" for r in results):
             raise BootstrapError("account-login", "全部账号登录失败")
 
-    async def _step_ccm_service(self, ssh: SSHExecutor):
+    async def _step_ccm_service(self, ssh: SSHExecutor, worker: Worker):
         remote_dir = settings.worker_remote_dir
         unit = f"""
 [Unit]
@@ -288,9 +305,9 @@ After=network.target
 
 [Service]
 Type=simple
-User=ubuntu
+User={worker.ssh_user}
 WorkingDirectory={remote_dir}
-ExecStart={remote_dir}/.venv/bin/python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000
+ExecStart={remote_dir}/.venv/bin/python -m uvicorn backend.main:app --host 0.0.0.0 --port {worker.ccm_port}
 Restart=always
 RestartSec=5
 
@@ -313,16 +330,20 @@ sudo systemctl restart ccm-worker
     async def _step_health_check(self, worker_id: int, timeout: int = 120):
         async with self.db_factory() as db:
             worker = await db.get(Worker, worker_id)
-        url = f"http://{worker.private_ip}:{worker.ccm_port}/api/system/health"
         deadline = asyncio.get_event_loop().time() + timeout
         last_err = ""
-        async with httpx.AsyncClient(timeout=10) as c:
+        async with httpx.AsyncClient() as c:
             while asyncio.get_event_loop().time() < deadline:
                 try:
-                    r = await c.get(url, headers={"Authorization": f"Bearer {worker.auth_token}"})
-                    if r.status_code == 200:
-                        return
-                    last_err = f"HTTP {r.status_code}"
+                    body = await self._probe_health(worker, c)
+                    # health 是 PUBLIC 路径不校验 token——必须再打一个需认证端点
+                    await self._probe_auth(worker, c)
+                    # 顺手记录 worker 自报 commit（应与部署 commit 一致）
+                    if body.get("commit"):
+                        await self._update(worker_id, ccm_commit=body["commit"], broadcast=False)
+                    return
+                except BootstrapError:
+                    raise
                 except Exception as e:
                     last_err = str(e)
                 await asyncio.sleep(5)
@@ -338,35 +359,52 @@ sudo systemctl restart ccm-worker
     async def stop_worker(self, worker_id: int):
         worker = await self._update(worker_id, status="stopping")
         try:
-            ssh = self._ssh(worker)
-            await ssh.run("sudo systemctl stop ccm-worker", timeout=60)
+            if not worker.cloud_instance_id:
+                # bootstrap 在开机前就失败过的 worker：没有实例可停
+                await self._update(worker_id, status="stopped")
+                return
+            try:
+                ssh = self._ssh(worker)
+                await ssh.run("sudo systemctl stop ccm-worker", timeout=60)
+            except Exception as e:
+                logger.warning("worker %s: graceful service stop failed: %s", worker_id, e)
+            await self.cloud.stop_instance(worker.cloud_instance_id)
+            # 等到真正 stopped
+            for _ in range(60):
+                info = await self.cloud.describe_instance(worker.cloud_instance_id)
+                if info["state"] == "stopped":
+                    break
+                await asyncio.sleep(5)
+            await self._update(worker_id, status="stopped")
         except Exception as e:
-            logger.warning("worker %s: graceful service stop failed: %s", worker_id, e)
-        await self.cloud.stop_instance(worker.cloud_instance_id)
-        # 等到真正 stopped
-        for _ in range(60):
-            info = await self.cloud.describe_instance(worker.cloud_instance_id)
-            if info["state"] == "stopped":
-                break
-            await asyncio.sleep(5)
-        await self._update(worker_id, status="stopped")
+            # 不留 "stopping" 终态卡死——回 error 让用户可 stop/start/destroy
+            await self._update(
+                worker_id, status="error", bootstrap_step=None,
+                bootstrap_error=f"关机失败: {e}",
+            )
 
     async def start_worker(self, worker_id: int):
         worker = await self._update(worker_id, status="starting")
         try:
             await self.cloud.start_instance(worker.cloud_instance_id)
             private_ip = await self.cloud.wait_until_running(worker.cloud_instance_id)
-            worker = await self._update(worker_id, private_ip=private_ip)
+            info = await self.cloud.describe_instance(worker.cloud_instance_id)
+            worker = await self._update(
+                worker_id, private_ip=private_ip, public_ip=info.get("public_ip"),
+            )
             ssh = self._ssh(worker)
             await self._step_ssh_wait(ssh)
             # systemd enable 过，等服务自启
             await self._step_health_check(worker_id, timeout=180)
             await self._update(
                 worker_id, status="ready", last_heartbeat=datetime.utcnow(),
-                bootstrap_error=None,
+                bootstrap_error=None, bootstrap_step=None,
             )
         except Exception as e:
-            await self._update(worker_id, status="error", bootstrap_error=str(e))
+            # bootstrap_step=None：允许健康检查在服务自行恢复后自动回 ready
+            await self._update(
+                worker_id, status="error", bootstrap_step=None, bootstrap_error=str(e),
+            )
 
     async def destroy_worker(self, worker_id: int):
         """销毁实例。任务迁移由调用方先行完成（Phase 3 接 TaskMigrator）。"""
@@ -401,26 +439,39 @@ sudo systemctl restart ccm-worker
                 select(Worker).where(Worker.status.in_(["ready", "error"]))
             )
             workers = result.scalars().all()
-        for worker in workers:
-            url = f"http://{worker.private_ip}:{worker.ccm_port}/api/system/health"
-            try:
-                async with httpx.AsyncClient(timeout=10) as c:
-                    r = await c.get(url, headers={"Authorization": f"Bearer {worker.auth_token}"})
-                r.raise_for_status()
-                fail_counts.pop(worker.id, None)
-                fields = {"last_heartbeat": datetime.utcnow()}
-                commit = r.json().get("commit")
-                if commit:
-                    fields["ccm_commit"] = commit
-                if worker.status == "error":
-                    # 自动恢复（error 不是终态）
-                    fields["status"] = "ready"
-                    fields["bootstrap_error"] = None
-                await self._update(worker.id, **fields)
-            except Exception:
-                fail_counts[worker.id] = fail_counts.get(worker.id, 0) + 1
-                if fail_counts[worker.id] >= 3 and worker.status == "ready":
-                    await self._update(
-                        worker.id, status="error",
-                        bootstrap_error="健康检查连续 3 次失败",
-                    )
+        if not workers:
+            return
+        # 并发探测 + 共享连接池：周期 = max(timeout) 而非 sum(timeouts)
+        async with httpx.AsyncClient() as client:
+            await asyncio.gather(
+                *(self._health_check_worker(w, fail_counts, client) for w in workers),
+                return_exceptions=True,
+            )
+
+    async def _health_check_worker(
+        self, worker: Worker, fail_counts: dict[int, int], client: httpx.AsyncClient
+    ):
+        try:
+            body = await self._probe_health(worker, client)
+            fail_counts.pop(worker.id, None)
+            fields = {"last_heartbeat": datetime.utcnow()}
+            commit = body.get("commit")
+            if commit:
+                fields["ccm_commit"] = commit
+            recovered = False
+            # 自动恢复仅限健康降级类 error（bootstrap_step 为 None）。
+            # bootstrap 失败的 error（step 非 None，如 account-login 全挂）不能
+            # 因为服务恰好活着就洗白——否则错误信息被清、retry 入口消失。
+            if worker.status == "error" and worker.bootstrap_step is None:
+                fields["status"] = "ready"
+                fields["bootstrap_error"] = None
+                recovered = True
+            # 心跳是常态写入：不广播，省得所有前端 tab 每 30s 空转
+            await self._update(worker.id, broadcast=recovered, **fields)
+        except Exception:
+            fail_counts[worker.id] = fail_counts.get(worker.id, 0) + 1
+            if fail_counts[worker.id] >= 3 and worker.status == "ready":
+                await self._update(
+                    worker.id, status="error", bootstrap_step=None,
+                    bootstrap_error="健康检查连续 3 次失败",
+                )

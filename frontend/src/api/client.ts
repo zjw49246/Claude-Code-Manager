@@ -699,7 +699,7 @@ export const api = {
   retryWorker: (id: number) => request<Worker>(`/api/workers/${id}/retry`, { method: 'POST' }),
 
   // System
-  health: () => request<{ status: string }>('/api/system/health'),
+  health: () => request<{ status: string; commit?: string }>('/api/system/health'),
   stats: () => request<{ tasks: Record<string, number>; running_instances: number }>('/api/system/stats'),
   config: () => request<{ default_provider: string; provider_options: string[]; default_model: string; model_options: string[]; default_codex_model: string; codex_model_options: string[]; default_effort: string; effort_options: string[]; codex_effort_options: string[] }>('/api/system/config'),
 };
