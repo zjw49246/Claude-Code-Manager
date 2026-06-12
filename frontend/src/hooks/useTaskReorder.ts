@@ -223,7 +223,9 @@ export function useTaskReorder(tasks: Task[], onReordered: () => void): ReorderA
         'div',
         {
           style: {
-            position: 'fixed', left: ghostPos.x + 12, top: ghostPos.y - 16,
+            // 手柄在卡片右下角 → 幽灵卡右对齐光标、向左延伸，避免飞出视口右缘
+            position: 'fixed', left: ghostPos.x - 12, top: ghostPos.y - 16,
+            transform: 'translateX(-100%)',
             zIndex: 9999, pointerEvents: 'none', maxWidth: 320,
           },
           className: 'px-3 py-2 rounded-lg bg-gray-700/95 border border-indigo-400 shadow-2xl text-xs text-gray-100 truncate',
