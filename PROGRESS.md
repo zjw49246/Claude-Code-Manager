@@ -314,6 +314,13 @@
 - **预防**: 哨兵协议必须校验"turn 归属"；接收方可能自己说话的通道必须有常驻消费者。另：调研结论要在目标分支上复核——"drain_idle_pty_sessions 无调用点"在 main 上不成立（settings API 已接），险些重复实现造成双重 drain
 - **Commit**: 71c4fdb（CCM task-from-main）、14ce6a0（claude-pty，本地未推送）
 
+### 2026-06-12 — PTY 权限透传（聊天卡片允许/拒绝）
+
+- **问题**: PTY 链路里 BridgeHub 的 permission handler 从未被 CCM 注册，CC 的权限请求全部 120s 超时默认拒绝（task 87 冒烟被拒的根因），用户侧毫无感知
+- **解决**: instance_manager 注册 handler（bridge HTTP 线程经 run_coroutine_threadsafe 进主循环），权限请求 → LogEntry + WS `permission_request` 卡片；前端 🔐 卡片点 允许/拒绝 → `POST /api/tasks/{id}/permissions/{request_id}` → bridge → channel server 解除阻塞。未送达（过期/未知）如实 410 且不落库，防止其他客户端误标
+- **预防**: 提供回调注册点的库要在集成层 grep 一遍"谁注册了"——长期无人注册的回调点等于功能性静默缺陷；跨线程回调必须显式注入事件循环（lifespan 里给 _loop 赋值），不要在回调里 get_event_loop
+- **Commit**: d0e53d4 + 8b6b496
+
 ## 已知问题
 
 - `total_cost_usd` 仅在 Claude Code stream-json result 事件报告时更新
