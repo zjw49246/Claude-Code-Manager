@@ -313,3 +313,11 @@ uv run alembic history         # 查看历史
 - **关键陷阱**（实现处有注释）：worker 广播前 pop session_id（靠 chat 响应同步）；广播无 raw_json；monitor 事件用 "event" 键；worker MonitorSession.id 用 remote_id 列翻译；backfill 用非 user_message 条数对比
 - **Phase 2 限制**：纯本地项目不能远程执行（Phase 3 播种）；worker task 不支持 secrets 引用；cost 只有 context_usage（token 级）
 - `/ws` 已加 token 认证（header 或 ?token=，前端 WsClient 自动带）
+
+### Phase 3（TaskMigrator，已实测双向闭环）
+
+- **执行位置实时切换**：PUT /api/tasks/{id} 带 worker_id（-1=本机）→ TaskMigrator；前端 TaskConfigBadge 的 Run on 下拉。先复制后切指针，失败状态复原可重试
+- **搬运内容**：session JSONL（跨账号 glob 定位 → 目标机 ~/.claude 同编码路径）+ 项目目录全量 rsync（含未提交改动）；worker→worker 经 Manager 两跳
+- **cwd 链条两个教训**（task 58 实测）：① worker 转发路径必须像本地一样把 project.local_path 写进 target_repo；② 失败启动会把 os.getcwd() 写进 last_cwd 且其优先级高于 target_repo——迁回本机时无效 last_cwd 必须清掉
+- worker 上重建 task 后立即 cancel（否则其 Dispatcher 2 秒内把任务描述重跑一遍）
+- Worker 销毁 = 批量迁回 + terminate；纯本地项目 = rsync 播种（_init_local_repo 见 .git 跳过）
