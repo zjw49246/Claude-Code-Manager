@@ -349,3 +349,9 @@
 - **解决**: 长任务改 `setsid nohup ... > log &`（本环境既有惯例，dev CCM 8003 就是这么起的），命令避开 `rm`/`mv` 前缀（如改用带时间戳的新文件名）
 - **预防**: 经 bridge 驱动的会话里长任务不要用 run_in_background、命令别踩 ask 触发词；长期方案是把权限确认透传到 CCM 前端（已记 TODO）
 - **Commit**: f37a9b9（冒烟脚本与流程）
+
+### 分布式 Worker Phase 2 一次性全绿的关键：先摸清广播协议再写 relay
+- **问题**: WorkerRelay 要镜像 worker CCM 的全部事件，但广播 payload 的坑很多（session_id 被 pop、raw_json 被剥、monitor 用 "event" 键、status_change 用 "new_status"、plan_ready 不含内容、MonitorSession id 跨机碰撞）
+- **解决**: 写代码前先逐个 grep instance_manager/dispatcher/monitor 的 broadcast 调用点确认每种事件的真实 payload，再按事实实现（设计文档的预判大部分准确但 monitor 键名等细节仍需实测）；MonitorSession 加 remote_id 列做 id 翻译
+- **预防**: 跨服务镜像/中继类功能，协议事实（键名、谁 pop 了什么、发到哪个 channel）必须从源码确认，不能按"应该是"写
+- **Commit**: e968a11
