@@ -32,6 +32,7 @@ claude-manager/
 │   │   ├── monitor.py           # Monitor Session CRUD + 子 agent checks/complete endpoints
 │   │   ├── pool.py              # Claude 账号池 status/usage/reload/clear-cooldown
 │   │   ├── pr_monitor.py       # PR Monitor CRUD + GitHub webhook endpoint
+│   │   ├── workers.py           # 分布式 Worker CRUD + stop/start/destroy/retry
 │   │   ├── sub_agents.py        # 通用子 Agent summary API (GET /tasks/{id}/sub-agents/summary)
 │   │   ├── ws.py                # WebSocket 端点
 │   │   ├── voice.py             # Whisper 语音转文字
@@ -45,6 +46,7 @@ claude-manager/
 │   │   ├── sub_agent.py         # SubAgentSession + SubAgentReport (通用子 agent 表, agent_type 分类)
 │   │   ├── monitor_session.py   # 兼容 shim: MonitorSession/MonitorCheck = sub_agent 别名
 │   │   ├── pr_monitor.py       # MonitoredRepo + PRReview (PR 自动审核)
+│   │   ├── worker.py            # 分布式 Worker（EC2 实例 + bootstrap 状态机）
 │   │   ├── log_entry.py         # 执行日志
 │   │   └── worktree.py          # Git worktree 跟踪
 │   ├── schemas/                 # Pydantic 请求/响应模型
@@ -294,3 +296,13 @@ uv run alembic history         # 查看历史
 - **必须附上 git commit ID**
 
 **同样的问题不要犯两次！**
+
+## 分布式 Worker（Phase 1，设计见 docs/plans/elastic-worker-design.md）
+
+- **形态**：Worker = 一台跑完整 CCM 的 EC2，Manager 全生命周期管理（创建/收养/关机/开机/销毁），前端 Workers 一级页面操作
+- **配置自举**：新 EC2 的机型/AMI/子网/密钥从 Manager 自身实例元数据继承（IMDSv2 + boto3，凭证走 IAM instance profile）；通信全走 VPC 内网 private IP
+- **部署 = rsync**（不走 git clone）：Manager 本地仓库 → worker `/home/ubuntu/ccm`，`--filter ':- .gitignore'` + 排除 `.git`（worktree 的 .git 是悬空指针）；版本锁定靠 `.deploy_commit` 文件（`git_info.git_head_commit` 的回退路径），health 端点带 commit 供校验
+- **auth 探针**：`/api/system/health` 在 PUBLIC_PATHS 不校验 token，bootstrap 健康检查必须再打需认证端点（`/api/system/stats`）验证 worker 的 AUTH_TOKEN 真可用
+- **error 语义**：`bootstrap_step` 非 None 的 error 是 bootstrap 失败（不自动恢复，UI 给 retry）；为 None 的是健康降级（健康检查恢复后自动回 ready）
+- **开关**：`WORKER_ENABLED=true` + `WORKER_SSH_KEY_PATH`（默认关，不装 boto3 也能跑）
+- Phase 2（任务转发 + WorkerRelay）、Phase 3（TaskMigrator 实时切换执行位置）见设计文档 §20
