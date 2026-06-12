@@ -118,6 +118,16 @@ class TaskMigrator:
                 task = await db.get(Task, task_id)
                 task.worker_id = target
                 task.status = prev_status
+                # last_cwd 防护：失败启动会把 os.getcwd() 写进 last_cwd（污染），
+                # 且它优先于 target_repo——切回本机时不存在/不在项目内的一律清掉，
+                # 让 cwd 解析回落到 target_repo
+                if target is None and task.last_cwd:
+                    valid = os.path.isdir(task.last_cwd) and (
+                        not task.target_repo
+                        or task.last_cwd.startswith(task.target_repo)
+                    )
+                    if not valid:
+                        task.last_cwd = None
                 await db.commit()
             await self._broadcast_status(task_id, "migrating", prev_status)
             logger.info("task %s migrated: %s -> %s", task_id, src_worker_id, target)
