@@ -334,3 +334,12 @@ async def test_stop_endpoint_sets_transitional_status_sync(client, session_facto
     assert r1.json()["status"] == "stopping"
     r2 = await client.post(f"/api/workers/{wid}/stop")
     assert r2.status_code == 409
+
+
+async def test_git_head_commit_deploy_file_fallback(tmp_path):
+    """rsync 部署不带 .git：git_head_commit 回退读 .deploy_commit。"""
+    from backend.services.git_info import git_head_commit
+    (tmp_path / ".deploy_commit").write_text("abc123def\n")
+    assert git_head_commit(str(tmp_path)) == "abc123def"
+    # 既无 git 也无文件 → ""
+    assert git_head_commit(str(tmp_path / "nonexistent")) == ""

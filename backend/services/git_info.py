@@ -12,12 +12,23 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 
 
 def git_head_commit(cwd: str = REPO_ROOT) -> str:
-    """返回 HEAD commit（失败返回 ""，不抛异常）。同步调用，启动期/线程内使用。"""
+    """返回 HEAD commit（失败返回 ""，不抛异常）。同步调用，启动期/线程内使用。
+
+    git 不可用时回退读 .deploy_commit——Worker 部署走 rsync 不带 .git
+    （从 worktree 部署时 .git 只是个指向 Manager 本地路径的悬空指针文件），
+    由 provisioner 在部署时写入该文件。
+    """
     try:
         r = subprocess.run(
             ["git", "rev-parse", "HEAD"],
             cwd=cwd, capture_output=True, text=True, timeout=10,
         )
-        return r.stdout.strip() if r.returncode == 0 else ""
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip()
+    except Exception:
+        pass
+    try:
+        with open(os.path.join(cwd, ".deploy_commit")) as f:
+            return f.read().strip()
     except Exception:
         return ""
