@@ -154,6 +154,9 @@ async def update_task(
                 await task_migrator.migrate(task_id, target)
             except MigrationError as e:
                 raise HTTPException(409, str(e))
+            # migrate 在独立 session 写库；当前 DI session 的 identity map
+            # 还缓存着旧 worker_id，必须 expire 否则响应返回迁移前的值
+            queue.db.expire_all()
 
     if not updates:
         task = await queue.get(task_id)
