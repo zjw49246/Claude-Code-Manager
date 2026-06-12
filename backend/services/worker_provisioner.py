@@ -28,9 +28,11 @@ from backend.services.ssh_executor import SSHExecutor
 logger = logging.getLogger(__name__)
 
 # rsync 部署时排除。.gitignore 经 --filter 自动生效（.venv/node_modules/db 等），
-# 这里只列 .gitignore 之外必须排除的（.git 要保留——版本锁定靠它）
+# 这里只列 .gitignore 之外必须排除的。.git 不带：worktree 的 .git 是指向
+# Manager 本地路径的指针文件（rsync 过去即悬空），且 .git 目录体积大——
+# 版本锁定改走 .deploy_commit 文件（git_info.git_head_commit 的回退路径）
 DEPLOY_EXCLUDES = [
-    ".env", ".env.*", "uploads/", ".claude-manager/", "archive-do-not-use/",
+    ".git", ".env", ".env.*", "uploads/", ".claude-manager/", "archive-do-not-use/",
 ]
 
 
@@ -245,6 +247,8 @@ echo "node=$(node --version) uv=$($HOME/.local/bin/uv --version 2>/dev/null || u
         script = f"""
 set -e
 cd {remote_dir}
+# 版本锁定标记：rsync 不带 .git，worker 侧 git_head_commit 回退读此文件
+echo {commit} > .deploy_commit
 export PATH="$HOME/.local/bin:$PATH"
 uv sync --quiet
 cd frontend && npm install --silent > /dev/null && npm run build > /dev/null 2>&1
