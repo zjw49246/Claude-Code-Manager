@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '../api/client';
+import { useWebSocket } from '../hooks/useWebSocket';
 import type { Worker } from '../api/client';
 import { Plus, X, RefreshCw, Trash2, Power, Play, Server, ScrollText } from 'lucide-react';
 
@@ -107,12 +108,16 @@ function LogsModal({ worker, onClose }: { worker: Worker; onClose: () => void })
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    let alive = true;
-    const load = () => api.getWorkerLogs(worker.id).then((r) => { if (alive) setLog(r.bootstrap_log || ''); }).catch(() => {});
-    load();
-    const t = setInterval(load, 3000);
-    return () => { alive = false; clearInterval(t); };
+    api.getWorkerLogs(worker.id).then((r) => setLog(r.bootstrap_log || '')).catch(() => {});
   }, [worker.id]);
+
+  // 增量日志走 WS（worker_update 带 log_line），不再轮询全量日志
+  useWebSocket(['workers'], (msg) => {
+    const data = (msg.data || {}) as Record<string, unknown>;
+    if (msg.channel === 'workers' && data.worker_id === worker.id && typeof data.log_line === 'string') {
+      setLog((prev) => prev + data.log_line);
+    }
+  });
 
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [log]);
 
@@ -217,9 +222,15 @@ export default function WorkersPage() {
 
   useEffect(() => {
     load();
-    const t = setInterval(load, 5000);
+    // WS 是主信号，这里只留慢速兜底轮询（WS 断开/丢消息时）
+    const t = setInterval(load, 30000);
     return () => clearInterval(t);
   }, [load]);
+
+  // 状态变化实时推送：provisioner 每次 _update 都广播到 workers channel
+  useWebSocket(['workers'], (msg) => {
+    if (msg.channel === 'workers') load();
+  });
 
   return (
     <div className="space-y-4">

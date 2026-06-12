@@ -270,3 +270,67 @@ async def test_health_check_marks_error_and_recovers(db_factory, session_factory
     assert w.status == "ready"
     assert w.ccm_commit == "abc123"
     assert w.bootstrap_error is None
+
+
+async def test_stop_worker_without_instance_goes_stopped(db_factory, session_factory):
+    """bootstrap 在开机前失败的 worker：stop 不应卡死在 stopping。"""
+    wid = await _insert_worker(session_factory, status="error", cloud_instance_id=None)
+    prov = WorkerProvisioner(db_factory=db_factory, cloud=FakeCloud(), broadcaster=None)
+    await prov.stop_worker(wid)
+    async with session_factory() as db:
+        assert (await db.get(Worker, wid)).status == "stopped"
+
+
+async def test_stop_worker_failure_goes_error_not_stuck(db_factory, session_factory):
+    wid = await _insert_worker(session_factory, status="ready", cloud_instance_id="i-x")
+    cloud = FakeCloud()
+
+    async def boom(iid):
+        raise RuntimeError("ec2 down")
+
+    cloud.stop_instance = boom
+    prov = WorkerProvisioner(db_factory=db_factory, cloud=cloud, broadcaster=None)
+    prov._ssh = lambda w: AsyncMock()
+    await prov.stop_worker(wid)
+    async with session_factory() as db:
+        w = await db.get(Worker, wid)
+    assert w.status == "error"
+    assert "关机失败" in w.bootstrap_error
+
+
+async def test_health_check_does_not_whitewash_bootstrap_error(db_factory, session_factory, monkeypatch):
+    """bootstrap 失败（step 非 None）的 error 不能因服务恰好活着被自动洗白。"""
+    wid = await _insert_worker(
+        session_factory, status="error", private_ip="10.0.0.9", auth_token="t",
+        bootstrap_step="account-login", bootstrap_error="全部账号登录失败",
+    )
+    prov = WorkerProvisioner(db_factory=db_factory, cloud=FakeCloud(), broadcaster=None)
+
+    class OkResp:
+        status_code = 200
+        def raise_for_status(self): ...
+        def json(self): return {"status": "ok", "commit": "abc"}
+
+    class OkClient:
+        def __init__(self, *a, **k): ...
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): return False
+        async def get(self, *a, **k): return OkResp()
+
+    import backend.services.worker_provisioner as wp
+    monkeypatch.setattr(wp.httpx, "AsyncClient", OkClient)
+    await prov._health_check_once({})
+    async with session_factory() as db:
+        w = await db.get(Worker, wid)
+    assert w.status == "error"  # 不自动恢复
+    assert w.bootstrap_error == "全部账号登录失败"
+
+
+async def test_stop_endpoint_sets_transitional_status_sync(client, session_factory, fake_provisioner):
+    """双击防护：第一发同步置 stopping，第二发 409。"""
+    wid = await _insert_worker(session_factory, status="ready")
+    r1 = await client.post(f"/api/workers/{wid}/stop")
+    assert r1.status_code == 200
+    assert r1.json()["status"] == "stopping"
+    r2 = await client.post(f"/api/workers/{wid}/stop")
+    assert r2.status_code == 409

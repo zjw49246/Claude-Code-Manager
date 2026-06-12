@@ -23,7 +23,16 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/workers", tags=["workers"])
 
-ACTIVE_STATUSES = ("creating", "bootstrapping", "ready", "error", "stopping", "stopped", "starting", "destroying")
+# 后台任务强引用：event loop 只持弱引用，长耗时 bootstrap 任务可能被 GC
+# 掐死在半路（asyncio 文档明确的坑）
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _spawn(coro) -> asyncio.Task:
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
 
 
 def _provisioner():
@@ -61,7 +70,7 @@ async def create_worker(body: WorkerCreate, db: AsyncSession = Depends(get_db)):
         await db.refresh(worker)
 
     accounts = [a.model_dump() for a in body.accounts]
-    asyncio.create_task(
+    _spawn(
         prov.create_worker(worker.id, accounts=accounts, adopt_instance_id=body.adopt_instance_id)
     )
     return worker
@@ -96,7 +105,11 @@ async def _require_worker(db: AsyncSession, worker_id: int, allowed_statuses: tu
 async def stop_worker(worker_id: int, db: AsyncSession = Depends(get_db)):
     prov = _provisioner()
     worker = await _require_worker(db, worker_id, ("ready", "error"))
-    asyncio.create_task(prov.stop_worker(worker.id))
+    # 同步置过渡态：双击/并发请求第二发直接 409，不会起两个后台任务
+    worker.status = "stopping"
+    await db.commit()
+    await db.refresh(worker)
+    _spawn(prov.stop_worker(worker.id))
     return worker
 
 
@@ -104,7 +117,10 @@ async def stop_worker(worker_id: int, db: AsyncSession = Depends(get_db)):
 async def start_worker(worker_id: int, db: AsyncSession = Depends(get_db)):
     prov = _provisioner()
     worker = await _require_worker(db, worker_id, ("stopped", "error"))
-    asyncio.create_task(prov.start_worker(worker.id))
+    worker.status = "starting"
+    await db.commit()
+    await db.refresh(worker)
+    _spawn(prov.start_worker(worker.id))
     return worker
 
 
@@ -114,10 +130,13 @@ async def destroy_worker(worker_id: int, db: AsyncSession = Depends(get_db)):
     worker = await db.get(Worker, worker_id)
     if not worker:
         raise HTTPException(404, "Worker not found")
-    if worker.status == "terminated":
-        raise HTTPException(409, "Worker 已销毁")
+    if worker.status in ("terminated", "destroying"):
+        raise HTTPException(409, f"Worker 状态 {worker.status}")
+    worker.status = "destroying"
+    await db.commit()
+    await db.refresh(worker)
     # Phase 3 接 TaskMigrator：销毁前把该 worker 的 task 全部迁回本机
-    asyncio.create_task(prov.destroy_worker(worker.id))
+    _spawn(prov.destroy_worker(worker.id))
     return worker
 
 
@@ -126,7 +145,10 @@ async def retry_bootstrap(worker_id: int, db: AsyncSession = Depends(get_db)):
     """error 状态下重跑创建/bootstrap 流程（实例已存在则等效于收养重 bootstrap）。"""
     prov = _provisioner()
     worker = await _require_worker(db, worker_id, ("error",))
-    asyncio.create_task(
+    worker.status = "creating"
+    await db.commit()
+    await db.refresh(worker)
+    _spawn(
         prov.create_worker(worker.id, accounts=[], adopt_instance_id=worker.cloud_instance_id)
     )
     return worker

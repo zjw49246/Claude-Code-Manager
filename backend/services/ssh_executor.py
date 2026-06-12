@@ -61,7 +61,10 @@ class SSHExecutor:
         timeout: int = 600,
     ) -> None:
         """rsync 本地目录到远端（用系统 rsync over ssh，增量+保权限）。"""
-        cmd = ["rsync", "-az", "--delete"]
+        # .gitignore 的忽略规则自动生效（.venv/node_modules/*.db 等），
+        # 与仓库保持同步，避免手工 exclude 列表漂移；excludes 只补充
+        # git 跟踪之外必须排除的内容
+        cmd = ["rsync", "-az", "--delete", "--filter", ":- .gitignore"]
         for ex in excludes or []:
             cmd += ["--exclude", ex]
         ssh_opt = (
