@@ -183,3 +183,22 @@ async def test_permission_endpoint_task_not_found(client):
         "/api/tasks/999999/permissions/perm-z", json={"behavior": "allow"}
     )
     assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_resolve_not_delivered_no_broadcast(db_factory, db_session):
+    """bridge 回包失败（CC 侧已超时/不存在）→ 不落库不广播，返回 False。"""
+    im = _make_im(db_factory)
+    task = Task(title="t", description="d", session_id="sess-3", instance_id=1)
+    db_session.add(task)
+    await db_session.commit()
+
+    await im._handle_pty_permission_request("sess-3", REQUEST)
+    im.broadcaster.events.clear()
+
+    fake_backend = MagicMock()
+    fake_backend._bridge.resolve_permission = MagicMock(return_value=False)
+    im._pty_backend = fake_backend
+
+    assert await im.resolve_pty_permission("perm-1", "allow") is False
+    assert im.broadcaster.events == []
