@@ -382,3 +382,32 @@ async def inject_message(
         "source": "inject",
     })
     return {"ok": True, "injected": True}
+
+
+class PermissionDecision(BaseModel):
+    behavior: str  # "allow" | "deny"
+
+
+@router.post("/{task_id}/permissions/{request_id}")
+async def resolve_permission(
+    task_id: int,
+    request_id: str,
+    body: PermissionDecision,
+    db: AsyncSession = Depends(get_db),
+):
+    """权限透传回包：前端卡片的 允许/拒绝 → BridgeHub → CC（PTY-only）。
+
+    CC 侧 channel server 最多等 120s，超时默认 deny——过期请求返回 410。
+    """
+    if body.behavior not in ("allow", "deny"):
+        raise HTTPException(400, "behavior must be 'allow' or 'deny'")
+
+    task = await db.get(Task, task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+
+    from backend.main import instance_manager
+    ok = await instance_manager.resolve_pty_permission(request_id, body.behavior)
+    if not ok:
+        raise HTTPException(410, "权限请求已过期或不存在（CC 侧可能已超时默认拒绝）")
+    return {"ok": True, "behavior": body.behavior}

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -99,6 +100,8 @@ async def _reset_stale_discussion_agents():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    # PTY 权限透传：bridge HTTP 线程需要往主循环调度协程
+    instance_manager._loop = asyncio.get_running_loop()
     # Apply persisted runtime-settings override (frontend PTY toggle)
     from backend.models.global_settings import GlobalSettings
     async with async_session() as db:
