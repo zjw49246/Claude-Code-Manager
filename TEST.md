@@ -718,3 +718,10 @@ WORKER_ENABLED=true WORKER_SSH_KEY_PATH=~/.ssh/xxx.pem PYTHONPATH=. \
 预期：status=ready，health 返回非空 commit 且与 DB ccm_commit 一致（版本锁定 PASS）。
 注意：经 PTY bridge 跑长任务用 `setsid nohup ... > /tmp/x.log &`，且命令里别带
 `rm`/`mv`（权限 ask 列表会触发 bridge auto-deny）。
+
+### Phase 2 端到端（已验证 2026-06-12，task 58）
+
+manager(8003) 注册 worker → 建 git_url 项目 → 创建 task 选 worker → 验证：
+转发同 ID、状态回流、43 条日志镜像、README 真实修改 + merge push、
+chat 代理 + session_id 同步、回复经 relay 回流。测试仓库
+github.com/youchengsong/ccm-worker-e2e-test（可删）。

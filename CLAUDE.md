@@ -306,3 +306,10 @@ uv run alembic history         # 查看历史
 - **error 语义**：`bootstrap_step` 非 None 的 error 是 bootstrap 失败（不自动恢复，UI 给 retry）；为 None 的是健康降级（健康检查恢复后自动回 ready）
 - **开关**：`WORKER_ENABLED=true` + `WORKER_SSH_KEY_PATH`（默认关，不装 boto3 也能跑）
 - Phase 2（任务转发 + WorkerRelay）、Phase 3（TaskMigrator 实时切换执行位置）见设计文档 §20
+
+### Phase 2（任务转发 + 中继，已实测）
+
+- **执行链路**：Task.worker_id 非空 → Dispatcher 双路径转发（同 ID 在 worker 创建，worker 自 clone 项目）→ WorkerRelay 每 worker 一条 WS 把 chat/status/plan/loop/goal/monitor 事件双写 Manager DB + 镜像广播 → 前端零改动
+- **关键陷阱**（实现处有注释）：worker 广播前 pop session_id（靠 chat 响应同步）；广播无 raw_json；monitor 事件用 "event" 键；worker MonitorSession.id 用 remote_id 列翻译；backfill 用非 user_message 条数对比
+- **Phase 2 限制**：纯本地项目不能远程执行（Phase 3 播种）；worker task 不支持 secrets 引用；cost 只有 context_usage（token 级）
+- `/ws` 已加 token 认证（header 或 ?token=，前端 WsClient 自动带）
