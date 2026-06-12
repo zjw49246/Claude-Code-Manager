@@ -379,6 +379,26 @@ export interface PoolUsageStatus {
   accounts: PoolAccountUsage[];
 }
 
+
+export interface Worker {
+  id: number;
+  name: string;
+  status: string;
+  cloud_instance_id: string | null;
+  private_ip: string | null;
+  public_ip: string | null;
+  adopted: boolean;
+  ssh_user: string;
+  ccm_port: number;
+  ccm_commit: string | null;
+  accounts: { email: string; status: string }[] | null;
+  last_heartbeat: string | null;
+  bootstrap_step: string | null;
+  bootstrap_error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export const api = {
   // Projects
   listProjects: () => request<Project[]>('/api/projects'),
@@ -666,6 +686,17 @@ export const api = {
     request<PRReview>(`/api/pr-monitor/reviews/${reviewId}`),
   getWebhookInfo: () =>
     request<{ webhook_url: string | null }>('/api/pr-monitor/webhook-info'),
+
+  // Workers (distributed)
+  listWorkers: () => request<Worker[]>('/api/workers'),
+  createWorker: (data: { accounts: { email: string; password?: string }[]; adopt_instance_id?: string; name?: string }) =>
+    request<Worker>('/api/workers', { method: 'POST', body: JSON.stringify(data) }),
+  getWorker: (id: number) => request<Worker>(`/api/workers/${id}`),
+  getWorkerLogs: (id: number) => request<{ id: number; bootstrap_log: string | null }>(`/api/workers/${id}/logs`),
+  stopWorker: (id: number) => request<Worker>(`/api/workers/${id}/stop`, { method: 'POST' }),
+  startWorker: (id: number) => request<Worker>(`/api/workers/${id}/start`, { method: 'POST' }),
+  destroyWorker: (id: number) => request<Worker>(`/api/workers/${id}/destroy`, { method: 'POST' }),
+  retryWorker: (id: number) => request<Worker>(`/api/workers/${id}/retry`, { method: 'POST' }),
 
   // System
   health: () => request<{ status: string }>('/api/system/health'),

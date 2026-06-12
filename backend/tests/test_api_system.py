@@ -10,7 +10,9 @@ from backend.models.instance import Instance
 async def test_health(client):
     resp = await client.get("/api/system/health")
     assert resp.status_code == 200
-    assert resp.json() == {"status": "ok"}
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert "commit" in body  # Manager/Worker 版本锁定校验用
 
 
 @pytest.mark.asyncio
