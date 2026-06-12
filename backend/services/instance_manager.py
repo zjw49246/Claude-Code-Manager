@@ -1085,8 +1085,10 @@ class InstanceManager:
             behavior,
         )
 
+        # 只有真正送达 CC（channel server 还挂着这个请求）才记录/广播，
+        # 否则其他在线客户端会把过期请求误标成"已允许/拒绝"
         task_id = pending.get("task_id")
-        if task_id:
+        if ok and task_id:
             async with self.db_factory() as db:
                 db.add(LogEntry(
                     instance_id=1,

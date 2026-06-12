@@ -185,6 +185,16 @@ cd frontend && npx tsc --noEmit
 >（task87 错位回归：backlog orphan、in-flight turn_duration 不结束新 turn、
 > 空闲 watcher 消费自主 turn、挂起子 agent 的 session 不被驱逐）。
 
+#### `test_permission_relay.py` — PTY 权限透传
+
+| 测试 | 验证内容 |
+|------|---------|
+| `test_permission_request_logged_and_broadcast` | 权限请求 → LogEntry + WS 卡片事件 + pending 登记 |
+| `test_resolve_permission_roundtrip` | allow 回包 bridge + resolved 广播 + 二次回包幂等失败 |
+| `test_resolve_not_delivered_no_broadcast` | bridge 送达失败不落库不广播（防误标已允许） |
+| `test_resolve_unknown_or_expired` | 未知/过期 request 返回 False |
+| `test_permission_endpoint_*` | API：200 / 410 过期 / 400 非法 behavior / 404 任务不存在 |
+
 #### `test_api_monitor.py` — Monitor API 端点
 
 | 测试 | 验证内容 |
