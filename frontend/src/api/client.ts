@@ -172,6 +172,9 @@ export interface ChatMessage {
   image_urls: string[] | null;
   attachments: FileAttachment[] | null;
   source?: string | null;
+  // 权限透传卡片（event_type === 'permission_request' 时存在）
+  request_id?: string | null;
+  permission_status?: 'pending' | 'allow' | 'deny' | 'expired' | null;
 }
 
 export interface LogEntry {
@@ -636,6 +639,11 @@ export const api = {
     request<{ ok: boolean }>(`/api/tasks/${taskId}/monitor-sessions/${sessionId}`, { method: 'DELETE' }),
 
   // Sub-Agents
+  resolvePermission: (taskId: number, requestId: string, behavior: 'allow' | 'deny') =>
+    request<{ ok: boolean; behavior: string }>(`/api/tasks/${taskId}/permissions/${requestId}`, {
+      method: 'POST',
+      body: JSON.stringify({ behavior }),
+    }),
   getSubAgentSummary: (taskId: number) =>
     request<SubAgentSummary>(`/api/tasks/${taskId}/sub-agents/summary`),
 

@@ -334,6 +334,38 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
       return;
     }
 
+    // 权限透传：CC 请求权限 → 聊天卡片；用户点按钮回包
+    if (eventType === 'permission_request') {
+      const entry: ChatMessage = {
+        id: Date.now() + Math.random(),
+        role: 'system',
+        event_type: 'permission_request',
+        content: (msg.data.description as string) || null,
+        tool_name: (msg.data.tool_name as string) || null,
+        tool_input: (msg.data.input_preview as string) || null,
+        tool_output: null,
+        is_error: false,
+        loop_iteration: null,
+        timestamp: new Date().toISOString(),
+        image_urls: null,
+        attachments: null,
+        request_id: (msg.data.request_id as string) || null,
+        permission_status: 'pending',
+      };
+      setMessages((prev) => [...prev, entry]);
+      return;
+    }
+    if (eventType === 'permission_resolved') {
+      const rid = msg.data.request_id as string;
+      const behavior = msg.data.behavior as 'allow' | 'deny';
+      setMessages((prev) => prev.map((m) =>
+        m.event_type === 'permission_request' && m.request_id === rid
+          ? { ...m, permission_status: behavior }
+          : m
+      ));
+      return;
+    }
+
     // 模型原生子 agent 的进度（PTY 观测，经 sub_agent_sessions 镜像）
     if (eventType === 'sub_agent_report') {
       api.listMonitorSessions(task.id).then(setMonitorSessions).catch(() => {});
@@ -903,7 +935,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
           group.type === 'tool-group' ? (
             <ToolGroup key={i} messages={group.messages} taskId={task.id} />
           ) : (
-            <MessageBubble key={group.message.id} message={group.message} />
+            <MessageBubble key={group.message.id} message={group.message} taskId={task.id} />
           )
         )}
         {sending && (
@@ -1528,8 +1560,86 @@ function MessageImages({ urls }: { urls: string[] }) {
   );
 }
 
-const MessageBubble = memo(function MessageBubble({ message }: { message: ChatMessage }) {
+/** 权限透传卡片：CC 在 PTY 里请求权限 → 用户点 允许/拒绝 回包。
+ * CC 侧最多等 120s，超时默认拒绝；过期点击会得到 410 并标记过期。
+ * 历史消息没有 request_id（只入库描述），渲染为只读。 */
+function PermissionCard({ message, taskId }: { message: ChatMessage; taskId?: number }) {
+  const [submitting, setSubmitting] = useState(false);
+  const [localStatus, setLocalStatus] = useState<string | null>(null);
+  const status = localStatus || message.permission_status || (message.request_id ? 'pending' : 'expired');
+  const actionable = status === 'pending' && !!message.request_id && taskId !== undefined;
+
+  const decide = async (behavior: 'allow' | 'deny') => {
+    if (!actionable || submitting) return;
+    setSubmitting(true);
+    try {
+      await api.resolvePermission(taskId!, message.request_id!, behavior);
+      setLocalStatus(behavior);
+    } catch {
+      setLocalStatus('expired');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const statusBadge: Record<string, { text: string; cls: string }> = {
+    allow: { text: '✓ 已允许', cls: 'text-emerald-400' },
+    deny: { text: '✕ 已拒绝', cls: 'text-red-400' },
+    expired: { text: '⏱ 已过期（CC 侧默认拒绝）', cls: 'text-gray-500' },
+  };
+
+  return (
+    <div className="mx-4">
+      <div className="px-3 py-2.5 bg-amber-500/10 border border-amber-500/40 rounded-lg text-sm">
+        <div className="flex items-center gap-2 text-amber-300 font-medium">
+          <span>🔐</span>
+          <span>权限请求{message.tool_name ? `：${message.tool_name}` : ''}</span>
+          {message.timestamp && (
+            <MessageTimestamp timestamp={message.timestamp} className="ml-auto" />
+          )}
+        </div>
+        {message.content && (
+          <div className="mt-1 text-gray-300">{message.content}</div>
+        )}
+        {message.tool_input && (
+          <pre className="mt-1.5 px-2 py-1.5 bg-gray-900/60 rounded text-xs text-gray-400 whitespace-pre-wrap break-all max-h-32 overflow-y-auto">{message.tool_input}</pre>
+        )}
+        <div className="mt-2 flex items-center gap-2">
+          {actionable ? (
+            <>
+              <button
+                onClick={() => decide('allow')}
+                disabled={submitting}
+                className="px-3 py-1 text-xs rounded bg-emerald-600 hover:bg-emerald-500 text-white disabled:opacity-50"
+              >
+                允许
+              </button>
+              <button
+                onClick={() => decide('deny')}
+                disabled={submitting}
+                className="px-3 py-1 text-xs rounded bg-red-600/80 hover:bg-red-500 text-white disabled:opacity-50"
+              >
+                拒绝
+              </button>
+              <span className="text-xs text-gray-500">120s 内有效，超时默认拒绝</span>
+            </>
+          ) : (
+            <span className={`text-xs ${statusBadge[status]?.cls || 'text-gray-500'}`}>
+              {statusBadge[status]?.text || status}
+            </span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const MessageBubble = memo(function MessageBubble({ message, taskId }: { message: ChatMessage; taskId?: number }) {
   const isUser = message.role === 'user';
+
+  if (message.event_type === 'permission_request') {
+    return <PermissionCard message={message} taskId={taskId} />;
+  }
 
   if (message.event_type === 'thinking') {
     const text = message.content || '';

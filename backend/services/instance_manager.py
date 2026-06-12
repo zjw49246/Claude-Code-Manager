@@ -7,7 +7,7 @@ import signal
 from datetime import datetime
 from pathlib import Path
 
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config import settings
@@ -34,6 +34,10 @@ class InstanceManager:
         self._config_dirs: dict[int, str] = {}  # instance_id -> CLAUDE_CONFIG_DIR used
         self._last_stderr: dict[int, str] = {}  # instance_id -> stderr from last run
         self._launch_params: dict[int, dict] = {}  # instance_id -> params for re-launch on rotation
+        # PTY 权限透传：request_id -> {session_id, task_id, tool_name, expires_at}
+        # bridge HTTP 线程收到 CC 的权限请求后经 _loop 调度进事件循环
+        self._pty_permissions: dict[str, dict] = {}
+        self._loop = None  # 主事件循环，lifespan 启动时注入
 
         # PTY persistent-session backend (claude provider only).
         # Runtime-switchable: env USE_PTY_MODE is the boot default, the
@@ -112,6 +116,11 @@ class InstanceManager:
                 try:
                     from claude_pty.adapters.ccm import CCMBackend
                     self._pty_backend = CCMBackend(self)
+                    # 权限透传：CC 的权限请求经 BridgeHub 转给前端卡片，
+                    # 不注册的话 channel server 120s 超时默认 deny
+                    self._pty_backend._bridge.on_permission_request(
+                        self._on_pty_permission_request
+                    )
                     logger.info("PTY mode enabled (claude_pty persistent sessions)")
                 except ImportError:
                     logger.warning(
@@ -965,6 +974,135 @@ class InstanceManager:
                     "agent_type": existing.agent_type,
                     "status": "completed",
                 })
+
+    # ---------------------------------------------------- PTY 权限透传
+
+    _PTY_PERMISSION_TIMEOUT = 120  # channel server 阻塞上限（秒），超时 deny
+
+    def _on_pty_permission_request(self, session_id: str, request: dict) -> None:
+        """BridgeHub HTTP 线程回调——只做线程切换，业务在事件循环里处理。"""
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            logger.warning(
+                "PTY permission request dropped (no event loop): %s", request
+            )
+            return
+        asyncio.run_coroutine_threadsafe(
+            self._handle_pty_permission_request(session_id, request), loop
+        )
+
+    async def _handle_pty_permission_request(
+        self, session_id: str, request: dict
+    ) -> None:
+        """把 CC 的权限请求落库并广播成前端聊天卡片。"""
+        import json as _json
+        import time as _time
+
+        request_id = request.get("request_id")
+        if not request_id:
+            return
+
+        task_id = None
+        async with self.db_factory() as db:
+            row = (
+                await db.execute(
+                    select(Task)
+                    .where(Task.session_id == session_id)
+                    .order_by(Task.id.desc())
+                )
+            ).scalars().first()
+            if row:
+                task_id = row.id
+
+        self._pty_permissions[request_id] = {
+            "session_id": session_id,
+            "task_id": task_id,
+            "tool_name": request.get("tool_name"),
+            "expires_at": _time.monotonic() + self._PTY_PERMISSION_TIMEOUT,
+        }
+
+        payload = {
+            "event_type": "permission_request",
+            "request_id": request_id,
+            "tool_name": request.get("tool_name"),
+            "description": request.get("description"),
+            "input_preview": request.get("input_preview"),
+            "timeout_seconds": self._PTY_PERMISSION_TIMEOUT,
+        }
+
+        if task_id:
+            instance_id = row.instance_id or 1
+            async with self.db_factory() as db:
+                db.add(LogEntry(
+                    instance_id=instance_id,
+                    task_id=task_id,
+                    event_type="permission_request",
+                    role="system",
+                    content=request.get("description")
+                    or f"权限请求: {request.get('tool_name')}",
+                    tool_name=request.get("tool_name"),
+                    tool_input=request.get("input_preview"),
+                    raw_json=_json.dumps(
+                        {"request_id": request_id, "session_id": session_id},
+                        ensure_ascii=False,
+                    ),
+                ))
+                await db.commit()
+            await self.broadcaster.broadcast(f"task:{task_id}", payload)
+        else:
+            logger.warning(
+                "PTY permission request for unknown session %s (tool=%s)",
+                session_id, request.get("tool_name"),
+            )
+
+    async def resolve_pty_permission(self, request_id: str, behavior: str) -> bool:
+        """前端按钮回包 → BridgeHub → channel server 解除阻塞。
+
+        Returns False when the request is unknown/expired（channel server
+        已超时默认 deny）。
+        """
+        import json as _json
+        import time as _time
+
+        pending = self._pty_permissions.pop(request_id, None)
+        # 顺手清理其他过期项
+        now = _time.monotonic()
+        for rid in [r for r, p in self._pty_permissions.items()
+                    if p["expires_at"] < now]:
+            self._pty_permissions.pop(rid, None)
+
+        if not pending or pending["expires_at"] < now:
+            return False
+        if self._pty_backend is None:
+            return False
+
+        loop = asyncio.get_running_loop()
+        ok = await loop.run_in_executor(
+            None,
+            self._pty_backend._bridge.resolve_permission,
+            pending["session_id"],
+            request_id,
+            behavior,
+        )
+
+        task_id = pending.get("task_id")
+        if task_id:
+            async with self.db_factory() as db:
+                db.add(LogEntry(
+                    instance_id=1,
+                    task_id=task_id,
+                    event_type="system_event",
+                    role="system",
+                    content=f"permission_{behavior}: {pending.get('tool_name')}",
+                    raw_json=_json.dumps({"request_id": request_id}),
+                ))
+                await db.commit()
+            await self.broadcaster.broadcast(f"task:{task_id}", {
+                "event_type": "permission_resolved",
+                "request_id": request_id,
+                "behavior": behavior,
+            })
+        return bool(ok)
 
     async def stop(self, instance_id: int) -> bool:
         """Stop a running Claude Code instance via SIGINT (interrupt).
