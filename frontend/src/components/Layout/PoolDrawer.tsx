@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { RefreshCw, X, Users } from 'lucide-react';
+import { Plus, RefreshCw, X, Users } from 'lucide-react';
 import { api } from '../../api/client';
 import type { PoolAccountUsage, PoolUsageStatus, PoolUsageWindow } from '../../api/client';
 
@@ -141,6 +141,79 @@ function AccountCard({ account, preferred, lastSelected, onClearCooldown, onSetP
   );
 }
 
+
+function AddAccountModal({ onClose, onAdded }: { onClose: () => void; onAdded: () => void }) {
+  const [email, setEmail] = useState('');
+  const [token, setToken] = useState('');
+  const [provider, setProvider] = useState<'171mail' | 'mailcatcher'>('171mail');
+  const [status, setStatus] = useState<string | null>(null);
+  const [detail, setDetail] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!email.trim() || !token.trim()) return;
+    setSubmitting(true);
+    setDetail(null);
+    try {
+      await api.poolAddAccount({ email: email.trim(), token: token.trim(), provider });
+      setStatus('running');
+      const poll = async () => {
+        const s = await api.poolAddStatus(email.trim());
+        if (s.status === 'running') { setTimeout(poll, 5000); return; }
+        setStatus(s.status);
+        if (s.status === 'failed') setDetail(s.detail?.slice(-500) || '登录失败');
+        if (s.status === 'success') { onAdded(); onClose(); }
+      };
+      setTimeout(poll, 5000);
+    } catch (e) {
+      setStatus('failed');
+      setDetail(e instanceof Error ? e.message : '请求失败');
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="absolute inset-0 bg-gray-900/80 z-10 flex items-start justify-center pt-16">
+      <div className="bg-gray-800 rounded-lg shadow-xl w-full max-w-xs">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700">
+          <h3 className="text-sm font-semibold text-foreground">添加账号</h3>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-200"><X size={14} /></button>
+        </div>
+        <form onSubmit={handleSubmit} className="p-4 space-y-3">
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">邮箱</label>
+            <input className="w-full bg-gray-700 text-foreground text-xs rounded px-2.5 py-1.5 outline-none focus:ring-1 focus:ring-indigo-500"
+              value={email} onChange={e => setEmail(e.target.value)} placeholder="user@example.com" required />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">接码 Token</label>
+            <input className="w-full bg-gray-700 text-foreground text-xs rounded px-2.5 py-1.5 outline-none focus:ring-1 focus:ring-indigo-500"
+              value={token} onChange={e => setToken(e.target.value)} placeholder="接码平台的 token" required />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">接码渠道</label>
+            <select className="w-full bg-gray-700 text-foreground text-xs rounded px-2.5 py-1.5 outline-none focus:ring-1 focus:ring-indigo-500"
+              value={provider} onChange={e => setProvider(e.target.value as '171mail' | 'mailcatcher')}>
+              <option value="171mail">171mail (b.171mail.com)</option>
+              <option value="mailcatcher">MailCatcher (mail.claude-code-manager.com)</option>
+            </select>
+          </div>
+          {status === 'running' && <p className="text-xs text-blue-400">登录中… 请等待（可能需要 1-2 分钟）</p>}
+          {status === 'failed' && <p className="text-xs text-red-400 break-all">{detail || '登录失败'}</p>}
+          <div className="flex justify-end gap-2 pt-1">
+            <button type="button" onClick={onClose} className="px-3 py-1.5 text-xs text-gray-300 hover:text-white">取消</button>
+            <button type="submit" disabled={submitting || status === 'running' || !email.trim() || !token.trim()}
+              className="px-3 py-1.5 text-xs bg-indigo-600 text-white rounded hover:bg-indigo-500 disabled:opacity-50">
+              {status === 'running' ? '登录中…' : '添加'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 export function PoolDrawer() {
   const [poolEnabled, setPoolEnabled] = useState(false);
   const [open, setOpen] = useState(false);
@@ -189,6 +262,7 @@ export function PoolDrawer() {
   }, [loadUsage]);
 
   const [relogin, setRelogin] = useState<Record<string, { status: string; message?: string }>>({});
+  const [showAdd, setShowAdd] = useState(false);
 
   const handleRelogin = useCallback(async (accountId: string) => {
     setRelogin((m) => ({ ...m, [accountId]: { status: 'running' } }));
@@ -245,6 +319,13 @@ export function PoolDrawer() {
               )}
               <div className="ml-auto flex items-center gap-1">
                 <button
+                  onClick={() => setShowAdd(true)}
+                  className="p-1.5 rounded text-gray-400 hover:text-foreground hover:bg-gray-800"
+                  title="添加账号"
+                >
+                  <Plus size={14} />
+                </button>
+                <button
                   onClick={loadUsage}
                   disabled={loading}
                   className="p-1.5 rounded text-gray-400 hover:text-foreground hover:bg-gray-800 disabled:opacity-50"
@@ -260,7 +341,8 @@ export function PoolDrawer() {
                 </button>
               </div>
             </div>
-            <div className="flex-1 overflow-y-auto p-3 space-y-2">
+            <div className="flex-1 overflow-y-auto p-3 space-y-2 relative">
+              {showAdd && <AddAccountModal onClose={() => setShowAdd(false)} onAdded={loadUsage} />}
               {error && <div className="text-xs text-red-400">{error}</div>}
               {loading && !status && <div className="text-xs text-gray-500">加载中…</div>}
               {status?.accounts.map((a) => (
