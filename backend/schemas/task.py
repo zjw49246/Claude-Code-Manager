@@ -8,6 +8,9 @@ class TaskCreate(BaseModel):
     id: int | None = None
     # None = 本机执行；有值 = 创建后由 Dispatcher 转发到该 Worker
     worker_id: int | None = None
+    # TaskMigrator 在目标机重建 task 时带上（跨机 --resume 续聊）
+    session_id: str | None = None
+    last_cwd: str | None = None
     title: str = ""
     description: str = ""
     project_id: int | None = None
@@ -50,6 +53,9 @@ class TaskCreate(BaseModel):
 
 
 class TaskUpdate(BaseModel):
+    # 执行位置切换：传 worker_id 触发 TaskMigrator（-1 表示切回本机，
+    # 因为 None 在 exclude_unset 语义下无法与「未传」区分）
+    worker_id: int | None = None
     title: str | None = None
     model: str | None = None
     effort_level: str | None = None

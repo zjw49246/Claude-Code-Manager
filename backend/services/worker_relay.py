@@ -87,6 +87,10 @@ class WorkerRelay:
         await ws.send(json.dumps({"action": "subscribe", "channels": [f"task:{task_id}"]}))
         self._tasks[worker.id].add(task_id)
 
+    def unsubscribe_task(self, worker_id: int, task_id: int):
+        """迁移后停止中继该 task（_handle 按 self._tasks 过滤，移除即生效）。"""
+        self._tasks.get(worker_id, set()).discard(task_id)
+
     async def stop_worker(self, worker_id: int):
         """断开并停止重连（worker 关机/销毁前必须调，否则重连风暴）。"""
         self._closing.add(worker_id)

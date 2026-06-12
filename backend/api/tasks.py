@@ -132,7 +132,35 @@ async def get_task(task_id: int, queue: TaskQueue = Depends(_get_queue)):
 async def update_task(
     task_id: int, body: TaskUpdate, queue: TaskQueue = Depends(_get_queue)
 ):
-    task = await queue.update_task(task_id, **body.model_dump(exclude_unset=True))
+    updates = body.model_dump(exclude_unset=True)
+
+    # 执行位置切换走 TaskMigrator（同 mode/model 一样在 task 详情改，
+    # 但语义是迁移而非改字段）。-1 = 切回本机
+    if "worker_id" in updates:
+        target = updates.pop("worker_id")
+        if target == -1:
+            target = None
+        task = await queue.get(task_id)
+        if not task:
+            raise HTTPException(404, "Task not found")
+        if task.worker_id != target:
+            from backend.main import task_migrator
+            if task_migrator is None:
+                raise HTTPException(503, "Worker 功能未启用")
+            from backend.services.task_migrator import MigrationError
+            try:
+                # 同步执行：迁移结束后才返回，前端拿到的就是最终状态。
+                # 大工作目录会久——前端按钮置灰 + migrating 状态广播兜底
+                await task_migrator.migrate(task_id, target)
+            except MigrationError as e:
+                raise HTTPException(409, str(e))
+
+    if not updates:
+        task = await queue.get(task_id)
+        if not task:
+            raise HTTPException(404, "Task not found")
+        return task
+    task = await queue.update_task(task_id, **updates)
     if not task:
         raise HTTPException(404, "Task not found")
     return task
