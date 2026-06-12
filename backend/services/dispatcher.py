@@ -478,6 +478,18 @@ class GlobalDispatcher:
                 worker = await db.get(WorkerModel, task.worker_id)
             if not worker or worker.status != "ready":
                 continue  # worker 没就绪，留在 pending 等下轮
+            # 与本地路径一致：把 project.local_path 写进 target_repo——
+            # 否则迁回本机后 chat 解析不出 cwd（实测 task 58 教训）
+            if task.project_id and not task.target_repo:
+                async with self.db_factory() as db:
+                    project = await db.get(Project, task.project_id)
+                    if project and project.local_path:
+                        await db.execute(
+                            update(Task).where(Task.id == task.id)
+                            .values(target_repo=project.local_path)
+                        )
+                        await db.commit()
+                        task.target_repo = project.local_path
             async with self.db_factory() as db:
                 await db.execute(
                     update(Task).where(Task.id == task.id)
