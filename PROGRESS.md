@@ -355,3 +355,10 @@
 - **解决**: 写代码前先逐个 grep instance_manager/dispatcher/monitor 的 broadcast 调用点确认每种事件的真实 payload，再按事实实现（设计文档的预判大部分准确但 monitor 键名等细节仍需实测）；MonitorSession 加 remote_id 列做 id 翻译
 - **预防**: 跨服务镜像/中继类功能，协议事实（键名、谁 pop 了什么、发到哪个 channel）必须从源码确认，不能按"应该是"写
 - **Commit**: e968a11
+
+### 跨机迁移的 cwd 解析链双坑（分布式 Worker Phase 3）
+- **问题**: task 从 worker 迁回本机后 chat 续聊连续失败（PTY session 秒死），但手动 `claude -p --resume` 正常——session 迁移本身是好的
+- **原因**: ① worker 转发路径没把 project.local_path 写进 task.target_repo（本地 dispatch 路径有这步），cwd 解析回落到 os.getcwd()；② 第一次失败启动把错误 cwd 写进了 task.last_cwd，而 cwd 解析顺序 last_cwd > target_repo——脏数据自我强化，后续每次都错
+- **解决**: 转发路径补 target_repo 解析；迁回本机时校验 last_cwd（不存在或不在项目内则清空）
+- **预防**: 「衍生状态写回数据库」（如 last_cwd）的字段在失败路径也会被写——排查这类问题先 dump 原始行而不是只看 API（API/ORM 的 identity map 还会叠加缓存假象）；同一逻辑的双路径（本地/远程 dispatch）要逐字段对照
+- **Commit**: 见 task-elastic-worker 分支 Phase 3 系列
