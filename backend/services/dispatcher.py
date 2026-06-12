@@ -402,6 +402,9 @@ class GlobalDispatcher:
                 # Top up idle workers before looking for capacity
                 await self._ensure_min_idle_instances()
 
+                # 路径 1：分布式 Worker task —— 不消耗本地 instance，直接转发
+                await self._dispatch_worker_tasks()
+
                 # Find idle instances
                 async with self.db_factory() as db:
                     result = await db.execute(
@@ -451,6 +454,66 @@ class GlobalDispatcher:
             except Exception as e:
                 logger.error(f"Dispatch loop error: {e}", exc_info=True)
                 await asyncio.sleep(5)
+
+    async def _dispatch_worker_tasks(self):
+        """转发 pending 的 worker task（elastic-worker 设计 §5.3）。
+
+        取出后立即标 in_progress，防止 2 秒后重复转发；转发失败回 failed。
+        """
+        from backend.main import worker_proxy
+        if worker_proxy is None:
+            return
+        from backend.models.worker import Worker as WorkerModel
+
+        async with self.db_factory() as db:
+            result = await db.execute(
+                select(Task).where(
+                    Task.status == "pending", Task.worker_id.isnot(None)
+                )
+            )
+            worker_tasks = list(result.scalars().all())
+
+        for task in worker_tasks:
+            async with self.db_factory() as db:
+                worker = await db.get(WorkerModel, task.worker_id)
+            if not worker or worker.status != "ready":
+                continue  # worker 没就绪，留在 pending 等下轮
+            async with self.db_factory() as db:
+                await db.execute(
+                    update(Task).where(Task.id == task.id)
+                    .values(status="in_progress", started_at=datetime.utcnow())
+                )
+                await db.commit()
+            # 与本地 task 一致地广播，前端立即看到状态（不等 relay 回传）
+            await self.broadcaster.broadcast("tasks", {
+                "event": "status_change",
+                "task_id": task.id,
+                "old_status": "pending",
+                "new_status": "in_progress",
+            })
+            t = asyncio.create_task(self._safe_forward_to_worker(task))
+            key = f"worker-{task.id}"
+            self._running_tasks[key] = t  # 强引用防 GC
+            t.add_done_callback(lambda _t, k=key: self._running_tasks.pop(k, None))
+
+    async def _safe_forward_to_worker(self, task: Task):
+        from backend.main import worker_proxy
+        try:
+            await worker_proxy.forward_task_to_worker(task)
+        except Exception as e:
+            logger.error("forward task %s to worker failed: %s", task.id, e)
+            async with self.db_factory() as db:
+                await db.execute(
+                    update(Task).where(Task.id == task.id)
+                    .values(status="failed", error_message=f"转发到 Worker 失败: {e}")
+                )
+                await db.commit()
+            await self.broadcaster.broadcast("tasks", {
+                "event": "status_change",
+                "task_id": task.id,
+                "old_status": "in_progress",
+                "new_status": "failed",
+            })
 
     async def _pool_select(self, exclude: set[str] | None = None) -> str | None:
         """Select a pool account config_dir, or None if pool is off / exhausted."""

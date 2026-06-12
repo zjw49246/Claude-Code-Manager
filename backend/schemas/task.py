@@ -4,6 +4,10 @@ from pydantic import BaseModel, field_serializer, model_validator
 
 
 class TaskCreate(BaseModel):
+    # Manager→Worker 转发时指定 ID（task ID 全局由 Manager 分配，见设计文档 §2）
+    id: int | None = None
+    # None = 本机执行；有值 = 创建后由 Dispatcher 转发到该 Worker
+    worker_id: int | None = None
     title: str = ""
     description: str = ""
     project_id: int | None = None
@@ -73,6 +77,7 @@ class TaskUpdate(BaseModel):
 
 class TaskResponse(BaseModel):
     id: int
+    worker_id: int | None = None
     title: str
     description: str | None
     status: str

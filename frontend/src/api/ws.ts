@@ -18,7 +18,10 @@ export class WsClient {
 
   connect() {
     if (this.destroyed) return;
-    this.ws = new WebSocket(this.url);
+    // /ws 已加 token 认证（worker 模式必须）；浏览器设不了 header，走查询参数
+    const token = localStorage.getItem('cc_token') || '';
+    const url = token ? `${this.url}${this.url.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}` : this.url;
+    this.ws = new WebSocket(url);
     this.ws.onopen = () => {
       this.retryDelay = 1000;
       if (this.channels.length > 0) {

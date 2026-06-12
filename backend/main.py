@@ -64,15 +64,22 @@ dispatcher = GlobalDispatcher(
 
 # 分布式 Worker（可选，WORKER_ENABLED=true 且装了 boto3 才启用）
 worker_provisioner = None
+worker_relay = None
+worker_proxy = None
 if settings.worker_enabled:
     try:
         from backend.services.cloud_provider import get_cloud_provider
         from backend.services.worker_provisioner import WorkerProvisioner
+        from backend.services.worker_relay import WorkerRelay
+        from backend.services.worker_proxy import WorkerProxy
 
+        worker_relay = WorkerRelay(db_factory=async_session, broadcaster=broadcaster)
+        worker_proxy = WorkerProxy(db_factory=async_session, relay=worker_relay)
         worker_provisioner = WorkerProvisioner(
             db_factory=async_session,
             cloud=get_cloud_provider(settings.worker_cloud_provider),
             broadcaster=broadcaster,
+            relay=worker_relay,
         )
     except Exception:
         logger.exception("Worker provisioner init failed — workers disabled")
@@ -113,6 +120,24 @@ async def _reset_stale_discussion_agents():
             logger.info("Reset %d stale discussion agents to idle", len(stale))
 
 
+async def _recover_worker_relays():
+    """Manager 重启后为 ready worker 上的活跃 task 重建中继 + 补缺失日志。"""
+    from backend.models.worker import Worker
+    try:
+        async with async_session() as db:
+            result = await db.execute(
+                select(Worker).where(Worker.status == "ready")
+            )
+            workers = result.scalars().all()
+        for w in workers:
+            try:
+                await worker_relay.recover(w)
+            except Exception:
+                logger.exception("recover relay for worker %s failed", w.id)
+    except Exception:
+        logger.exception("worker relay recovery failed")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
@@ -129,11 +154,12 @@ async def lifespan(app: FastAPI):
     if settings.auto_start_dispatcher:
         await dispatcher.start()
 
-    # Worker 健康监控循环
+    # Worker 健康监控循环 + Manager 重启后恢复所有 relay 连接
     worker_health_task = None
     if worker_provisioner is not None:
         import asyncio as _asyncio
         worker_health_task = _asyncio.create_task(worker_provisioner.health_check_loop())
+        _asyncio.create_task(_recover_worker_relays())
 
     # Start periodic database backup (optional — requires BACKUP_ENABLED=true in .env)
     backup_svc = None

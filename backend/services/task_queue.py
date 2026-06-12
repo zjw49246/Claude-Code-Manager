@@ -139,7 +139,8 @@ class TaskQueue:
         """Get the highest-priority pending task."""
         stmt = (
             select(Task)
-            .where(Task.status == "pending")
+            # worker task 不走本地 instance，由 Dispatcher 的 worker 转发路径处理
+            .where(Task.status == "pending", Task.worker_id.is_(None))
             .order_by(Task.priority.asc(), Task.created_at.asc())
             .limit(1)
         )
