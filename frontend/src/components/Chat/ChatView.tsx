@@ -328,7 +328,14 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
 
     const eventType = msg.data.event_type as string || (msg.data.event as string);
 
-    if (eventType === 'monitor_session_created' || eventType === 'monitor_session_status') {
+    if (eventType === 'monitor_session_created' || eventType === 'monitor_session_status'
+        || eventType === 'sub_agent_session_created' || eventType === 'sub_agent_session_status') {
+      api.listMonitorSessions(task.id).then(setMonitorSessions).catch(() => {});
+      return;
+    }
+
+    // 模型原生子 agent 的进度（PTY 观测，经 sub_agent_sessions 镜像）
+    if (eventType === 'sub_agent_report') {
       api.listMonitorSessions(task.id).then(setMonitorSessions).catch(() => {});
       return;
     }

@@ -21,6 +21,7 @@ Web 端调度和管理多个 Claude Code 实例并行工作。灵感来自胡渊
 - **Android App** — 通过 Capacitor 打包原生 APK，App 内可配置远程服务器地址
 - **PR Monitor** — GitHub PR 自动审核，Webhook 接收 PR 事件后创建审核 Task，Claude 审核代码后自动 approve/merge 或 request-changes。支持白名单作者、auto-merge 开关、自定义审核模型
 - **Monitor Sub-Agent** — Agent 可自主创建持久监控子 Agent，子 Agent 拥有独立 MCP 工具（report_status / mark_complete / get_context），自主决定检查频率并通过 API 向系统汇报
+- **原生子 Agent 镜像（PTY 模式）** — 模型用内置 Agent/Task/Monitor 工具开的子 agent 会被 PTY 层观测并自动注册进子 agent 体系（类别 native-agent / native-monitor），任务卡徽章、Sub-Agents 面板、WebSocket 实时事件与 $monitor 同一套展示；后台子 agent 唤醒模型产生的自主回复实时进入聊天流，不再错位到下一条消息
 - **Claude Pool** — 多账号池自动切换：撞限/认证失败时自动换号并硬链接 session 实现无缝 `--resume`；Header 的 "Pro" 徽标可打开额度抽屉，查看每个账号 5h/7d 窗口的利用率（绿/黄/红进度条）、冷却状态，并可手动解除冷却
 - **主题切换** — 支持浅色/深色主题，偏好持久化
 - **Token 认证** — Bearer Token 保护所有 API，安全远程访问

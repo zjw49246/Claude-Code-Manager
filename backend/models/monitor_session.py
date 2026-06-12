@@ -1,33 +1,14 @@
-from datetime import datetime
-from sqlalchemy import Integer, String, Text, DateTime
-from sqlalchemy.orm import Mapped, mapped_column
-from backend.database import Base
+"""Compatibility shim — monitor 表已通用化为 sub-agent 表。
 
+真正的模型在 backend.models.sub_agent：
+- MonitorSession → SubAgentSession（表 sub_agent_sessions，加 agent_type/source/meta）
+- MonitorCheck   → SubAgentReport（表 sub_agent_reports，monitor_session_id → session_id，
+  旧属性名经 synonym 兼容）
 
-class MonitorSession(Base):
-    __tablename__ = "monitor_sessions"
+新代码请直接 import SubAgentSession / SubAgentReport。
+"""
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    task_id: Mapped[int] = mapped_column(Integer, index=True)
-    description: Mapped[str] = mapped_column(String(500), nullable=False)
-    monitor_context: Mapped[str | None] = mapped_column(Text, nullable=True)
-    interval: Mapped[int] = mapped_column(Integer, default=120)
-    max_checks: Mapped[int] = mapped_column(Integer, default=50)
-    model: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    status: Mapped[str] = mapped_column(String(20), default="running")
-    checks_done: Mapped[int] = mapped_column(Integer, default=0)
-    last_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-
-
-class MonitorCheck(Base):
-    __tablename__ = "monitor_checks"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    monitor_session_id: Mapped[int] = mapped_column(Integer, index=True)
-    check_number: Mapped[int] = mapped_column(Integer)
-    status: Mapped[str] = mapped_column(String(20))
-    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
-    full_output: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+from backend.models.sub_agent import (  # noqa: F401
+    SubAgentSession as MonitorSession,
+    SubAgentReport as MonitorCheck,
+)

@@ -124,6 +124,9 @@ class InstanceManager:
         else:
             if self._pty_enabled:
                 logger.info("PTY mode disabled; new launches use `claude -p`")
+            # NOTE: idle-session drain on toggle-off is the API layer's job
+            # (PUT /api/settings/runtime awaits drain_idle_pty_sessions) —
+            # this sync method must stay loop-free.
             self._pty_enabled = False
         return self._pty_enabled
 
@@ -762,6 +765,19 @@ class InstanceManager:
         session_id = event.pop("session_id", None)
         cost_usd = event.pop("cost_usd", None)
         context_usage = event.pop("context_usage", None)
+
+        # Native sub-agent lifecycle (model-spawned Agent/Monitor, observed by
+        # the PTY layer) — register into the generic sub-agent tables so the
+        # 前端徽章/面板 shows them next to $monitor sessions.
+        if task_id and event.get("subagent") and event["event_type"].startswith("subagent_"):
+            try:
+                await self._upsert_native_sub_agent(
+                    task_id, event["event_type"], event["subagent"]
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to upsert native sub-agent for task %s", task_id
+                )
         if session_id and task_id:
             async with self.db_factory() as db:
                 await db.execute(
@@ -868,6 +884,87 @@ class InstanceManager:
                 "event_type": "context_usage",
                 **context_usage,
             })
+
+    async def _upsert_native_sub_agent(
+        self, task_id: int, event_type: str, info: dict
+    ) -> None:
+        """Mirror a native sub-agent lifecycle event into sub_agent_sessions.
+
+        Keyed by tool_use_id (stored in meta JSON): spawn inserts a running
+        record, progress bumps checks_done/last_summary, done completes it.
+        Broadcasts sub_agent_* WebSocket events for the frontend panel/badge.
+        """
+        import json as _json
+        from sqlalchemy import select as _select
+        from backend.models.sub_agent import SubAgentSession
+
+        tool_use_id = info.get("tool_use_id")
+        if not tool_use_id:
+            return
+
+        async with self.db_factory() as db:
+            existing = (
+                await db.execute(
+                    _select(SubAgentSession).where(
+                        SubAgentSession.task_id == task_id,
+                        SubAgentSession.source == "native",
+                        SubAgentSession.meta.like(f'%"{tool_use_id}"%'),
+                    )
+                )
+            ).scalars().first()
+
+            if event_type == "subagent_spawn":
+                if existing:
+                    return  # replay safety
+                sa = SubAgentSession(
+                    task_id=task_id,
+                    agent_type=info.get("kind") or "native-agent",
+                    source="native",
+                    description=(info.get("description") or "")[:500],
+                    status="running",
+                    meta=_json.dumps(info, ensure_ascii=False),
+                )
+                db.add(sa)
+                await db.commit()
+                await db.refresh(sa)
+                await self.broadcaster.broadcast(f"task:{task_id}", {
+                    "event_type": "sub_agent_session_created",
+                    "sub_agent_session_id": sa.id,
+                    "agent_type": sa.agent_type,
+                    "source": "native",
+                    "description": sa.description,
+                })
+                return
+
+            if not existing:
+                return
+
+            if event_type == "subagent_progress":
+                existing.checks_done = (existing.checks_done or 0) + 1
+                if info.get("summary"):
+                    existing.last_summary = info["summary"][:2000]
+                await db.commit()
+                await self.broadcaster.broadcast(f"task:{task_id}", {
+                    "event_type": "sub_agent_report",
+                    "sub_agent_session_id": existing.id,
+                    "agent_type": existing.agent_type,
+                    "check_number": existing.checks_done,
+                    "summary": existing.last_summary,
+                })
+            elif event_type == "subagent_done":
+                existing.status = "completed"
+                existing.completed_at = datetime.utcnow()
+                if info.get("timed_out"):
+                    existing.last_summary = (
+                        (existing.last_summary or "") + " [timed out]"
+                    ).strip()
+                await db.commit()
+                await self.broadcaster.broadcast(f"task:{task_id}", {
+                    "event_type": "sub_agent_session_status",
+                    "sub_agent_session_id": existing.id,
+                    "agent_type": existing.agent_type,
+                    "status": "completed",
+                })
 
     async def stop(self, instance_id: int) -> bool:
         """Stop a running Claude Code instance via SIGINT (interrupt).
