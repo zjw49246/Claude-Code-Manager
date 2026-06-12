@@ -53,7 +53,11 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-API_BASE = "https://b.171mail.com/api/v1"
+API_BASE_171 = "https://b.171mail.com/api/v1"
+API_BASE_MAILCATCHER = "https://mail.claude-code-manager.com"
+
+# 兼容旧代码：默认走 171mail
+API_BASE = API_BASE_171
 OAUTH_URL_RE = re.compile(r"https://claude\.com/cai/oauth/authorize\?[^\s]+")
 
 _COOKIE_ATTR_KEYS = {"path", "domain", "expires", "max-age", "samesite", "secure", "httponly"}
@@ -170,6 +174,48 @@ async def _verify_link(
         msg = body.get("error") or body.get("message") or "unknown"
         raise MailServiceError(f"171mail /claude/verify failed: {msg}")
     return body["data"]["cookie"], body["data"]["sessionKey"]
+
+
+# ---------------------------------------------------------------------------
+# MailCatcher client (mail.claude-code-manager.com)
+# ---------------------------------------------------------------------------
+
+async def _poll_magic_link_mailcatcher(
+    client: httpx.AsyncClient, token: str, after_ts: float, timeout_s: int
+) -> str:
+    """从 MailCatcher 轮询 magic link。MailCatcher 只负责收信，
+    Claude 登录流程自己发邮件到该地址。"""
+    deadline = time.time() + timeout_s
+    last_subject: str | None = None
+    while time.time() < deadline:
+        r = await client.get(
+            f"{API_BASE_MAILCATCHER}/api/v1/message",
+            params={"token": token, "type": "claude"},
+        )
+        try:
+            payload = r.json()
+        except Exception:
+            await asyncio.sleep(2)
+            continue
+        if payload.get("code") != 200 or payload.get("message") != "success":
+            await asyncio.sleep(2)
+            continue
+        data = payload.get("data") or {}
+        subject = data.get("subject") or ""
+        magic_link = data.get("code") or ""
+        if not magic_link or not subject:
+            await asyncio.sleep(2)
+            continue
+        if subject != last_subject:
+            # 检查时间戳——只要比 after_ts 新的
+            m = re.search(r"\|\s+(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", subject)
+            if m:
+                t = time.mktime(time.strptime(m.group(1), "%Y-%m-%d %H:%M:%S"))
+                if t >= after_ts - 5:
+                    return magic_link
+            last_subject = subject
+        await asyncio.sleep(2)
+    raise MailServiceError(f"MailCatcher: no fresh magic-link email within {timeout_s}s")
 
 
 # ---------------------------------------------------------------------------
@@ -333,9 +379,9 @@ def load_email_tokens() -> dict:
         return {}
 
 
-def save_email_token(email: str, token: str):
+def save_email_token(email: str, token: str, provider: str = "171mail"):
     data = load_email_tokens()
-    data[email] = {"token": token, "provider": "171mail"}
+    data[email] = {"token": token, "provider": provider}
     EMAIL_TOKENS_FILE.parent.mkdir(parents=True, exist_ok=True)
     EMAIL_TOKENS_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False))
     os.chmod(EMAIL_TOKENS_FILE, 0o600)
@@ -397,6 +443,7 @@ async def perform_login(
     token_171: str,
     config_dir: str,
     use_xvfb: bool = True,
+    provider: str = "171mail",
 ) -> bool:
     config_path = Path(config_dir).expanduser()
     config_path.mkdir(parents=True, exist_ok=True)
@@ -405,22 +452,31 @@ async def perform_login(
 
     mitm_proc = None
     try:
-        # Step 1: 171mail — get session cookies
-        logger.info("step 1/5: triggering 171mail login email...")
-        async with httpx.AsyncClient(timeout=30) as mc:
-            device_id, client_sha = await _trigger_send(mc, email)
-            send_ts = time.time()
-            logger.info("step 2/5: polling for magic link (up to %ds)...", EMAIL_POLL_TIMEOUT)
-            magic_link = await _poll_magic_link(mc, token_171, send_ts, EMAIL_POLL_TIMEOUT)
-            logger.info("got magic link (%d chars)", len(magic_link))
-            cookie_header, session_key = await _verify_link(
-                mc, link=magic_link,
-                device_id=device_id, client_sha=client_sha, email=email,
-            )
-            logger.info("got sessionKey (%d chars)", len(session_key))
+        # Step 1: 获取 session cookies（按 provider 分支）
+        cookies: list[dict] = []
+        if provider == "mailcatcher":
+            # MailCatcher 模式：不需要 send/verify 三步——
+            # Claude CLI 自己发邮件，MailCatcher 只收信。
+            # 先启动 CLI 触发邮件发送，然后边轮询 MailCatcher 边等 CLI 输出 OAuth URL。
+            # cookies 留空：浏览器直接访问 magic link 拿 cookie
+            logger.info("provider=mailcatcher: cookies will be obtained via magic link in browser")
+        else:
+            # 171mail 模式
+            logger.info("step 1/5: triggering 171mail login email...")
+            async with httpx.AsyncClient(timeout=30) as mc:
+                device_id, client_sha = await _trigger_send(mc, email)
+                send_ts = time.time()
+                logger.info("step 2/5: polling for magic link (up to %ds)...", EMAIL_POLL_TIMEOUT)
+                magic_link = await _poll_magic_link(mc, token_171, send_ts, EMAIL_POLL_TIMEOUT)
+                logger.info("got magic link (%d chars)", len(magic_link))
+                cookie_header, session_key = await _verify_link(
+                    mc, link=magic_link,
+                    device_id=device_id, client_sha=client_sha, email=email,
+                )
+                logger.info("got sessionKey (%d chars)", len(session_key))
 
-        cookies = _parse_cookie_header(cookie_header)
-        logger.info("parsed %d cookies: %s", len(cookies), [c["name"] for c in cookies])
+            cookies = _parse_cookie_header(cookie_header)
+            logger.info("parsed %d cookies: %s", len(cookies), [c["name"] for c in cookies])
 
         # Clear stale credentials
         for f in [".claude.json", ".credentials.json"]:
@@ -524,8 +580,28 @@ async def perform_login(
                 context = await browser.new_context(
                     viewport={"width": 1280, "height": 800},
                 )
-                await context.add_cookies(cookies)
                 page = await context.new_page()
+
+                if provider == "mailcatcher":
+                    # MailCatcher 模式：CLI 已触发邮件发送，轮询拿 magic link，
+                    # 浏览器直接访问 magic link 获取 session cookie
+                    logger.info("mailcatcher: polling for magic link...")
+                    send_ts = time.time()
+                    async with httpx.AsyncClient(timeout=30) as mc:
+                        ml = await _poll_magic_link_mailcatcher(
+                            mc, token_171, send_ts, EMAIL_POLL_TIMEOUT
+                        )
+                    logger.info("mailcatcher: got magic link (%d chars), visiting...", len(ml))
+                    await page.goto(ml, wait_until="domcontentloaded", timeout=PLAYWRIGHT_NAV_TIMEOUT)
+                    # 等登录完成（页面跳转到 claude.ai）
+                    for _ in range(30):
+                        if "claude.ai" in page.url:
+                            break
+                        await asyncio.sleep(1)
+                    logger.info("mailcatcher: logged in via magic link, url=%s", page.url[:80])
+                else:
+                    # 171mail 模式：预注入 cookies
+                    await context.add_cookies(cookies)
 
                 # Identity check
                 resp = await page.request.get("https://claude.ai/api/account")
@@ -656,25 +732,34 @@ async def perform_login(
 def main():
     parser = argparse.ArgumentParser(description="Auto-login Claude account")
     parser.add_argument("--email", help="Claude account email")
-    parser.add_argument("--token", help="171mail token (if not in email_tokens.json)")
+    parser.add_argument("--token", help="接码 token (如果未存入 email_tokens.json)")
+    parser.add_argument("--provider", choices=["171mail", "mailcatcher"], default=None,
+                        help="接码渠道: 171mail (默认) 或 mailcatcher (mail.claude-code-manager.com)")
     parser.add_argument("--config-dir", help="CLAUDE_CONFIG_DIR for this account")
     parser.add_argument("--add-to-pool", metavar="ACCOUNT_ID",
                         help="Add to ~/.claude-pool/accounts.json with this ID after login")
     parser.add_argument("--save-token", action="store_true",
-                        help="Save the 171mail token to email_tokens.json for future use")
+                        help="Save the token to email_tokens.json for future use")
     args = parser.parse_args()
 
     email = args.email
     if not email:
         email = input("Email: ").strip()
 
+    # 先查存储，获取 token 和 provider
+    saved = load_email_tokens().get(email)
     token = args.token
-    if not token:
-        token = get_email_token(email)
+    provider = args.provider
+    if not token and saved:
+        token = saved.get("token")
+        if not provider:
+            provider = saved.get("provider", "171mail")
         if token:
-            logger.info("found saved token for %s", email)
-        else:
-            token = input("171mail token: ").strip()
+            logger.info("found saved token for %s (provider=%s)", email, provider)
+    if not token:
+        token = input("Token: ").strip()
+    if not provider:
+        provider = "171mail"
 
     config_dir = args.config_dir
     if not config_dir:
@@ -683,12 +768,13 @@ def main():
             config_dir = str(Path.home() / ".claude-account-new")
 
     if args.save_token or not get_email_token(email):
-        save_email_token(email, token)
+        save_email_token(email, token, provider=provider)
 
     ok = asyncio.run(perform_login(
         email=email,
         token_171=token,
         config_dir=config_dir,
+        provider=provider,
     ))
 
     if ok and args.add_to_pool:

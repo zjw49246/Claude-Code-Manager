@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/pool", tags=["pool"])
 
@@ -140,3 +141,81 @@ async def set_preferred(body: dict):
     if not pool.set_preferred(account_id):
         raise HTTPException(status_code=404, detail=f"Unknown account: {account_id}")
     return {"ok": True, "preferred": pool.preferred_account_id}
+
+
+# ---------------------------------------------------------------------------
+# Add account (三参数自动登录)
+# ---------------------------------------------------------------------------
+
+class AddAccountRequest(BaseModel):
+    email: str
+    token: str
+    provider: str = "171mail"  # "171mail" | "mailcatcher"
+
+
+# 后台 add 状态：key = email -> {"status": running|success|failed, ...}
+_add_state: dict[str, dict] = {}
+
+
+async def _watch_add(email: str, proc: asyncio.subprocess.Process):
+    out, _ = await proc.communicate()
+    tail = (out or b"").decode("utf-8", errors="replace")[-2000:]
+    _add_state[email] = {
+        "status": "success" if proc.returncode == 0 else "failed",
+        "detail": tail,
+        "finished_at": time.time(),
+    }
+    if proc.returncode == 0:
+        try:
+            _get_pool().reload()
+            _get_pool()._usage_cache = None
+        except Exception:
+            pass
+
+
+@router.post("/add")
+async def add_account(body: AddAccountRequest):
+    """自动登录新账号并加入号池。三参数：email、接码 token、接码渠道。
+
+    后台跑 auto_login.py，前端轮询 GET /api/pool/add/{email} 看进度。"""
+    email = body.email.strip()
+    if not email or not body.token.strip():
+        raise HTTPException(400, "email 和 token 必填")
+
+    state = _add_state.get(email)
+    if state and state.get("status") == "running":
+        return {"ok": True, "status": "running"}
+
+    root = Path(__file__).resolve().parents[2]
+    login_py = root / ".login-venv" / "bin" / "python3"
+    if not login_py.exists():
+        login_py = Path(shutil.which("python3") or "python3")
+
+    script = root / "scripts" / "auto_login.py"
+    # 用号池已有账号数 +1 作为 slot 名
+    pool = _get_pool()
+    existing = len(pool._accounts) if pool else 0
+    account_id = f"account-{existing + 1}" if existing > 0 else "default"
+    # 第一个账号用 ~/.claude，后续用 ~/.claude-account-N
+    config_dir = str(Path.home() / ".claude") if account_id == "default" else str(
+        Path.home() / f".claude-{account_id}"
+    )
+
+    proc = await asyncio.create_subprocess_exec(
+        str(login_py), str(script),
+        "--email", email,
+        "--token", body.token.strip(),
+        "--provider", body.provider,
+        "--config-dir", config_dir,
+        "--add-to-pool", account_id,
+        "--save-token",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+    )
+    _add_state[email] = {"status": "running", "started_at": time.time(), "account_id": account_id}
+    asyncio.get_running_loop().create_task(_watch_add(email, proc))
+    return {"ok": True, "status": "running", "account_id": account_id}
+
+
+@router.get("/add/{email}")
+async def add_status(email: str):
+    return _add_state.get(email) or {"status": "idle"}
