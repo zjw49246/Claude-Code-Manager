@@ -798,6 +798,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
           </span>
         )}
         <SubAgentIndicator
+          taskId={task.id}
           count={monitorCount}
           active={monitorCount > 0}
           onNavigate={() => setShowMonitorPanel(!showMonitorPanel)}
