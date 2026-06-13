@@ -2172,6 +2172,30 @@ class GlobalDispatcher:
                 task.enabled_skills = effective_skills
                 await db.commit()
 
+            # 上下文超 90% 时自动摘要 + 新 session（无限续聊）
+            if task.session_id and task.context_window_usage:
+                usage = task.context_window_usage
+                total_input = (usage.get("input_tokens") or 0) + (usage.get("cache_read_input_tokens") or 0) + (usage.get("cache_creation_input_tokens") or 0)
+                window = usage.get("context_window") or 200_000
+                utilization = total_input / window if window else 0
+                if utilization >= 0.90:
+                    logger.info(
+                        "Task %d context at %.0f%% (%d/%d), compacting session...",
+                        task_id, utilization * 100, total_input, window,
+                    )
+                    # 收集最近对话摘要
+                    summary = await self._compact_session(task_id, task.session_id, db)
+                    if summary:
+                        # 清空 session_id → 下次 launch 开新 session，prompt 带摘要
+                        task.session_id = None
+                        task.context_window_usage = None
+                        await db.commit()
+                        msg.prompt = (
+                            f"[上下文摘要 — 之前的对话记录]\n{summary}\n\n"
+                            f"---\n\n[新消息]\n{msg.prompt}"
+                        )
+                        logger.info("Task %d compacted, new session will start with summary", task_id)
+
             # Capture launch params before closing DB session
             launch_kwargs = dict(
                 instance_id=inst.id,
@@ -2248,3 +2272,57 @@ class GlobalDispatcher:
                             await db.commit()
                 except Exception:
                     logger.exception(f"Failed to restore enabled_skills for task {task_id}")
+
+    async def _compact_session(self, task_id: int, session_id: str, db) -> str | None:
+        """收集当前 session 的对话摘要，用于上下文压缩后带入新 session。
+
+        取最近的 user_message + assistant message 对，拼成摘要文本。
+        保留最后 10 轮对话的要点，更早的只保留 task description。
+        """
+        try:
+            from backend.models.log_entry import LogEntry
+            from backend.models.task import Task
+
+            task = await db.get(Task, task_id)
+            parts = []
+
+            # 任务原始描述
+            if task and task.description:
+                parts.append(f"## 任务描述\n{task.description[:2000]}")
+
+            # 最近的对话轮次
+            result = await db.execute(
+                select(LogEntry)
+                .where(
+                    LogEntry.task_id == task_id,
+                    LogEntry.event_type.in_(["user_message", "message", "result"]),
+                )
+                .order_by(LogEntry.id.desc())
+                .limit(30)
+            )
+            entries = list(reversed(result.scalars().all()))
+
+            # 提取最近 10 轮 user→assistant 对
+            rounds = []
+            current_user = None
+            for e in entries:
+                if e.event_type == "user_message":
+                    current_user = (e.content or "")[:500]
+                elif e.event_type in ("message", "result") and e.role == "assistant":
+                    content = (e.content or "")[:1000]
+                    if current_user:
+                        rounds.append(f"用户: {current_user}\n助手: {content}")
+                        current_user = None
+
+            if rounds:
+                # 保留最近 10 轮
+                recent = rounds[-10:]
+                parts.append("## 最近对话（摘要）\n" + "\n\n".join(recent))
+
+            summary = "\n\n".join(parts)
+            if len(summary) > 8000:
+                summary = summary[-8000:]
+            return summary if summary.strip() else None
+        except Exception as e:
+            logger.exception("compact session failed for task %d: %s", task_id, e)
+            return None
