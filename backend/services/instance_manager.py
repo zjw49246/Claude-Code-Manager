@@ -509,6 +509,22 @@ class InstanceManager:
                             })
                 await db.commit()
 
+            # 原生子 agent（native-monitor 等）生命周期跟 session 走——
+            # session 退出/重建时一律标 completed，否则 UI 上永远显示 running
+            if task_id:
+                from backend.models.monitor_session import MonitorSession
+                async with self.db_factory() as db:
+                    stale = await db.execute(
+                        select(MonitorSession).where(
+                            MonitorSession.task_id == task_id,
+                            MonitorSession.status == "running",
+                        )
+                    )
+                    for ms in stale.scalars().all():
+                        ms.status = "completed"
+                        ms.completed_at = datetime.utcnow()
+                    await db.commit()
+
             # Broadcast completion
             exit_event = {
                 "event_type": "process_exit",
