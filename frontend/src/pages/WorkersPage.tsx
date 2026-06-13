@@ -220,25 +220,41 @@ function WorkerCard({ worker, onAction }: { worker: Worker; onAction: () => void
         </div>
       )}
       {poolOpen && (
-        <div className="text-xs bg-gray-900/60 rounded p-2 space-y-1">
+        <div className="text-xs bg-gray-900/60 rounded p-2 space-y-2">
           {poolErr ? (
             <span className="text-red-400 break-all">{poolErr}</span>
           ) : pool === null ? (
             <span className="text-gray-500">加载账号池…</span>
-          ) : pool.accounts.length === 0 ? (
-            <span className="text-gray-500">未能识别使用的账号</span>
           ) : (
             <>
               <div className="text-gray-500">
-                使用的账号{(pool as { single_account?: boolean }).single_account ? '（单账号模式）' : `（号池 ${pool.available}/${pool.total} 可用）`}
-                <span className="ml-1 text-gray-600">· 号的管理在顶栏号池里</span>
+                {pool.accounts.length === 0 ? '暂无账号' :
+                  (pool as { single_account?: boolean }).single_account ? '单账号模式' : `号池 ${pool.available}/${pool.total} 可用`}
               </div>
               {pool.accounts.map((a) => (
                 <div key={a.id} className="flex items-center gap-2">
                   <span className={a.available ? 'text-emerald-400' : a.enabled ? 'text-yellow-400' : 'text-gray-500'}>●</span>
-                  <span className="text-gray-300">{a.email || a.id}</span>
+                  <span className="text-gray-300 flex-1">{a.email || a.id}</span>
+                  <button onClick={async () => {
+                    if (!window.confirm(`从 Worker 号池删除 ${a.id}？`)) return;
+                    try { await api.deleteWorkerAccount(worker.id, a.id); togglePool(); togglePool(); } catch (e) { window.alert(String(e)); }
+                  }} className="text-gray-500 hover:text-red-400" title="删除">×</button>
                 </div>
               ))}
+              <div className="pt-1 border-t border-gray-700">
+                <button
+                  onClick={() => {
+                    const email = window.prompt('邮箱');
+                    if (!email) return;
+                    const token = window.prompt('接码 Token（mail.com 域填邮箱密码）');
+                    if (!token) return;
+                    api.addWorkerAccount(worker.id, { email, token }).then(() => {
+                      window.alert('登录已启动，可能需要 1-2 分钟。完成后刷新查看。');
+                    }).catch((e) => window.alert(String(e)));
+                  }}
+                  className="text-indigo-400 hover:text-indigo-300"
+                >+ 添加账号</button>
+              </div>
             </>
           )}
         </div>

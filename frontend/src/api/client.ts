@@ -691,6 +691,12 @@ export const api = {
 
   // Workers (distributed)
   listWorkers: () => request<Worker[]>('/api/workers'),
+  addWorkerAccount: (workerId: number, data: { email: string; token: string }) =>
+    request<{ ok: boolean; status: string; slot?: string }>(`/api/workers/${workerId}/pool/add`, { method: 'POST', body: JSON.stringify(data) }),
+  workerAddStatus: (workerId: number, email: string) =>
+    request<{ status: string; detail?: string }>(`/api/workers/${workerId}/pool/add/${encodeURIComponent(email)}`),
+  deleteWorkerAccount: (workerId: number, accountId: string) =>
+    request<{ ok: boolean }>(`/api/workers/${workerId}/pool/${accountId}`, { method: 'DELETE' }),
   getWorkerPool: (id: number) =>
     request<{ enabled: boolean; total: number; available: number; accounts: { id: string; email: string | null; enabled: boolean; available: boolean; cooldown_remaining: number }[] }>(`/api/workers/${id}/pool`),
   createWorker: (data: { accounts: { email: string; token?: string }[]; name?: string }) =>
