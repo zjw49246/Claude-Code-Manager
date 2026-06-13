@@ -116,7 +116,7 @@ async def relogin_account(account_id: str):
     proc = await asyncio.create_subprocess_exec(
         str(login_py), str(script), "--email", acc.email, "--config-dir", acc.config_dir,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-        env={k: v for k, v in os.environ.items() if k != "DISPLAY"} | {"PYTHONUNBUFFERED": "1"},
+        env={**os.environ, "DISPLAY": ":99", "PYTHONUNBUFFERED": "1"},
     )
     _relogin_state[account_id] = {"status": "running", "started_at": time.time()}
     asyncio.get_running_loop().create_task(_watch_relogin(account_id, proc))
@@ -152,6 +152,25 @@ async def set_preferred(body: dict):
 class AddAccountRequest(BaseModel):
     email: str
     token: str  # 171mail 的接码 token 或 mail.com 的邮箱密码（按邮箱后缀自动判断）
+
+
+# 全局 Xvfb：所有 auto_login 共享一个 display
+_xvfb_proc = None
+
+async def _ensure_xvfb():
+    global _xvfb_proc
+    if _xvfb_proc is not None and _xvfb_proc.returncode is None:
+        return  # 已在跑
+    import subprocess as _sp
+    # 杀掉可能残留的旧 Xvfb
+    _sp.run(["pkill", "-f", "Xvfb :99"], capture_output=True)
+    await asyncio.sleep(0.5)
+    _xvfb_proc = _sp.Popen(
+        ["Xvfb", ":99", "-screen", "0", "1920x1080x24", "-nolisten", "tcp"],
+        stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+    )
+    os.environ["DISPLAY"] = ":99"
+    await asyncio.sleep(1)
 
 
 # 后台 add 状态：key = email -> {"status": running|success|failed, ...}
@@ -202,9 +221,10 @@ async def add_account(body: AddAccountRequest):
         Path.home() / f".claude-{account_id}"
     )
 
-    # xvfb-run 包装：Chrome CDP 需要 display，Popen 起的 Xvfb 在 systemd 子进程下会 zombie
+    # 确保有 Xvfb 在跑（Chrome CDP 需要 display）
+    await _ensure_xvfb()
+
     proc = await asyncio.create_subprocess_exec(
-        "xvfb-run", "--auto-servernum", "--server-args=-screen 0 1920x1080x24",
         str(login_py), str(script),
         "--email", email,
         "--token", body.token.strip(),
@@ -212,7 +232,7 @@ async def add_account(body: AddAccountRequest):
         "--add-to-pool", account_id,
         "--save-token",
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-        env={k: v for k, v in os.environ.items() if k != "DISPLAY"} | {"PYTHONUNBUFFERED": "1"},
+        env={**os.environ, "DISPLAY": ":99", "PYTHONUNBUFFERED": "1"},
     )
     _add_state[email] = {"status": "running", "started_at": time.time(), "account_id": account_id}
     asyncio.get_running_loop().create_task(_watch_add(email, proc))

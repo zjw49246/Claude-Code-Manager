@@ -835,10 +835,16 @@ async def perform_login(
         return False
     logger.info("OAuth URL found (%d chars)", len(oauth_url))
 
-    # Step 3: Chrome CDP 完成 OAuth
+    # Step 3: Chrome CDP 完成 OAuth（用验证过的 cdp_login 模块）
     logger.info("step 3: Chrome CDP OAuth...")
-    result = await _mailcatcher_browser_login(
-        email, token_171, oauth_url=oauth_url,
+    script_dir = Path(__file__).resolve().parent
+    sys.path.insert(0, str(script_dir))
+    from cdp_login import cdp_login
+    result = await cdp_login(
+        email=email,
+        token=token_171,
+        config_dir=str(config_path),
+        oauth_url=oauth_url,
         cookies_171=cookies_171 if not _use_mailcatcher else None,
     )
     if not result or not result.get("code"):
