@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '../api/client';
 import { useWebSocket } from '../hooks/useWebSocket';
 import type { Worker } from '../api/client';
-import { Plus, X, RefreshCw, Trash2, Power, Play, Server, ScrollText, KeyRound } from 'lucide-react';
+import { Plus, X, RefreshCw, Trash2, Power, Play, Server, ScrollText } from 'lucide-react';
 
 const STATUS_COLORS: Record<string, string> = {
   creating: 'bg-blue-500/20 text-blue-400',
@@ -14,12 +14,6 @@ const STATUS_COLORS: Record<string, string> = {
   starting: 'bg-blue-500/20 text-blue-400',
   destroying: 'bg-red-500/20 text-red-400',
   terminated: 'bg-gray-500/20 text-gray-500',
-};
-
-const ACCOUNT_COLORS: Record<string, string> = {
-  logged_in: 'text-green-400',
-  pending: 'text-yellow-400',
-  failed: 'text-red-400',
 };
 
 const BUSY = new Set(['creating', 'bootstrapping', 'stopping', 'starting', 'destroying']);
@@ -213,35 +207,83 @@ function WorkerCard({ worker, onAction }: { worker: Worker; onAction: () => void
       </div>
 
       {poolOpen && (
-        <div className="text-xs bg-gray-900/60 rounded p-2 space-y-2">
+        <div className="bg-gray-900/60 rounded p-3 space-y-2">
           {poolErr ? (
-            <span className="text-red-400 break-all">{poolErr}</span>
+            <span className="text-xs text-red-400 break-all">{poolErr}</span>
           ) : pool === null ? (
-            <span className="text-gray-500">加载额度…</span>
+            <span className="text-xs text-gray-500">加载额度…</span>
           ) : (
             <>
-              {pool.accounts && pool.accounts.length > 0 ? pool.accounts.map((a: any) => (
-                <div key={a.id} className="rounded border border-gray-700 p-2 space-y-1.5">
-                  <div className="flex items-center gap-2">
-                    <span className={`h-2 w-2 rounded-full ${a.available ? 'bg-green-500' : a.enabled ? 'bg-yellow-500' : 'bg-gray-500'}`} />
-                    <span className="text-sm font-medium text-foreground">{a.id}</span>
-                    {a.subscription_type && <span className="px-1 py-0.5 rounded bg-indigo-600/30 text-indigo-300 text-[10px] font-semibold uppercase">{a.subscription_type}</span>}
-                    <button onClick={async () => {
-                      if (!window.confirm(`从 Worker 号池删除 ${a.id}？`)) return;
-                      try { await api.deleteWorkerAccount(worker.id, a.id); togglePool(); } catch (e) { window.alert(String(e)); }
-                    }} className="ml-auto text-gray-500 hover:text-red-400 text-[10px]">删除</button>
-                  </div>
-                  {a.email && <div className="text-xs text-gray-500">{a.email}</div>}
-                  {a.usage ? (
-                    <div className="space-y-1">
-                      {a.usage.five_hour && <div className="flex items-center gap-2"><span className="w-6 text-gray-500">5h</span><div className="flex-1 h-1.5 rounded bg-gray-700"><div className={`h-full rounded \${a.usage.five_hour.utilization>=85?'bg-red-500':a.usage.five_hour.utilization>=60?'bg-yellow-500':'bg-green-500'}`} style={{width:`\${Math.min(100,a.usage.five_hour.utilization||0)}%`}} /></div><span className="w-8 text-right text-gray-400">{(a.usage.five_hour.utilization||0).toFixed(0)}%</span></div>}
-                      {a.usage.seven_day && <div className="flex items-center gap-2"><span className="w-6 text-gray-500">7d</span><div className="flex-1 h-1.5 rounded bg-gray-700"><div className={`h-full rounded \${a.usage.seven_day.utilization>=85?'bg-red-500':a.usage.seven_day.utilization>=60?'bg-yellow-500':'bg-green-500'}`} style={{width:`\${Math.min(100,a.usage.seven_day.utilization||0)}%`}} /></div><span className="w-8 text-right text-gray-400">{(a.usage.seven_day.utilization||0).toFixed(0)}%</span></div>}
+              <div className="flex items-center gap-2 text-xs text-gray-500">
+                <span>{pool.accounts?.length || 0} 个账号</span>
+                {pool.available != null && <span>· {pool.available}/{pool.total} 可用</span>}
+              </div>
+              {pool.accounts && pool.accounts.length > 0 ? pool.accounts.map((a: any) => {
+                const dot = !a.enabled ? 'bg-gray-500' : a.available ? 'bg-green-500' : 'bg-yellow-500';
+                const barColor = (u: number) => u >= 85 ? 'bg-red-500' : u >= 60 ? 'bg-yellow-500' : 'bg-green-500';
+                const textColor = (u: number) => u >= 85 ? 'text-red-400' : u >= 60 ? 'text-yellow-400' : 'text-green-400';
+                const fmtReset = (s: string | null) => {
+                  if (!s) return '';
+                  const d = new Date(s);
+                  return isNaN(d.getTime()) ? '' : d.toLocaleString(undefined, { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+                };
+                return (
+                  <div key={a.id} className="rounded-lg border border-gray-700 p-3 space-y-2">
+                    <div className="flex items-center gap-2">
+                      <span className={`h-2 w-2 shrink-0 rounded-full ${dot}`} />
+                      <span className="text-sm font-medium text-foreground truncate">{a.id}</span>
+                      {a.subscription_type && (
+                        <span className="px-1.5 py-0.5 rounded bg-indigo-600/30 text-indigo-300 text-[10px] font-semibold uppercase">{a.subscription_type}</span>
+                      )}
+                      <div className="ml-auto flex items-center gap-1">
+                        <button onClick={async () => {
+                          if (!window.confirm(`从 Worker 号池删除 ${a.id}（${a.email || ''})？`)) return;
+                          try { await api.deleteWorkerAccount(worker.id, a.id); setPoolOpen(false); setTimeout(togglePool, 300); } catch (e) { window.alert(String(e)); }
+                        }} className="text-[10px] px-1.5 py-0.5 rounded border border-gray-600 text-gray-400 hover:text-red-400 hover:border-red-500">删除</button>
+                      </div>
                     </div>
-                  ) : a.usage_error ? (
-                    <div className="text-red-400">{a.usage_error === 'no_credentials' ? '未找到凭据' : a.usage_error === 'token_expired' ? 'Token 过期' : a.usage_error}</div>
-                  ) : null}
-                </div>
-              )) : <div className="text-gray-500">暂无账号</div>}
+                    {a.email && <div className="text-xs text-gray-500 truncate">{a.email}</div>}
+                    {a.usage ? (
+                      <div className="space-y-1.5">
+                        {a.usage.five_hour && (
+                          <div className="flex items-center gap-2 text-xs">
+                            <span className="w-7 shrink-0 text-gray-500">5h</span>
+                            <div className="flex-1 h-2 rounded-full bg-gray-700 overflow-hidden">
+                              <div className={`h-full rounded-full ${barColor(a.usage.five_hour.utilization || 0)}`} style={{width: `${Math.min(100, a.usage.five_hour.utilization || 0)}%`}} />
+                            </div>
+                            <span className={`w-10 shrink-0 text-right font-medium ${textColor(a.usage.five_hour.utilization || 0)}`}>{(a.usage.five_hour.utilization || 0).toFixed(0)}%</span>
+                            <span className="w-24 shrink-0 text-right text-gray-500">{fmtReset(a.usage.five_hour.resets_at)}</span>
+                          </div>
+                        )}
+                        {a.usage.seven_day && (
+                          <div className="flex items-center gap-2 text-xs">
+                            <span className="w-7 shrink-0 text-gray-500">7d</span>
+                            <div className="flex-1 h-2 rounded-full bg-gray-700 overflow-hidden">
+                              <div className={`h-full rounded-full ${barColor(a.usage.seven_day.utilization || 0)}`} style={{width: `${Math.min(100, a.usage.seven_day.utilization || 0)}%`}} />
+                            </div>
+                            <span className={`w-10 shrink-0 text-right font-medium ${textColor(a.usage.seven_day.utilization || 0)}`}>{(a.usage.seven_day.utilization || 0).toFixed(0)}%</span>
+                            <span className="w-24 shrink-0 text-right text-gray-500">{fmtReset(a.usage.seven_day.resets_at)}</span>
+                          </div>
+                        )}
+                        {a.usage.seven_day_opus && (
+                          <div className="flex items-center gap-2 text-xs">
+                            <span className="w-7 shrink-0 text-gray-500">Opus</span>
+                            <div className="flex-1 h-2 rounded-full bg-gray-700 overflow-hidden">
+                              <div className={`h-full rounded-full ${barColor(a.usage.seven_day_opus.utilization || 0)}`} style={{width: `${Math.min(100, a.usage.seven_day_opus.utilization || 0)}%`}} />
+                            </div>
+                            <span className={`w-10 shrink-0 text-right font-medium ${textColor(a.usage.seven_day_opus.utilization || 0)}`}>{(a.usage.seven_day_opus.utilization || 0).toFixed(0)}%</span>
+                            <span className="w-24 shrink-0 text-right text-gray-500">{fmtReset(a.usage.seven_day_opus.resets_at)}</span>
+                          </div>
+                        )}
+                      </div>
+                    ) : a.usage_error ? (
+                      <div className="text-xs text-red-400">
+                        {a.usage_error === 'no_credentials' ? '未找到凭据文件' : a.usage_error === 'token_expired' ? 'Token 过期' : a.usage_error}
+                      </div>
+                    ) : null}
+                  </div>
+                );
+              }) : <div className="text-xs text-gray-500">暂无账号</div>}
               <div className="pt-1 border-t border-gray-700">
                 <button
                   onClick={() => {
@@ -253,7 +295,7 @@ function WorkerCard({ worker, onAction }: { worker: Worker; onAction: () => void
                       window.alert('登录已启动，可能需要 1-2 分钟。完成后刷新查看。');
                     }).catch((e) => window.alert(String(e)));
                   }}
-                  className="text-indigo-400 hover:text-indigo-300"
+                  className="text-xs text-indigo-400 hover:text-indigo-300"
                 >+ 添加账号</button>
               </div>
             </>
