@@ -313,6 +313,100 @@ async def _poll_magic_link_mailcom(
     raise MailServiceError(f"mail.com Web: 收件箱中 {timeout_s}s 内未找到新的 Claude 登录邮件")
 
 # ---------------------------------------------------------------------------
+# mail.com 域：undetected-chromedriver 网页登录（过 Cloudflare）
+# ---------------------------------------------------------------------------
+
+async def _mailcatcher_browser_login(email: str, mail_token: str) -> list[dict] | None:
+    """用 undetected-chromedriver 模拟 claude.ai 网页登录：
+    输入邮箱 → Claude 发验证邮件 → MailCatcher 拿 magic link → 点击链接 → 登录成功 → 返回 cookies。
+    """
+    try:
+        import undetected_chromedriver as uc
+        from selenium.webdriver.common.by import By
+    except ImportError:
+        logger.error("需要 undetected-chromedriver: pip install undetected-chromedriver selenium")
+        return None
+
+    driver = None
+    try:
+        options = uc.ChromeOptions()
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--window-size=1280,800")
+        driver = uc.Chrome(options=options, headless=False)
+
+        # 1. 打开 claude.ai 登录页
+        logger.info("uc: opening claude.ai...")
+        driver.get("https://claude.ai/login")
+        for i in range(40):
+            if "just a moment" not in driver.title.lower():
+                break
+            await asyncio.sleep(1)
+        await asyncio.sleep(2)
+
+        # 2. 点 "Continue with email"
+        for b in driver.find_elements(By.TAG_NAME, "button"):
+            if "continue with email" in b.text.strip().lower():
+                b.click()
+                logger.info("uc: clicked Continue with email")
+                break
+        await asyncio.sleep(2)
+
+        # 3. 输入邮箱
+        try:
+            email_input = driver.find_element(By.CSS_SELECTOR, 'input[type="email"], input[name="email"]')
+            email_input.clear()
+            email_input.send_keys(email)
+            await asyncio.sleep(0.5)
+            for b in driver.find_elements(By.CSS_SELECTOR, 'button[type="submit"]'):
+                if b.is_displayed():
+                    b.click()
+                    logger.info("uc: submitted email")
+                    break
+        except Exception as exc:
+            logger.error("uc: email input failed: %s", exc)
+            return None
+        await asyncio.sleep(5)
+
+        # 4. 轮询 MailCatcher 拿 magic link
+        mail_send_ts = time.time()
+        logger.info("uc: polling MailCatcher for magic link...")
+        async with httpx.AsyncClient(timeout=30, headers={"User-Agent": "Mozilla/5.0"}) as mc:
+            ml = await _poll_magic_link_mailcatcher(mc, mail_token, mail_send_ts, EMAIL_POLL_TIMEOUT)
+        logger.info("uc: got magic link (%d chars)", len(ml))
+
+        # 5. 浏览器访问 magic link 完成登录
+        try:
+            driver.execute_script(f"window.location.href = {json.dumps(ml)};")
+        except Exception:
+            driver.get(ml)
+        for i in range(30):
+            try:
+                if "magic-link" not in driver.current_url:
+                    break
+            except Exception:
+                break
+            await asyncio.sleep(1)
+        await asyncio.sleep(3)
+        logger.info("uc: login done, url=%s", driver.current_url[:80])
+
+        # 6. 返回 cookies
+        cookies = driver.get_cookies()
+        logger.info("uc: got %d cookies", len(cookies))
+        return cookies
+
+    except Exception as exc:
+        logger.error("uc browser login failed: %s", exc)
+        return None
+    finally:
+        if driver:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+
+
+# ---------------------------------------------------------------------------
 # mitmproxy (patches CLI 2.1.x OAuth redirect_uri bug)
 # ---------------------------------------------------------------------------
 
