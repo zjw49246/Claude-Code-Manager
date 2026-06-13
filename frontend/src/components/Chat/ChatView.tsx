@@ -8,7 +8,7 @@ import { Send, ArrowLeft, Loader2, ChevronDown, ChevronRight, ChevronUp, Copy, C
 import { SecretPicker } from '../Secrets/SecretPicker';
 import { QuickPhraseDropdown } from '../QuickPhrases/QuickPhraseDropdown';
 import { ListFilter, Syringe } from 'lucide-react';
-import { TaskConfigBadge } from '../Tasks/TaskBadges';
+import { TaskConfigBadge, RunOnBadge } from '../Tasks/TaskBadges';
 import { ExpandableText } from '../ExpandableText';
 import { formatMessageTime, formatDateTime } from '../../config/timezone';
 import { useFileDrop } from '../../hooks/useFileDrop';
@@ -802,6 +802,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
           active={monitorCount > 0}
           onNavigate={() => setShowMonitorPanel(!showMonitorPanel)}
         />
+        <RunOnBadge task={task} />
         <TaskConfigBadge task={task} onRefresh={() => onTaskUpdated?.()} align="right" />
         <button
           onClick={handleStar}
