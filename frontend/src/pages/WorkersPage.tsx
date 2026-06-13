@@ -137,9 +137,8 @@ function LogsModal({ worker, onClose }: { worker: Worker; onClose: () => void })
   );
 }
 
-/** 前端只显示短名 worker-{id}；AWS/EC2 标签保留全名（含本机前缀）。 */
 function shortName(w: Worker): string {
-  return `worker-${w.id}`;
+  return w.name;
 }
 
 function WorkerCard({ worker, onAction }: { worker: Worker; onAction: () => void }) {
