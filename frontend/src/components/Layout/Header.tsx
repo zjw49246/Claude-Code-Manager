@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { Sun, Moon, Globe, Menu, X } from 'lucide-react';
+import { Sun, Moon, Globe, Menu, X, Settings } from 'lucide-react';
 import { api } from '../../api/client';
 import type { RuntimeSettings } from '../../api/client';
 import { isCapacitor } from '../../config/server';
@@ -16,6 +16,17 @@ export function Header({ currentPage, onNavigate }: HeaderProps) {
   const [theme, setTheme] = useState(getTheme());
   const [tz, setTz] = useState(getTimezone());
   const [menuOpen, setMenuOpen] = useState(false);
+  const [prefsOpen, setPrefsOpen] = useState(false);
+  const prefsRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!prefsOpen) return;
+    const handle = (e: MouseEvent) => {
+      if (prefsRef.current && !prefsRef.current.contains(e.target as Node)) setPrefsOpen(false);
+    };
+    document.addEventListener('mousedown', handle);
+    return () => document.removeEventListener('mousedown', handle);
+  }, [prefsOpen]);
   const [runtime, setRuntime] = useState<RuntimeSettings | null>(null);
   const [switching, setSwitching] = useState(false);
 
@@ -139,27 +150,43 @@ export function Header({ currentPage, onNavigate }: HeaderProps) {
               </button>
             </div>
           )}
-          <div className="relative flex items-center shrink-0">
-            <Globe size={16} className="absolute left-2 text-gray-500 pointer-events-none" />
-            {/* 手机端只留图标宽度（文字透明），避免 "Auto" 把汉堡按钮挤出屏幕 */}
-            <select
-              value={tz}
-              onChange={(e) => { setTimezone(e.target.value); setTz(e.target.value); }}
-              className="appearance-none bg-gray-800 text-transparent sm:text-gray-300 text-xs rounded pl-7 pr-0 sm:pr-6 py-1.5 w-8 sm:w-auto border border-gray-700 hover:border-gray-600 focus:outline-none focus:ring-1 focus:ring-indigo-500 cursor-pointer"
-              title="Timezone"
+          {/* 偏好下拉：时区 + 主题（低频设置收进齿轮，顶栏保持精简） */}
+          <div className="relative shrink-0" ref={prefsRef}>
+            <button
+              onClick={() => setPrefsOpen(!prefsOpen)}
+              className={`p-2 rounded transition-colors ${prefsOpen ? 'text-foreground bg-gray-800' : 'text-gray-400 hover:text-foreground hover:bg-gray-800'}`}
+              title="偏好设置（时区 / 主题）"
             >
-              {TIMEZONE_OPTIONS.map((opt) => (
-                <option key={opt.value} value={opt.value}>{opt.label}</option>
-              ))}
-            </select>
+              <Settings size={18} />
+            </button>
+            {prefsOpen && (
+              <div className="absolute top-full right-0 mt-1 bg-gray-800 border border-gray-600 rounded-lg shadow-lg z-30 p-3 min-w-[210px] space-y-3">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-xs text-gray-400 flex items-center gap-1.5"><Globe size={13} /> 时区</span>
+                  <select
+                    value={tz}
+                    onChange={(e) => { setTimezone(e.target.value); setTz(e.target.value); }}
+                    className="bg-gray-700 text-gray-200 text-xs rounded px-2 py-1 border border-gray-600 focus:outline-none focus:ring-1 focus:ring-indigo-500 cursor-pointer"
+                  >
+                    {TIMEZONE_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>{opt.label}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-xs text-gray-400 flex items-center gap-1.5">
+                    {theme === 'dark' ? <Moon size={13} /> : <Sun size={13} />} 主题
+                  </span>
+                  <button
+                    onClick={handleToggleTheme}
+                    className="text-xs px-2 py-1 rounded bg-gray-700 text-gray-200 border border-gray-600 hover:bg-gray-600"
+                  >
+                    {theme === 'dark' ? '切换到浅色' : '切换到深色'}
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
-          <button
-            onClick={handleToggleTheme}
-            className="p-2 rounded text-gray-400 hover:text-foreground hover:bg-gray-800 transition-colors"
-            title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-          >
-            {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
-          </button>
           {/* 汉堡按钮：导航被收纳时出现 */}
           {collapsed && (
             <button
