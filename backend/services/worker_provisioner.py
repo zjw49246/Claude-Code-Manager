@@ -340,6 +340,7 @@ After=network.target
 Type=simple
 User={worker.ssh_user}
 WorkingDirectory={remote_dir}
+EnvironmentFile={remote_dir}/.env
 ExecStart={remote_dir}/.venv/bin/python -m uvicorn backend.main:app --host 0.0.0.0 --port {worker.ccm_port}
 Restart=always
 RestartSec=5
