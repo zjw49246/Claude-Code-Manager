@@ -16,6 +16,8 @@ from backend.services.worker_provisioner import BootstrapError, WorkerProvisione
 @pytest.fixture
 def fake_provisioner(monkeypatch):
     prov = AsyncMock()
+    prov.cloud = AsyncMock()
+    prov.cloud.self_describe.return_value = {"name": "test-manager"}
     monkeypatch.setattr(main_module, "worker_provisioner", prov)
     return prov
 
@@ -84,7 +86,7 @@ async def test_create_worker_auto_name_and_background_task(client, fake_provisio
     )
     assert resp.status_code == 200, resp.text
     data = resp.json()
-    assert data["name"] == f"{socket.gethostname()}-worker-{data['id']}"
+    assert data["name"] == f"test-manager-worker-{data['id']}"
     assert data["status"] == "creating"
     assert data["accounts"] == [{"email": "a@x.com", "status": "pending"}]
     await asyncio.sleep(0)  # 让 create_task 跑起来
@@ -112,14 +114,11 @@ async def test_stop_requires_ready(client, session_factory, fake_provisioner):
 
 
 async def test_stop_start_destroy_flow(client, session_factory, fake_provisioner, monkeypatch, db_factory):
-    # destroy 链路现在先批量迁回（真实实现查 async_session），测试注入 in-memory factory
     import backend.api.workers as workers_api
-    real = workers_api._migrate_back_then_destroy
-    async def _patched(prov, worker_id, db_factory_arg=None):
-        await real(prov, worker_id, db_factory=db_factory)
-    monkeypatch.setattr(workers_api, "_migrate_back_then_destroy", _patched)
-    monkeypatch.setattr(main_module, "task_migrator", AsyncMock())
-    monkeypatch.setattr(main_module, "worker_relay", AsyncMock())
+    # destroy 链路走 _migrate_back_then_destroy（Phase 3），mock 掉让它直接调 prov.destroy_worker
+    async def _simple_destroy(prov, worker_id, db_factory_arg=None):
+        await prov.destroy_worker(worker_id)
+    monkeypatch.setattr(workers_api, "_migrate_back_then_destroy", _simple_destroy)
     wid = await _insert_worker(session_factory, status="ready")
     assert (await client.post(f"/api/workers/{wid}/stop")).status_code == 200
     await asyncio.sleep(0)
@@ -133,7 +132,9 @@ async def test_stop_start_destroy_flow(client, session_factory, fake_provisioner
     fake_provisioner.start_worker.assert_called_once_with(wid)
 
     assert (await client.post(f"/api/workers/{wid}/destroy")).status_code == 200
-    for _ in range(20):
+    # destroy 现在走 _migrate_back_then_destroy → prov.destroy_worker，
+    # 需要更多 event loop ticks 让后台任务完成
+    for _ in range(50):
         await asyncio.sleep(0)
     fake_provisioner.destroy_worker.assert_called_once_with(wid)
 
