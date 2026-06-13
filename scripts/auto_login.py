@@ -532,12 +532,10 @@ async def perform_login(
     try:
         # Step 1: 获取 session cookies（按 provider 分支）
         cookies: list[dict] = []
-        if provider == "mailcatcher":
-            # MailCatcher 模式：不需要 send/verify 三步——
-            # Claude CLI 自己发邮件，MailCatcher 只收信。
-            # 先启动 CLI 触发邮件发送，然后边轮询 MailCatcher 边等 CLI 输出 OAuth URL。
-            # cookies 留空：浏览器直接访问 magic link 拿 cookie
-            logger.info("provider=mailcatcher: cookies will be obtained via magic link in browser")
+        if provider in ("mailcatcher", "mailcom"):
+            # MailCatcher/mailcom 模式：不需要 171mail 的 send/verify 三步——
+            # Claude CLI 自己发邮件，后续在 Playwright 阶段轮询拿 magic link
+            logger.info("provider=%s: cookies will be obtained via magic link in browser", provider)
         else:
             # 171mail 模式
             logger.info("step 1/5: triggering 171mail login email...")
