@@ -65,7 +65,7 @@ _DROP_COOKIES = {"__cf_bm", "_cfuvid"}
 
 EMAIL_POLL_TIMEOUT = 300  # mail.com IMAP 拉取可能延迟几分钟
 
-# mail.com 家族域名——这些邮箱走 claude_oauth_login.py（Selenium webmail），
+# mail.com 家族域名——这些邮箱走 Chrome CDP（MailCatcher 接码），
 # 其余走 171mail（API 接码）。根据邮箱后缀自动判断，不需要用户手动选 provider。
 MAILCOM_DOMAINS = {
     "lovecat.com", "berlin.com", "consultant.com", "birdlover.com",
