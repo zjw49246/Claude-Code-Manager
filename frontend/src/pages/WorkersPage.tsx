@@ -25,7 +25,7 @@ const ACCOUNT_COLORS: Record<string, string> = {
 const BUSY = new Set(['creating', 'bootstrapping', 'stopping', 'starting', 'destroying']);
 
 function AddWorkerModal({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
-  const [accounts, setAccounts] = useState<{ email: string; password: string }[]>([{ email: '', password: '' }]);
+  const [accounts, setAccounts] = useState<{ email: string; token: string; provider: string }[]>([{ email: '', token: '', provider: '171mail' }]);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -35,7 +35,7 @@ function AddWorkerModal({ onClose, onSaved }: { onClose: () => void; onSaved: ()
     setError(null);
     try {
       await api.createWorker({
-        accounts: accounts.filter((a) => a.email.trim()).map((a) => ({ email: a.email.trim(), password: a.password || undefined })),
+        accounts: accounts.filter((a) => a.email.trim()).map((a) => ({ email: a.email.trim(), token: a.token.trim(), provider: a.provider })),
       });
       onSaved();
       onClose();
@@ -67,11 +67,19 @@ function AddWorkerModal({ onClose, onSaved }: { onClose: () => void; onSaved: ()
                   onChange={(e) => setAccounts(accounts.map((a, j) => (j === i ? { ...a, email: e.target.value } : a)))}
                 />
                 <input
-                  type="password"
                   className="w-full bg-gray-700 text-foreground text-sm rounded px-3 py-2 outline-none focus:ring-1 focus:ring-indigo-500"
-                  value={acct.password} placeholder="密码（可选，登录方式按 auto_login）"
-                  onChange={(e) => setAccounts(accounts.map((a, j) => (j === i ? { ...a, password: e.target.value } : a)))}
+                  value={acct.token} placeholder="接码 Token"
+                  onChange={(e) => setAccounts(accounts.map((a, j) => (j === i ? { ...a, token: e.target.value } : a)))}
                 />
+                <select
+                  className="w-full bg-gray-700 text-foreground text-xs rounded px-2 py-1.5 outline-none"
+                  value={acct.provider}
+                  onChange={(e) => setAccounts(accounts.map((a, j) => (j === i ? { ...a, provider: e.target.value } : a)))}
+                >
+                  <option value="171mail">171mail</option>
+                  <option value="mailcatcher">MailCatcher</option>
+                  <option value="mailcom">mail.com Web</option>
+                </select>
               </div>
               {accounts.length > 1 && (
                 <button type="button" className="text-gray-500 hover:text-red-400 mt-2"
@@ -79,7 +87,7 @@ function AddWorkerModal({ onClose, onSaved }: { onClose: () => void; onSaved: ()
               )}
             </div>
           ))}
-          <button type="button" onClick={() => setAccounts([...accounts, { email: '', password: '' }])}
+          <button type="button" onClick={() => setAccounts([...accounts, { email: '', token: '', provider: '171mail' }])}
             className="text-xs text-indigo-400 hover:text-indigo-300">+ 再加一个账号</button>
           <div className="flex justify-end gap-2 pt-1">
             <button type="button" onClick={onClose} className="px-4 py-2 text-sm text-gray-300 hover:text-white">Cancel</button>

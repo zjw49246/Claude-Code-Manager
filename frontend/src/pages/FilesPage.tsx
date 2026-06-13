@@ -52,6 +52,34 @@ function newProfile(): SSHProfile {
 }
 
 // ---------------------------------------------------------------------------
+// Auto-inject Worker SSH profiles
+// ---------------------------------------------------------------------------
+
+function useWorkerProfiles(): SSHProfile[] {
+  const [wps, setWps] = useState<SSHProfile[]>([]);
+  useEffect(() => {
+    api.listWorkers()
+      .then((workers) => {
+        setWps(
+          workers
+            .filter((w) => w.status === 'ready' && w.private_ip)
+            .map((w) => ({
+              id: `worker-${w.id}`,
+              label: w.name,
+              host: w.private_ip!,
+              port: 22,
+              username: w.ssh_user || 'ubuntu',
+              password: '',
+              key_path: '',  // Manager 的密钥路径由后端 SSH 调用时注入
+            })),
+        );
+      })
+      .catch(() => {});
+  }, []);
+  return wps;
+}
+
+// ---------------------------------------------------------------------------
 // Shared file tree node (works for both local and SSH)
 // ---------------------------------------------------------------------------
 
@@ -243,6 +271,8 @@ export function FilesPage() {
 
   // SSH state
   const [profiles, setProfiles] = useState<SSHProfile[]>(loadProfiles);
+  const workerProfiles = useWorkerProfiles();
+  const allProfiles = [...workerProfiles, ...profiles];
   const [activeProfile, setActiveProfile] = useState<SSHProfile | null>(null);
   const [sshPath, setSshPath] = useState('/');
   const [sshEntries, setSshEntries] = useState<DirEntry[] | null>(null);
@@ -447,7 +477,7 @@ export function FilesPage() {
         {mode === 'ssh' && (
           <div className="space-y-3">
             <SSHPanel
-              profiles={profiles}
+              profiles={allProfiles}
               active={activeProfile}
               onActivate={handleActivateProfile}
               onSave={handleSaveProfiles}
