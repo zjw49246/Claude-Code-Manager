@@ -702,7 +702,7 @@ export const api = {
   retryWorker: (id: number) => request<Worker>(`/api/workers/${id}/retry`, { method: 'POST' }),
 
   // Pool add account
-  poolAddAccount: (data: { email: string; token: string; provider: string }) =>
+  poolAddAccount: (data: { email: string; token: string; provider: string; mail_password?: string }) =>
     request<{ ok: boolean; status: string; account_id?: string }>('/api/pool/add', { method: 'POST', body: JSON.stringify(data) }),
   poolAddStatus: (email: string) =>
     request<{ status: string; detail?: string }>(`/api/pool/add/${encodeURIComponent(email)}`),

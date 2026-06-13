@@ -218,6 +218,80 @@ async def _poll_magic_link_mailcatcher(
     raise MailServiceError(f"MailCatcher: no fresh magic-link email within {timeout_s}s")
 
 
+
+# ---------------------------------------------------------------------------
+# mail.com Web 读邮件（绕开 IMAP，直接 Web 登录读收件箱拿 magic link）
+# ---------------------------------------------------------------------------
+
+async def _poll_magic_link_mailcom(
+    email_addr: str, email_password: str, after_ts: float, timeout_s: int
+) -> str:
+    """mail.com Web 登录 → 读收件箱 → 找最新 Claude magic link。"""
+    import httpx as _httpx
+
+    BASE = "https://lightmailer.mail.com"
+    UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    deadline = time.time() + timeout_s
+
+    while time.time() < deadline:
+        try:
+            c = _httpx.Client(headers={"User-Agent": UA}, timeout=30, follow_redirects=True)
+            # Login
+            home = c.get("https://www.mail.com/")
+            stats_m = re.search(r'name="statistics"\s*value="([^"]*)"', home.text)
+            stats = stats_m.group(1) if stats_m else ""
+            r = c.post("https://login.mail.com/login", data={
+                "service": "mailint", "statistics": stats, "uasServiceID": "mc_starter_mailcom",
+                "successURL": "https://$(clientName)-$(dataCenter).mail.com/login",
+                "loginFailedURL": "https://www.mail.com/logout/?ls=wd",
+                "loginErrorURL": "https://www.mail.com/logout/?ls=te",
+                "edition": "us", "lang": "en", "usertype": "standard",
+                "username": email_addr, "password": email_password,
+            }, headers={"Content-Type": "application/x-www-form-urlencoded"}, follow_redirects=True)
+
+            ott = ""
+            for rr in r.history:
+                m = re.search(r'ott=([^&"]+)', str(rr.headers.get("location", "")))
+                if m: ott = m.group(1); break
+            if not ott:
+                raise MailServiceError("mail.com Web 登录失败（密码错误或被阻止）")
+
+            c.get(f"{BASE}/start?device=desktop&ott={ott}")
+            r2 = c.get(f"{BASE}/start?0-1.0-&device=desktop",
+                       headers={"Wicket-Ajax": "true", "Wicket-Ajax-BaseURL": "start?0&device=desktop"})
+            rpath_m = re.search(r'<redirect><!\[CDATA\[\./([^\]]*)\]\]>', r2.text)
+            if not rpath_m:
+                raise MailServiceError("mail.com 无法初始化邮箱会话")
+            r3 = c.get(f"{BASE}/{rpath_m.group(1)}")
+            inbox_m = re.search(r'folderId=(\d+)[^>]*data-webdriver="INBOX', r3.text)
+            if not inbox_m:
+                raise MailServiceError("mail.com 找不到收件箱")
+            fid = inbox_m.group(1)
+
+            r4 = c.get(f"{BASE}/messagelist?folderId={fid}")
+            links = re.findall(r'messagedetail\?folderId=\d+&(?:amp;)?mailIndex=\d+&(?:amp;)?mailId=\d+', r4.text)
+            subjects = re.findall(r'mail-header__subject">([^<]*)', r4.text)
+
+            for subj, link in zip(subjects, links):
+                if "claude" not in subj.lower(): continue
+                ts_m = re.search(r'\|\s+(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})', subj)
+                if ts_m:
+                    t = time.mktime(time.strptime(ts_m.group(1), "%Y-%m-%d %H:%M:%S"))
+                    if t < after_ts - 5: continue
+                mid = re.search(r'mailId=(\d+)', link).group(1)
+                r6 = c.get(f"{BASE}/mailbody/{mid}/false")
+                ml = re.findall(r'https://claude\.ai/magic-link[^\s"\'<>]+', r6.text.replace("&amp;","&"))
+                if ml:
+                    c.close()
+                    return ml[0]
+            c.close()
+        except MailServiceError:
+            raise
+        except Exception as e:
+            logger.warning("mailcom poll attempt failed: %s", e)
+        await asyncio.sleep(5)
+    raise MailServiceError(f"mail.com Web: 收件箱中 {timeout_s}s 内未找到新的 Claude 登录邮件")
+
 # ---------------------------------------------------------------------------
 # mitmproxy (patches CLI 2.1.x OAuth redirect_uri bug)
 # ---------------------------------------------------------------------------
@@ -379,9 +453,12 @@ def load_email_tokens() -> dict:
         return {}
 
 
-def save_email_token(email: str, token: str, provider: str = "171mail"):
+def save_email_token(email: str, token: str, provider: str = "171mail", mail_password: str = ""):
     data = load_email_tokens()
-    data[email] = {"token": token, "provider": provider}
+    entry = {"token": token, "provider": provider}
+    if mail_password:
+        entry["mail_password"] = mail_password
+    data[email] = entry
     EMAIL_TOKENS_FILE.parent.mkdir(parents=True, exist_ok=True)
     EMAIL_TOKENS_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False))
     os.chmod(EMAIL_TOKENS_FILE, 0o600)
@@ -444,6 +521,7 @@ async def perform_login(
     config_dir: str,
     use_xvfb: bool = True,
     provider: str = "171mail",
+    mail_password: str = "",
 ) -> bool:
     config_path = Path(config_dir).expanduser()
     config_path.mkdir(parents=True, exist_ok=True)
@@ -582,7 +660,20 @@ async def perform_login(
                 )
                 page = await context.new_page()
 
-                if provider == "mailcatcher":
+                if provider == "mailcom":
+                    # mail.com Web 模式：直接 Web 登录 mail.com 读收件箱
+                    logger.info("mailcom: polling mail.com inbox for magic link...")
+                    send_ts = time.time()
+                    ml = await _poll_magic_link_mailcom(
+                        email, mail_password, send_ts, EMAIL_POLL_TIMEOUT
+                    )
+                    logger.info("mailcom: got magic link (%d chars), visiting...", len(ml))
+                    await page.goto(ml, wait_until="domcontentloaded", timeout=PLAYWRIGHT_NAV_TIMEOUT)
+                    for _ in range(30):
+                        if "claude.ai" in page.url: break
+                        await asyncio.sleep(1)
+                    logger.info("mailcom: logged in via magic link, url=%s", page.url[:80])
+                elif provider == "mailcatcher":
                     # MailCatcher 模式：CLI 已触发邮件发送，轮询拿 magic link，
                     # 浏览器直接访问 magic link 获取 session cookie
                     logger.info("mailcatcher: polling for magic link...")
@@ -733,8 +824,9 @@ def main():
     parser = argparse.ArgumentParser(description="Auto-login Claude account")
     parser.add_argument("--email", help="Claude account email")
     parser.add_argument("--token", help="接码 token (如果未存入 email_tokens.json)")
-    parser.add_argument("--provider", choices=["171mail", "mailcatcher"], default=None,
-                        help="接码渠道: 171mail (默认) 或 mailcatcher (mail.claude-code-manager.com)")
+    parser.add_argument("--provider", choices=["171mail", "mailcatcher", "mailcom"], default=None,
+                        help="接码渠道: 171mail | mailcatcher | mailcom (mail.com Web 读邮件)")
+    parser.add_argument("--mail-password", help="mail.com 邮箱密码（mailcom provider 用）")
     parser.add_argument("--config-dir", help="CLAUDE_CONFIG_DIR for this account")
     parser.add_argument("--add-to-pool", metavar="ACCOUNT_ID",
                         help="Add to ~/.claude-pool/accounts.json with this ID after login")
@@ -768,13 +860,21 @@ def main():
             config_dir = str(Path.home() / ".claude-account-new")
 
     if args.save_token or not get_email_token(email):
-        save_email_token(email, token, provider=provider)
+        save_email_token(email, token, provider=provider, mail_password=mail_password)
+
+    mail_password = args.mail_password or ""
+    if provider == "mailcom" and not mail_password:
+        saved = load_email_tokens().get(email) or {}
+        mail_password = saved.get("mail_password", "")
+    if provider == "mailcom" and not mail_password:
+        mail_password = input("mail.com 邮箱密码: ").strip()
 
     ok = asyncio.run(perform_login(
         email=email,
         token_171=token,
         config_dir=config_dir,
         provider=provider,
+        mail_password=mail_password,
     ))
 
     if ok and args.add_to_pool:
