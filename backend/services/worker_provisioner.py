@@ -303,10 +303,13 @@ echo deploy-ok
             token = acct.get("token", "")
             name = "default" if i == 0 else f"account-{i + 1}"
             await self._log(worker_id, f"login {email} -> pool slot {name}")
-            # mail.com 域走 Selenium OAuth（需要 xvfb），其余走 171mail CLI
+            # 启动无认证 Xvfb（-ac），然后跑 auto_login
+            # xvfb-run 的 Xvfb 有 auth，cdp_login 启动的 Chrome 连不上
             parts = [
                 f"cd {remote_dir} && export PATH=\"$HOME/.local/bin:$PATH\" &&",
-                "xvfb-run --auto-servernum --server-args='-screen 0 1920x1080x24'",
+                "pkill -f 'Xvfb :99' 2>/dev/null; sleep 0.5;",
+                "Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp -ac > /dev/null 2>&1 &",
+                "sleep 1 && export DISPLAY=:99 &&",
                 f"uv run python scripts/auto_login.py --email {email}",
             ]
             if token:
