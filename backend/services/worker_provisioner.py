@@ -437,6 +437,9 @@ sudo systemctl restart ccm-worker
                 worker_id, status="ready", last_heartbeat=datetime.utcnow(),
                 bootstrap_error=None, bootstrap_step=None,
             )
+            # 开机后检查号池账号是否还有效
+            if worker is not None:
+                await self._check_pool_accounts(worker)
             if self.relay is not None and worker is not None:
                 await self.relay.recover(worker)
         except Exception as e:
@@ -514,3 +517,35 @@ sudo systemctl restart ccm-worker
                     worker.id, status="error", bootstrap_step=None,
                     bootstrap_error="健康检查连续 3 次失败",
                 )
+
+    async def _check_pool_accounts(self, worker: Worker):
+        """开机后检查 Worker 号池账号是否有效，过期则尝试 OAuth refresh。"""
+        try:
+            async with httpx.AsyncClient(timeout=15) as c:
+                r = await c.get(
+                    f"http://{worker.private_ip}:{worker.ccm_port}/api/pool/usage",
+                    headers={"Authorization": f"Bearer {worker.auth_token}"},
+                )
+                if r.status_code != 200:
+                    return
+                data = r.json()
+                for acct in data.get("accounts", []):
+                    if acct.get("usage_error") in ("no_credentials", "token_expired"):
+                        aid = acct.get("id", "")
+                        await self._log(
+                            worker.id,
+                            f"账号 {aid} 凭证过期，尝试 OAuth refresh...",
+                        )
+                        try:
+                            rr = await c.post(
+                                f"http://{worker.private_ip}:{worker.ccm_port}/api/pool/accounts/{aid}/relogin",
+                                headers={"Authorization": f"Bearer {worker.auth_token}"},
+                            )
+                            await self._log(
+                                worker.id,
+                                f"账号 {aid} refresh: {rr.json().get('status', rr.status_code)}",
+                            )
+                        except Exception as e:
+                            await self._log(worker.id, f"账号 {aid} refresh 失败: {e}")
+        except Exception as e:
+            logger.warning("worker %s pool check failed: %s", worker.id, e)
