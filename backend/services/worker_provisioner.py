@@ -139,9 +139,25 @@ class WorkerProvisioner:
                 worker_id, status="creating", bootstrap_step=step, bootstrap_error=None
             )
 
-            await self._log(worker_id, "creating EC2 instance (config inherited from manager)")
-            iid = await self.cloud.create_instance(worker.name)
-            worker = await self._update(worker_id, cloud_instance_id=iid)
+            # retry 场景：DB 里已有实例 ID 且实例还在 → 跳过创建直接 bootstrap
+            existing_iid = worker.cloud_instance_id if worker else None
+            if existing_iid:
+                try:
+                    info = await self.cloud.describe_instance(existing_iid)
+                    if info["state"] in ("running", "stopped"):
+                        await self._log(worker_id, f"reusing existing instance {existing_iid} ({info['state']})")
+                        if info["state"] == "stopped":
+                            await self.cloud.start_instance(existing_iid)
+                        iid = existing_iid
+                    else:
+                        existing_iid = None  # terminated/shutting-down → 新建
+                except Exception:
+                    existing_iid = None  # 查不到 → 新建
+
+            if not existing_iid:
+                await self._log(worker_id, "creating EC2 instance (config inherited from manager)")
+                iid = await self.cloud.create_instance(worker.name)
+                worker = await self._update(worker_id, cloud_instance_id=iid)
 
             private_ip = await self.cloud.wait_until_running(iid)
             info = await self.cloud.describe_instance(iid)

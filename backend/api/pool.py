@@ -128,6 +128,23 @@ async def relogin_status(account_id: str):
     return _relogin_state.get(account_id) or {"status": "idle"}
 
 
+@router.delete("/accounts/{account_id}")
+async def delete_account(account_id: str):
+    """从号池中删除账号（不删 config_dir 文件夹，方便以后重新登录其他号）。"""
+    pool = _get_pool()
+    acc = pool.account(account_id)
+    if acc is None:
+        raise HTTPException(status_code=404, detail=f"Unknown account: {account_id}")
+    # 从 accounts.json 中删除
+    import json as _json
+    accounts_path = Path.home() / ".claude-pool" / "accounts.json"
+    data = _json.loads(accounts_path.read_text())
+    data["accounts"] = [a for a in data["accounts"] if a["id"] != account_id]
+    accounts_path.write_text(_json.dumps(data, indent=2))
+    pool.reload()
+    return {"ok": True, "deleted": account_id}
+
+
 @router.post("/preferred")
 async def set_preferred(body: dict):
     """Pin an account for subsequent launches (manual switch).
