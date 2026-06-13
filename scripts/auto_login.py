@@ -840,14 +840,6 @@ async def perform_login(
         return False
     logger.info("OAuth URL found (%d chars)", len(oauth_url))
 
-    # Discover CLI listener port
-    listener_port = _discover_listener_port(proc.pid, deadline=time.time() + 5)
-    if not listener_port:
-        proc.kill()
-        logger.error("CLI did not bind a localhost listener")
-        return False
-    logger.info("CLI listener on port %d", listener_port)
-
     # Step 3: Chrome CDP 完成 OAuth
     logger.info("step 3: Chrome CDP OAuth...")
     result = await _mailcatcher_browser_login(
@@ -861,16 +853,18 @@ async def perform_login(
 
     code = result["code"]
     state = result["state"]
-    logger.info("got code#state, delivering to CLI listener...")
+    code_state = f"{code}#{state}"
+    logger.info("got code#state (%d chars), feeding to CLI stdin...", len(code_state))
 
-    # Step 4: Deliver code+state to CLI listener
+    # Step 4: Feed code#state to CLI stdin（和 elastic-agent 同款）
+    # CLI 从 stdin 读 code#state 然后自己做 token exchange。
+    # 不走 HTTP callback（那需要 mitmproxy patch redirect_uri）。
     try:
-        async with httpx.AsyncClient(timeout=15) as cli:
-            url = f"http://localhost:{listener_port}/callback?code={code}&state={state}"
-            resp = await cli.get(url, follow_redirects=False)
-            logger.info("CLI listener responded %d", resp.status_code)
+        proc.stdin.write(f"{code_state}\n".encode())
+        proc.stdin.flush()
+        proc.stdin.close()
     except Exception as exc:
-        logger.warning("CLI listener delivery error: %s", exc)
+        logger.warning("stdin write error: %s", exc)
 
     # Wait for CLI to exit
     for _ in range(CLI_EXIT_TIMEOUT):
