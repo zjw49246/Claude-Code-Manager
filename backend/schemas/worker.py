@@ -4,8 +4,7 @@ from pydantic import BaseModel, ConfigDict
 
 class WorkerAccountIn(BaseModel):
     email: str
-    token: str | None = None     # 接码 token（auto_login 用）
-    provider: str = "171mail"    # 接码渠道：171mail | mailcatcher | mailcom
+    token: str | None = None     # 171mail 接码 token 或 mail.com 邮箱密码（按后缀自动判断）
 
 
 class WorkerCreate(BaseModel):

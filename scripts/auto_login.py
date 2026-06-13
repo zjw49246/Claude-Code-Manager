@@ -64,6 +64,21 @@ _COOKIE_ATTR_KEYS = {"path", "domain", "expires", "max-age", "samesite", "secure
 _DROP_COOKIES = {"__cf_bm", "_cfuvid"}
 
 EMAIL_POLL_TIMEOUT = 90
+
+# mail.com 家族域名——这些邮箱走 claude_oauth_login.py（Selenium webmail），
+# 其余走 171mail（API 接码）。根据邮箱后缀自动判断，不需要用户手动选 provider。
+MAILCOM_DOMAINS = {
+    "lovecat.com", "berlin.com", "consultant.com", "birdlover.com",
+    "chemist.com", "tvstar.com", "songwriter.net", "mail.com",
+    "email.com", "usa.com", "post.com", "europe.com", "asia.com",
+    "iname.com", "writeme.com", "dr.com", "cheerful.com",
+    "techie.com", "myself.com",
+}
+
+
+def is_mailcom_domain(email: str) -> bool:
+    domain = email.split("@")[-1].lower()
+    return domain in MAILCOM_DOMAINS
 PLAYWRIGHT_NAV_TIMEOUT = 30_000  # ms
 CLI_OAUTH_URL_TIMEOUT = 15
 CLI_EXIT_TIMEOUT = 30
@@ -526,8 +541,6 @@ async def perform_login(
     token_171: str,
     config_dir: str,
     use_xvfb: bool = True,
-    provider: str = "171mail",
-    mail_password: str = "",
 ) -> bool:
     config_path = Path(config_dir).expanduser()
     config_path.mkdir(parents=True, exist_ok=True)
@@ -536,29 +549,23 @@ async def perform_login(
 
     mitm_proc = None
     try:
-        # Step 1: 获取 session cookies（按 provider 分支）
+        # Step 1: 171mail 获取 session cookies
         cookies: list[dict] = []
-        if provider in ("mailcatcher", "mailcom"):
-            # MailCatcher/mailcom 模式：不需要 171mail 的 send/verify 三步——
-            # Claude CLI 自己发邮件，后续在 Playwright 阶段轮询拿 magic link
-            logger.info("provider=%s: cookies will be obtained via magic link in browser", provider)
-        else:
-            # 171mail 模式
-            logger.info("step 1/5: triggering 171mail login email...")
-            async with httpx.AsyncClient(timeout=30) as mc:
-                device_id, client_sha = await _trigger_send(mc, email)
-                send_ts = time.time()
-                logger.info("step 2/5: polling for magic link (up to %ds)...", EMAIL_POLL_TIMEOUT)
-                magic_link = await _poll_magic_link(mc, token_171, send_ts, EMAIL_POLL_TIMEOUT)
-                logger.info("got magic link (%d chars)", len(magic_link))
-                cookie_header, session_key = await _verify_link(
-                    mc, link=magic_link,
-                    device_id=device_id, client_sha=client_sha, email=email,
-                )
-                logger.info("got sessionKey (%d chars)", len(session_key))
+        logger.info("step 1/5: triggering 171mail login email...")
+        async with httpx.AsyncClient(timeout=30) as mc:
+            device_id, client_sha = await _trigger_send(mc, email)
+            send_ts = time.time()
+            logger.info("step 2/5: polling for magic link (up to %ds)...", EMAIL_POLL_TIMEOUT)
+            magic_link = await _poll_magic_link(mc, token_171, send_ts, EMAIL_POLL_TIMEOUT)
+            logger.info("got magic link (%d chars)", len(magic_link))
+            cookie_header, session_key = await _verify_link(
+                mc, link=magic_link,
+                device_id=device_id, client_sha=client_sha, email=email,
+            )
+            logger.info("got sessionKey (%d chars)", len(session_key))
 
-            cookies = _parse_cookie_header(cookie_header)
-            logger.info("parsed %d cookies: %s", len(cookies), [c["name"] for c in cookies])
+        cookies = _parse_cookie_header(cookie_header)
+        logger.info("parsed %d cookies: %s", len(cookies), [c["name"] for c in cookies])
 
         # Clear stale credentials
         for f in [".claude.json", ".credentials.json"]:
@@ -824,35 +831,33 @@ async def perform_login(
 def main():
     parser = argparse.ArgumentParser(description="Auto-login Claude account")
     parser.add_argument("--email", help="Claude account email")
-    parser.add_argument("--token", help="接码 token (如果未存入 email_tokens.json)")
-    parser.add_argument("--provider", choices=["171mail", "mailcatcher", "mailcom"], default=None,
-                        help="接码渠道: 171mail | mailcatcher | mailcom (mail.com Web 读邮件)")
-    parser.add_argument("--mail-password", help="mail.com 邮箱密码（mailcom provider 用）")
+    parser.add_argument("--token", help="接码 token（171mail 用）或 mail.com 邮箱密码（mail.com 域自动识别）")
     parser.add_argument("--config-dir", help="CLAUDE_CONFIG_DIR for this account")
     parser.add_argument("--add-to-pool", metavar="ACCOUNT_ID",
                         help="Add to ~/.claude-pool/accounts.json with this ID after login")
     parser.add_argument("--save-token", action="store_true",
                         help="Save the token to email_tokens.json for future use")
+    # 兼容旧调用（Worker bootstrap 可能还传这些参数）
+    parser.add_argument("--provider", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--mail-password", default=None, help=argparse.SUPPRESS)
     args = parser.parse_args()
 
     email = args.email
     if not email:
         email = input("Email: ").strip()
 
-    # 先查存储，获取 token 和 provider
+    # 按邮箱后缀自动判断登录方式
+    use_webmail = is_mailcom_domain(email)
+
+    # token: 171mail 的接码 token，或 mail.com 的邮箱密码
     saved = load_email_tokens().get(email)
-    token = args.token
-    provider = args.provider
+    token = args.token or args.mail_password
     if not token and saved:
-        token = saved.get("token")
-        if not provider:
-            provider = saved.get("provider", "171mail")
+        token = saved.get("token") or saved.get("mail_password")
         if token:
-            logger.info("found saved token for %s (provider=%s)", email, provider)
+            logger.info("found saved token for %s", email)
     if not token:
-        token = input("Token: ").strip()
-    if not provider:
-        provider = "171mail"
+        token = input("mail.com 密码: " if use_webmail else "171mail Token: ").strip()
 
     config_dir = args.config_dir
     if not config_dir:
@@ -860,23 +865,37 @@ def main():
         if not config_dir:
             config_dir = str(Path.home() / ".claude-account-new")
 
-    mail_password = args.mail_password or ""
-    if provider == "mailcom" and not mail_password:
-        saved = load_email_tokens().get(email) or {}
-        mail_password = saved.get("mail_password", "")
-    if provider == "mailcom" and not mail_password:
-        mail_password = input("mail.com 邮箱密码: ").strip()
-
     if args.save_token or not get_email_token(email):
-        save_email_token(email, token, provider=provider, mail_password=mail_password)
+        provider_label = "mailcom" if use_webmail else "171mail"
+        save_email_token(email, token, provider=provider_label)
 
-    ok = asyncio.run(perform_login(
-        email=email,
-        token_171=token,
-        config_dir=config_dir,
-        provider=provider,
-        mail_password=mail_password,
-    ))
+    if use_webmail:
+        # mail.com 家族：走 claude_oauth_login.py 的 Selenium OAuth 流程
+        logger.info("mail.com 域邮箱，走 Selenium OAuth 流程（webmail 读 magic link）")
+        config_path = Path(config_dir).expanduser()
+        config_path.mkdir(parents=True, exist_ok=True)
+        creds_path = str(config_path / ".credentials.json")
+        try:
+            script_dir = Path(__file__).resolve().parent
+            sys.path.insert(0, str(script_dir))
+            from claude_oauth_login import do_oauth_login
+            creds = do_oauth_login(
+                email=email, password=token, output_path=creds_path,
+            )
+            ok = creds is not None and "claudeAiOauth" in (creds or {})
+        except ImportError:
+            logger.error("claude_oauth_login.py 不存在或依赖缺失（需要 selenium + undetected-chromedriver）")
+            ok = False
+        except Exception as exc:
+            logger.error("Selenium OAuth 失败: %s", exc)
+            ok = False
+    else:
+        # 其他域名：走 171mail 接码 + CLI OAuth
+        ok = asyncio.run(perform_login(
+            email=email,
+            token_171=token,
+            config_dir=config_dir,
+        ))
 
     if ok and args.add_to_pool:
         add_to_pool(args.add_to_pool, str(Path(config_dir).expanduser()), email)

@@ -145,8 +145,7 @@ function AccountCard({ account, preferred, lastSelected, onClearCooldown, onSetP
 function AddAccountModal({ onClose, onAdded }: { onClose: () => void; onAdded: () => void }) {
   const [email, setEmail] = useState('');
   const [token, setToken] = useState('');
-  const [provider, setProvider] = useState<'171mail' | 'mailcatcher' | 'mailcom'>('171mail');
-  const [mailPassword, setMailPassword] = useState('');
+
   const [status, setStatus] = useState<string | null>(null);
   const [detail, setDetail] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -157,7 +156,7 @@ function AddAccountModal({ onClose, onAdded }: { onClose: () => void; onAdded: (
     setSubmitting(true);
     setDetail(null);
     try {
-      await api.poolAddAccount({ email: email.trim(), token: token.trim(), provider, mail_password: provider === 'mailcom' ? mailPassword : '' });
+      await api.poolAddAccount({ email: email.trim(), token: token.trim() });
       setStatus('running');
       const poll = async () => {
         const s = await api.poolAddStatus(email.trim());
@@ -190,24 +189,8 @@ function AddAccountModal({ onClose, onAdded }: { onClose: () => void; onAdded: (
           <div>
             <label className="block text-xs text-gray-400 mb-1">接码 Token</label>
             <input className="w-full bg-gray-700 text-foreground text-xs rounded px-2.5 py-1.5 outline-none focus:ring-1 focus:ring-indigo-500"
-              value={token} onChange={e => setToken(e.target.value)} placeholder="接码平台的 token" required />
+              value={token} onChange={e => setToken(e.target.value)} placeholder="接码 Token（mail.com 域填邮箱密码）" required />
           </div>
-          <div>
-            <label className="block text-xs text-gray-400 mb-1">接码渠道</label>
-            <select className="w-full bg-gray-700 text-foreground text-xs rounded px-2.5 py-1.5 outline-none focus:ring-1 focus:ring-indigo-500"
-              value={provider} onChange={e => setProvider(e.target.value as '171mail' | 'mailcatcher')}>
-              <option value="171mail">171mail (b.171mail.com)</option>
-              <option value="mailcatcher">MailCatcher (mail.claude-code-manager.com)</option>
-              <option value="mailcom">mail.com Web (直接登录邮箱读邮件)</option>
-            </select>
-          </div>
-          {provider === 'mailcom' && (
-          <div>
-            <label className="block text-xs text-gray-400 mb-1">邮箱密码（mail.com 登录用）</label>
-            <input type="password" className="w-full bg-gray-700 text-foreground text-xs rounded px-2.5 py-1.5 outline-none focus:ring-1 focus:ring-indigo-500"
-              value={mailPassword} onChange={e => setMailPassword(e.target.value)} placeholder="mail.com 密码" required />
-          </div>
-          )}
           {status === 'running' && <p className="text-xs text-blue-400">登录中… 请等待（可能需要 1-2 分钟）</p>}
           {status === 'failed' && <p className="text-xs text-red-400 break-all">{detail || '登录失败'}</p>}
           <div className="flex justify-end gap-2 pt-1">

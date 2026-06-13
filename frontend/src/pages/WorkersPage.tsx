@@ -26,7 +26,7 @@ const BUSY = new Set(['creating', 'bootstrapping', 'stopping', 'starting', 'dest
 
 function AddWorkerModal({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
   const [name, setName] = useState('');
-  const [accounts, setAccounts] = useState<{ email: string; token: string; provider: string }[]>([{ email: '', token: '', provider: '171mail' }]);
+  const [accounts, setAccounts] = useState<{ email: string; token: string }[]>([{ email: '', token: '' }]);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -37,7 +37,7 @@ function AddWorkerModal({ onClose, onSaved }: { onClose: () => void; onSaved: ()
     try {
       await api.createWorker({
         name: name.trim(),
-        accounts: accounts.filter((a) => a.email.trim()).map((a) => ({ email: a.email.trim(), token: a.token.trim(), provider: a.provider })),
+        accounts: accounts.filter((a) => a.email.trim()).map((a) => ({ email: a.email.trim(), token: a.token.trim() })),
       });
       onSaved();
       onClose();
@@ -77,18 +77,10 @@ function AddWorkerModal({ onClose, onSaved }: { onClose: () => void; onSaved: ()
                 />
                 <input
                   className="w-full bg-gray-700 text-foreground text-sm rounded px-3 py-2 outline-none focus:ring-1 focus:ring-indigo-500"
-                  value={acct.token} placeholder="接码 Token"
+                  value={acct.token} placeholder="接码 Token（mail.com 域填邮箱密码）"
                   onChange={(e) => setAccounts(accounts.map((a, j) => (j === i ? { ...a, token: e.target.value } : a)))}
                 />
-                <select
-                  className="w-full bg-gray-700 text-foreground text-xs rounded px-2 py-1.5 outline-none"
-                  value={acct.provider}
-                  onChange={(e) => setAccounts(accounts.map((a, j) => (j === i ? { ...a, provider: e.target.value } : a)))}
-                >
-                  <option value="171mail">171mail</option>
-                  <option value="mailcatcher">MailCatcher</option>
-                  <option value="mailcom">mail.com Web</option>
-                </select>
+
               </div>
               {accounts.length > 1 && (
                 <button type="button" className="text-gray-500 hover:text-red-400 mt-2"
@@ -96,7 +88,7 @@ function AddWorkerModal({ onClose, onSaved }: { onClose: () => void; onSaved: ()
               )}
             </div>
           ))}
-          <button type="button" onClick={() => setAccounts([...accounts, { email: '', token: '', provider: '171mail' }])}
+          <button type="button" onClick={() => setAccounts([...accounts, { email: '', token: '' }])}
             className="text-xs text-indigo-400 hover:text-indigo-300">+ 再加一个账号</button>
           <div className="flex justify-end gap-2 pt-1">
             <button type="button" onClick={onClose} className="px-4 py-2 text-sm text-gray-300 hover:text-white">Cancel</button>
