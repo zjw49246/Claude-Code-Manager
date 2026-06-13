@@ -789,18 +789,18 @@ async def perform_login(
     else:
         logger.info("step 1: mail.com 域，跳过 171mail（Chrome CDP 登录 + MailCatcher 接码）")
 
-    # Step 2: Spawn CLI auth login（不需要 mitmproxy）
+    # Step 2: Spawn CLI auth login（和 elastic-agent 同款：极简 env，不传 --email，不给 DISPLAY）
     logger.info("step 2: spawning claude auth login...")
     claude_bin = _find_claude()
-    env = os.environ.copy()
-    env["CLAUDE_CONFIG_DIR"] = str(config_path)
-    env["NO_COLOR"] = "1"
-    env["TERM"] = "dumb"
-    env["BROWSER"] = "false"  # 阻止 CLI 自己打开浏览器（我们用 CDP Chrome 做 OAuth）
+    cli_env = {
+        "CLAUDE_CONFIG_DIR": str(config_path),
+        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+        "HOME": str(Path.home()),
+    }
 
     proc = subprocess.Popen(
-        [claude_bin, "auth", "login", "--email", email],
-        env=env,
+        [claude_bin, "auth", "login"],
+        env=cli_env,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
