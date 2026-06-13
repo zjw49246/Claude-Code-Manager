@@ -103,6 +103,16 @@ function AccountCard({ account, preferred, lastSelected, onClearCooldown, onSetP
               </button>
             )
           )}
+          <button
+            onClick={async () => {
+              if (!window.confirm(`从号池中删除 ${account.id}（${account.email}）？\nconfig_dir 文件夹保留，可以重新登录其他号。`)) return;
+              try { await api.poolDeleteAccount(account.id); window.location.reload(); } catch (e) { window.alert(String(e)); }
+            }}
+            className="text-[10px] px-1.5 py-0.5 rounded border border-gray-600 text-gray-400 hover:text-red-400 hover:border-red-500"
+            title="从号池删除（保留文件夹）"
+          >
+            删除
+          </button>
         </div>
       </div>
       {account.email && <div className="text-xs text-gray-500 truncate">{account.email}</div>}
