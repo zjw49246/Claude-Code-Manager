@@ -118,7 +118,7 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId 
         <div
           key={t.id}
           {...targetProps(t, idx)}
-          className={`relative rounded-lg p-3 transition-opacity ${
+          className={`relative rounded-lg p-3 overflow-hidden transition-opacity ${
             draggingId === t.id ? 'opacity-40' : ''
           } ${overIndex === idx && draggingId !== null && draggingId !== t.id ? 'ring-2 ring-indigo-400' : ''} ${
             activeTaskId === t.id ? 'bg-indigo-900/60 ring-1 ring-indigo-400/60' : t.has_unread ? 'bg-indigo-900/50 ring-1 ring-indigo-500/50' : 'bg-gray-800'
