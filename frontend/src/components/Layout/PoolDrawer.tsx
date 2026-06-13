@@ -127,30 +127,42 @@ function AccountCard({ account, preferred, lastSelected, onClearCooldown, onSetP
           <div className="flex items-center gap-2">
             <span>
               {account.usage_error === 'no_credentials' && '未找到凭据文件'}
-              {/* 后端已先尝试 OAuth refresh，走到这说明 refreshToken 也失效了 */}
               {account.usage_error === 'token_expired' && 'Token 刷新失败，需重新登录'}
               {account.usage_error && !['no_credentials', 'token_expired'].includes(account.usage_error) && `额度获取失败: ${account.usage_error}`}
             </span>
-            {account.usage_error && (<>
-              <button
-                onClick={() => onRelogin(account.id)}
-                disabled={reloginState?.status === 'running'}
-                className="shrink-0 text-[10px] px-1.5 py-0.5 rounded border border-red-500/50 text-red-300 hover:bg-red-600/20 disabled:opacity-50"
-                title="先尝试刷新 OAuth token；刷新失败则后台跑 auto_login 重新登录"
-              >
-                {reloginState?.status === 'running' ? '登录中…' : '重新登录'}
-              </button>
-              <button
-                onClick={async () => {
-                  if (!window.confirm(`从号池中删除 ${account.id}？config_dir 文件夹保留，可以重新登录其他号。`)) return;
-                  try { await api.poolDeleteAccount(account.id); window.location.reload(); } catch {}
-                }}
-                className="shrink-0 text-[10px] px-1.5 py-0.5 rounded border border-gray-600 text-gray-400 hover:bg-gray-700"
-                title="从号池删除（保留文件夹）"
-              >
-                删除
-              </button>
-            </>)}
+            {account.usage_error && (() => {
+              const needsRelogin = ['no_credentials', 'token_expired'].includes(account.usage_error!);
+              return (<>
+                {needsRelogin ? (
+                  <button
+                    onClick={() => onRelogin(account.id)}
+                    disabled={reloginState?.status === 'running'}
+                    className="shrink-0 text-[10px] px-1.5 py-0.5 rounded border border-red-500/50 text-red-300 hover:bg-red-600/20 disabled:opacity-50"
+                    title="先尝试刷新 OAuth token；刷新失败则后台跑 auto_login 重新登录"
+                  >
+                    {reloginState?.status === 'running' ? '登录中…' : '重新登录'}
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => window.location.reload()}
+                    className="shrink-0 text-[10px] px-1.5 py-0.5 rounded border border-yellow-500/50 text-yellow-300 hover:bg-yellow-600/20"
+                    title="临时错误，刷新重试"
+                  >
+                    重试
+                  </button>
+                )}
+                <button
+                  onClick={async () => {
+                    if (!window.confirm(`从号池中删除 ${account.id}？config_dir 文件夹保留，可以重新登录其他号。`)) return;
+                    try { await api.poolDeleteAccount(account.id); window.location.reload(); } catch {}
+                  }}
+                  className="shrink-0 text-[10px] px-1.5 py-0.5 rounded border border-gray-600 text-gray-400 hover:bg-gray-700"
+                  title="从号池删除（保留文件夹）"
+                >
+                  删除
+                </button>
+              </>);
+            })()}
           </div>
           {reloginState?.message && (
             <div className="text-[10px] text-gray-400 whitespace-pre-wrap break-all">{reloginState.message}</div>
