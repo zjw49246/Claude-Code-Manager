@@ -420,7 +420,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
         </div>
       )}
       {/* Bottom action row */}
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 flex-wrap">
         {/* Attach files */}
         <button
           type="button"
