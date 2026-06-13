@@ -211,13 +211,7 @@ function WorkerCard({ worker, onAction }: { worker: Worker; onAction: () => void
         {worker.ccm_commit && <span title={worker.ccm_commit}>@{worker.ccm_commit.slice(0, 8)}</span>}
         {worker.last_heartbeat && <span>心跳 {new Date(worker.last_heartbeat + 'Z').toLocaleTimeString()}</span>}
       </div>
-      {(worker.accounts || []).length > 0 && (
-        <div className="text-xs flex flex-wrap gap-2">
-          {(worker.accounts || []).map((a, i) => (
-            <span key={i} className={`${ACCOUNT_COLORS[a.status] || 'text-gray-400'}`}>{a.email} ({a.status})</span>
-          ))}
-        </div>
-      )}
+
       {poolOpen && (
         <div className="text-xs bg-gray-900/60 rounded p-2 space-y-2">
           {poolErr ? (
