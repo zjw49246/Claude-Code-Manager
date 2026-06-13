@@ -690,6 +690,8 @@ export const api = {
 
   // Workers (distributed)
   listWorkers: () => request<Worker[]>('/api/workers'),
+  getWorkerPool: (id: number) =>
+    request<{ enabled: boolean; total: number; available: number; accounts: { id: string; email: string | null; enabled: boolean; available: boolean; cooldown_remaining: number }[] }>(`/api/workers/${id}/pool`),
   createWorker: (data: { accounts: { email: string; password?: string }[]; adopt_instance_id?: string; name?: string }) =>
     request<Worker>('/api/workers', { method: 'POST', body: JSON.stringify(data) }),
   getWorker: (id: number) => request<Worker>(`/api/workers/${id}`),
