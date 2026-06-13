@@ -697,6 +697,8 @@ export const api = {
     request<{ status: string; detail?: string }>(`/api/workers/${workerId}/pool/add/${encodeURIComponent(email)}`),
   deleteWorkerAccount: (workerId: number, accountId: string) =>
     request<{ ok: boolean }>(`/api/workers/${workerId}/pool/${accountId}`, { method: 'DELETE' }),
+  getWorkerPoolUsage: (id: number) =>
+    request<any>(`/api/workers/${id}/pool/usage`),
   getWorkerPool: (id: number) =>
     request<{ enabled: boolean; total: number; available: number; accounts: { id: string; email: string | null; enabled: boolean; available: boolean; cooldown_remaining: number }[] }>(`/api/workers/${id}/pool`),
   createWorker: (data: { accounts: { email: string; token?: string }[]; name?: string }) =>

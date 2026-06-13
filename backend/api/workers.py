@@ -323,3 +323,30 @@ async def delete_worker_account(worker_id: int, account_id: str, db: AsyncSessio
     if r.status_code >= 400:
         raise HTTPException(r.status_code, r.text[:300])
     return r.json()
+
+
+@router.get("/{worker_id}/pool/usage")
+async def get_worker_pool_usage(worker_id: int, db: AsyncSession = Depends(get_db)):
+    """拉取 worker 的号池额度（转发 /api/pool/usage，和本机 PoolDrawer 同格式）。"""
+    worker = await db.get(Worker, worker_id)
+    if not worker:
+        raise HTTPException(404, "Worker not found")
+    if worker.status != "ready" or not worker.private_ip:
+        raise HTTPException(409, f"Worker 未就绪（{worker.status}）")
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(
+                f"http://{worker.private_ip}:{worker.ccm_port}/api/pool/usage",
+                headers={"Authorization": f"Bearer {worker.auth_token}"},
+            )
+            if r.status_code == 200:
+                return r.json()
+            # pool 未启用时走 status fallback
+            r2 = await client.get(
+                f"http://{worker.private_ip}:{worker.ccm_port}/api/pool/status",
+                headers={"Authorization": f"Bearer {worker.auth_token}"},
+            )
+            return r2.json() if r2.status_code == 200 else {"accounts": []}
+    except Exception as e:
+        raise HTTPException(503, f"Worker 不可达: {e}")
