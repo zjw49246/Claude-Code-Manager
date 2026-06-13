@@ -63,7 +63,7 @@ OAUTH_URL_RE = re.compile(r"https://claude\.com/cai/oauth/authorize\?[^\s]+")
 _COOKIE_ATTR_KEYS = {"path", "domain", "expires", "max-age", "samesite", "secure", "httponly"}
 _DROP_COOKIES = {"__cf_bm", "_cfuvid"}
 
-EMAIL_POLL_TIMEOUT = 90
+EMAIL_POLL_TIMEOUT = 300  # mail.com IMAP 拉取可能延迟几分钟
 
 # mail.com 家族域名——这些邮箱走 claude_oauth_login.py（Selenium webmail），
 # 其余走 171mail（API 接码）。根据邮箱后缀自动判断，不需要用户手动选 provider。
