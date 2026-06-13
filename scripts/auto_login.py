@@ -316,8 +316,8 @@ async def _poll_magic_link_mailcom(
 # mail.com 域：undetected-chromedriver 网页登录（过 Cloudflare）
 # ---------------------------------------------------------------------------
 
-async def _mailcatcher_browser_login(email: str, mail_token: str) -> list[dict] | None:
-    """用 undetected-chromedriver 模拟 claude.ai 网页登录：
+async def _mailcatcher_browser_login(email: str, mail_token: str, oauth_url: str = '') -> dict | None:
+    """用系统 Google Chrome 模拟 claude.ai 网页登录（和 claude_oauth_login.py 同款）：
     输入邮箱 → Claude 发验证邮件 → MailCatcher 拿 magic link → 点击链接 → 登录成功 → 返回 cookies。
     """
     try:
@@ -333,7 +333,7 @@ async def _mailcatcher_browser_login(email: str, mail_token: str) -> list[dict] 
         options.add_argument("--no-sandbox")
         options.add_argument("--disable-dev-shm-usage")
         options.add_argument("--window-size=1280,800")
-        driver = uc.Chrome(options=options, headless=False)
+        driver = uc.Chrome(options=options, headless=False, use_subprocess=True)
 
         # 1. 打开 claude.ai 登录页
         logger.info("uc: opening claude.ai...")
@@ -390,10 +390,64 @@ async def _mailcatcher_browser_login(email: str, mail_token: str) -> list[dict] 
         await asyncio.sleep(3)
         logger.info("uc: login done, url=%s", driver.current_url[:80])
 
-        # 6. 返回 cookies
-        cookies = driver.get_cookies()
-        logger.info("uc: got %d cookies", len(cookies))
-        return cookies
+        # 6. 导航到 OAuth URL → Authorize → 拿 callback
+        # 直接用已登录的 uc 浏览器完成 OAuth（不转交给 Playwright，避免 CF 问题）
+        if not oauth_url:
+            logger.error("uc: no oauth_url provided")
+            return None
+        logger.info("uc: navigating to OAuth URL...")
+        driver.get(oauth_url)
+        for i in range(30):
+            if "just a moment" not in driver.title.lower():
+                break
+            time.sleep(1)
+        time.sleep(2)
+
+        # 点 Authorize
+        from selenium.webdriver.support.ui import WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
+        try:
+            authorize_btn = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable((By.XPATH, "//button[contains(text(),'Authorize')]"))
+            )
+            # 监听重定向
+            original_url = driver.current_url
+            authorize_btn.click()
+            logger.info("uc: clicked Authorize")
+
+            # 等 callback（redirect 到 localhost）
+            import urllib.parse
+            callback_url = None
+            for _ in range(30):
+                try:
+                    cur = driver.current_url
+                    if "localhost" in cur or "/oauth/code/callback" in cur:
+                        callback_url = cur
+                        break
+                except Exception:
+                    break
+                time.sleep(1)
+
+            if callback_url:
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(callback_url).query)
+                code = qs.get("code", [""])[0]
+                state_val = qs.get("state", [""])[0]
+                logger.info("uc: got callback code=%s state=%s", code[:12], state_val[:12])
+                return {"code": code, "state": state_val}
+            else:
+                # 可能重定向到 localhost 失败（ERR_CONNECTION_REFUSED），检查页面源码
+                try:
+                    page_url = driver.current_url
+                    if "code=" in page_url:
+                        qs = urllib.parse.parse_qs(urllib.parse.urlparse(page_url).query)
+                        return {"code": qs.get("code",[""])[0], "state": qs.get("state",[""])[0]}
+                except Exception:
+                    pass
+                logger.error("uc: no callback URL captured")
+                return None
+        except Exception as exc:
+            logger.error("uc: Authorize failed: %s", exc)
+            return None
 
     except Exception as exc:
         logger.error("uc browser login failed: %s", exc)
