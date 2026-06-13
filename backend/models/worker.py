@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Boolean, Integer, String, Text, DateTime, JSON
+from sqlalchemy import Integer, String, Text, DateTime, JSON
 from sqlalchemy.orm import Mapped, mapped_column
 from backend.database import Base
 
@@ -24,7 +24,6 @@ class Worker(Base):
     cloud_instance_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     private_ip: Mapped[str | None] = mapped_column(String(45), nullable=True)  # 主通信地址（VPC 内网）
     public_ip: Mapped[str | None] = mapped_column(String(45), nullable=True)  # 仅记录，不用于通信
-    adopted: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")  # 收养的已有实例（destroy 时只 stop 不 terminate）
 
     # 连接信息
     ssh_user: Mapped[str] = mapped_column(String(50), default="ubuntu", server_default="ubuntu")

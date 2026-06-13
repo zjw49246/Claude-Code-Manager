@@ -79,7 +79,7 @@ async def create_worker(body: WorkerCreate, db: AsyncSession = Depends(get_db)):
 
     accounts = [a.model_dump() for a in body.accounts]
     _spawn(
-        prov.create_worker(worker.id, accounts=accounts, adopt_instance_id=body.adopt_instance_id)
+        prov.create_worker(worker.id, accounts=accounts)
     )
     return worker
 
@@ -189,7 +189,7 @@ async def retry_bootstrap(worker_id: int, db: AsyncSession = Depends(get_db)):
     await db.commit()
     await db.refresh(worker)
     _spawn(
-        prov.create_worker(worker.id, accounts=[], adopt_instance_id=worker.cloud_instance_id)
+        prov.create_worker(worker.id, accounts=[])
     )
     return worker
 

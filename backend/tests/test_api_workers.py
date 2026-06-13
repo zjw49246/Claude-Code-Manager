@@ -93,18 +93,6 @@ async def test_create_worker_auto_name_and_background_task(client, fake_provisio
     fake_provisioner.create_worker.assert_called_once()
     kwargs = fake_provisioner.create_worker.call_args.kwargs
     assert kwargs["accounts"] == [{"email": "a@x.com", "password": "p"}]
-    assert kwargs["adopt_instance_id"] is None
-
-
-async def test_create_worker_adopt_instance(client, fake_provisioner):
-    resp = await client.post(
-        "/api/workers",
-        json={"accounts": [], "adopt_instance_id": "i-abc", "name": "custom"},
-    )
-    assert resp.status_code == 200
-    assert resp.json()["name"] == "custom"
-    await asyncio.sleep(0)
-    assert fake_provisioner.create_worker.call_args.kwargs["adopt_instance_id"] == "i-abc"
 
 
 async def test_stop_requires_ready(client, session_factory, fake_provisioner):
@@ -168,19 +156,18 @@ async def test_terminated_workers_hidden_from_list(client, session_factory):
 # === Provisioner state machine tests（cloud/bootstrap 全替身，不碰网络） ===
 
 
-async def test_provisioner_adopt_happy_path(db_factory, session_factory):
+async def test_provisioner_create_happy_path(db_factory, session_factory):
     wid = await _insert_worker(session_factory, status="creating")
     prov = WorkerProvisioner(db_factory=db_factory, cloud=FakeCloud(), broadcaster=None)
     prov._bootstrap = AsyncMock()
 
-    await prov.create_worker(wid, accounts=[], adopt_instance_id="i-adopt")
+    await prov.create_worker(wid, accounts=[])
 
     async with session_factory() as db:
         w = await db.get(Worker, wid)
     assert w.status == "ready"
-    assert w.cloud_instance_id == "i-adopt"
+    assert w.cloud_instance_id == "i-new123"
     assert w.private_ip == "10.0.0.9"
-    assert w.adopted is True
     assert w.last_heartbeat is not None
 
 
@@ -189,7 +176,7 @@ async def test_provisioner_bootstrap_failure_records_step(db_factory, session_fa
     prov = WorkerProvisioner(db_factory=db_factory, cloud=FakeCloud(), broadcaster=None)
     prov._bootstrap = AsyncMock(side_effect=BootstrapError("ccm-deploy", "rsync failed"))
 
-    await prov.create_worker(wid, accounts=[], adopt_instance_id="i-adopt")
+    await prov.create_worker(wid, accounts=[])
 
     async with session_factory() as db:
         w = await db.get(Worker, wid)
@@ -221,22 +208,9 @@ async def test_provisioner_stop_and_start(db_factory, session_factory):
     assert ("start", "i-x") in cloud.calls
 
 
-async def test_provisioner_destroy_adopted_only_stops(db_factory, session_factory):
-    wid = await _insert_worker(
-        session_factory, status="ready", cloud_instance_id="i-x", adopted=True
-    )
-    cloud = FakeCloud()
-    prov = WorkerProvisioner(db_factory=db_factory, cloud=cloud, broadcaster=None)
-    await prov.destroy_worker(wid)
-    async with session_factory() as db:
-        assert (await db.get(Worker, wid)).status == "terminated"
-    assert ("stop", "i-x") in cloud.calls
-    assert ("terminate", "i-x") not in cloud.calls
-
-
 async def test_provisioner_destroy_created_terminates(db_factory, session_factory):
     wid = await _insert_worker(
-        session_factory, status="ready", cloud_instance_id="i-x", adopted=False
+        session_factory, status="ready", cloud_instance_id="i-x"
     )
     cloud = FakeCloud()
     prov = WorkerProvisioner(db_factory=db_factory, cloud=cloud, broadcaster=None)

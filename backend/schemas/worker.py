@@ -9,8 +9,6 @@ class WorkerAccountIn(BaseModel):
 
 class WorkerCreate(BaseModel):
     accounts: list[WorkerAccountIn] = []
-    # 收养已有 EC2 实例（不新开机器；destroy 时只 stop 不 terminate）
-    adopt_instance_id: str | None = None
     # 覆盖自动命名
     name: str | None = None
 
@@ -24,7 +22,6 @@ class WorkerResponse(BaseModel):
     cloud_instance_id: str | None
     private_ip: str | None
     public_ip: str | None
-    adopted: bool
     ssh_user: str
     ccm_port: int
     ccm_commit: str | None
