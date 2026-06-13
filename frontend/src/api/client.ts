@@ -449,6 +449,8 @@ export const api = {
   setPoolPreferred: (accountId: string | null) =>
     request<{ ok: boolean; preferred: string | null }>('/api/pool/preferred', { method: 'POST', body: JSON.stringify({ account_id: accountId }) }),
   // 重新登录：后端先试 OAuth refresh（秒回 success），失败才后台跑 auto_login（running，需轮询）
+  poolDeleteAccount: (accountId: string) =>
+    request<{ ok: boolean }>(`/api/pool/accounts/${accountId}`, { method: 'DELETE' }),
   poolRelogin: (accountId: string) =>
     request<{ ok: boolean; method: string; status: string }>(`/api/pool/accounts/${accountId}/relogin`, { method: 'POST' }),
   poolReloginStatus: (accountId: string) =>

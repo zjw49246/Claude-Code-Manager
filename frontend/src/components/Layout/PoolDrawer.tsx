@@ -130,6 +130,16 @@ function AccountCard({ account, preferred, lastSelected, onClearCooldown, onSetP
               >
                 {reloginState?.status === 'running' ? '登录中…' : '重新登录'}
               </button>
+              <button
+                onClick={async () => {
+                  if (!window.confirm(`从号池中删除 ${account.id}？config_dir 文件夹保留，可以重新登录其他号。`)) return;
+                  try { await api.poolDeleteAccount(account.id); window.location.reload(); } catch {}
+                }}
+                className="shrink-0 text-[10px] px-1.5 py-0.5 rounded border border-gray-600 text-gray-400 hover:bg-gray-700"
+                title="从号池删除（保留文件夹）"
+              >
+                删除
+              </button>
             )}
           </div>
           {reloginState?.message && (
