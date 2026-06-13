@@ -198,8 +198,7 @@ async def _verify_link(
 async def _poll_magic_link_mailcatcher(
     client: httpx.AsyncClient, token: str, after_ts: float, timeout_s: int
 ) -> str:
-    """从 MailCatcher 轮询 magic link。MailCatcher 只负责收信，
-    Claude 登录流程自己发邮件到该地址。"""
+    """从 MailCatcher (mail.claude-code-manager.com) 轮询 magic link。"""
     deadline = time.time() + timeout_s
     last_subject: str | None = None
     while time.time() < deadline:
@@ -549,23 +548,32 @@ async def perform_login(
 
     mitm_proc = None
     try:
-        # Step 1: 171mail 获取 session cookies
+        # Step 1: 获取 session cookies（按域名分支）
         cookies: list[dict] = []
-        logger.info("step 1/5: triggering 171mail login email...")
-        async with httpx.AsyncClient(timeout=30) as mc:
-            device_id, client_sha = await _trigger_send(mc, email)
-            send_ts = time.time()
-            logger.info("step 2/5: polling for magic link (up to %ds)...", EMAIL_POLL_TIMEOUT)
-            magic_link = await _poll_magic_link(mc, token_171, send_ts, EMAIL_POLL_TIMEOUT)
-            logger.info("got magic link (%d chars)", len(magic_link))
-            cookie_header, session_key = await _verify_link(
-                mc, link=magic_link,
-                device_id=device_id, client_sha=client_sha, email=email,
-            )
-            logger.info("got sessionKey (%d chars)", len(session_key))
+        _use_mailcatcher = is_mailcom_domain(email)
 
-        cookies = _parse_cookie_header(cookie_header)
-        logger.info("parsed %d cookies: %s", len(cookies), [c["name"] for c in cookies])
+        if _use_mailcatcher:
+            # mail.com 域：跳过 171mail 的 send/verify——
+            # CLI 会自己发邮件，MailCatcher 只负责读邮件拿 magic link。
+            # cookies 留空，后续在 Playwright 阶段用 magic link 获取
+            logger.info("step 1/5: mail.com 域，跳过 171mail（CLI 自发邮件 + MailCatcher 接码）")
+        else:
+            # 其他域：171mail 流程
+            logger.info("step 1/5: triggering 171mail login email...")
+            async with httpx.AsyncClient(timeout=30) as mc:
+                device_id, client_sha = await _trigger_send(mc, email)
+                send_ts = time.time()
+                logger.info("step 2/5: polling for magic link (up to %ds)...", EMAIL_POLL_TIMEOUT)
+                magic_link = await _poll_magic_link(mc, token_171, send_ts, EMAIL_POLL_TIMEOUT)
+                logger.info("got magic link (%d chars)", len(magic_link))
+                cookie_header, session_key = await _verify_link(
+                    mc, link=magic_link,
+                    device_id=device_id, client_sha=client_sha, email=email,
+                )
+                logger.info("got sessionKey (%d chars)", len(session_key))
+
+            cookies = _parse_cookie_header(cookie_header)
+            logger.info("parsed %d cookies: %s", len(cookies), [c["name"] for c in cookies])
 
         # Clear stale credentials
         for f in [".claude.json", ".credentials.json"]:
@@ -869,38 +877,12 @@ def main():
         provider_label = "mailcom" if use_webmail else "171mail"
         save_email_token(email, token, provider=provider_label)
 
-    if use_webmail:
-        # mail.com 家族：走 claude_oauth_login.py 的 Selenium OAuth 流程
-        # token 作为 MailCatcher 接码令牌（mail_token），不是 mail.com 密码——
-        # do_oauth_login 先试 webmail（需密码），失败自动 fallback 到 MailCatcher API
-        logger.info("mail.com 域邮箱，走 Selenium OAuth 流程（MailCatcher 接码）")
-        config_path = Path(config_dir).expanduser()
-        config_path.mkdir(parents=True, exist_ok=True)
-        creds_path = str(config_path / ".credentials.json")
-        try:
-            script_dir = Path(__file__).resolve().parent
-            sys.path.insert(0, str(script_dir))
-            from claude_oauth_login import do_oauth_login
-            creds = do_oauth_login(
-                email=email,
-                password="",  # 不传密码，跳过 webmail
-                mail_token=token,  # MailCatcher 接码令牌
-                output_path=creds_path,
-            )
-            ok = creds is not None and "claudeAiOauth" in (creds or {})
-        except ImportError:
-            logger.error("claude_oauth_login.py 不存在或依赖缺失（需要 selenium + undetected-chromedriver）")
-            ok = False
-        except Exception as exc:
-            logger.error("Selenium OAuth 失败: %s", exc)
-            ok = False
-    else:
-        # 其他域名：走 171mail 接码 + CLI OAuth
-        ok = asyncio.run(perform_login(
-            email=email,
-            token_171=token,
-            config_dir=config_dir,
-        ))
+    # 统一走 perform_login（CLI OAuth），按域名自动选择接码方式
+    ok = asyncio.run(perform_login(
+        email=email,
+        token_171=token,
+        config_dir=config_dir,
+    ))
 
     if ok and args.add_to_pool:
         add_to_pool(args.add_to_pool, str(Path(config_dir).expanduser()), email)
