@@ -121,7 +121,7 @@ function AccountCard({ account, preferred, lastSelected, onClearCooldown, onSetP
               {account.usage_error === 'token_expired' && 'Token 刷新失败，需重新登录'}
               {account.usage_error && !['no_credentials', 'token_expired'].includes(account.usage_error) && `额度获取失败: ${account.usage_error}`}
             </span>
-            {account.usage_error && (
+            {account.usage_error && (<>
               <button
                 onClick={() => onRelogin(account.id)}
                 disabled={reloginState?.status === 'running'}
@@ -140,7 +140,7 @@ function AccountCard({ account, preferred, lastSelected, onClearCooldown, onSetP
               >
                 删除
               </button>
-            )}
+            </>)}
           </div>
           {reloginState?.message && (
             <div className="text-[10px] text-gray-400 whitespace-pre-wrap break-all">{reloginState.message}</div>
