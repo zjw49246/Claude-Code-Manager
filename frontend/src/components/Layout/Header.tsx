@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Sun, Moon, Globe, Menu, X } from 'lucide-react';
 import { api } from '../../api/client';
 import type { RuntimeSettings } from '../../api/client';
@@ -53,27 +53,62 @@ export function Header({ currentPage, onNavigate }: HeaderProps) {
     setTheme(next);
   };
 
+  // 导航收纳规则：不按固定断点，而是按实际宽度——完整导航一行放不下
+  // （会换行/溢出）就收进汉堡。用一条隐藏的测量 nav 算出所需宽度，
+  // 与「行宽 - 标题 - 右侧控件」比较，窗口尺寸变化时实时重算。
+  const rowRef = useRef<HTMLDivElement>(null);
+  const titleRef = useRef<HTMLHeadingElement>(null);
+  const rightRef = useRef<HTMLDivElement>(null);
+  const measureRef = useRef<HTMLElement>(null);
+  const [collapsed, setCollapsed] = useState(false);
+
+  useLayoutEffect(() => {
+    const update = () => {
+      const row = rowRef.current, t = titleRef.current,
+        r = rightRef.current, m = measureRef.current;
+      if (!row || !t || !r || !m) return;
+      const gaps = 12 * 3; // 行内 gap-3 三处间隙
+      const available = row.clientWidth - t.offsetWidth - r.offsetWidth - gaps;
+      setCollapsed(m.scrollWidth > available);
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    if (rowRef.current) ro.observe(rowRef.current);
+    if (rightRef.current) ro.observe(rightRef.current);
+    return () => ro.disconnect();
+  }, []);
+
   return (
     <header className="bg-gray-900 border-b border-gray-700 px-4 py-2 pt-[max(0.5rem,env(safe-area-inset-top))]">
-      <div className="flex items-center gap-3">
-        <h1 className="text-base font-bold text-foreground truncate min-w-0">Claude Manager</h1>
-        {/* Desktop nav */}
-        <nav className="hidden sm:flex gap-1.5 flex-wrap">
+      <div ref={rowRef} className="relative flex items-center gap-3">
+        <h1 ref={titleRef} className="text-base font-bold text-foreground whitespace-nowrap shrink-0">Claude Manager</h1>
+        {/* 隐藏测量 nav：始终渲染完整按钮以计算所需宽度 */}
+        <nav ref={measureRef} aria-hidden className="absolute invisible pointer-events-none flex gap-1.5 whitespace-nowrap">
           {pages.map((p) => (
-            <button
-              key={p.key}
-              onClick={() => onNavigate(p.key)}
-              className={`px-3 py-1.5 min-h-[36px] rounded text-xs sm:text-sm font-medium transition-colors ${
-                currentPage === p.key
-                  ? 'bg-indigo-600 text-white'
-                  : 'text-gray-300 hover:bg-gray-800'
-              }`}
-            >
+            <button key={p.key} tabIndex={-1} className="px-3 py-1.5 min-h-[36px] rounded text-sm font-medium">
               {p.label}
             </button>
           ))}
         </nav>
-        <div className="ml-auto flex items-center gap-1">
+        {/* 实际导航：放得下才显示，放不下收进汉堡 */}
+        {!collapsed && (
+          <nav className="flex gap-1.5 flex-nowrap overflow-hidden">
+            {pages.map((p) => (
+              <button
+                key={p.key}
+                onClick={() => onNavigate(p.key)}
+                className={`px-3 py-1.5 min-h-[36px] rounded text-sm font-medium whitespace-nowrap transition-colors ${
+                  currentPage === p.key
+                    ? 'bg-indigo-600 text-white'
+                    : 'text-gray-300 hover:bg-gray-800'
+                }`}
+              >
+                {p.label}
+              </button>
+            ))}
+          </nav>
+        )}
+        <div ref={rightRef} className="ml-auto flex items-center gap-1">
           <PoolDrawer />
           {runtime && (
             <div
@@ -125,18 +160,20 @@ export function Header({ currentPage, onNavigate }: HeaderProps) {
           >
             {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
           </button>
-          {/* Mobile menu button */}
-          <button
-            onClick={() => setMenuOpen(!menuOpen)}
-            className="sm:hidden shrink-0 p-2 rounded text-gray-400 hover:text-foreground hover:bg-gray-800 transition-colors"
-          >
-            {menuOpen ? <X size={18} /> : <Menu size={18} />}
-          </button>
+          {/* 汉堡按钮：导航被收纳时出现 */}
+          {collapsed && (
+            <button
+              onClick={() => setMenuOpen(!menuOpen)}
+              className="shrink-0 p-2 rounded text-gray-400 hover:text-foreground hover:bg-gray-800 transition-colors"
+            >
+              {menuOpen ? <X size={18} /> : <Menu size={18} />}
+            </button>
+          )}
         </div>
       </div>
-      {/* Mobile nav dropdown */}
-      {menuOpen && (
-        <nav className="sm:hidden flex flex-col gap-1 mt-2 pb-1">
+      {/* 收纳后的导航下拉 */}
+      {collapsed && menuOpen && (
+        <nav className="flex flex-col gap-1 mt-2 pb-1">
           {pages.map((p) => (
             <button
               key={p.key}
