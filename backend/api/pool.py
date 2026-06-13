@@ -183,7 +183,7 @@ async def _ensure_xvfb():
     _sp.run(["pkill", "-f", "Xvfb :99"], capture_output=True)
     await asyncio.sleep(0.5)
     _xvfb_proc = _sp.Popen(
-        ["Xvfb", ":99", "-screen", "0", "1920x1080x24", "-nolisten", "tcp"],
+        ["Xvfb", ":99", "-screen", "0", "1920x1080x24", "-nolisten", "tcp", "-ac"],
         stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
     )
     os.environ["DISPLAY"] = ":99"
