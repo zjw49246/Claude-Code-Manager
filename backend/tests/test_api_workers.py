@@ -82,17 +82,17 @@ async def test_create_worker_disabled_returns_503(client, monkeypatch):
 async def test_create_worker_auto_name_and_background_task(client, fake_provisioner):
     resp = await client.post(
         "/api/workers",
-        json={"accounts": [{"email": "a@x.com", "token": "tok123", "provider": "171mail"}]},
+        json={"name": "test-w", "accounts": [{"email": "a@x.com", "token": "tok123"}]},
     )
     assert resp.status_code == 200, resp.text
     data = resp.json()
-    assert data["name"] == f"test-manager-worker-{data['id']}"
+    assert data["name"] == "test-w"
     assert data["status"] == "creating"
     assert data["accounts"] == [{"email": "a@x.com", "status": "pending"}]
     await asyncio.sleep(0)  # 让 create_task 跑起来
     fake_provisioner.create_worker.assert_called_once()
     kwargs = fake_provisioner.create_worker.call_args.kwargs
-    assert kwargs["accounts"] == [{"email": "a@x.com", "token": "tok123", "provider": "171mail"}]
+    assert kwargs["accounts"] == [{"email": "a@x.com", "token": "tok123"}]
 
 
 async def test_stop_requires_ready(client, session_factory, fake_provisioner):

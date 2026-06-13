@@ -691,7 +691,7 @@ export const api = {
   listWorkers: () => request<Worker[]>('/api/workers'),
   getWorkerPool: (id: number) =>
     request<{ enabled: boolean; total: number; available: number; accounts: { id: string; email: string | null; enabled: boolean; available: boolean; cooldown_remaining: number }[] }>(`/api/workers/${id}/pool`),
-  createWorker: (data: { accounts: { email: string; token?: string; provider?: string }[]; name?: string }) =>
+  createWorker: (data: { accounts: { email: string; token?: string }[]; name?: string }) =>
     request<Worker>('/api/workers', { method: 'POST', body: JSON.stringify(data) }),
   getWorker: (id: number) => request<Worker>(`/api/workers/${id}`),
   getWorkerLogs: (id: number) => request<{ id: number; bootstrap_log: string | null }>(`/api/workers/${id}/logs`),
@@ -701,7 +701,7 @@ export const api = {
   retryWorker: (id: number) => request<Worker>(`/api/workers/${id}/retry`, { method: 'POST' }),
 
   // Pool add account
-  poolAddAccount: (data: { email: string; token: string; provider: string; mail_password?: string }) =>
+  poolAddAccount: (data: { email: string; token: string }) =>
     request<{ ok: boolean; status: string; account_id?: string }>('/api/pool/add', { method: 'POST', body: JSON.stringify(data) }),
   poolAddStatus: (email: string) =>
     request<{ status: string; detail?: string }>(`/api/pool/add/${encodeURIComponent(email)}`),

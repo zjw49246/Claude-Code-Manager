@@ -149,9 +149,7 @@ async def set_preferred(body: dict):
 
 class AddAccountRequest(BaseModel):
     email: str
-    token: str
-    provider: str = "171mail"  # "171mail" | "mailcatcher" | "mailcom"
-    mail_password: str = ""    # mailcom provider 用（mail.com Web 登录密码）
+    token: str  # 171mail 的接码 token 或 mail.com 的邮箱密码（按邮箱后缀自动判断）
 
 
 # 后台 add 状态：key = email -> {"status": running|success|failed, ...}
@@ -206,8 +204,7 @@ async def add_account(body: AddAccountRequest):
         str(login_py), str(script),
         "--email", email,
         "--token", body.token.strip(),
-        "--provider", body.provider,
-        *(["--mail-password", body.mail_password] if body.mail_password else []),
+
         "--config-dir", config_dir,
         "--add-to-pool", account_id,
         "--save-token",
