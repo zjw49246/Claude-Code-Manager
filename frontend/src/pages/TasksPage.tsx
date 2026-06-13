@@ -494,7 +494,6 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
                     )}
                   </div>
                   <div className="flex items-center gap-1.5 mt-1 ml-4" onClick={(e) => e.stopPropagation()}>
-                    <TaskConfigBadge task={t} onRefresh={refresh} />
                     <ToolsBadge task={t} onRefresh={refresh} />
                     <SubAgentsBadge task={t} />
                     <span className="flex-1" />
