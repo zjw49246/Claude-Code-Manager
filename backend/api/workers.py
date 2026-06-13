@@ -210,9 +210,35 @@ async def get_worker_pool(worker_id: int, db: AsyncSession = Depends(get_db)):
                 headers={"Authorization": f"Bearer {worker.auth_token}"},
             )
             if r.status_code == 404:
-                # worker 端 POOL_ENABLED=false：单账号模式，无号池
-                return {"enabled": False, "total": 0, "available": 0,
-                        "accounts": [], "single_account": True}
+                # worker 端 POOL_ENABLED=false：单账号模式。
+                # 老版 worker 没有账号查询端点，经 SSH 读 ~/.claude.json
+                # 的 oauthAccount.emailAddress 兜底，让用户知道用的是哪个号
+                email = None
+                try:
+                    from backend.services.ssh_executor import SSHExecutor
+                    ssh = SSHExecutor(
+                        host=worker.private_ip,
+                        user=worker.ssh_user,
+                        key_path=worker.ssh_key_path,
+                    )
+                    code, out = await ssh.run(
+                        "python3 -c \"import json;"
+                        "print(json.load(open('/home/'+__import__('getpass').getuser()+'/.claude.json'))"
+                        ".get('oauthAccount',{}).get('emailAddress',''))\"",
+                        timeout=15,
+                    )
+                    if code == 0 and out.strip():
+                        email = out.strip().splitlines()[-1]
+                except Exception:
+                    email = None
+                accounts = (
+                    [{"id": "default", "email": email, "enabled": True,
+                      "available": True, "cooldown_remaining": 0}]
+                    if email else []
+                )
+                return {"enabled": False, "total": len(accounts),
+                        "available": len(accounts), "accounts": accounts,
+                        "single_account": True}
             r.raise_for_status()
             return r.json()
     except HTTPException:
