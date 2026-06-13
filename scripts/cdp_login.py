@@ -121,7 +121,7 @@ async def cdp_login(email: str, token: str, config_dir: str, oauth_url: str, coo
 
             # 8. Launch CLI
             cli = subprocess.Popen(["claude", "auth", "login", "--email", email],
-                env={"CLAUDE_CONFIG_DIR": config_dir, "PATH": os.environ["PATH"], "HOME": os.environ["HOME"]},
+                env={"CLAUDE_CONFIG_DIR": config_dir, "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"), "HOME": os.environ.get("HOME", str(__import__('pathlib').Path.home())), "NO_COLOR": "1", "TERM": "dumb"},
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0)
             print(f"  CLI pid={cli.pid}")
 
@@ -178,9 +178,10 @@ async def cdp_login(email: str, token: str, config_dir: str, oauth_url: str, coo
                         print(f"  Auth status: {r.stdout.strip()[:200]}")
                         if email.lower() in r.stdout.lower():
                             print("SUCCESS!")
+                            return {"code": code, "state": state, "success": True}
                         else:
                             print("FAILED: auth status doesn't show email")
-                        return
+                            return {"code": code, "state": state, "success": False}
             print("FAILED: authorize")
             return None
     finally:
