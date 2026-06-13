@@ -233,15 +233,15 @@ function WorkerCard({ worker, onAction }: { worker: Worker; onAction: () => void
                     <span className="text-sm font-medium text-foreground">{a.id}</span>
                     {a.subscription_type && <span className="px-1 py-0.5 rounded bg-indigo-600/30 text-indigo-300 text-[10px] font-semibold uppercase">{a.subscription_type}</span>}
                     <button onClick={async () => {
-                      if (!window.confirm(\`从 Worker 号池删除 \${a.id}？\`)) return;
+                      if (!window.confirm(`从 Worker 号池删除 ${a.id}？`)) return;
                       try { await api.deleteWorkerAccount(worker.id, a.id); togglePool(); } catch (e) { window.alert(String(e)); }
                     }} className="ml-auto text-gray-500 hover:text-red-400 text-[10px]">删除</button>
                   </div>
                   {a.email && <div className="text-xs text-gray-500">{a.email}</div>}
                   {a.usage ? (
                     <div className="space-y-1">
-                      {a.usage.five_hour && <div className="flex items-center gap-2"><span className="w-6 text-gray-500">5h</span><div className="flex-1 h-1.5 rounded bg-gray-700"><div className={\`h-full rounded \${a.usage.five_hour.utilization>=85?'bg-red-500':a.usage.five_hour.utilization>=60?'bg-yellow-500':'bg-green-500'}\`} style={{width:\`\${Math.min(100,a.usage.five_hour.utilization||0)}%\`}} /></div><span className="w-8 text-right text-gray-400">{(a.usage.five_hour.utilization||0).toFixed(0)}%</span></div>}
-                      {a.usage.seven_day && <div className="flex items-center gap-2"><span className="w-6 text-gray-500">7d</span><div className="flex-1 h-1.5 rounded bg-gray-700"><div className={\`h-full rounded \${a.usage.seven_day.utilization>=85?'bg-red-500':a.usage.seven_day.utilization>=60?'bg-yellow-500':'bg-green-500'}\`} style={{width:\`\${Math.min(100,a.usage.seven_day.utilization||0)}%\`}} /></div><span className="w-8 text-right text-gray-400">{(a.usage.seven_day.utilization||0).toFixed(0)}%</span></div>}
+                      {a.usage.five_hour && <div className="flex items-center gap-2"><span className="w-6 text-gray-500">5h</span><div className="flex-1 h-1.5 rounded bg-gray-700"><div className={`h-full rounded \${a.usage.five_hour.utilization>=85?'bg-red-500':a.usage.five_hour.utilization>=60?'bg-yellow-500':'bg-green-500'}`} style={{width:`\${Math.min(100,a.usage.five_hour.utilization||0)}%`}} /></div><span className="w-8 text-right text-gray-400">{(a.usage.five_hour.utilization||0).toFixed(0)}%</span></div>}
+                      {a.usage.seven_day && <div className="flex items-center gap-2"><span className="w-6 text-gray-500">7d</span><div className="flex-1 h-1.5 rounded bg-gray-700"><div className={`h-full rounded \${a.usage.seven_day.utilization>=85?'bg-red-500':a.usage.seven_day.utilization>=60?'bg-yellow-500':'bg-green-500'}`} style={{width:`\${Math.min(100,a.usage.seven_day.utilization||0)}%`}} /></div><span className="w-8 text-right text-gray-400">{(a.usage.seven_day.utilization||0).toFixed(0)}%</span></div>}
                     </div>
                   ) : a.usage_error ? (
                     <div className="text-red-400">{a.usage_error === 'no_credentials' ? '未找到凭据' : a.usage_error === 'token_expired' ? 'Token 过期' : a.usage_error}</div>
