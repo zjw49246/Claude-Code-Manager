@@ -681,20 +681,59 @@ async def perform_login(
                 page = await context.new_page()
 
                 if _use_mailcatcher:
-                    # mail.com 域：CLI 已发邮件，轮询 MailCatcher 拿 magic link，
-                    # 浏览器访问 magic link 获取 session cookies
-                    logger.info("mailcatcher: polling for magic link (cli_spawn_ts=%.0f)...", cli_spawn_ts)
+                    # mail.com 域：浏览器模拟登录 Claude → 输入邮箱 → Claude 发验证邮件
+                    # → MailCatcher 接码拿 magic link → 浏览器访问 magic link 完成登录
+                    # → 拿到 session cookies → 后续 Authorize 和 171mail 一样
+                    logger.info("mailcatcher: 浏览器模拟 Claude 登录流程...")
+
+                    # 1. 打开 Claude 登录页
+                    await page.goto("https://claude.ai/login", wait_until="domcontentloaded", timeout=PLAYWRIGHT_NAV_TIMEOUT)
+                    for _ in range(30):
+                        t = (await page.title()) or ""
+                        if "just a moment" not in t.lower():
+                            break
+                        await asyncio.sleep(1)
+                    await asyncio.sleep(2)
+
+                    # 2. 点 "Continue with email" 如果有的话
+                    try:
+                        btn = page.locator("button", has_text="Continue with email").first
+                        await btn.wait_for(state="visible", timeout=5000)
+                        await btn.click()
+                        logger.info("mailcatcher: clicked 'Continue with email'")
+                        await asyncio.sleep(2)
+                    except Exception:
+                        pass
+
+                    # 3. 输入邮箱并提交
+                    try:
+                        email_input = page.locator('input[type="email"], input[name="email"]').first
+                        await email_input.wait_for(state="visible", timeout=5000)
+                        await email_input.fill(email)
+                        await asyncio.sleep(0.5)
+                        submit = page.locator('button[type="submit"]').first
+                        await submit.click()
+                        logger.info("mailcatcher: submitted email, waiting for verification...")
+                        await asyncio.sleep(5)  # 等 Claude 发邮件
+                    except Exception as exc:
+                        logger.error("mailcatcher: email input failed: %s", exc)
+
+                    # 4. 轮询 MailCatcher 拿 magic link（Claude 此时已发邮件到邮箱）
+                    mail_send_ts = time.time()
+                    logger.info("mailcatcher: polling MailCatcher for magic link...")
                     async with httpx.AsyncClient(timeout=30, headers={"User-Agent": "Mozilla/5.0"}) as mc:
                         ml = await _poll_magic_link_mailcatcher(
-                            mc, token_171, cli_spawn_ts, EMAIL_POLL_TIMEOUT
+                            mc, token_171, mail_send_ts, EMAIL_POLL_TIMEOUT
                         )
                     logger.info("mailcatcher: got magic link (%d chars), visiting...", len(ml))
+
+                    # 5. 浏览器访问 magic link 完成登录
                     await page.goto(ml, wait_until="domcontentloaded", timeout=PLAYWRIGHT_NAV_TIMEOUT)
                     for _ in range(30):
                         if "claude.ai" in page.url and "magic-link" not in page.url:
                             break
                         await asyncio.sleep(1)
-                    logger.info("mailcatcher: magic link done, url=%s", page.url[:80])
+                    logger.info("mailcatcher: logged in, url=%s", page.url[:80])
                 else:
                     # 171mail：预注入 cookies
                     await context.add_cookies(cookies)
