@@ -115,6 +115,7 @@ async def relogin_account(account_id: str):
     proc = await asyncio.create_subprocess_exec(
         str(login_py), str(script), "--email", acc.email, "--config-dir", acc.config_dir,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+        env={**os.environ, "PYTHONUNBUFFERED": "1"},
     )
     _relogin_state[account_id] = {"status": "running", "started_at": time.time()}
     asyncio.get_running_loop().create_task(_watch_relogin(account_id, proc))
@@ -210,6 +211,7 @@ async def add_account(body: AddAccountRequest):
         "--add-to-pool", account_id,
         "--save-token",
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+        env={**os.environ, "PYTHONUNBUFFERED": "1"},
     )
     _add_state[email] = {"status": "running", "started_at": time.time(), "account_id": account_id}
     asyncio.get_running_loop().create_task(_watch_add(email, proc))

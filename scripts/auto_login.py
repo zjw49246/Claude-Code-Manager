@@ -804,6 +804,7 @@ async def perform_login(
     env["CLAUDE_CONFIG_DIR"] = str(config_path)
     env["NO_COLOR"] = "1"
     env["TERM"] = "dumb"
+    env["BROWSER"] = "false"  # 阻止 CLI 自己打开浏览器（我们用 CDP Chrome 做 OAuth）
 
     proc = subprocess.Popen(
         [claude_bin, "auth", "login", "--email", email],
