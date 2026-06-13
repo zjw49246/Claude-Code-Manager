@@ -199,7 +199,7 @@ function WorkerCard({ worker, onAction }: { worker: Worker; onAction: () => void
             <button title="开机" onClick={() => act(api.startWorker)}
               className="p-1.5 text-gray-400 hover:text-green-400"><Play size={15} /></button>
           )}
-          {!busy && (
+          {(
             <button title="销毁（terminate EC2）"
               onClick={() => act(api.destroyWorker, `销毁 ${shortName(worker)}？EC2 实例将被 terminate，不可恢复！`)}
               className="p-1.5 text-gray-400 hover:text-red-400"><Trash2 size={15} /></button>
