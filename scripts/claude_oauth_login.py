@@ -928,7 +928,7 @@ def _read_verification_from_mailcatcher(mail_token: str, max_wait: int = 120, se
         attempt += 1
         try:
             url = f"{base}/api/v1/message?token={mail_token}&type=claude"
-            req = urllib.request.Request(url)
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
             with urllib.request.urlopen(req, timeout=15) as resp:
                 data = json.loads(resp.read().decode())
             if data.get("code") == 200:
