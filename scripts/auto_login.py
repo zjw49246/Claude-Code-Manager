@@ -789,54 +789,8 @@ async def perform_login(
     else:
         logger.info("step 1: mail.com 域，跳过 171mail（Chrome CDP 登录 + MailCatcher 接码）")
 
-    # Step 2: Spawn CLI auth login（极简 env：不给 DISPLAY 防 CLI 打开浏览器）
-    logger.info("step 2: spawning claude auth login...")
-    claude_bin = _find_claude()
-    cli_env = {
-        "CLAUDE_CONFIG_DIR": str(config_path),
-        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-        "HOME": str(Path.home()),
-        "NO_COLOR": "1",
-        "TERM": "dumb",
-    }
-
-    proc = subprocess.Popen(
-        [claude_bin, "auth", "login", "--email", email],
-        env=cli_env,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        bufsize=0,
-    )
-    logger.info("CLI pid=%d", proc.pid)
-
-    # Read stdout for OAuth URL
-    oauth_url: str | None = None
-    captured = b""
-    deadline = time.time() + CLI_OAUTH_URL_TIMEOUT
-    while time.time() < deadline and oauth_url is None:
-        if proc.poll() is not None:
-            break
-        rlist, _, _ = select.select([proc.stdout], [], [], 0.2)
-        if rlist:
-            try:
-                captured += os.read(proc.stdout.fileno(), 8192)
-            except OSError:
-                break
-        m = OAUTH_URL_RE.search(captured.decode(errors="replace"))
-        if m:
-            oauth_url = m.group(0)
-        await asyncio.sleep(0.1)
-
-    if not oauth_url:
-        proc.kill()
-        snippet = captured.decode(errors="replace")[-400:]
-        logger.error("OAuth URL not found. CLI output: %s", snippet)
-        return False
-    logger.info("OAuth URL found (%d chars)", len(oauth_url))
-
-    # Step 3: Chrome CDP 完成 OAuth（用验证过的 cdp_login 模块）
-    logger.info("step 3: Chrome CDP OAuth...")
+    # Step 2: Chrome CDP 完成全部登录（浏览器登录 + CLI OAuth + stdin + 验证）
+    logger.info("step 2: Chrome CDP 全流程登录...")
     script_dir = Path(__file__).resolve().parent
     sys.path.insert(0, str(script_dir))
     from cdp_login import cdp_login
@@ -844,49 +798,14 @@ async def perform_login(
         email=email,
         token=token_171,
         config_dir=str(config_path),
-        oauth_url=oauth_url,
+        oauth_url="",  # cdp_login 内部启动 CLI 拿 OAuth URL
         cookies_171=cookies_171 if not _use_mailcatcher else None,
     )
-    if not result or not result.get("code"):
-        logger.error("Chrome CDP OAuth failed")
-        proc.kill()
+    if not result or not result.get("success"):
+        logger.error("Chrome CDP 登录失败")
         return False
 
-    code = result["code"]
-    state = result["state"]
-    code_state = f"{code}#{state}"
-    logger.info("got code#state (%d chars), feeding to CLI stdin...", len(code_state))
-
-    # Step 4: Feed code#state to CLI stdin（和 elastic-agent 同款）
-    # CLI 从 stdin 读 code#state 然后自己做 token exchange。
-    # 不走 HTTP callback（那需要 mitmproxy patch redirect_uri）。
-    try:
-        proc.stdin.write(f"{code_state}\n".encode())
-        proc.stdin.flush()
-        proc.stdin.close()
-    except Exception as exc:
-        logger.warning("stdin write error: %s", exc)
-
-    # Wait for CLI to exit
-    for _ in range(CLI_EXIT_TIMEOUT):
-        if proc.poll() is not None:
-            break
-        await asyncio.sleep(1)
-    if proc.poll() is None:
-        proc.kill()
-        logger.warning("CLI did not exit within %ds — killed", CLI_EXIT_TIMEOUT)
-
-    # Verify
-    status = subprocess.run(
-        [claude_bin, "auth", "status", "--text"],
-        env={"CLAUDE_CONFIG_DIR": str(config_path), "PATH": os.environ.get("PATH", "")},
-        capture_output=True, text=True, timeout=15,
-    )
-    if email.lower() in status.stdout.lower():
-        logger.info("verified: %s", status.stdout.strip()[:200])
-    else:
-        logger.warning("auth status: %s", status.stdout[:300])
-
+    logger.info("登录成功: %s", email)
     return True
 
 
