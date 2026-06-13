@@ -229,9 +229,8 @@ async def get_worker_pool(worker_id: int, db: AsyncSession = Depends(get_db)):
                       "available": True, "cooldown_remaining": 0}]
                     if email else []
                 )
-                return {"enabled": False, "total": len(accounts),
-                        "available": len(accounts), "accounts": accounts,
-                        "single_account": True}
+                return {"enabled": True, "total": len(accounts),
+                        "available": len(accounts), "accounts": accounts}
             r.raise_for_status()
             return r.json()
     except HTTPException:
