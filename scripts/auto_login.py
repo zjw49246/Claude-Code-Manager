@@ -859,15 +859,15 @@ def main():
         if not config_dir:
             config_dir = str(Path.home() / ".claude-account-new")
 
-    if args.save_token or not get_email_token(email):
-        save_email_token(email, token, provider=provider, mail_password=mail_password)
-
     mail_password = args.mail_password or ""
     if provider == "mailcom" and not mail_password:
         saved = load_email_tokens().get(email) or {}
         mail_password = saved.get("mail_password", "")
     if provider == "mailcom" and not mail_password:
         mail_password = input("mail.com 邮箱密码: ").strip()
+
+    if args.save_token or not get_email_token(email):
+        save_email_token(email, token, provider=provider, mail_password=mail_password)
 
     ok = asyncio.run(perform_login(
         email=email,
