@@ -121,7 +121,7 @@ class ClaudePool:
 
     @property
     def enabled(self) -> bool:
-        return len(self._accounts) > 1
+        return len(self._accounts) >= 1
 
     def _load(self):
         if not self._config_path.exists():
