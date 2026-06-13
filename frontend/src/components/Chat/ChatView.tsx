@@ -802,7 +802,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
           active={monitorCount > 0}
           onNavigate={() => setShowMonitorPanel(!showMonitorPanel)}
         />
-        <RunOnBadge task={task} onRefresh={() => onTaskUpdated?.()} />
+        <RunOnBadge task={task} />
         <TaskConfigBadge task={task} onRefresh={() => onTaskUpdated?.()} align="right" />
         <button
           onClick={handleStar}

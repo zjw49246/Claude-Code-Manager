@@ -152,22 +152,22 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId 
               <span className={`hidden sm:inline text-xs px-1.5 rounded font-medium ${t.provider === 'codex' ? 'bg-green-600/30 text-green-300' : 'bg-blue-600/30 text-blue-300'}`}>
                 {t.provider === 'codex' ? 'Codex' : 'Claude'}
               </span>
-              <RunOnBadge task={t} onRefresh={onRefresh} />
+              <RunOnBadge task={t} />
               <span className="hidden sm:inline">
                 <TaskConfigBadge task={t} onRefresh={onRefresh} />
               </span>
-              <button
-                onClick={() => handleStar(t.id)}
-                className={`p-0.5 transition-colors ${t.starred ? 'text-yellow-400 hover:text-yellow-300' : 'text-gray-600 hover:text-yellow-400'}`}
-                title={t.starred ? "Unstar" : "Star"}
-              >
-                <Star size={14} fill={t.starred ? 'currentColor' : 'none'} />
-              </button>
+              <ToolsBadge task={t} onRefresh={onRefresh} />
               <SubAgentsBadge task={t} />
             </div>
             {/* Action buttons — always top-right aligned */}
             <div className="flex gap-1 shrink-0 items-center">
-              <ToolsBadge task={t} onRefresh={onRefresh} />
+              <button
+                onClick={() => handleStar(t.id)}
+                className={`p-1.5 transition-colors ${t.starred ? 'text-yellow-400 hover:text-yellow-300' : 'text-gray-600 hover:text-yellow-400'}`}
+                title={t.starred ? "Unstar" : "Star"}
+              >
+                <Star size={16} fill={t.starred ? 'currentColor' : 'none'} />
+              </button>
               <button
                 onClick={() => handleToggleUnread(t.id, t.has_unread)}
                 className={`p-1.5 transition-colors ${t.has_unread ? 'text-indigo-400 hover:text-indigo-300' : 'text-gray-600 hover:text-indigo-400'}`}
