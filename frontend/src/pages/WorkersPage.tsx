@@ -137,6 +137,11 @@ function LogsModal({ worker, onClose }: { worker: Worker; onClose: () => void })
   );
 }
 
+/** 前端只显示短名 worker-{id}；AWS/EC2 标签保留全名（含本机前缀）。 */
+function shortName(w: Worker): string {
+  return `worker-${w.id}`;
+}
+
 function WorkerCard({ worker, onAction }: { worker: Worker; onAction: () => void }) {
   const [logsOpen, setLogsOpen] = useState(false);
   const [poolOpen, setPoolOpen] = useState(false);
@@ -170,7 +175,7 @@ function WorkerCard({ worker, onAction }: { worker: Worker; onAction: () => void
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 min-w-0">
           <Server size={16} className="text-indigo-400 shrink-0" />
-          <span className="text-foreground font-medium truncate">{worker.name}</span>
+          <span className="text-foreground font-medium truncate" title={worker.name}>{shortName(worker)}</span>
           <span className={`text-xs px-2 py-0.5 rounded-full shrink-0 ${STATUS_COLORS[worker.status] || 'bg-gray-500/20 text-gray-400'}`}>
             {worker.status}{busy && worker.bootstrap_step ? `: ${worker.bootstrap_step}` : ''}
           </span>
@@ -187,7 +192,7 @@ function WorkerCard({ worker, onAction }: { worker: Worker; onAction: () => void
               className="p-1.5 text-gray-400 hover:text-blue-400"><RefreshCw size={15} /></button>
           )}
           {worker.status === 'ready' && (
-            <button title="关机（EC2 stop，数据保留）" onClick={() => act(api.stopWorker, `关机 ${worker.name}？数据保留，停机期间不可派发任务。`)}
+            <button title="关机（EC2 stop，数据保留）" onClick={() => act(api.stopWorker, `关机 ${shortName(worker)}？数据保留，停机期间不可派发任务。`)}
               className="p-1.5 text-gray-400 hover:text-yellow-400"><Power size={15} /></button>
           )}
           {worker.status === 'stopped' && (
@@ -197,8 +202,8 @@ function WorkerCard({ worker, onAction }: { worker: Worker; onAction: () => void
           {!busy && (
             <button title={worker.adopted ? '移除（收养实例只关机不销毁）' : '销毁（terminate EC2）'}
               onClick={() => act(api.destroyWorker, worker.adopted
-                ? `移除 ${worker.name}？收养的实例只会关机，不会销毁。`
-                : `销毁 ${worker.name}？EC2 实例将被 terminate，不可恢复！`)}
+                ? `移除 ${shortName(worker)}？收养的实例只会关机，不会销毁。`
+                : `销毁 ${shortName(worker)}？EC2 实例将被 terminate，不可恢复！`)}
               className="p-1.5 text-gray-400 hover:text-red-400"><Trash2 size={15} /></button>
           )}
         </div>
@@ -223,20 +228,18 @@ function WorkerCard({ worker, onAction }: { worker: Worker; onAction: () => void
             <span className="text-red-400 break-all">{poolErr}</span>
           ) : pool === null ? (
             <span className="text-gray-500">加载账号池…</span>
-          ) : (pool as { single_account?: boolean }).single_account ? (
-            <span className="text-gray-500">未启用号池（单账号模式，账号见下方登记信息）</span>
           ) : pool.accounts.length === 0 ? (
-            <span className="text-gray-500">号池为空</span>
+            <span className="text-gray-500">未能识别使用的账号</span>
           ) : (
             <>
-              <div className="text-gray-500">CC 账号池：{pool.available}/{pool.total} 可用</div>
+              <div className="text-gray-500">
+                使用的账号{(pool as { single_account?: boolean }).single_account ? '（单账号模式）' : `（号池 ${pool.available}/${pool.total} 可用）`}
+                <span className="ml-1 text-gray-600">· 号的管理在顶栏号池里</span>
+              </div>
               {pool.accounts.map((a) => (
                 <div key={a.id} className="flex items-center gap-2">
                   <span className={a.available ? 'text-emerald-400' : a.enabled ? 'text-yellow-400' : 'text-gray-500'}>●</span>
                   <span className="text-gray-300">{a.email || a.id}</span>
-                  <span className="text-gray-500">
-                    {!a.enabled ? 'disabled' : a.available ? 'available' : `冷却 ${Math.ceil(a.cooldown_remaining / 60)}m`}
-                  </span>
                 </div>
               ))}
             </>

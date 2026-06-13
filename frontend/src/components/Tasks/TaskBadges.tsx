@@ -296,7 +296,7 @@ export function TaskConfigBadge({ task, onRefresh, openUp, align }: { task: Task
               <option value="">本机</option>
               {workers.map((w) => (
                 <option key={w.id} value={w.id} disabled={w.status !== 'ready'}>
-                  {w.name}{w.status !== 'ready' ? ` (${w.status})` : ''}
+                  worker-{w.id}{w.status !== 'ready' ? ` (${w.status})` : ''}
                 </option>
               ))}
             </select>
