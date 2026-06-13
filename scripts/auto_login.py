@@ -364,8 +364,19 @@ async def _mailcatcher_browser_login(email: str, mail_token: str, oauth_url: str
             await asyncio.sleep(5)
         return False
 
+    xvfb_proc = None
     try:
         import websockets as _ws
+
+        # 确保有 DISPLAY（Chrome 需要，即使 headless=False 也要）
+        if not os.environ.get("DISPLAY"):
+            xvfb_proc = _sp.Popen(
+                ["Xvfb", ":99", "-screen", "0", "1920x1080x24", "-nolisten", "tcp"],
+                stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
+            )
+            os.environ["DISPLAY"] = ":99"
+            await asyncio.sleep(1)
+            logger.info("Started Xvfb on :99")
 
         _sp.run(["pkill", "-f", "chrome.*remote-debugging-port"], capture_output=True)
         await asyncio.sleep(1)
@@ -513,6 +524,8 @@ async def _mailcatcher_browser_login(email: str, mail_token: str, oauth_url: str
         if chrome_proc:
             chrome_proc.kill()
             chrome_proc.wait()
+        if xvfb_proc:
+            xvfb_proc.terminate()
 
 
 # ---------------------------------------------------------------------------
