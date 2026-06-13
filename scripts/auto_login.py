@@ -680,34 +680,23 @@ async def perform_login(
                 )
                 page = await context.new_page()
 
-                if provider == "mailcom":
-                    # mail.com Web 模式：用 CLI 启动时间（cli_spawn_ts）过滤旧邮件
-                    logger.info("mailcom: polling mail.com inbox for magic link (after cli_spawn_ts=%.0f)...", cli_spawn_ts)
-                    ml = await _poll_magic_link_mailcom(
-                        email, mail_password, cli_spawn_ts, EMAIL_POLL_TIMEOUT
-                    )
-                    logger.info("mailcom: got magic link (%d chars), visiting...", len(ml))
-                    await page.goto(ml, wait_until="domcontentloaded", timeout=PLAYWRIGHT_NAV_TIMEOUT)
-                    for _ in range(30):
-                        if "claude.ai" in page.url: break
-                        await asyncio.sleep(1)
-                    logger.info("mailcom: logged in via magic link, url=%s", page.url[:80])
-                elif provider == "mailcatcher":
-                    logger.info("mailcatcher: polling for magic link (after cli_spawn_ts=%.0f)...", cli_spawn_ts)
-                    async with httpx.AsyncClient(timeout=30) as mc:
+                if _use_mailcatcher:
+                    # mail.com 域：CLI 已发邮件，轮询 MailCatcher 拿 magic link，
+                    # 浏览器访问 magic link 获取 session cookies
+                    logger.info("mailcatcher: polling for magic link (cli_spawn_ts=%.0f)...", cli_spawn_ts)
+                    async with httpx.AsyncClient(timeout=30, headers={"User-Agent": "Mozilla/5.0"}) as mc:
                         ml = await _poll_magic_link_mailcatcher(
                             mc, token_171, cli_spawn_ts, EMAIL_POLL_TIMEOUT
                         )
                     logger.info("mailcatcher: got magic link (%d chars), visiting...", len(ml))
                     await page.goto(ml, wait_until="domcontentloaded", timeout=PLAYWRIGHT_NAV_TIMEOUT)
-                    # 等登录完成（页面跳转到 claude.ai）
                     for _ in range(30):
-                        if "claude.ai" in page.url:
+                        if "claude.ai" in page.url and "magic-link" not in page.url:
                             break
                         await asyncio.sleep(1)
-                    logger.info("mailcatcher: logged in via magic link, url=%s", page.url[:80])
+                    logger.info("mailcatcher: magic link done, url=%s", page.url[:80])
                 else:
-                    # 171mail 模式：预注入 cookies
+                    # 171mail：预注入 cookies
                     await context.add_cookies(cookies)
 
                 # Identity check
