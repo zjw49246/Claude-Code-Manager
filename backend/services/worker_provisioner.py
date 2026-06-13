@@ -217,13 +217,13 @@ if ! command -v node >/dev/null; then
 fi
 command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh > /dev/null
 sudo npm ls -g @anthropic-ai/claude-code --depth=0 >/dev/null 2>&1 || sudo npm install -g @anthropic-ai/claude-code@latest > /dev/null
-# Selenium OAuth 登录依赖（mail.com 域名账号用）
-sudo apt-get install -y -qq xvfb python3-pip > /dev/null 2>&1 || true
+# Chrome CDP 自动登录依赖（Chrome + xvfb + xdotool + websockets）
+sudo apt-get install -y -qq xvfb xdotool python3-pip > /dev/null 2>&1 || true
 if ! command -v google-chrome >/dev/null; then
   curl -sL https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -o /tmp/chrome.deb
   sudo dpkg -i /tmp/chrome.deb > /dev/null 2>&1; sudo apt-get -f install -y -qq > /dev/null 2>&1
 fi
-pip3 install --break-system-packages selenium undetected-chromedriver setuptools > /dev/null 2>&1 || true
+pip3 install --break-system-packages websockets > /dev/null 2>&1 || true
 echo "node=$(node --version) uv=$($HOME/.local/bin/uv --version 2>/dev/null || uv --version) claude=$(claude --version 2>/dev/null | head -1) chrome=$(google-chrome --version 2>/dev/null | head -1)"
 """
         code, out = await ssh.run(script, timeout=900)
