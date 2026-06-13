@@ -303,19 +303,21 @@ echo deploy-ok
             token = acct.get("token", "")
             name = "default" if i == 0 else f"account-{i + 1}"
             await self._log(worker_id, f"login {email} -> pool slot {name}")
-            # 启动无认证 Xvfb（-ac），然后跑 auto_login
-            # xvfb-run 的 Xvfb 有 auth，cdp_login 启动的 Chrome 连不上
-            parts = [
-                f"cd {remote_dir} && export PATH=\"$HOME/.local/bin:$PATH\" &&",
-                "pkill -f 'Xvfb :99' 2>/dev/null; sleep 0.5;",
-                "Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp -ac > /dev/null 2>&1 &",
-                "sleep 1 && export DISPLAY=:99 &&",
-                f"uv run python scripts/auto_login.py --email {email}",
-            ]
-            if token:
-                parts.append(f"--token {token}")
-            parts.append(f"--add-to-pool {name} --save-token")
-            cmd = " ".join(parts)
+            # 写一个临时脚本到 worker 上执行（避免 shell 命令拼接的引号/分号陷阱）
+            login_script = f"""#!/bin/bash
+set +e
+export PATH="$HOME/.local/bin:$PATH"
+cd {remote_dir}
+pkill -f 'Xvfb :99' 2>/dev/null
+sleep 0.5
+Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp -ac > /dev/null 2>&1 &
+sleep 1
+export DISPLAY=:99
+uv run python scripts/auto_login.py --email '{email}' --token '{token}' --add-to-pool {name} --save-token
+"""
+            # 写脚本到 worker 再执行
+            await ssh.run(f"cat > /tmp/ccm_login.sh << 'SCRIPT'\n{login_script}SCRIPT\nchmod +x /tmp/ccm_login.sh")
+            cmd = "bash /tmp/ccm_login.sh"
             code, out = await ssh.run(cmd, timeout=600)
             status = "logged_in" if code == 0 else "failed"
             results.append({"email": email, "status": status})
