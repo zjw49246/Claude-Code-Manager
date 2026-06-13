@@ -237,7 +237,8 @@ sudo npm ls -g @anthropic-ai/claude-code --depth=0 >/dev/null 2>&1 || sudo npm i
 sudo apt-get install -y -qq xvfb xdotool python3-pip > /dev/null 2>&1 || true
 if ! command -v google-chrome >/dev/null; then
   curl -sL https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -o /tmp/chrome.deb
-  sudo dpkg -i /tmp/chrome.deb > /dev/null 2>&1; sudo apt-get -f install -y -qq > /dev/null 2>&1
+  (sudo dpkg -i /tmp/chrome.deb > /dev/null 2>&1 || true)
+  sudo apt-get -f install -y -qq > /dev/null 2>&1 || true
 fi
 pip3 install --break-system-packages websockets > /dev/null 2>&1 || true
 echo "node=$(node --version) uv=$($HOME/.local/bin/uv --version 2>/dev/null || uv --version) claude=$(claude --version 2>/dev/null | head -1) chrome=$(google-chrome --version 2>/dev/null | head -1)"
