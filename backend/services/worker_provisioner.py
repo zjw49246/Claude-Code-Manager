@@ -313,7 +313,8 @@ sleep 0.5
 Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp -ac > /dev/null 2>&1 &
 sleep 1
 export DISPLAY=:99
-uv run python scripts/auto_login.py --email '{email}' --token '{token}' --add-to-pool {name} --save-token
+CONFIG_DIR="$HOME/.claude" && [ "{name}" != "default" ] && CONFIG_DIR="$HOME/.claude-{name}"
+uv run python scripts/auto_login.py --email '{email}' --token '{token}' --config-dir "$CONFIG_DIR" --add-to-pool {name} --save-token
 """
             # 写脚本到 worker 再执行
             await ssh.run(f"cat > /tmp/ccm_login.sh << 'SCRIPT'\n{login_script}SCRIPT\nchmod +x /tmp/ccm_login.sh")
