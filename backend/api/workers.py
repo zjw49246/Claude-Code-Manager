@@ -235,3 +235,88 @@ async def get_worker_pool(worker_id: int, db: AsyncSession = Depends(get_db)):
         raise
     except Exception as e:
         raise HTTPException(502, f"无法连接 worker 号池: {e}")
+
+
+@router.post("/{worker_id}/pool/add")
+async def add_worker_account(worker_id: int, body: dict, db: AsyncSession = Depends(get_db)):
+    """在 worker 上添加账号（跑 auto_login.py）。body: {email, token}"""
+    worker = await db.get(Worker, worker_id)
+    if not worker:
+        raise HTTPException(404, "Worker not found")
+    if worker.status != "ready" or not worker.private_ip:
+        raise HTTPException(409, f"Worker 未就绪（{worker.status}）")
+
+    email = body.get("email", "").strip()
+    token = body.get("token", "").strip()
+    if not email or not token:
+        raise HTTPException(400, "email 和 token 必填")
+
+    from backend.config import settings
+    from backend.services.ssh_executor import SSHExecutor
+    ssh = SSHExecutor(host=worker.private_ip, user=worker.ssh_user,
+                      key_path=worker.ssh_key_path or settings.worker_ssh_key_path)
+
+    # 算 slot 名：查 worker 现有账号数
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get(f"http://{worker.private_ip}:{worker.ccm_port}/api/pool/status",
+                            headers={"Authorization": f"Bearer {worker.auth_token}"})
+            existing = len(r.json().get("accounts", [])) if r.status_code == 200 else 0
+    except Exception:
+        existing = 0
+
+    slot = f"account-{existing + 1}" if existing > 0 else "default"
+    remote_dir = settings.worker_remote_dir
+
+    # 后台跑 auto_login（xvfb-run 包装）
+    cmd = (
+        f"cd {remote_dir} && export PATH=\"$HOME/.local/bin:$PATH\" && "
+        f"xvfb-run --auto-servernum --server-args='-screen 0 1920x1080x24' "
+        f"python3 scripts/auto_login.py --email {email} --token {token} "
+        f"--add-to-pool {slot} --save-token"
+    )
+
+    # 这个任务可能跑 1-2 分钟，用 fire-and-forget
+    _worker_login_state[f"{worker_id}:{email}"] = {"status": "running", "started_at": time.time()}
+
+    async def _run():
+        code, out = await ssh.run(cmd, timeout=600)
+        _worker_login_state[f"{worker_id}:{email}"] = {
+            "status": "success" if code == 0 else "failed",
+            "detail": out[-1000:],
+        }
+
+    import asyncio
+    asyncio.create_task(_run())
+    return {"ok": True, "status": "running", "slot": slot}
+
+
+# worker 登录状态
+_worker_login_state: dict[str, dict] = {}
+
+
+@router.get("/{worker_id}/pool/add/{email}")
+async def worker_add_status(worker_id: int, email: str):
+    return _worker_login_state.get(f"{worker_id}:{email}") or {"status": "idle"}
+
+
+@router.delete("/{worker_id}/pool/{account_id}")
+async def delete_worker_account(worker_id: int, account_id: str, db: AsyncSession = Depends(get_db)):
+    """从 worker 的号池中删除账号。"""
+    worker = await db.get(Worker, worker_id)
+    if not worker:
+        raise HTTPException(404, "Worker not found")
+    if worker.status != "ready" or not worker.private_ip:
+        raise HTTPException(409, f"Worker 未就绪（{worker.status}）")
+
+    # 转发到 worker 的 pool delete API
+    import httpx
+    async with httpx.AsyncClient(timeout=10) as c:
+        r = await c.delete(
+            f"http://{worker.private_ip}:{worker.ccm_port}/api/pool/accounts/{account_id}",
+            headers={"Authorization": f"Bearer {worker.auth_token}"},
+        )
+    if r.status_code >= 400:
+        raise HTTPException(r.status_code, r.text[:300])
+    return r.json()
