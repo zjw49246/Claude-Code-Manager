@@ -560,6 +560,18 @@ export function TaskForm({ onCreated }: TaskFormProps) {
             </div>
           )}
         </div>
+        {/* Star */}
+        <button
+          type="button"
+          onClick={() => setStarOnCreate(!starOnCreate)}
+          className={`flex items-center gap-1 text-xs px-2 py-1.5 rounded border transition-colors ${
+            starOnCreate
+              ? 'bg-yellow-600/30 text-yellow-300 border-yellow-500/50 hover:bg-yellow-600/40'
+              : 'bg-gray-700 text-gray-400 border-gray-600 hover:bg-gray-600 hover:text-gray-300'
+          }`}
+        >
+          <Star size={13} fill={starOnCreate ? 'currentColor' : 'none'} />
+        </button>
         {/* Tools dropdown */}
         {AVAILABLE_TOOLS.length > 0 && (
           <div ref={toolsRef} className="relative">
@@ -577,7 +589,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
               {enabledToolCount > 0 && <span className="sm:hidden">{enabledToolCount}</span>}
             </button>
             {showToolsDropdown && (
-              <div className="absolute bottom-full mb-1 left-0 bg-gray-800 border border-gray-600 rounded shadow-lg z-20 min-w-[180px]">
+              <div className="absolute bottom-full mb-1 right-0 bg-gray-800 border border-gray-600 rounded shadow-lg z-20 min-w-[180px]">
                 {AVAILABLE_TOOLS.map((tool) => {
                   const locked = tool.key === 'help';
                   return (
@@ -601,18 +613,6 @@ export function TaskForm({ onCreated }: TaskFormProps) {
             )}
           </div>
         )}
-        {/* Star */}
-        <button
-          type="button"
-          onClick={() => setStarOnCreate(!starOnCreate)}
-          className={`flex items-center gap-1 text-xs px-2 py-1.5 rounded border transition-colors ${
-            starOnCreate
-              ? 'bg-yellow-600/30 text-yellow-300 border-yellow-500/50 hover:bg-yellow-600/40'
-              : 'bg-gray-700 text-gray-400 border-gray-600 hover:bg-gray-600 hover:text-gray-300'
-          }`}
-        >
-          <Star size={13} fill={starOnCreate ? 'currentColor' : 'none'} />
-        </button>
         {/* Create */}
         <button
           type="submit"
