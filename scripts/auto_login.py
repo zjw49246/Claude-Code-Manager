@@ -232,6 +232,7 @@ async def _poll_magic_link_mailcom(
     BASE = "https://lightmailer.mail.com"
     UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     deadline = time.time() + timeout_s
+    baseline_mid = 0  # 第一轮记录现有最大 mailId，之后只接受新的
 
     while time.time() < deadline:
         try:
@@ -272,13 +273,17 @@ async def _poll_magic_link_mailcom(
             links = re.findall(r'messagedetail\?folderId=\d+&(?:amp;)?mailIndex=\d+&(?:amp;)?mailId=\d+', r4.text)
             subjects = re.findall(r'mail-header__subject">([^<]*)', r4.text)
 
+            # 第一次扫描记录现有最大 mailId，后续只要 mailId 更大的
             for subj, link in zip(subjects, links):
                 if "claude" not in subj.lower(): continue
-                ts_m = re.search(r'\|\s+(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})', subj)
-                if ts_m:
-                    t = time.mktime(time.strptime(ts_m.group(1), "%Y-%m-%d %H:%M:%S"))
-                    logger.info("mailcom: found email ts=%s after_ts=%.0f delta=%.0fs", ts_m.group(1), after_ts, t - after_ts)
-                    if t < after_ts - 5: continue
+                mid_m = re.search(r"mailId=(\d+)", link)
+                mid = int(mid_m.group(1)) if mid_m else 0
+                logger.info("mailcom: found claude email mid=%d baseline=%d subj=%s", mid, baseline_mid, subj.strip()[:60])
+                if baseline_mid == 0:
+                    # 第一轮：记录当前最大 mid 作为基线，跳过所有现有邮件
+                    baseline_mid = max(baseline_mid, mid)
+                    continue
+                if mid <= baseline_mid: continue
                 mid = re.search(r'mailId=(\d+)', link).group(1)
                 r6 = c.get(f"{BASE}/mailbody/{mid}/false")
                 ml = re.findall(r'https://claude\.ai/magic-link[^\s"\'<>]+', r6.text.replace("&amp;","&"))
@@ -590,7 +595,8 @@ async def perform_login(
             stderr=subprocess.STDOUT,
             bufsize=0,
         )
-        logger.info("CLI pid=%d", proc.pid)
+        cli_spawn_ts = time.time()
+        logger.info("CLI pid=%d (spawn_ts=%.0f)", proc.pid, cli_spawn_ts)
 
         # Read stdout for OAuth URL
         oauth_url: str | None = None
@@ -660,11 +666,10 @@ async def perform_login(
                 page = await context.new_page()
 
                 if provider == "mailcom":
-                    # mail.com Web 模式：直接 Web 登录 mail.com 读收件箱
-                    logger.info("mailcom: polling mail.com inbox for magic link...")
-                    send_ts = time.time()
+                    # mail.com Web 模式：用 CLI 启动时间（cli_spawn_ts）过滤旧邮件
+                    logger.info("mailcom: polling mail.com inbox for magic link (after cli_spawn_ts=%.0f)...", cli_spawn_ts)
                     ml = await _poll_magic_link_mailcom(
-                        email, mail_password, send_ts, EMAIL_POLL_TIMEOUT
+                        email, mail_password, cli_spawn_ts, EMAIL_POLL_TIMEOUT
                     )
                     logger.info("mailcom: got magic link (%d chars), visiting...", len(ml))
                     await page.goto(ml, wait_until="domcontentloaded", timeout=PLAYWRIGHT_NAV_TIMEOUT)
@@ -673,13 +678,10 @@ async def perform_login(
                         await asyncio.sleep(1)
                     logger.info("mailcom: logged in via magic link, url=%s", page.url[:80])
                 elif provider == "mailcatcher":
-                    # MailCatcher 模式：CLI 已触发邮件发送，轮询拿 magic link，
-                    # 浏览器直接访问 magic link 获取 session cookie
-                    logger.info("mailcatcher: polling for magic link...")
-                    send_ts = time.time()
+                    logger.info("mailcatcher: polling for magic link (after cli_spawn_ts=%.0f)...", cli_spawn_ts)
                     async with httpx.AsyncClient(timeout=30) as mc:
                         ml = await _poll_magic_link_mailcatcher(
-                            mc, token_171, send_ts, EMAIL_POLL_TIMEOUT
+                            mc, token_171, cli_spawn_ts, EMAIL_POLL_TIMEOUT
                         )
                     logger.info("mailcatcher: got magic link (%d chars), visiting...", len(ml))
                     await page.goto(ml, wait_until="domcontentloaded", timeout=PLAYWRIGHT_NAV_TIMEOUT)
