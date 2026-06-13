@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '../api/client';
 import type { Project, GlobalSettings, TagItem } from '../api/client';
-import { Trash2, RotateCcw, FolderGit2, Globe, HardDrive, Plus, Settings, X, ChevronDown, ChevronUp, GripVertical, Tag, FileKey, Palette } from 'lucide-react';
+import { Trash2, RotateCcw, FolderGit2, Globe, HardDrive, Plus, Settings, X, ChevronDown, ChevronUp, GripVertical, Tag, FileKey, Palette , Server } from 'lucide-react';
 import { resolveTagColor, TAG_COLOR_OPTIONS } from '../components/TagColors';
 import { TagManager } from '../components/TagManager';
 import { EnvFilesEditor } from '../components/EnvFilesEditor';
@@ -665,6 +665,20 @@ export function ProjectsPage() {
   const [showTagManager, setShowTagManager] = useState(false);
   const [tagItems, setTagItems] = useState<TagItem[]>([]);
 
+  // Worker task counts per project
+  const [workerTaskCounts, setWorkerTaskCounts] = useState<Record<number, number>>({});
+  useEffect(() => {
+    api.listTasks(undefined, undefined, undefined, undefined, 1000).then((tasks) => {
+      const counts: Record<number, number> = {};
+      for (const t of tasks) {
+        if (t.worker_id && t.project_id) {
+          counts[t.project_id] = (counts[t.project_id] || 0) + 1;
+        }
+      }
+      setWorkerTaskCounts(counts);
+    }).catch(() => {});
+  }, []);
+
   // Drag state
   const [draggingId, setDraggingId] = useState<number | null>(null);
   const [dragOverId, setDragOverId] = useState<number | null>(null);
@@ -987,6 +1001,11 @@ export function ProjectsPage() {
                     ) : (
                       <span className="flex items-center gap-1 text-xs text-gray-500">
                         <HardDrive size={12} /> Local
+                      </span>
+                    )}
+                    {(workerTaskCounts[p.id] || 0) > 0 && (
+                      <span className="flex items-center gap-1 text-xs text-indigo-400" title="在 Worker 上运行的任务数">
+                        <Server size={12} /> Worker ×{workerTaskCounts[p.id]}
                       </span>
                     )}
                   </div>

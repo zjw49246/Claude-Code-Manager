@@ -276,16 +276,25 @@ echo deploy-ok
         results = []
         for i, acct in enumerate(accounts):
             email = acct.get("email", "")
+            token = acct.get("token", "")
+            provider = acct.get("provider", "171mail")
             name = "default" if i == 0 else f"account-{i + 1}"
-            await self._log(worker_id, f"login {email} -> pool slot {name}")
-            cmd = (
-                f"cd {remote_dir} && export PATH=\"$HOME/.local/bin:$PATH\" && "
-                f"uv run python scripts/auto_login.py --email {email} --add-to-pool {name}"
-            )
+            await self._log(worker_id, f"login {email} (provider={provider}) -> pool slot {name}")
+            parts = [
+                f"cd {remote_dir} && export PATH=\"$HOME/.local/bin:$PATH\" &&",
+                f"uv run python scripts/auto_login.py --email {email}",
+            ]
+            if token:
+                parts.append(f"--token {token}")
+            parts.append(f"--provider {provider}")
+            parts.append(f"--add-to-pool {name} --save-token")
+            cmd = " ".join(parts)
             code, out = await ssh.run(cmd, timeout=600)
             status = "logged_in" if code == 0 else "failed"
             results.append({"email": email, "status": status})
             await self._log(worker_id, f"login {email}: {status}")
+            if code != 0:
+                await self._log(worker_id, f"login output: {out[-500:]}")
         await self._update(worker_id, accounts=results)
         if all(r["status"] == "failed" for r in results):
             raise BootstrapError("account-login", "全部账号登录失败")
