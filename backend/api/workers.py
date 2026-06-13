@@ -61,7 +61,7 @@ async def create_worker(body: WorkerCreate, db: AsyncSession = Depends(get_db)):
         status="creating",
         ssh_user=settings.worker_ssh_user,
         ssh_key_path=settings.worker_ssh_key_path,
-        accounts=[{"email": a.email, "status": "pending"} for a in body.accounts],
+        accounts=[{"email": a.email, "token": a.token or "", "status": "pending"} for a in body.accounts],
     )
     db.add(worker)
     await db.commit()
@@ -178,8 +178,11 @@ async def retry_bootstrap(worker_id: int, db: AsyncSession = Depends(get_db)):
     worker.status = "creating"
     await db.commit()
     await db.refresh(worker)
+    # 从 DB 读已有账号信息（创建时存的 email/token），retry 时重新登录
+    saved_accounts = worker.accounts or []
+    accounts = [{"email": a.get("email", ""), "token": a.get("token", "")} for a in saved_accounts if a.get("email")]
     _spawn(
-        prov.create_worker(worker.id, accounts=[])
+        prov.create_worker(worker.id, accounts=accounts)
     )
     return worker
 
