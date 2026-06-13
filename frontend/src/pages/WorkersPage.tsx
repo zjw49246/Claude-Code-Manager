@@ -25,6 +25,7 @@ const ACCOUNT_COLORS: Record<string, string> = {
 const BUSY = new Set(['creating', 'bootstrapping', 'stopping', 'starting', 'destroying']);
 
 function AddWorkerModal({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
+  const [name, setName] = useState('');
   const [accounts, setAccounts] = useState<{ email: string; token: string; provider: string }[]>([{ email: '', token: '', provider: '171mail' }]);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -35,6 +36,7 @@ function AddWorkerModal({ onClose, onSaved }: { onClose: () => void; onSaved: ()
     setError(null);
     try {
       await api.createWorker({
+        name: name.trim(),
         accounts: accounts.filter((a) => a.email.trim()).map((a) => ({ email: a.email.trim(), token: a.token.trim(), provider: a.provider })),
       });
       onSaved();
@@ -58,6 +60,13 @@ function AddWorkerModal({ onClose, onSaved }: { onClose: () => void; onSaved: ()
           <p className="text-xs text-gray-400">
             新 EC2 配置自动继承本机（机型/镜像/子网/密钥）。账号在 Worker 本机登录，Manager 不保存 Claude 凭证。
           </p>
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">Worker 名称 *（也作为 AWS 实例名）</label>
+            <input
+              className="w-full bg-gray-700 text-foreground text-sm rounded px-3 py-2 outline-none focus:ring-1 focus:ring-indigo-500"
+              value={name} onChange={(e) => setName(e.target.value)} placeholder="如 worker-prod-1" required
+            />
+          </div>
           {accounts.map((acct, i) => (
             <div key={i} className="flex gap-2 items-start">
               <div className="flex-1 space-y-2">
@@ -91,7 +100,7 @@ function AddWorkerModal({ onClose, onSaved }: { onClose: () => void; onSaved: ()
             className="text-xs text-indigo-400 hover:text-indigo-300">+ 再加一个账号</button>
           <div className="flex justify-end gap-2 pt-1">
             <button type="button" onClick={onClose} className="px-4 py-2 text-sm text-gray-300 hover:text-white">Cancel</button>
-            <button type="submit" disabled={submitting}
+            <button type="submit" disabled={submitting || !name.trim()}
               className="px-4 py-2 text-sm bg-indigo-600 text-white rounded hover:bg-indigo-500 disabled:opacity-50">
               {submitting ? 'Creating...' : 'Create'}
             </button>
