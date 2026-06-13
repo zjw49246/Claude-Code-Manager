@@ -217,7 +217,14 @@ if ! command -v node >/dev/null; then
 fi
 command -v uv >/dev/null || curl -LsSf https://astral.sh/uv/install.sh | sh > /dev/null
 sudo npm ls -g @anthropic-ai/claude-code --depth=0 >/dev/null 2>&1 || sudo npm install -g @anthropic-ai/claude-code@latest > /dev/null
-echo "node=$(node --version) uv=$($HOME/.local/bin/uv --version 2>/dev/null || uv --version) claude=$(claude --version 2>/dev/null | head -1)"
+# Selenium OAuth 登录依赖（mail.com 域名账号用）
+sudo apt-get install -y -qq xvfb python3-pip > /dev/null 2>&1 || true
+if ! command -v google-chrome >/dev/null; then
+  curl -sL https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb -o /tmp/chrome.deb
+  sudo dpkg -i /tmp/chrome.deb > /dev/null 2>&1; sudo apt-get -f install -y -qq > /dev/null 2>&1
+fi
+pip3 install --break-system-packages selenium undetected-chromedriver setuptools > /dev/null 2>&1 || true
+echo "node=$(node --version) uv=$($HOME/.local/bin/uv --version 2>/dev/null || uv --version) claude=$(claude --version 2>/dev/null | head -1) chrome=$(google-chrome --version 2>/dev/null | head -1)"
 """
         code, out = await ssh.run(script, timeout=900)
         if code != 0:
@@ -277,16 +284,16 @@ echo deploy-ok
         for i, acct in enumerate(accounts):
             email = acct.get("email", "")
             token = acct.get("token", "")
-            provider = acct.get("provider", "171mail")
             name = "default" if i == 0 else f"account-{i + 1}"
-            await self._log(worker_id, f"login {email} (provider={provider}) -> pool slot {name}")
+            await self._log(worker_id, f"login {email} -> pool slot {name}")
+            # mail.com 域走 Selenium OAuth（需要 xvfb），其余走 171mail CLI
             parts = [
                 f"cd {remote_dir} && export PATH=\"$HOME/.local/bin:$PATH\" &&",
+                "xvfb-run --auto-servernum --server-args='-screen 0 1920x1080x24'",
                 f"uv run python scripts/auto_login.py --email {email}",
             ]
             if token:
                 parts.append(f"--token {token}")
-            parts.append(f"--provider {provider}")
             parts.append(f"--add-to-pool {name} --save-token")
             cmd = " ".join(parts)
             code, out = await ssh.run(cmd, timeout=600)
