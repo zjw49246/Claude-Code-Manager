@@ -121,7 +121,7 @@ async def cdp_login(email: str, token: str, config_dir: str, oauth_url: str, coo
 
             # 8. Launch CLI
             cli = subprocess.Popen(["claude", "auth", "login", "--email", email],
-                env={"CLAUDE_config_dir": config_dir, "PATH": os.environ["PATH"], "HOME": os.environ["HOME"]},
+                env={"CLAUDE_CONFIG_DIR": config_dir, "PATH": os.environ["PATH"], "HOME": os.environ["HOME"]},
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0)
             print(f"  CLI pid={cli.pid}")
 
@@ -173,7 +173,7 @@ async def cdp_login(email: str, token: str, config_dir: str, oauth_url: str, coo
                             if cli.poll() is not None: break
                             await asyncio.sleep(1)
                         r = subprocess.run(["claude","auth","status","--text"],
-                            env={"CLAUDE_config_dir":config_dir,"PATH":os.environ["PATH"]},
+                            env={"CLAUDE_CONFIG_DIR":config_dir,"PATH":os.environ["PATH"]},
                             capture_output=True, text=True, timeout=15)
                         print(f"  Auth status: {r.stdout.strip()[:200]}")
                         if email.lower() in r.stdout.lower():
