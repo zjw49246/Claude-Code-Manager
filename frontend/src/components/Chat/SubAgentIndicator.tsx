@@ -11,6 +11,7 @@ export function SubAgentIndicator({ count, active, onNavigate }: SubAgentIndicat
   const [expanded, setExpanded] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
+
   useEffect(() => {
     if (!expanded) return;
     const handleClick = (e: MouseEvent) => {
@@ -21,6 +22,9 @@ export function SubAgentIndicator({ count, active, onNavigate }: SubAgentIndicat
     document.addEventListener('mousedown', handleClick);
     return () => document.removeEventListener('mousedown', handleClick);
   }, [expanded]);
+
+  // 没有运行中的子 agent 就不显示（避免 "monitor 0" 噪音）
+  if (count === 0) return null;
 
   return (
     <div className="relative inline-block" ref={ref}>

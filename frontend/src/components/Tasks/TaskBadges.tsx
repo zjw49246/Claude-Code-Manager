@@ -1,7 +1,43 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Wrench, Users, Settings } from 'lucide-react';
+import { Wrench, Users, Settings, Server } from 'lucide-react';
 import { api } from '../../api/client';
-import type { Task, SubAgentSummary } from '../../api/client';
+import type { Task, SubAgentSummary, Worker } from '../../api/client';
+
+// workers 列表页级缓存（RunOnBadge 在列表里逐行渲染，避免 N 次请求）
+let workersCache: Worker[] | null = null;
+let workersPromise: Promise<Worker[]> | null = null;
+function fetchWorkersCached(): Promise<Worker[]> {
+  if (workersCache) return Promise.resolve(workersCache);
+  if (!workersPromise) {
+    workersPromise = api.listWorkers().then((ws) => { workersCache = ws; return ws; })
+      .catch(() => { workersPromise = null; return []; });
+  }
+  return workersPromise;
+}
+
+/** 任务运行位置徽章：跑在 worker 上时显示 worker 名；本机不显示。 */
+export function RunOnBadge({ task }: { task: Task }) {
+  const [name, setName] = useState<string | null>(null);
+  useEffect(() => {
+    if (task.worker_id == null) { setName(null); return; }
+    let cancelled = false;
+    fetchWorkersCached().then((ws) => {
+      if (cancelled) return;
+      setName(ws.find((w) => w.id === task.worker_id)?.name || `worker #${task.worker_id}`);
+    });
+    return () => { cancelled = true; };
+  }, [task.worker_id]);
+  if (task.worker_id == null) return null;
+  return (
+    <span
+      className="text-xs bg-sky-600/30 text-sky-300 px-1.5 rounded whitespace-nowrap inline-flex items-center gap-0.5"
+      title="运行位置（在 Config 里可迁移）"
+    >
+      <Server size={11} />
+      {name ?? `#${task.worker_id}`}
+    </span>
+  );
+}
 
 export const ALL_TOOLS = [
   { key: 'help', label: 'Help' },

@@ -56,7 +56,7 @@ export function Header({ currentPage, onNavigate }: HeaderProps) {
   return (
     <header className="bg-gray-900 border-b border-gray-700 px-4 py-2 pt-[max(0.5rem,env(safe-area-inset-top))]">
       <div className="flex items-center gap-3">
-        <h1 className="text-base font-bold text-foreground">Claude Manager</h1>
+        <h1 className="text-base font-bold text-foreground truncate min-w-0">Claude Manager</h1>
         {/* Desktop nav */}
         <nav className="hidden sm:flex gap-1.5 flex-wrap">
           {pages.map((p) => (
@@ -104,12 +104,13 @@ export function Header({ currentPage, onNavigate }: HeaderProps) {
               </button>
             </div>
           )}
-          <div className="relative flex items-center">
+          <div className="relative flex items-center shrink-0">
             <Globe size={16} className="absolute left-2 text-gray-500 pointer-events-none" />
+            {/* 手机端只留图标宽度（文字透明），避免 "Auto" 把汉堡按钮挤出屏幕 */}
             <select
               value={tz}
               onChange={(e) => { setTimezone(e.target.value); setTz(e.target.value); }}
-              className="appearance-none bg-gray-800 text-gray-300 text-xs rounded pl-7 pr-6 py-1.5 border border-gray-700 hover:border-gray-600 focus:outline-none focus:ring-1 focus:ring-indigo-500 cursor-pointer"
+              className="appearance-none bg-gray-800 text-transparent sm:text-gray-300 text-xs rounded pl-7 pr-0 sm:pr-6 py-1.5 w-8 sm:w-auto border border-gray-700 hover:border-gray-600 focus:outline-none focus:ring-1 focus:ring-indigo-500 cursor-pointer"
               title="Timezone"
             >
               {TIMEZONE_OPTIONS.map((opt) => (
@@ -127,7 +128,7 @@ export function Header({ currentPage, onNavigate }: HeaderProps) {
           {/* Mobile menu button */}
           <button
             onClick={() => setMenuOpen(!menuOpen)}
-            className="sm:hidden p-2 rounded text-gray-400 hover:text-foreground hover:bg-gray-800 transition-colors"
+            className="sm:hidden shrink-0 p-2 rounded text-gray-400 hover:text-foreground hover:bg-gray-800 transition-colors"
           >
             {menuOpen ? <X size={18} /> : <Menu size={18} />}
           </button>
