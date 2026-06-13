@@ -37,6 +37,7 @@ CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 REDIRECT_URI = "https://platform.claude.com/oauth/code/callback"
 SCOPES = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
 MAIL_SERVICE_URL = "https://b.171mail.com"
+MAILCATCHER_URL = "https://mail.claude-code-manager.com"
 MAIL_ADMIN_USER = "admin"
 # AUDIT-FIX C-1: mail admin password no longer hardcoded; require from env at use.
 MAIL_ADMIN_PASS = os.environ.get("MAIL_ADMIN_PASS", "")
@@ -487,7 +488,10 @@ def do_oauth_login(
 
             if not result and mail_token:
                 print("  [claude] Webmail unavailable, trying MailCatcher API...")
-                result = _read_verification_from_mailcatcher(mail_token, max_wait=90)
+                # mail.com 域查 MailCatcher，其余查 171mail
+                domain = email.split("@")[-1].lower()
+                svc = MAILCATCHER_URL if domain in MAILCOM_DOMAINS else MAIL_SERVICE_URL
+                result = _read_verification_from_mailcatcher(mail_token, max_wait=90, service_url=svc)
 
             if not result:
                 print("  [claude] FAILED: No verification code or magic link found")
@@ -908,18 +912,22 @@ def _extract_code_from_frames(driver) -> str | None:
     return None
 
 
-def _read_verification_from_mailcatcher(mail_token: str, max_wait: int = 120) -> str | None:
-    """Fetch verification code or magic link via 171mail API.
+def _read_verification_from_mailcatcher(mail_token: str, max_wait: int = 120, service_url: str | None = None) -> str | None:
+    """Fetch verification code or magic link via mail service API.
+
+    service_url: 171mail (https://b.171mail.com) or MailCatcher (https://mail.claude-code-manager.com).
+    Both expose the same /api/v1/message?token=&type= endpoint.
 
     Returns "CODE:123456", a magic-link URL string, or None.
     """
-    print(f"  [mailcatcher] Polling for verification (max {max_wait}s)...")
+    base = service_url or MAIL_SERVICE_URL
+    print(f"  [mailcatcher] Polling {base} for verification (max {max_wait}s)...")
     start = time.time()
     attempt = 0
     while time.time() - start < max_wait:
         attempt += 1
         try:
-            url = f"{MAIL_SERVICE_URL}/api/v1/message?token={mail_token}&type=claude"
+            url = f"{base}/api/v1/message?token={mail_token}&type=claude"
             req = urllib.request.Request(url)
             with urllib.request.urlopen(req, timeout=15) as resp:
                 data = json.loads(resp.read().decode())
