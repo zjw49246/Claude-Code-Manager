@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '../api/client';
 import { useWebSocket } from '../hooks/useWebSocket';
 import type { Worker } from '../api/client';
-import { Plus, X, RefreshCw, Trash2, Power, Play, Server, ScrollText } from 'lucide-react';
+import { Plus, X, RefreshCw, Trash2, Power, Play, Server, ScrollText, KeyRound } from 'lucide-react';
 
 const STATUS_COLORS: Record<string, string> = {
   creating: 'bg-blue-500/20 text-blue-400',
@@ -139,7 +139,21 @@ function LogsModal({ worker, onClose }: { worker: Worker; onClose: () => void })
 
 function WorkerCard({ worker, onAction }: { worker: Worker; onAction: () => void }) {
   const [logsOpen, setLogsOpen] = useState(false);
+  const [poolOpen, setPoolOpen] = useState(false);
+  const [pool, setPool] = useState<Awaited<ReturnType<typeof api.getWorkerPool>> | null>(null);
+  const [poolErr, setPoolErr] = useState<string | null>(null);
   const busy = BUSY.has(worker.status);
+
+  const togglePool = async () => {
+    if (poolOpen) { setPoolOpen(false); return; }
+    setPoolOpen(true);
+    setPool(null); setPoolErr(null);
+    try {
+      setPool(await api.getWorkerPool(worker.id));
+    } catch (e) {
+      setPoolErr(String(e));
+    }
+  };
 
   const act = async (fn: (id: number) => Promise<Worker>, confirmMsg?: string) => {
     if (confirmMsg && !window.confirm(confirmMsg)) return;
@@ -162,6 +176,10 @@ function WorkerCard({ worker, onAction }: { worker: Worker; onAction: () => void
           </span>
         </div>
         <div className="flex items-center gap-1 shrink-0">
+          {worker.status === 'ready' && (
+            <button title="CC 账号池" onClick={togglePool}
+              className={`p-1.5 ${poolOpen ? 'text-teal-300' : 'text-gray-400'} hover:text-teal-300`}><KeyRound size={15} /></button>
+          )}
           <button title="日志" onClick={() => setLogsOpen(true)}
             className="p-1.5 text-gray-400 hover:text-gray-200"><ScrollText size={15} /></button>
           {worker.status === 'error' && (
@@ -197,6 +215,32 @@ function WorkerCard({ worker, onAction }: { worker: Worker; onAction: () => void
           {(worker.accounts || []).map((a, i) => (
             <span key={i} className={`${ACCOUNT_COLORS[a.status] || 'text-gray-400'}`}>{a.email} ({a.status})</span>
           ))}
+        </div>
+      )}
+      {poolOpen && (
+        <div className="text-xs bg-gray-900/60 rounded p-2 space-y-1">
+          {poolErr ? (
+            <span className="text-red-400 break-all">{poolErr}</span>
+          ) : pool === null ? (
+            <span className="text-gray-500">加载账号池…</span>
+          ) : (pool as { single_account?: boolean }).single_account ? (
+            <span className="text-gray-500">未启用号池（单账号模式，账号见下方登记信息）</span>
+          ) : pool.accounts.length === 0 ? (
+            <span className="text-gray-500">号池为空</span>
+          ) : (
+            <>
+              <div className="text-gray-500">CC 账号池：{pool.available}/{pool.total} 可用</div>
+              {pool.accounts.map((a) => (
+                <div key={a.id} className="flex items-center gap-2">
+                  <span className={a.available ? 'text-emerald-400' : a.enabled ? 'text-yellow-400' : 'text-gray-500'}>●</span>
+                  <span className="text-gray-300">{a.email || a.id}</span>
+                  <span className="text-gray-500">
+                    {!a.enabled ? 'disabled' : a.available ? 'available' : `冷却 ${Math.ceil(a.cooldown_remaining / 60)}m`}
+                  </span>
+                </div>
+              ))}
+            </>
+          )}
         </div>
       )}
       {worker.bootstrap_error && (

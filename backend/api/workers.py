@@ -65,7 +65,15 @@ async def create_worker(body: WorkerCreate, db: AsyncSession = Depends(get_db)):
     await db.commit()
     await db.refresh(worker)
     if not body.name:
-        worker.name = f"{socket.gethostname()}-worker-{worker.id}"
+        # 命名规则：本机（Manager）的 EC2 Name 标签 + -worker-{id}，
+        # 如 ccm-youchengsong-worker-1；拿不到标签时退回 hostname
+        prefix = None
+        try:
+            info = await prov.cloud.self_describe()
+            prefix = (info or {}).get("name") or None
+        except Exception:
+            prefix = None
+        worker.name = f"{prefix or socket.gethostname()}-worker-{worker.id}"
         await db.commit()
         await db.refresh(worker)
 
@@ -184,3 +192,30 @@ async def retry_bootstrap(worker_id: int, db: AsyncSession = Depends(get_db)):
         prov.create_worker(worker.id, accounts=[], adopt_instance_id=worker.cloud_instance_id)
     )
     return worker
+
+
+@router.get("/{worker_id}/pool")
+async def get_worker_pool(worker_id: int, db: AsyncSession = Depends(get_db)):
+    """实时拉取 worker 上配置的 CC 账号池状态（转发其 /api/pool/status）。"""
+    worker = await db.get(Worker, worker_id)
+    if not worker:
+        raise HTTPException(404, "Worker not found")
+    if worker.status != "ready" or not worker.private_ip:
+        raise HTTPException(409, f"Worker 未就绪（{worker.status}）")
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(
+                f"http://{worker.private_ip}:{worker.ccm_port}/api/pool/status",
+                headers={"Authorization": f"Bearer {worker.auth_token}"},
+            )
+            if r.status_code == 404:
+                # worker 端 POOL_ENABLED=false：单账号模式，无号池
+                return {"enabled": False, "total": 0, "available": 0,
+                        "accounts": [], "single_account": True}
+            r.raise_for_status()
+            return r.json()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"无法连接 worker 号池: {e}")
