@@ -54,8 +54,10 @@ async def list_workers(db: AsyncSession = Depends(get_db)):
 @router.post("", response_model=WorkerResponse)
 async def create_worker(body: WorkerCreate, db: AsyncSession = Depends(get_db)):
     prov = _provisioner()
+    if not body.name or not body.name.strip():
+        raise HTTPException(400, "请填写 Worker 名称")
     worker = Worker(
-        name=body.name or "pending",
+        name=body.name.strip(),
         status="creating",
         ssh_user=settings.worker_ssh_user,
         ssh_key_path=settings.worker_ssh_key_path,
@@ -64,18 +66,6 @@ async def create_worker(body: WorkerCreate, db: AsyncSession = Depends(get_db)):
     db.add(worker)
     await db.commit()
     await db.refresh(worker)
-    if not body.name:
-        # 命名规则：本机（Manager）的 EC2 Name 标签 + -worker-{id}，
-        # 如 ccm-youchengsong-worker-1；拿不到标签时退回 hostname
-        prefix = None
-        try:
-            info = await prov.cloud.self_describe()
-            prefix = (info or {}).get("name") or None
-        except Exception:
-            prefix = None
-        worker.name = f"{prefix or socket.gethostname()}-worker-{worker.id}"
-        await db.commit()
-        await db.refresh(worker)
 
     accounts = [a.model_dump() for a in body.accounts]
     _spawn(
