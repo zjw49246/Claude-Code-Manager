@@ -131,7 +131,6 @@ class WorkerProvisioner:
         self,
         worker_id: int,
         accounts: list[dict] | None = None,
-        adopt_instance_id: str | None = None,
     ):
         """完整创建流程（后台任务）。失败 → status=error + 记录步骤与原因。"""
         step = "provision"
@@ -140,19 +139,9 @@ class WorkerProvisioner:
                 worker_id, status="creating", bootstrap_step=step, bootstrap_error=None
             )
 
-            if adopt_instance_id:
-                await self._log(worker_id, f"adopting existing instance {adopt_instance_id}")
-                info = await self.cloud.describe_instance(adopt_instance_id)
-                if info["state"] == "stopped":
-                    await self.cloud.start_instance(adopt_instance_id)
-                iid = adopt_instance_id
-                worker = await self._update(
-                    worker_id, cloud_instance_id=iid, adopted=True,
-                )
-            else:
-                await self._log(worker_id, "creating EC2 instance (config inherited from manager)")
-                iid = await self.cloud.create_instance(worker.name)
-                worker = await self._update(worker_id, cloud_instance_id=iid)
+            await self._log(worker_id, "creating EC2 instance (config inherited from manager)")
+            iid = await self.cloud.create_instance(worker.name)
+            worker = await self._update(worker_id, cloud_instance_id=iid)
 
             private_ip = await self.cloud.wait_until_running(iid)
             info = await self.cloud.describe_instance(iid)
@@ -423,11 +412,7 @@ sudo systemctl restart ccm-worker
             await self.relay.stop_worker(worker_id)
         try:
             if worker.cloud_instance_id:
-                if worker.adopted:
-                    # 收养的机器不是我们创建的，只关机不销毁
-                    await self.cloud.stop_instance(worker.cloud_instance_id)
-                else:
-                    await self.cloud.terminate_instance(worker.cloud_instance_id)
+                await self.cloud.terminate_instance(worker.cloud_instance_id)
         except Exception as e:
             logger.warning("worker %s destroy: %s", worker_id, e)
         await self._update(worker_id, status="terminated")

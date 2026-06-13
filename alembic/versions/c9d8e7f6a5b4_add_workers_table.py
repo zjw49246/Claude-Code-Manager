@@ -27,7 +27,6 @@ def upgrade() -> None:
         sa.Column('cloud_instance_id', sa.String(length=100), nullable=True),
         sa.Column('private_ip', sa.String(length=45), nullable=True),
         sa.Column('public_ip', sa.String(length=45), nullable=True),
-        sa.Column('adopted', sa.Boolean(), nullable=False, server_default='0'),
         sa.Column('ssh_user', sa.String(length=50), nullable=False, server_default='ubuntu'),
         sa.Column('ssh_key_path', sa.String(length=500), nullable=True),
         sa.Column('ccm_port', sa.Integer(), nullable=False, server_default='8000'),

@@ -26,7 +26,6 @@ const BUSY = new Set(['creating', 'bootstrapping', 'stopping', 'starting', 'dest
 
 function AddWorkerModal({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
   const [accounts, setAccounts] = useState<{ email: string; password: string }[]>([{ email: '', password: '' }]);
-  const [adoptId, setAdoptId] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -37,7 +36,6 @@ function AddWorkerModal({ onClose, onSaved }: { onClose: () => void; onSaved: ()
     try {
       await api.createWorker({
         accounts: accounts.filter((a) => a.email.trim()).map((a) => ({ email: a.email.trim(), password: a.password || undefined })),
-        adopt_instance_id: adoptId.trim() || undefined,
       });
       onSaved();
       onClose();
@@ -83,13 +81,6 @@ function AddWorkerModal({ onClose, onSaved }: { onClose: () => void; onSaved: ()
           ))}
           <button type="button" onClick={() => setAccounts([...accounts, { email: '', password: '' }])}
             className="text-xs text-indigo-400 hover:text-indigo-300">+ 再加一个账号</button>
-          <div>
-            <label className="block text-xs text-gray-400 mb-1">收养已有实例 ID（可选，跳过开机直接 bootstrap）</label>
-            <input
-              className="w-full bg-gray-700 text-foreground text-sm rounded px-3 py-2 outline-none focus:ring-1 focus:ring-indigo-500"
-              value={adoptId} onChange={(e) => setAdoptId(e.target.value)} placeholder="i-xxxxxxxxxxxx"
-            />
-          </div>
           <div className="flex justify-end gap-2 pt-1">
             <button type="button" onClick={onClose} className="px-4 py-2 text-sm text-gray-300 hover:text-white">Cancel</button>
             <button type="submit" disabled={submitting}
@@ -200,10 +191,8 @@ function WorkerCard({ worker, onAction }: { worker: Worker; onAction: () => void
               className="p-1.5 text-gray-400 hover:text-green-400"><Play size={15} /></button>
           )}
           {!busy && (
-            <button title={worker.adopted ? '移除（收养实例只关机不销毁）' : '销毁（terminate EC2）'}
-              onClick={() => act(api.destroyWorker, worker.adopted
-                ? `移除 ${shortName(worker)}？收养的实例只会关机，不会销毁。`
-                : `销毁 ${shortName(worker)}？EC2 实例将被 terminate，不可恢复！`)}
+            <button title="销毁（terminate EC2）"
+              onClick={() => act(api.destroyWorker, `销毁 ${shortName(worker)}？EC2 实例将被 terminate，不可恢复！`)}
               className="p-1.5 text-gray-400 hover:text-red-400"><Trash2 size={15} /></button>
           )}
         </div>
@@ -213,7 +202,6 @@ function WorkerCard({ worker, onAction }: { worker: Worker; onAction: () => void
         {worker.cloud_instance_id && <span>{worker.cloud_instance_id}</span>}
         {worker.ccm_commit && <span title={worker.ccm_commit}>@{worker.ccm_commit.slice(0, 8)}</span>}
         {worker.last_heartbeat && <span>心跳 {new Date(worker.last_heartbeat + 'Z').toLocaleTimeString()}</span>}
-        {worker.adopted && <span className="text-amber-400/80">收养</span>}
       </div>
       {(worker.accounts || []).length > 0 && (
         <div className="text-xs flex flex-wrap gap-2">
