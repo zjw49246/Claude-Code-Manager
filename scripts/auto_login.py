@@ -317,147 +317,250 @@ async def _poll_magic_link_mailcom(
 # ---------------------------------------------------------------------------
 
 async def _mailcatcher_browser_login(email: str, mail_token: str, oauth_url: str = '') -> dict | None:
-    """用系统 Google Chrome 模拟 claude.ai 网页登录（和 claude_oauth_login.py 同款）：
-    输入邮箱 → Claude 发验证邮件 → MailCatcher 拿 magic link → 点击链接 → 登录成功 → 返回 cookies。
+    """Chrome CDP 模拟 claude.ai 网页登录（和 elastic-agent 同款，不用 Playwright/Selenium）。
+
+    流程：Chrome --remote-debugging-port → CDP WebSocket 控制 →
+    1. 打开 claude.ai/login → xdotool 过 CF → 输入邮箱 → Claude 发验证邮件
+    2. MailCatcher 轮询拿 magic link → Chrome 导航 magic link → 验证完成
+    3. 导航到 CLI OAuth URL → 调 authorize API → 返回 code+state
     """
-    try:
-        import undetected_chromedriver as uc
-        from selenium.webdriver.common.by import By
-    except ImportError:
-        logger.error("需要 undetected-chromedriver: pip install undetected-chromedriver selenium")
+    import subprocess as _sp
+
+    CDP_PORT = 9222
+    CF_CHECKBOX_X, CF_CHECKBOX_Y = 257, 476
+    chrome_proc = None
+
+    # JS helpers（和 elastic-agent 一致）
+    JS_SET_INPUT = """(function(){{var inputs=[...document.querySelectorAll('input[type={type}]')].filter(i=>i.offsetParent!==null);if(!inputs.length)return 'no {type} input';var inp=inputs[0];var s=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;s.call(inp,'{value}');inp.dispatchEvent(new Event('input',{{bubbles:true}}));inp.dispatchEvent(new Event('change',{{bubbles:true}}));return 'set'}})()"""
+    JS_CLICK_BTN = """(function(){{var btns=[...document.querySelectorAll('button')].filter(b=>b.offsetParent!==null);for(var b of btns){{var t=b.textContent.trim();if({condition}){{b.click();return 'clicked:'+t}}}}return 'no match'}})()"""
+    JS_ENTER_CODE = """(function(){{var code="{code}";var inputs=[...document.querySelectorAll('input')].filter(i=>i.offsetParent!==null);if(inputs.length>=6){{for(var i=0;i<code.length&&i<inputs.length;i++){{inputs[i].focus();var s=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;s.call(inputs[i],code[i]);inputs[i].dispatchEvent(new Event('input',{{bubbles:true}}));inputs[i].dispatchEvent(new Event('change',{{bubbles:true}}));}}return 'entered '+code.length+' digits'}}var inp=inputs.find(i=>i.type!=='email')||inputs[0];if(inp){{var s=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;s.call(inp,code);inp.dispatchEvent(new Event('input',{{bubbles:true}}));return 'entered single'}}return 'no inputs'}})()"""
+
+    async def cdp_eval(ws, expression, timeout=10):
+        """Send CDP Runtime.evaluate and return result."""
+        import websockets as _ws
+        msg_id = int(time.time() * 1000) % 100000
+        await ws.send(json.dumps({
+            "id": msg_id, "method": "Runtime.evaluate",
+            "params": {"expression": expression, "returnByValue": True, "awaitPromise": True},
+        }))
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                raw = await asyncio.wait_for(ws.recv(), timeout=2)
+                msg = json.loads(raw)
+                if msg.get("id") == msg_id:
+                    result = msg.get("result", {}).get("result", {})
+                    return result.get("value")
+            except asyncio.TimeoutError:
+                continue
         return None
 
-    driver = None
+    async def xdotool_click(x, y):
+        proc = await asyncio.create_subprocess_exec(
+            "xdotool", "mousemove", str(x), str(y), "click", "1",
+            env={**os.environ, "DISPLAY": os.environ.get("DISPLAY", ":99")},
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.wait()
+
+    async def handle_cf(ws, context, timeout=60):
+        start = time.time()
+        while time.time() - start < timeout:
+            title = await cdp_eval(ws, "document.title") or ""
+            if "just a moment" not in title.lower():
+                logger.info("CF cleared for %s", context)
+                return True
+            logger.info("CF challenge on %s, clicking checkbox...", context)
+            await xdotool_click(CF_CHECKBOX_X, CF_CHECKBOX_Y)
+            await asyncio.sleep(5)
+        return False
+
     try:
-        options = uc.ChromeOptions()
-        options.add_argument("--no-sandbox")
-        options.add_argument("--disable-dev-shm-usage")
-        options.add_argument("--window-size=1280,800")
-        driver = uc.Chrome(options=options, headless=False, use_subprocess=True)
+        import websockets as _ws
 
-        # 1. 打开 claude.ai 登录页
-        logger.info("uc: opening claude.ai...")
-        driver.get("https://claude.ai/login")
-        for i in range(40):
-            if "just a moment" not in driver.title.lower():
-                break
-            await asyncio.sleep(1)
-        await asyncio.sleep(2)
+        # Kill any existing Chrome
+        _sp.run(["pkill", "-f", "chrome.*remote-debugging-port"], capture_output=True)
+        await asyncio.sleep(1)
 
-        # 2. 点 "Continue with email"
-        for b in driver.find_elements(By.TAG_NAME, "button"):
-            if "continue with email" in b.text.strip().lower():
-                b.click()
-                logger.info("uc: clicked Continue with email")
-                break
-        await asyncio.sleep(2)
+        # Find Chrome binary
+        chrome_bin = _sp.run(
+            ["bash", "-c", "command -v google-chrome 2>/dev/null || command -v chromium-browser 2>/dev/null"],
+            capture_output=True, text=True,
+        ).stdout.strip()
+        if not chrome_bin:
+            logger.error("Chrome not found")
+            return None
 
-        # 3. 输入邮箱
-        try:
-            email_input = driver.find_element(By.CSS_SELECTOR, 'input[type="email"], input[name="email"]')
-            email_input.clear()
-            email_input.send_keys(email)
+        # Launch Chrome
+        profile_dir = f"/tmp/chrome-cdp-login-{email.split('@')[0]}"
+        os.makedirs(profile_dir, exist_ok=True)
+        chrome_proc = _sp.Popen([
+            chrome_bin,
+            "--no-sandbox", "--disable-gpu", "--disable-software-rasterizer",
+            "--no-first-run", "--no-default-browser-check",
+            "--disable-extensions", "--disable-component-extensions-with-background-pages",
+            f"--window-size=1365,900",
+            f"--remote-debugging-port={CDP_PORT}",
+            f"--user-data-dir={profile_dir}",
+            "about:blank",
+        ], stdout=_sp.DEVNULL, stderr=_sp.DEVNULL, env={**os.environ, "DISPLAY": os.environ.get("DISPLAY", ":99")})
+        await asyncio.sleep(4)
+        logger.info("Chrome launched pid=%d", chrome_proc.pid)
+
+        # Connect CDP
+        import httpx as _httpx
+        async with _httpx.AsyncClient() as c:
+            r = await c.get(f"http://127.0.0.1:{CDP_PORT}/json")
+            tabs = r.json()
+        page_tab = next((t for t in tabs if t.get("type") == "page"), None)
+        if not page_tab:
+            logger.error("No Chrome page tab found")
+            return None
+        ws_url = page_tab["webSocketDebuggerUrl"]
+
+        async with _ws.connect(ws_url, max_size=10_000_000) as ws:
+            # Enable Page events
+            await ws.send(json.dumps({"id": 1, "method": "Page.enable"}))
             await asyncio.sleep(0.5)
-            for b in driver.find_elements(By.CSS_SELECTOR, 'button[type="submit"]'):
-                if b.is_displayed():
-                    b.click()
-                    logger.info("uc: submitted email")
-                    break
-        except Exception as exc:
-            logger.error("uc: email input failed: %s", exc)
-            return None
-        await asyncio.sleep(5)
 
-        # 4. 轮询 MailCatcher 拿 magic link
-        mail_send_ts = time.time()
-        logger.info("uc: polling MailCatcher for magic link...")
-        async with httpx.AsyncClient(timeout=30, headers={"User-Agent": "Mozilla/5.0"}) as mc:
-            ml = await _poll_magic_link_mailcatcher(mc, mail_token, mail_send_ts, EMAIL_POLL_TIMEOUT)
-        logger.info("uc: got magic link (%d chars)", len(ml))
-
-        # 5. 浏览器访问 magic link 完成登录
-        try:
-            driver.execute_script(f"window.location.href = {json.dumps(ml)};")
-        except Exception:
-            driver.get(ml)
-        for i in range(30):
-            try:
-                if "magic-link" not in driver.current_url:
-                    break
-            except Exception:
-                break
-            await asyncio.sleep(1)
-        await asyncio.sleep(3)
-        logger.info("uc: login done, url=%s", driver.current_url[:80])
-
-        # 6. 导航到 OAuth URL → Authorize → 拿 callback
-        # 直接用已登录的 uc 浏览器完成 OAuth（不转交给 Playwright，避免 CF 问题）
-        if not oauth_url:
-            logger.error("uc: no oauth_url provided")
-            return None
-        logger.info("uc: navigating to OAuth URL...")
-        driver.get(oauth_url)
-        for i in range(30):
-            if "just a moment" not in driver.title.lower():
-                break
-            time.sleep(1)
-        time.sleep(2)
-
-        # 点 Authorize
-        from selenium.webdriver.support.ui import WebDriverWait
-        from selenium.webdriver.support import expected_conditions as EC
-        try:
-            authorize_btn = WebDriverWait(driver, 10).until(
-                EC.element_to_be_clickable((By.XPATH, "//button[contains(text(),'Authorize')]"))
-            )
-            # 监听重定向
-            original_url = driver.current_url
-            authorize_btn.click()
-            logger.info("uc: clicked Authorize")
-
-            # 等 callback（redirect 到 localhost）
-            import urllib.parse
-            callback_url = None
-            for _ in range(30):
-                try:
-                    cur = driver.current_url
-                    if "localhost" in cur or "/oauth/code/callback" in cur:
-                        callback_url = cur
-                        break
-                except Exception:
-                    break
-                time.sleep(1)
-
-            if callback_url:
-                qs = urllib.parse.parse_qs(urllib.parse.urlparse(callback_url).query)
-                code = qs.get("code", [""])[0]
-                state_val = qs.get("state", [""])[0]
-                logger.info("uc: got callback code=%s state=%s", code[:12], state_val[:12])
-                return {"code": code, "state": state_val}
-            else:
-                # 可能重定向到 localhost 失败（ERR_CONNECTION_REFUSED），检查页面源码
-                try:
-                    page_url = driver.current_url
-                    if "code=" in page_url:
-                        qs = urllib.parse.parse_qs(urllib.parse.urlparse(page_url).query)
-                        return {"code": qs.get("code",[""])[0], "state": qs.get("state",[""])[0]}
-                except Exception:
-                    pass
-                logger.error("uc: no callback URL captured")
+            # Step 1: Navigate to login page
+            await ws.send(json.dumps({"id": 2, "method": "Page.navigate", "params": {"url": "https://claude.ai/login"}}))
+            await asyncio.sleep(3)
+            if not await handle_cf(ws, "login page"):
                 return None
-        except Exception as exc:
-            logger.error("uc: Authorize failed: %s", exc)
+            await asyncio.sleep(2)
+
+            # Step 2: Enter email
+            r = await cdp_eval(ws, JS_SET_INPUT.format(type="email", value=email))
+            logger.info("Email input: %s", r)
+            if r == "no email input":
+                # Maybe already logged in
+                url = await cdp_eval(ws, "document.location.href") or ""
+                if "/new" in url or "/chat" in url:
+                    logger.info("Already logged in: %s", url[:60])
+                else:
+                    logger.error("Email input not found at %s", url[:80])
+                    return None
+
+            await asyncio.sleep(0.5)
+            r = await cdp_eval(ws, JS_CLICK_BTN.format(condition="t.includes('Continue with email')"))
+            logger.info("Email button: %s", r)
+            await asyncio.sleep(3)
+
+            # Step 3: Trigger verification → poll MailCatcher
+            mail_send_ts = time.time()
+            logger.info("Polling MailCatcher for magic link...")
+            async with _httpx.AsyncClient(timeout=30, headers={"User-Agent": "Mozilla/5.0"}) as mc:
+                ml = await _poll_magic_link_mailcatcher(mc, mail_token, mail_send_ts, EMAIL_POLL_TIMEOUT)
+            logger.info("Got magic link (%d chars)", len(ml))
+
+            # Step 4: Navigate to magic link
+            await ws.send(json.dumps({"id": 3, "method": "Page.navigate", "params": {"url": ml}}))
+            await asyncio.sleep(3)
+            await handle_cf(ws, "magic link")
+
+            # Wait for login to complete
+            for _ in range(15):
+                url = await cdp_eval(ws, "document.location.href") or ""
+                if "magic-link" not in url:
+                    break
+                await asyncio.sleep(2)
+            await asyncio.sleep(3)
+            logger.info("After magic link: %s", (await cdp_eval(ws, "document.location.href") or "")[:80])
+
+            # Check for verification code (6-digit)
+            body_text = await cdp_eval(ws, "document.body?.innerText?.substring(0, 500)") or ""
+            code_match = re.search(r"(\d{6})", body_text)
+            if code_match:
+                verify_code = code_match.group(1)
+                logger.info("Got verification code: %s", verify_code)
+                # Navigate back to login, enter email + code
+                await ws.send(json.dumps({"id": 4, "method": "Page.navigate", "params": {"url": "https://claude.ai/login"}}))
+                await asyncio.sleep(3)
+                await handle_cf(ws, "login return")
+                await asyncio.sleep(3)
+                await cdp_eval(ws, JS_SET_INPUT.format(type="email", value=email))
+                await asyncio.sleep(0.5)
+                await cdp_eval(ws, JS_CLICK_BTN.format(condition="t.includes('Continue with email')"))
+                await asyncio.sleep(8)
+                await cdp_eval(ws, JS_ENTER_CODE.format(code=verify_code))
+                await asyncio.sleep(1)
+                await cdp_eval(ws, JS_CLICK_BTN.format(
+                    condition="!t.includes('Google')&&!t.includes('SSO')&&(t.includes('Verify')||t.includes('Continue')||t.includes('Submit'))"
+                ))
+                await asyncio.sleep(10)
+
+            url = await cdp_eval(ws, "document.location.href") or ""
+            logger.info("Login result URL: %s", url[:80])
+
+            if not oauth_url:
+                # 只做网页登录（没有 CLI OAuth）
+                cookies = await cdp_eval(ws, "document.cookie")
+                return {"cookies": cookies} if cookies else None
+
+            # Step 5: Navigate to CLI OAuth URL → Authorize
+            await ws.send(json.dumps({"id": 5, "method": "Page.navigate", "params": {"url": oauth_url}}))
+            await asyncio.sleep(3)
+            await handle_cf(ws, "OAuth")
+            await asyncio.sleep(8)
+
+            # Extract org UUID from React fiber tree
+            JS_ORG = """(function(){var btn=[...document.querySelectorAll("button")].find(b=>b.textContent.trim()==="Authorize");if(!btn)return null;var fk=Object.keys(btn).find(k=>k.startsWith("__reactFiber"));if(!fk)return null;var c=btn[fk];for(var i=0;i<30&&c;i++){if(c.memoizedState){var s=c.memoizedState;var x=0;while(s&&x<20){var v=s.memoizedState;if(v&&Array.isArray(v)){for(var it of v){if(it&&it.email_address)return(it.memberships&&it.memberships[0]&&it.memberships[0].organization)?it.memberships[0].organization.uuid:null;if(Array.isArray(it)){for(var sub of it){if(sub&&sub.email_address)return(sub.memberships&&sub.memberships[0]&&sub.memberships[0].organization)?sub.memberships[0].organization.uuid:null;}}}}s=s.next;x++;}}c=c.return;}return null;})()"""
+            org_uuid = await cdp_eval(ws, JS_ORG)
+            logger.info("Org UUID: %s", org_uuid)
+
+            if org_uuid:
+                # Call authorize API directly (bypasses Turnstile)
+                parsed_url = urlparse(oauth_url.replace("claude.com/cai/", "claude.ai/"))
+                params = {k: v[0] for k, v in parse_qs(parsed_url.query).items()}
+                scope = " ".join(s for s in params.get("scope", "").split(" ") if s != "org:create_api_key")
+                api_body = json.dumps({
+                    "response_type": params.get("response_type", "code"),
+                    "client_id": params.get("client_id", ""),
+                    "organization_uuid": org_uuid,
+                    "redirect_uri": params.get("redirect_uri", ""),
+                    "scope": scope,
+                    "state": params.get("state", ""),
+                    "code_challenge": params.get("code_challenge", ""),
+                    "code_challenge_method": params.get("code_challenge_method", "S256"),
+                })
+                js_fetch = f"""(async function(){{var r=await fetch("/v1/oauth/{org_uuid}/authorize",{{method:"POST",headers:{{"Content-Type":"application/json","Accept":"application/json"}},credentials:"include",body:{json.dumps(api_body)}}});return r.status+" | "+await r.text()}})()"""
+                api_result = await cdp_eval(ws, js_fetch, timeout=15)
+                logger.info("Authorize API: %s", (api_result or "")[:150])
+
+                if api_result and api_result.startswith("200"):
+                    _, response_text = api_result.split(" | ", 1)
+                    response_data = json.loads(response_text)
+                    redirect_uri = response_data.get("redirect_uri", "")
+                    from urllib.parse import parse_qs as _pqs, urlparse as _up
+                    cb_params = _pqs(_up(redirect_uri).query)
+                    code = cb_params.get("code", [""])[0]
+                    state_val = cb_params.get("state", [""])[0]
+                    if code and state_val:
+                        logger.info("Got code#state from authorize API")
+                        return {"code": code, "state": state_val}
+
+            # Fallback: try clicking Authorize button
+            r = await cdp_eval(ws, JS_CLICK_BTN.format(condition="t==='Authorize'"))
+            logger.info("Authorize click: %s", r)
+            await asyncio.sleep(5)
+            url = await cdp_eval(ws, "document.location.href") or ""
+            if "code=" in url:
+                from urllib.parse import parse_qs as _pqs, urlparse as _up
+                cb_params = _pqs(_up(url).query)
+                return {"code": cb_params.get("code",[""])[0], "state": cb_params.get("state",[""])[0]}
+
+            logger.error("OAuth authorize failed")
             return None
 
     except Exception as exc:
-        logger.error("uc browser login failed: %s", exc)
+        logger.error("Chrome CDP login failed: %s", exc)
+        import traceback; traceback.print_exc()
         return None
     finally:
-        if driver:
-            try:
-                driver.quit()
-            except Exception:
-                pass
+        if chrome_proc:
+            chrome_proc.kill()
+            chrome_proc.wait()
 
 
 # ---------------------------------------------------------------------------
