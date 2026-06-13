@@ -871,7 +871,9 @@ def main():
 
     if use_webmail:
         # mail.com 家族：走 claude_oauth_login.py 的 Selenium OAuth 流程
-        logger.info("mail.com 域邮箱，走 Selenium OAuth 流程（webmail 读 magic link）")
+        # token 作为 MailCatcher 接码令牌（mail_token），不是 mail.com 密码——
+        # do_oauth_login 先试 webmail（需密码），失败自动 fallback 到 MailCatcher API
+        logger.info("mail.com 域邮箱，走 Selenium OAuth 流程（MailCatcher 接码）")
         config_path = Path(config_dir).expanduser()
         config_path.mkdir(parents=True, exist_ok=True)
         creds_path = str(config_path / ".credentials.json")
@@ -880,7 +882,10 @@ def main():
             sys.path.insert(0, str(script_dir))
             from claude_oauth_login import do_oauth_login
             creds = do_oauth_login(
-                email=email, password=token, output_path=creds_path,
+                email=email,
+                password="",  # 不传密码，跳过 webmail
+                mail_token=token,  # MailCatcher 接码令牌
+                output_path=creds_path,
             )
             ok = creds is not None and "claudeAiOauth" in (creds or {})
         except ImportError:
