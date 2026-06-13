@@ -200,11 +200,12 @@ async def add_account(body: AddAccountRequest):
         Path.home() / f".claude-{account_id}"
     )
 
+    # xvfb-run 包装：Chrome CDP 需要 display，Popen 起的 Xvfb 在 systemd 子进程下会 zombie
     proc = await asyncio.create_subprocess_exec(
+        "xvfb-run", "--auto-servernum", "--server-args=-screen 0 1920x1080x24",
         str(login_py), str(script),
         "--email", email,
         "--token", body.token.strip(),
-
         "--config-dir", config_dir,
         "--add-to-pool", account_id,
         "--save-token",
