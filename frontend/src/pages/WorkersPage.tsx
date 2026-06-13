@@ -153,7 +153,7 @@ function WorkerCard({ worker, onAction }: { worker: Worker; onAction: () => void
     setPoolOpen(true);
     setPool(null); setPoolErr(null);
     try {
-      setPool(await api.getWorkerPool(worker.id));
+      setPool(await api.getWorkerPoolUsage(worker.id));
     } catch (e) {
       setPoolErr(String(e));
     }
@@ -181,8 +181,8 @@ function WorkerCard({ worker, onAction }: { worker: Worker; onAction: () => void
         </div>
         <div className="flex items-center gap-1 shrink-0">
           {worker.status === 'ready' && (
-            <button title="CC 账号池" onClick={togglePool}
-              className={`p-1.5 ${poolOpen ? 'text-teal-300' : 'text-gray-400'} hover:text-teal-300`}><KeyRound size={15} /></button>
+            <button title="Worker 号池额度" onClick={togglePool}
+              className={`flex items-center gap-0.5 px-1.5 py-0.5 rounded ${poolOpen ? 'bg-indigo-600/30 text-indigo-300' : 'bg-gray-700 text-gray-400'} hover:text-indigo-300 text-[10px] font-semibold`}>Pro</button>
           )}
           <button title="日志" onClick={() => setLogsOpen(true)}
             className="p-1.5 text-gray-400 hover:text-gray-200"><ScrollText size={15} /></button>
@@ -223,23 +223,31 @@ function WorkerCard({ worker, onAction }: { worker: Worker; onAction: () => void
           {poolErr ? (
             <span className="text-red-400 break-all">{poolErr}</span>
           ) : pool === null ? (
-            <span className="text-gray-500">加载账号池…</span>
+            <span className="text-gray-500">加载额度…</span>
           ) : (
             <>
-              <div className="text-gray-500">
-                {pool.accounts.length === 0 ? '暂无账号' :
-                  (pool as { single_account?: boolean }).single_account ? '单账号模式' : `号池 ${pool.available}/${pool.total} 可用`}
-              </div>
-              {pool.accounts.map((a) => (
-                <div key={a.id} className="flex items-center gap-2">
-                  <span className={a.available ? 'text-emerald-400' : a.enabled ? 'text-yellow-400' : 'text-gray-500'}>●</span>
-                  <span className="text-gray-300 flex-1">{a.email || a.id}</span>
-                  <button onClick={async () => {
-                    if (!window.confirm(`从 Worker 号池删除 ${a.id}？`)) return;
-                    try { await api.deleteWorkerAccount(worker.id, a.id); togglePool(); togglePool(); } catch (e) { window.alert(String(e)); }
-                  }} className="text-gray-500 hover:text-red-400" title="删除">×</button>
+              {pool.accounts && pool.accounts.length > 0 ? pool.accounts.map((a: any) => (
+                <div key={a.id} className="rounded border border-gray-700 p-2 space-y-1.5">
+                  <div className="flex items-center gap-2">
+                    <span className={`h-2 w-2 rounded-full ${a.available ? 'bg-green-500' : a.enabled ? 'bg-yellow-500' : 'bg-gray-500'}`} />
+                    <span className="text-sm font-medium text-foreground">{a.id}</span>
+                    {a.subscription_type && <span className="px-1 py-0.5 rounded bg-indigo-600/30 text-indigo-300 text-[10px] font-semibold uppercase">{a.subscription_type}</span>}
+                    <button onClick={async () => {
+                      if (!window.confirm(\`从 Worker 号池删除 \${a.id}？\`)) return;
+                      try { await api.deleteWorkerAccount(worker.id, a.id); togglePool(); } catch (e) { window.alert(String(e)); }
+                    }} className="ml-auto text-gray-500 hover:text-red-400 text-[10px]">删除</button>
+                  </div>
+                  {a.email && <div className="text-xs text-gray-500">{a.email}</div>}
+                  {a.usage ? (
+                    <div className="space-y-1">
+                      {a.usage.five_hour && <div className="flex items-center gap-2"><span className="w-6 text-gray-500">5h</span><div className="flex-1 h-1.5 rounded bg-gray-700"><div className={\`h-full rounded \${a.usage.five_hour.utilization>=85?'bg-red-500':a.usage.five_hour.utilization>=60?'bg-yellow-500':'bg-green-500'}\`} style={{width:\`\${Math.min(100,a.usage.five_hour.utilization||0)}%\`}} /></div><span className="w-8 text-right text-gray-400">{(a.usage.five_hour.utilization||0).toFixed(0)}%</span></div>}
+                      {a.usage.seven_day && <div className="flex items-center gap-2"><span className="w-6 text-gray-500">7d</span><div className="flex-1 h-1.5 rounded bg-gray-700"><div className={\`h-full rounded \${a.usage.seven_day.utilization>=85?'bg-red-500':a.usage.seven_day.utilization>=60?'bg-yellow-500':'bg-green-500'}\`} style={{width:\`\${Math.min(100,a.usage.seven_day.utilization||0)}%\`}} /></div><span className="w-8 text-right text-gray-400">{(a.usage.seven_day.utilization||0).toFixed(0)}%</span></div>}
+                    </div>
+                  ) : a.usage_error ? (
+                    <div className="text-red-400">{a.usage_error === 'no_credentials' ? '未找到凭据' : a.usage_error === 'token_expired' ? 'Token 过期' : a.usage_error}</div>
+                  ) : null}
                 </div>
-              ))}
+              )) : <div className="text-gray-500">暂无账号</div>}
               <div className="pt-1 border-t border-gray-700">
                 <button
                   onClick={() => {
