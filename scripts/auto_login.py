@@ -277,6 +277,7 @@ async def _poll_magic_link_mailcom(
                 ts_m = re.search(r'\|\s+(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})', subj)
                 if ts_m:
                     t = time.mktime(time.strptime(ts_m.group(1), "%Y-%m-%d %H:%M:%S"))
+                    logger.info("mailcom: found email ts=%s after_ts=%.0f delta=%.0fs", ts_m.group(1), after_ts, t - after_ts)
                     if t < after_ts - 5: continue
                 mid = re.search(r'mailId=(\d+)', link).group(1)
                 r6 = c.get(f"{BASE}/mailbody/{mid}/false")
