@@ -15,27 +15,89 @@ function fetchWorkersCached(): Promise<Worker[]> {
   return workersPromise;
 }
 
-/** 任务运行位置徽章：跑在 worker 上时显示 worker 名；本机不显示。 */
-export function RunOnBadge({ task }: { task: Task }) {
-  const [name, setName] = useState<string | null>(null);
+/** 任务运行位置徽章：和 Config 项一样可点开调整（迁移 session + 工作目录）。
+ * 跑在 worker 上显示 worker 名，本机显示"本机"；执行中禁止切换。 */
+export function RunOnBadge({ task, onRefresh }: { task: Task; onRefresh?: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [workers, setWorkers] = useState<Worker[] | null>(null);
+  const [migrating, setMigrating] = useState(false);
+  const [label, setLabel] = useState<string | null>(null);
+
+  // 徽章文字用页级缓存；下拉打开时再拉一次最新列表
   useEffect(() => {
-    if (task.worker_id == null) { setName(null); return; }
+    if (task.worker_id == null) { setLabel('本机'); return; }
     let cancelled = false;
     fetchWorkersCached().then((ws) => {
       if (cancelled) return;
-      setName(ws.find((w) => w.id === task.worker_id)?.name || `worker #${task.worker_id}`);
+      setLabel(ws.find((w) => w.id === task.worker_id)?.name || `worker #${task.worker_id}`);
     });
     return () => { cancelled = true; };
   }, [task.worker_id]);
-  if (task.worker_id == null) return null;
+
+  useEffect(() => {
+    if (!open) return;
+    api.listWorkers().then((ws) => { workersCache = ws; setWorkers(ws); }).catch(() => setWorkers([]));
+    const handle = (e: MouseEvent) => {
+      if (!(e.target as HTMLElement).closest('[data-runon-badge]')) setOpen(false);
+    };
+    document.addEventListener('mousedown', handle);
+    return () => document.removeEventListener('mousedown', handle);
+  }, [open]);
+
+  const locked = migrating || task.status === 'executing' || task.status === 'migrating';
+
   return (
-    <span
-      className="text-xs bg-sky-600/30 text-sky-300 px-1.5 rounded whitespace-nowrap inline-flex items-center gap-0.5"
-      title="运行位置（在 Config 里可迁移）"
-    >
-      <Server size={11} />
-      {name ?? `#${task.worker_id}`}
-    </span>
+    <div className="relative inline-block" data-runon-badge>
+      <button
+        onClick={(e) => { e.stopPropagation(); setOpen(!open); }}
+        className="text-xs bg-sky-600/30 text-sky-300 px-1.5 rounded whitespace-nowrap inline-flex items-center gap-0.5 cursor-pointer hover:bg-sky-600/40"
+        title="运行位置（点击查看/迁移）"
+      >
+        <Server size={11} />
+        {label ?? (task.worker_id == null ? '本机' : `#${task.worker_id}`)}
+      </button>
+      {open && (
+        <div
+          className="absolute top-full mt-1 left-0 bg-gray-800 border border-gray-600 rounded shadow-lg z-30 p-3 min-w-[200px] max-w-[calc(100vw-1rem)]"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 items-center text-xs">
+            <span className="text-gray-400">Run on</span>
+            <select
+              className="bg-gray-700 text-foreground rounded px-2 py-1 text-xs disabled:opacity-50"
+              value={task.worker_id == null ? '' : String(task.worker_id)}
+              disabled={locked || workers === null}
+              title={task.status === 'executing' ? '运行中不能切换，先 Stop' : '切换执行位置（迁移 session + 工作目录）'}
+              onChange={async (e) => {
+                const target = e.target.value === '' ? -1 : parseInt(e.target.value);
+                if ((target === -1 && task.worker_id == null) || target === task.worker_id) return;
+                setMigrating(true);
+                try {
+                  await api.updateTask(task.id, { worker_id: target });
+                  onRefresh?.();
+                  setOpen(false);
+                } catch (err) {
+                  window.alert(String(err));
+                } finally {
+                  setMigrating(false);
+                }
+              }}
+            >
+              <option value="">本机</option>
+              {(workers ?? []).map((w) => (
+                <option key={w.id} value={w.id} disabled={w.status !== 'ready'}>
+                  {w.name}{w.status !== 'ready' ? ` (${w.status})` : ''}
+                </option>
+              ))}
+            </select>
+          </div>
+          {migrating && <div className="mt-2 text-xs text-amber-300">迁移中…</div>}
+          {locked && !migrating && (
+            <div className="mt-2 text-xs text-gray-500">运行中不能切换，先 Stop</div>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
