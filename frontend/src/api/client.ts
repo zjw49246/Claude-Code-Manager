@@ -389,6 +389,7 @@ export interface Worker {
   private_ip: string | null;
   public_ip: string | null;
   ssh_user: string;
+  ssh_key_path: string | null;
   ccm_port: number;
   ccm_commit: string | null;
   accounts: { email: string; status: string }[] | null;

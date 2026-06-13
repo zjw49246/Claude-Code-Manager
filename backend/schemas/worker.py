@@ -23,6 +23,7 @@ class WorkerResponse(BaseModel):
     private_ip: str | None
     public_ip: str | None
     ssh_user: str
+    ssh_key_path: str | None = None
     ccm_port: int
     ccm_commit: str | None
     accounts: list | None

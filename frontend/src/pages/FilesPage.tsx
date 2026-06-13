@@ -70,7 +70,7 @@ function useWorkerProfiles(): SSHProfile[] {
               port: 22,
               username: w.ssh_user || 'ubuntu',
               password: '',
-              key_path: '',  // Manager 的密钥路径由后端 SSH 调用时注入
+              key_path: w.ssh_key_path || '',
             })),
         );
       })
