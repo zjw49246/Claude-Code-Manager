@@ -112,6 +112,7 @@ async def relogin_account(account_id: str):
             "Token 刷新失败，且找不到浏览器（auto_login 需要系统 Google Chrome）。"
             "安装 google-chrome-stable 或 .login-venv/bin/python3 -m playwright install chromium"
         ))
+    await _ensure_xvfb()
     script = root / "scripts" / "auto_login.py"
     proc = await asyncio.create_subprocess_exec(
         str(login_py), str(script), "--email", acc.email, "--config-dir", acc.config_dir,

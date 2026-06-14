@@ -1,5 +1,6 @@
 """Chrome CDP 登录模块（从 auto_login.py 调用）。"""
 import asyncio, json, os, re, select, subprocess, sys, time
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 import httpx, websockets
 
@@ -176,12 +177,22 @@ async def cdp_login(email: str, token: str, config_dir: str, oauth_url: str, coo
                             env={"CLAUDE_CONFIG_DIR":config_dir,"PATH":os.environ["PATH"]},
                             capture_output=True, text=True, timeout=15)
                         print(f"  Auth status: {r.stdout.strip()[:200]}")
+                        # auth status may show org owner email instead of this account's email
+                        # (Max org sub-accounts). Check credentials file instead.
+                        cred_path = Path(config_dir) / ".credentials.json"
+                        if cred_path.exists():
+                            try:
+                                creds = json.loads(cred_path.read_text())
+                                if creds.get("claudeAiOauth", {}).get("accessToken"):
+                                    print("SUCCESS! (credentials file valid)")
+                                    return {"code": code, "state": state, "success": True}
+                            except Exception:
+                                pass
                         if email.lower() in r.stdout.lower():
                             print("SUCCESS!")
                             return {"code": code, "state": state, "success": True}
-                        else:
-                            print("FAILED: auth status doesn't show email")
-                            return {"code": code, "state": state, "success": False}
+                        print("FAILED: no valid credentials after login")
+                        return {"code": code, "state": state, "success": False}
             print("FAILED: authorize")
             return None
     finally:
