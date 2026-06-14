@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Float, Integer, String, Text, DateTime, JSON, select, func
+from sqlalchemy import Float, Integer, String, Text, DateTime, JSON, select, func, case
 from sqlalchemy.orm import Mapped, mapped_column, column_property
 
 from backend.database import Base
@@ -67,11 +67,16 @@ class Task(Base):
 def _configure_task_properties():
     from backend.models.monitor_session import MonitorSession
     ms = MonitorSession.__table__
+    # Task 终态时 sub-agent 不可能还在跑——即使 DB 有残留 running 记录也返回 0
+    _terminal = ("completed", "failed", "cancelled")
     Task.active_sub_agents = column_property(
-        select(func.count(ms.c.id))
-        .where(ms.c.task_id == Task.id, ms.c.status == "running")
-        .correlate(Task.__table__)
-        .scalar_subquery()
+        case(
+            (Task.status.in_(_terminal), 0),
+            else_=select(func.count(ms.c.id))
+            .where(ms.c.task_id == Task.id, ms.c.status == "running")
+            .correlate(Task.__table__)
+            .scalar_subquery(),
+        )
     )
 
 _configure_task_properties()

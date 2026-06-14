@@ -37,13 +37,14 @@ function UsageBar({ label, window: w }: { label: string; window: PoolUsageWindow
   );
 }
 
-function AccountCard({ account, preferred, lastSelected, onClearCooldown, onSetPreferred, onRelogin, reloginState }: {
+function AccountCard({ account, preferred, lastSelected, onClearCooldown, onSetPreferred, onRelogin, onRetryUsage, reloginState }: {
   account: PoolAccountUsage;
   preferred: string | null;
   lastSelected: string | null;
   onClearCooldown: (id: string) => void;
   onSetPreferred: (id: string | null) => void;
   onRelogin: (id: string) => void;
+  onRetryUsage: () => void;
   reloginState?: { status: string; message?: string };
 }) {
   const statusDot = !account.enabled
@@ -133,7 +134,7 @@ function AccountCard({ account, preferred, lastSelected, onClearCooldown, onSetP
             {account.usage_error && (() => {
               const needsRelogin = ['no_credentials', 'token_expired'].includes(account.usage_error!);
               return (<>
-                {needsRelogin ? (
+                {needsRelogin ? (<>
                   <button
                     onClick={() => onRelogin(account.id)}
                     disabled={reloginState?.status === 'running'}
@@ -142,25 +143,25 @@ function AccountCard({ account, preferred, lastSelected, onClearCooldown, onSetP
                   >
                     {reloginState?.status === 'running' ? '登录中…' : '重新登录'}
                   </button>
-                ) : (
                   <button
-                    onClick={() => window.location.reload()}
+                    onClick={async () => {
+                      if (!window.confirm(`从号池中删除 ${account.id}？config_dir 文件夹保留，可以重新登录其他号。`)) return;
+                      try { await api.poolDeleteAccount(account.id); window.location.reload(); } catch {}
+                    }}
+                    className="shrink-0 text-[10px] px-1.5 py-0.5 rounded border border-gray-600 text-gray-400 hover:bg-gray-700"
+                    title="从号池删除（保留文件夹）"
+                  >
+                    删除
+                  </button>
+                </>) : (
+                  <button
+                    onClick={onRetryUsage}
                     className="shrink-0 text-[10px] px-1.5 py-0.5 rounded border border-yellow-500/50 text-yellow-300 hover:bg-yellow-600/20"
-                    title="临时错误，刷新重试"
+                    title="临时错误，重新拉取额度"
                   >
                     重试
                   </button>
                 )}
-                <button
-                  onClick={async () => {
-                    if (!window.confirm(`从号池中删除 ${account.id}？config_dir 文件夹保留，可以重新登录其他号。`)) return;
-                    try { await api.poolDeleteAccount(account.id); window.location.reload(); } catch {}
-                  }}
-                  className="shrink-0 text-[10px] px-1.5 py-0.5 rounded border border-gray-600 text-gray-400 hover:bg-gray-700"
-                  title="从号池删除（保留文件夹）"
-                >
-                  删除
-                </button>
               </>);
             })()}
           </div>
@@ -378,6 +379,7 @@ export function PoolDrawer() {
                   onClearCooldown={handleClearCooldown}
                   onSetPreferred={handleSetPreferred}
                   onRelogin={handleRelogin}
+                  onRetryUsage={loadUsage}
                   reloginState={relogin[a.id]}
                 />
               ))}

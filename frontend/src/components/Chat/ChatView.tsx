@@ -421,7 +421,22 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
       return;
     }
 
-    // Only show meaningful events in chat (skip user_message - already added optimistically)
+    // Show user_message from WS only if not already optimistically added (i.e. injected messages)
+    if (eventType === 'user_message') {
+      const content = (msg.data.content as string) || '';
+      setMessages((prev) => {
+        const last = [...prev].reverse().find((m) => m.role === 'user');
+        if (last && last.content === content) return prev;
+        return [...prev, {
+          id: Date.now() + Math.random(), role: 'user', event_type: 'user_message',
+          content, tool_name: null, tool_input: null, tool_output: null,
+          is_error: false, loop_iteration: null, timestamp: new Date().toISOString(),
+          image_urls: null, attachments: null,
+        }];
+      });
+      return;
+    }
+
     const showTypes = ['message', 'result', 'tool_use', 'tool_result', 'system_init', 'system_event', 'thinking'];
     if (!showTypes.includes(eventType)) return;
 
@@ -432,6 +447,8 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
     const content = (msg.data.content as string) || null;
     // Skip empty assistant messages (partial streaming chunks with no text)
     if ((eventType === 'message' || eventType === 'result') && !content) return;
+    // Skip CC internal messages (compact summaries, task-notifications) — real user input uses event_type=user_message
+    if (eventType === 'message' && (msg.data.role as string) === 'user') return;
 
     const entry: ChatMessage = {
       id: Date.now() + Math.random(),

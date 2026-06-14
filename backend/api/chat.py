@@ -365,6 +365,12 @@ async def get_chat_history(
             current_source = None
         msg_source = current_source
 
+        # event_type=message with role=user are CC internal messages (compact
+        # summaries, task-notifications, local-command caveats) — not real user
+        # input (which uses event_type=user_message). Hide them from chat.
+        if row.event_type == "message" and row.role == "user":
+            continue
+
         messages.append({
             "id": row.id,
             "role": row.role or ("assistant" if row.event_type in ("message", "result") else "system"),
