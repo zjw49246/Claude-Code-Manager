@@ -29,6 +29,7 @@ class TaskCreate(BaseModel):
     model: str | None = None
     effort_level: str | None = None
     thinking_budget: int | None = None
+    system_prompt_mode: str | None = None
     timeout_hours: float | None = None
     sort_order: float | None = None
     enable_workflows: bool = False
@@ -60,6 +61,7 @@ class TaskUpdate(BaseModel):
     model: str | None = None
     effort_level: str | None = None
     thinking_budget: int | None = None
+    system_prompt_mode: str | None = None
     timeout_hours: float | None = None
     sort_order: float | None = None
     description: str | None = None
@@ -113,6 +115,7 @@ class TaskResponse(BaseModel):
     model: str | None
     effort_level: str | None
     thinking_budget: int | None
+    system_prompt_mode: str | None = None
     timeout_hours: float | None = None
     last_accessed_at: datetime | None = None
     sort_order: float | None = None

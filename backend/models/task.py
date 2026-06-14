@@ -45,6 +45,8 @@ class Task(Base):
     model: Mapped[str | None] = mapped_column(String(100), nullable=True)
     effort_level: Mapped[str | None] = mapped_column(String(20), nullable=True)
     thinking_budget: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # NULL = 不注入；"append" = 追加；"replace" = 替换
+    system_prompt_mode: Mapped[str | None] = mapped_column(String(20), nullable=True)
     # NULL = 全局默认超时；0 = 不限时；>0 = 指定小时数
     timeout_hours: Mapped[float | None] = mapped_column(Float, nullable=True)
     # 最近访问时间（打开 chat 时更新）——默认排序：最近访问优先

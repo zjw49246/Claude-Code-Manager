@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { Wrench, Users, Settings } from 'lucide-react';
 import { api } from '../../api/client';
 import type { Task, SubAgentSummary } from '../../api/client';
@@ -257,9 +257,21 @@ export function TaskConfigBadge({ task, onRefresh, openUp, align }: { task: Task
   const models = opts ? (isCodex ? opts.codex : opts.claude) : [];
   const efforts = opts ? (isCodex ? opts.codexEffort : opts.effort) : [];
 
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const [pos, setPos] = useState<{ top: number; left: number }>({ top: 0, left: 0 });
+
+  useEffect(() => {
+    if (!open || !btnRef.current) return;
+    const rect = btnRef.current.getBoundingClientRect();
+    const top = openUp ? rect.top - 4 : rect.bottom + 4;
+    const left = align === 'right' ? rect.right : rect.left;
+    setPos({ top, left });
+  }, [open, openUp, align]);
+
   return (
     <div className="relative" data-task-config>
       <button
+        ref={btnRef}
         onClick={(e) => { e.stopPropagation(); setOpen(!open); }}
         className="text-xs bg-gray-700 text-gray-300 px-1.5 rounded cursor-pointer hover:bg-gray-600 hover:text-gray-100 flex items-center gap-0.5"
         title={`Config（model: ${task.model || 'default'}）`}
@@ -269,7 +281,13 @@ export function TaskConfigBadge({ task, onRefresh, openUp, align }: { task: Task
       </button>
       {open && (
         <div
-          className={`absolute ${openUp ? 'bottom-full mb-1' : 'top-full mt-1'} ${align === 'right' ? 'right-0' : 'left-0'} bg-gray-800 border border-gray-600 rounded shadow-lg z-30 p-3 min-w-[250px] max-w-[calc(100vw-1rem)]`}
+          className="fixed bg-gray-800 border border-gray-600 rounded shadow-lg z-50 p-3 min-w-[250px] max-w-[calc(100vw-1rem)] max-h-[80vh] overflow-y-auto"
+          style={{
+            top: openUp ? undefined : pos.top,
+            bottom: openUp ? `calc(100vh - ${pos.top}px)` : undefined,
+            left: align === 'right' ? undefined : pos.left,
+            right: align === 'right' ? `calc(100vw - ${pos.left}px)` : undefined,
+          }}
           onClick={(e) => e.stopPropagation()}
         >
           <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 items-center text-xs">
@@ -339,6 +357,17 @@ export function TaskConfigBadge({ task, onRefresh, openUp, align }: { task: Task
               onChange={(e) => update({ thinking_budget: e.target.value === '' ? null : Number(e.target.value) })}
             >
               {THINKING_OPTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+
+            <span className="text-gray-400">System Prompt</span>
+            <select
+              className="bg-gray-700 text-foreground rounded px-2 py-1 text-xs"
+              value={task.system_prompt_mode || ''}
+              onChange={(e) => update({ system_prompt_mode: e.target.value || null })}
+            >
+              <option value="">Off</option>
+              <option value="append">Fable 5 (Append)</option>
+              <option value="replace">Fable 5 (Replace)</option>
             </select>
           </div>
           <div className="mt-2 text-[10px] text-gray-500">修改在下一轮对话生效</div>
