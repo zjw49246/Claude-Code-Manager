@@ -47,6 +47,17 @@ export function Header({ currentPage, onNavigate }: HeaderProps) {
     }
   }, [runtime, switching]);
 
+  const toggleAutoSort = useCallback(async () => {
+    if (!runtime || switching) return;
+    setSwitching(true);
+    try {
+      const updated = await api.updateRuntimeSettings({ auto_sort_on_access: !runtime.auto_sort_on_access });
+      setRuntime(updated);
+    } catch { /* keep previous state */ } finally {
+      setSwitching(false);
+    }
+  }, [runtime, switching]);
+
   const pages = [
     { key: 'dashboard', label: 'Dashboard' },
     { key: 'tasks', label: 'Tasks' },
@@ -184,6 +195,25 @@ export function Header({ currentPage, onNavigate }: HeaderProps) {
                     {theme === 'dark' ? '切换到浅色' : '切换到深色'}
                   </button>
                 </div>
+                {runtime && (
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-xs text-gray-400">访问置顶</span>
+                    <button
+                      onClick={toggleAutoSort}
+                      disabled={switching}
+                      className={`relative inline-flex h-4 w-8 items-center rounded-full transition-colors disabled:opacity-50 ${
+                        runtime.auto_sort_on_access ? 'bg-green-500' : 'bg-gray-600'
+                      }`}
+                      title={runtime.auto_sort_on_access ? '开启：打开聊天自动置顶任务' : '关闭：打开聊天不改变排序'}
+                    >
+                      <span
+                        className={`inline-block h-3 w-3 transform rounded-full bg-white transition-transform ${
+                          runtime.auto_sort_on_access ? 'translate-x-4' : 'translate-x-1'
+                        }`}
+                      />
+                    </button>
+                  </div>
+                )}
               </div>
             )}
           </div>

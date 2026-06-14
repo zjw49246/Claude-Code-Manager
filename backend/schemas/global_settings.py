@@ -24,7 +24,9 @@ class GlobalSettingsResponse(BaseModel):
 class RuntimeSettingsResponse(BaseModel):
     use_pty_mode: bool
     pty_available: bool
+    auto_sort_on_access: bool
 
 
 class RuntimeSettingsUpdate(BaseModel):
-    use_pty_mode: bool
+    use_pty_mode: bool | None = None
+    auto_sort_on_access: bool | None = None

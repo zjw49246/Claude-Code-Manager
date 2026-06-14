@@ -83,6 +83,26 @@ class TaskQueue:
         if not task:
             return None
         task.starred = not task.starred
+        # Recalculate sort_order for the target group so the task
+        # appears at the top of its new group instead of carrying
+        # the old (possibly wrong) position.
+        effective_key = func.coalesce(
+            Task.sort_order,
+            func.cast(func.strftime("%s", func.coalesce(Task.last_accessed_at, Task.created_at)), Float),
+        )
+        group_max = (
+            await self.db.execute(
+                select(func.max(effective_key)).where(
+                    Task.archived == False,  # noqa: E712
+                    Task.starred == task.starred,
+                    Task.id != task_id,
+                )
+            )
+        ).scalar()
+        if group_max is not None:
+            task.sort_order = group_max + 60
+        else:
+            task.sort_order = datetime.utcnow().timestamp()
         await self.db.commit()
         await self.db.refresh(task)
         return task
