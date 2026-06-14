@@ -1,5 +1,5 @@
 """Chrome CDP 登录模块（从 auto_login.py 调用）。"""
-import asyncio, json, os, re, select, subprocess, sys, time
+import asyncio, json, os, re, select, shutil, subprocess, sys, time
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 import httpx, websockets
@@ -40,9 +40,10 @@ async def handle_cf(ws, ctx, timeout=60):
     return False
 
 async def cdp_login(email: str, token: str, config_dir: str, oauth_url: str, cookies_171: list[dict] | None = None) -> dict | None:
-    # 1. Kill old chrome
+    # 1. Kill old chrome and clean profile
     subprocess.run(["pkill", "-f", "chrome.*remote-debugging"], capture_output=True)
     await asyncio.sleep(1)
+    shutil.rmtree("/tmp/chrome-test-login", ignore_errors=True)
 
     # 2. Launch Chrome
     chrome = subprocess.Popen(["google-chrome", "--no-sandbox", "--disable-gpu",
@@ -70,59 +71,52 @@ async def cdp_login(email: str, token: str, config_dir: str, oauth_url: str, coo
             await handle_cf(ws, "login")
             await asyncio.sleep(2)
 
-            # 检测是否已登录（浏览器 session cookies 还有效 → 自动跳转到 /new 或 /chat）
-            cur_url = await cdp_eval(ws, "document.location.href") or ""
-            cur_path = re.sub(r'[?#].*', '', cur_url).rstrip('/')
-            already_logged_in = any(p in cur_path for p in ['/new', '/chat', '/recents'])
-            if already_logged_in:
-                print(f"  Already logged in: {cur_url[:60]}")
-            else:
-                # 5. Enter email
-                JS_SET = """(function(){{var inputs=[...document.querySelectorAll('input[type={type}]')].filter(i=>i.offsetParent!==null);if(!inputs.length)return 'no input';var inp=inputs[0];var s=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;s.call(inp,'{value}');inp.dispatchEvent(new Event('input',{{bubbles:true}}));inp.dispatchEvent(new Event('change',{{bubbles:true}}));return 'set'}})()"""
-                JS_BTN = """(function(){{var btns=[...document.querySelectorAll('button')].filter(b=>b.offsetParent!==null);for(var b of btns){{var t=b.textContent.trim();if({cond}){{b.click();return 'clicked:'+t}}}}return 'no match'}})()"""
-                r = await cdp_eval(ws, JS_SET.format(type="email", value=email))
-                print(f"  Email: {r}")
-                await asyncio.sleep(0.5)
-                r = await cdp_eval(ws, JS_BTN.format(cond="t.includes('Continue with email')"))
-                print(f"  Button: {r}")
-                await asyncio.sleep(3)
+            # 5. Enter email
+            JS_SET = """(function(){{var inputs=[...document.querySelectorAll('input[type={type}]')].filter(i=>i.offsetParent!==null);if(!inputs.length)return 'no input';var inp=inputs[0];var s=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;s.call(inp,'{value}');inp.dispatchEvent(new Event('input',{{bubbles:true}}));inp.dispatchEvent(new Event('change',{{bubbles:true}}));return 'set'}})()"""
+            JS_BTN = """(function(){{var btns=[...document.querySelectorAll('button')].filter(b=>b.offsetParent!==null);for(var b of btns){{var t=b.textContent.trim();if({cond}){{b.click();return 'clicked:'+t}}}}return 'no match'}})()"""
+            r = await cdp_eval(ws, JS_SET.format(type="email", value=email))
+            print(f"  Email: {r}")
+            await asyncio.sleep(0.5)
+            r = await cdp_eval(ws, JS_BTN.format(cond="t.includes('Continue with email')"))
+            print(f"  Button: {r}")
+            await asyncio.sleep(3)
 
-                # 6. Poll MailCatcher
-                send_ts = time.time()
-                print("  Polling MailCatcher...")
-                async with httpx.AsyncClient(timeout=30, headers={"User-Agent": "Mozilla/5.0"}) as mc:
-                    deadline = time.time() + 120
-                    while time.time() < deadline:
-                        r = await mc.get(f"{MAILCATCHER}/api/v1/message", params={"token": token, "type": "claude"})
-                        d = r.json().get("data", {})
-                        subj = d.get("subject", "")
-                        link = d.get("code", "")
-                        if link.startswith("http") and subj:
-                            m = re.search(r"\|\s+(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", subj)
-                            if m:
-                                t = time.mktime(time.strptime(m.group(1), "%Y-%m-%d %H:%M:%S"))
-                                if t >= send_ts - 10:
-                                    print(f"  Got magic link ({len(link)} chars)")
-                                    break
-                        await asyncio.sleep(2)
-                    else:
-                        print("  TIMEOUT waiting for magic link")
-                        return
-
-                # 7. Navigate magic link
-                await ws.send(json.dumps({"id": 3, "method": "Page.navigate", "params": {"url": link}}))
-                await asyncio.sleep(3)
-                await handle_cf(ws, "magic-link")
-                for _ in range(15):
-                    url = await cdp_eval(ws, "document.location.href") or ""
-                    if "magic-link" not in url: break
+            # 6. Poll MailCatcher
+            send_ts = time.time()
+            print("  Polling MailCatcher...")
+            async with httpx.AsyncClient(timeout=30, headers={"User-Agent": "Mozilla/5.0"}) as mc:
+                deadline = time.time() + 120
+                while time.time() < deadline:
+                    r = await mc.get(f"{MAILCATCHER}/api/v1/message", params={"token": token, "type": "claude"})
+                    d = r.json().get("data", {})
+                    subj = d.get("subject", "")
+                    link = d.get("code", "")
+                    if link.startswith("http") and subj:
+                        m = re.search(r"\|\s+(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", subj)
+                        if m:
+                            t = time.mktime(time.strptime(m.group(1), "%Y-%m-%d %H:%M:%S"))
+                            if t >= send_ts - 10:
+                                print(f"  Got magic link ({len(link)} chars)")
+                                break
                     await asyncio.sleep(2)
-                await asyncio.sleep(3)
-                print(f"  After magic link: {(await cdp_eval(ws, 'document.location.href') or '')[:60]}")
+                else:
+                    print("  TIMEOUT waiting for magic link")
+                    return
+
+            # 7. Navigate magic link
+            await ws.send(json.dumps({"id": 3, "method": "Page.navigate", "params": {"url": link}}))
+            await asyncio.sleep(3)
+            await handle_cf(ws, "magic-link")
+            for _ in range(15):
+                url = await cdp_eval(ws, "document.location.href") or ""
+                if "magic-link" not in url: break
+                await asyncio.sleep(2)
+            await asyncio.sleep(3)
+            print(f"  After magic link: {(await cdp_eval(ws, 'document.location.href') or '')[:60]}")
 
             # 8. Launch CLI
             cli = subprocess.Popen(["claude", "auth", "login", "--email", email],
-                env={"CLAUDE_CONFIG_DIR": config_dir, "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"), "HOME": os.environ.get("HOME", str(__import__('pathlib').Path.home())), "NO_COLOR": "1", "TERM": "dumb"},
+                env={"CLAUDE_CONFIG_DIR": config_dir, "PATH": os.environ["PATH"], "HOME": os.environ["HOME"]},
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0)
             print(f"  CLI pid={cli.pid}")
 
@@ -177,8 +171,6 @@ async def cdp_login(email: str, token: str, config_dir: str, oauth_url: str, coo
                             env={"CLAUDE_CONFIG_DIR":config_dir,"PATH":os.environ["PATH"]},
                             capture_output=True, text=True, timeout=15)
                         print(f"  Auth status: {r.stdout.strip()[:200]}")
-                        # auth status may show org owner email instead of this account's email
-                        # (Max org sub-accounts). Check credentials file instead.
                         cred_path = Path(config_dir) / ".credentials.json"
                         if cred_path.exists():
                             try:

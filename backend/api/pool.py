@@ -59,7 +59,7 @@ async def clear_cooldown(account_id: str):
 
 async def _watch_relogin(account_id: str, proc: asyncio.subprocess.Process):
     out, _ = await proc.communicate()
-    tail = (out or b"").decode("utf-8", errors="replace")[-2000:]
+    tail = (out or b"").decode("utf-8", errors="replace")[-5000:]
     _relogin_state[account_id] = {
         "status": "success" if proc.returncode == 0 else "failed",
         "detail": tail,
@@ -197,7 +197,7 @@ _add_state: dict[str, dict] = {}
 
 async def _watch_add(email: str, proc: asyncio.subprocess.Process):
     out, _ = await proc.communicate()
-    tail = (out or b"").decode("utf-8", errors="replace")[-2000:]
+    tail = (out or b"").decode("utf-8", errors="replace")[-5000:]
     _add_state[email] = {
         "status": "success" if proc.returncode == 0 else "failed",
         "detail": tail,
