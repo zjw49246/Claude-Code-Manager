@@ -11,16 +11,24 @@ export function effectiveKey(t: Task): number {
   return new Date(iso).getTime() / 1000;
 }
 
-/** 计算把 fromIdx 的任务移到 toIdx（移除后的下标）所需的 sort_order。 */
-function newSortFor(list: Task[], fromIdx: number, toIdx: number): number {
+/** 计算把 fromIdx 的任务移到 toIdx（移除后的下标）所需的 sort_order。
+ *  只使用同 starred 组的邻居计算中点，避免跨组边界取到另一组的值。 */
+export function newSortFor(list: Task[], fromIdx: number, toIdx: number): number {
+  const starred = list[fromIdx]?.starred ?? false;
   const without = list.filter((_, i) => i !== fromIdx);
-  const prev = toIdx > 0 ? without[toIdx - 1] : null;
-  const next = toIdx < without.length ? without[toIdx] : null;
+  let prev: Task | null = null;
+  for (let i = toIdx - 1; i >= 0; i--) {
+    if ((without[i].starred ?? false) === starred) { prev = without[i]; break; }
+  }
+  let next: Task | null = null;
+  for (let i = toIdx; i < without.length; i++) {
+    if ((without[i].starred ?? false) === starred) { next = without[i]; break; }
+  }
   const pk = prev ? effectiveKey(prev) : null;
   const nk = next ? effectiveKey(next) : null;
   if (pk != null && nk != null) return (pk + nk) / 2;
-  if (pk == null && nk != null) return nk + 3600; // 置顶（同组内）
-  if (pk != null && nk == null) return pk - 3600; // 置底
+  if (pk == null && nk != null) return nk + 60;
+  if (pk != null && nk == null) return pk - 60;
   return Date.now() / 1000;
 }
 

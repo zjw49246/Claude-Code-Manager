@@ -41,6 +41,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 export interface RuntimeSettings {
   use_pty_mode: boolean;
   pty_available: boolean;
+  auto_sort_on_access: boolean;
 }
 
 export interface GlobalSettings {
@@ -459,7 +460,7 @@ export const api = {
 
   // Global Settings
   getRuntimeSettings: () => request<RuntimeSettings>('/api/settings/runtime'),
-  updateRuntimeSettings: (data: { use_pty_mode: boolean }) =>
+  updateRuntimeSettings: (data: Partial<Pick<RuntimeSettings, 'use_pty_mode' | 'auto_sort_on_access'>>) =>
     request<RuntimeSettings>('/api/settings/runtime', { method: 'PUT', body: JSON.stringify(data) }),
   getGitSettings: () => request<GlobalSettings>('/api/settings/git'),
   updateGitSettings: (data: Partial<GlobalSettings>) =>
