@@ -766,30 +766,23 @@ async def perform_login(
         if fp.exists():
             fp.unlink()
 
-    # Step 1: 171mail 域先拿 cookies（mail.com 域在 Chrome 里做）
-    cookies_171: list[dict] = []
+    # Step 1: 171mail 域先通过 API 拿 magic link（mail.com 域在 Chrome+MailCatcher 里拿）
+    magic_link_171: str | None = None
     if not _use_mailcatcher:
-        logger.info("step 1: 171mail — triggering + polling + verify...")
+        logger.info("step 1: 171mail — triggering + polling magic link...")
         try:
             async with httpx.AsyncClient(timeout=30) as mc:
                 device_id, client_sha = await _trigger_send(mc, email)
                 send_ts = time.time()
-                magic_link = await _poll_magic_link(mc, token_171, send_ts, EMAIL_POLL_TIMEOUT)
-                logger.info("got magic link (%d chars)", len(magic_link))
-                cookie_header, session_key = await _verify_link(
-                    mc, link=magic_link,
-                    device_id=device_id, client_sha=client_sha, email=email,
-                )
-                logger.info("got sessionKey (%d chars)", len(session_key))
-            cookies_171 = _parse_cookie_header(cookie_header)
-            logger.info("parsed %d cookies", len(cookies_171))
+                magic_link_171 = await _poll_magic_link(mc, token_171, send_ts, EMAIL_POLL_TIMEOUT)
+                logger.info("got magic link (%d chars)", len(magic_link_171))
         except MailServiceError as exc:
             logger.error("171mail error: %s", exc)
             return False
     else:
-        logger.info("step 1: mail.com 域，跳过 171mail（Chrome CDP 登录 + MailCatcher 接码）")
+        logger.info("step 1: mail.com 域（Chrome 输入邮箱 + MailCatcher 接码）")
 
-    # Step 2: Chrome CDP 完成全部登录（浏览器登录 + CLI OAuth + stdin + 验证）
+    # Step 2: Chrome CDP 全流程（输入邮箱 → magic link → OAuth）
     logger.info("step 2: Chrome CDP 全流程登录...")
     script_dir = Path(__file__).resolve().parent
     sys.path.insert(0, str(script_dir))
@@ -798,8 +791,7 @@ async def perform_login(
         email=email,
         token=token_171,
         config_dir=str(config_path),
-        oauth_url="",  # cdp_login 内部启动 CLI 拿 OAuth URL
-        cookies_171=cookies_171 if not _use_mailcatcher else None,
+        magic_link=magic_link_171,
     )
     if not result or not result.get("success"):
         logger.error("Chrome CDP 登录失败")
