@@ -365,6 +365,12 @@ class InstanceManager:
                 cmd.extend(["--disallowedTools", ",".join(sorted(set(disallowed)))])
             if mcp_config_path and Path(mcp_config_path).exists():
                 cmd.extend(["--mcp-config", mcp_config_path])
+            if settings.append_system_prompt_file:
+                sp_path = Path(settings.append_system_prompt_file)
+                if not sp_path.is_absolute():
+                    sp_path = Path(settings.worker_deploy_source_dir) / sp_path
+                if sp_path.exists():
+                    cmd.extend(["--append-system-prompt-file", str(sp_path)])
             return cmd
 
         if provider == "codex":

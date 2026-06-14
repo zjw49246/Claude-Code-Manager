@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     worker_remote_dir: str = "/home/ubuntu/ccm"  # Worker 上 CCM 部署目录
     worker_deploy_source_dir: str = "."          # rsync 部署源（Manager 本地仓库根）
 
+    # --- Custom system prompt (appended to Claude's default) ---
+    append_system_prompt_file: str = ""  # path to .md file, e.g. system-prompts/fable5.md
+
     # --- PTY persistent-session mode (claude provider only) ---
     # When true, claude tasks run in long-lived interactive PTY sessions
     # (claude_pty): prompts are delivered via channel injection, events come
