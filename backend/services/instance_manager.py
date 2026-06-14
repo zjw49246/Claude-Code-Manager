@@ -418,6 +418,7 @@ class InstanceManager:
         Any exception other than CancelledError is caught and logged so that
         a single bad line or transient DB error never kills the whole consumer.
         """
+        _assistant_texts: list[str] = []
         try:
             while True:
                 try:
@@ -439,6 +440,10 @@ class InstanceManager:
                     for event in events:
                         try:
                             await self._process_event(instance_id, task_id, event, loop_iteration)
+                            if event.get("event_type") in ("message", "result") and event.get("role") == "assistant":
+                                c = event.get("content") or ""
+                                if c:
+                                    _assistant_texts.append(c)
                         except Exception:
                             logger.exception("Failed to process event for instance %s task %s: %s", instance_id, task_id, event.get("event_type"))
                 except asyncio.CancelledError:
@@ -465,6 +470,35 @@ class InstanceManager:
             # If stop() was called, it handles instance + task cleanup — skip here
             if instance_id in self._stopping:
                 return
+
+            # Empty-reply retry: if chat turn produced only "No response requested."
+            # or similar non-response, re-enqueue the original prompt once.
+            _NO_RESPONSE_PATTERNS = {"no response requested.", "no response requested", "no response needed."}
+            if (
+                task_id
+                and chat_initiated
+                and exit_code == 0
+                and instance_id in self._launch_params
+                and not self._launch_params[instance_id].get("_retried")
+            ):
+                combined = " ".join(_assistant_texts).strip().lower().rstrip(".")
+                if not _assistant_texts or combined in _NO_RESPONSE_PATTERNS:
+                    params = self._launch_params[instance_id]
+                    params["_retried"] = True
+                    logger.warning(
+                        "Task %d got empty/non-response (%r), re-enqueueing prompt",
+                        task_id, combined[:80],
+                    )
+                    from backend.main import dispatcher
+                    from backend.services.dispatcher import PRIORITY_USER
+                    await dispatcher.enqueue_message(
+                        task_id=task_id,
+                        prompt=params["prompt"],
+                        priority=PRIORITY_USER,
+                        source="retry",
+                    )
+                    # Still clean up instance below so it's available for the retry
+                    # fall through to normal cleanup
 
             # Pool rotation for chat-initiated rate limit failures
             if task_id and chat_initiated and exit_code not in (0, -2, 130):

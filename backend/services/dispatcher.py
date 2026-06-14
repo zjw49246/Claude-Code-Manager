@@ -2098,6 +2098,29 @@ class GlobalDispatcher:
                 logger.warning(f"Task {task_id} not found or no session, skipping queued message")
                 return
 
+            # Session crashed (task=failed after abnormal exit): clone session JSONL + resume
+            if task.status == "failed" and task.session_id:
+                logger.info("Task %d session crashed, cloning session for recovery...", task_id)
+                from backend.api.tasks import _clone_session
+                cloned = await _clone_session(task_id, db)
+                if cloned:
+                    task.session_id = cloned["session_id"]
+                    logger.info("Task %d cloned session -> %s", task_id, task.session_id)
+                else:
+                    # JSONL file missing, fall back to compact summary
+                    logger.warning("Task %d JSONL not found, falling back to compact summary", task_id)
+                    summary = await self._compact_session(task_id, task.session_id, db)
+                    task.session_id = None
+                    task.context_window_usage = None
+                    if summary:
+                        msg.prompt = (
+                            f"[上下文摘要 — 之前的对话记录（会话异常中断后恢复）]\n{summary}\n\n"
+                            f"---\n\n[新消息]\n{msg.prompt}"
+                        )
+                task.status = "pending"
+                task.error_message = None
+                await db.commit()
+
             # Wait for main agent to be idle (not executing)
             for attempt in range(60):
                 is_busy = False
