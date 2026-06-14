@@ -71,48 +71,55 @@ async def cdp_login(email: str, token: str, config_dir: str, oauth_url: str, coo
             await handle_cf(ws, "login")
             await asyncio.sleep(2)
 
-            # 5. Enter email
-            JS_SET = """(function(){{var inputs=[...document.querySelectorAll('input[type={type}]')].filter(i=>i.offsetParent!==null);if(!inputs.length)return 'no input';var inp=inputs[0];var s=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;s.call(inp,'{value}');inp.dispatchEvent(new Event('input',{{bubbles:true}}));inp.dispatchEvent(new Event('change',{{bubbles:true}}));return 'set'}})()"""
-            JS_BTN = """(function(){{var btns=[...document.querySelectorAll('button')].filter(b=>b.offsetParent!==null);for(var b of btns){{var t=b.textContent.trim();if({cond}){{b.click();return 'clicked:'+t}}}}return 'no match'}})()"""
-            r = await cdp_eval(ws, JS_SET.format(type="email", value=email))
-            print(f"  Email: {r}")
-            await asyncio.sleep(0.5)
-            r = await cdp_eval(ws, JS_BTN.format(cond="t.includes('Continue with email')"))
-            print(f"  Button: {r}")
-            await asyncio.sleep(3)
+            if cookies_171:
+                print(f"  Injecting {len(cookies_171)} cookies from 171mail...")
+                for c in cookies_171:
+                    await ws.send(json.dumps({"id": int(time.time()*1000) % 100000, "method": "Network.setCookie", "params": {"name": c["name"], "value": c["value"], "domain": c.get("domain", "claude.ai"), "path": c.get("path", "/"), "secure": c.get("secure", True)}}))
+                    await asyncio.sleep(0.05)
+                await ws.send(json.dumps({"id": 3, "method": "Page.reload"}))
+                await asyncio.sleep(3)
+                await handle_cf(ws, "after cookies")
+                print(f"  After cookies: {(await cdp_eval(ws, 'document.location.href') or '')[:60]}")
+            else:
+                JS_SET = """(function(){{var inputs=[...document.querySelectorAll('input[type={type}]')].filter(i=>i.offsetParent!==null);if(!inputs.length)return 'no input';var inp=inputs[0];var s=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;s.call(inp,'{value}');inp.dispatchEvent(new Event('input',{{bubbles:true}}));inp.dispatchEvent(new Event('change',{{bubbles:true}}));return 'set'}})()"""
+                JS_BTN = """(function(){{var btns=[...document.querySelectorAll('button')].filter(b=>b.offsetParent!==null);for(var b of btns){{var t=b.textContent.trim();if({cond}){{b.click();return 'clicked:'+t}}}}return 'no match'}})()"""
+                r = await cdp_eval(ws, JS_SET.format(type="email", value=email))
+                print(f"  Email: {r}")
+                await asyncio.sleep(0.5)
+                r = await cdp_eval(ws, JS_BTN.format(cond="t.includes('Continue with email')"))
+                print(f"  Button: {r}")
+                await asyncio.sleep(3)
 
-            # 6. Poll MailCatcher
-            send_ts = time.time()
-            print("  Polling MailCatcher...")
-            async with httpx.AsyncClient(timeout=30, headers={"User-Agent": "Mozilla/5.0"}) as mc:
-                deadline = time.time() + 120
-                while time.time() < deadline:
-                    r = await mc.get(f"{MAILCATCHER}/api/v1/message", params={"token": token, "type": "claude"})
-                    d = r.json().get("data", {})
-                    subj = d.get("subject", "")
-                    link = d.get("code", "")
-                    if link.startswith("http") and subj:
-                        m = re.search(r"\|\s+(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", subj)
-                        if m:
-                            t = time.mktime(time.strptime(m.group(1), "%Y-%m-%d %H:%M:%S"))
-                            if t >= send_ts - 10:
-                                print(f"  Got magic link ({len(link)} chars)")
-                                break
+                send_ts = time.time()
+                print("  Polling MailCatcher...")
+                async with httpx.AsyncClient(timeout=30, headers={"User-Agent": "Mozilla/5.0"}) as mc:
+                    deadline = time.time() + 120
+                    while time.time() < deadline:
+                        r = await mc.get(f"{MAILCATCHER}/api/v1/message", params={"token": token, "type": "claude"})
+                        d = r.json().get("data", {})
+                        subj = d.get("subject", "")
+                        link = d.get("code", "")
+                        if link.startswith("http") and subj:
+                            m = re.search(r"\|\s+(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", subj)
+                            if m:
+                                t = time.mktime(time.strptime(m.group(1), "%Y-%m-%d %H:%M:%S"))
+                                if t >= send_ts - 10:
+                                    print(f"  Got magic link ({len(link)} chars)")
+                                    break
+                        await asyncio.sleep(2)
+                    else:
+                        print("  TIMEOUT waiting for magic link")
+                        return
+
+                await ws.send(json.dumps({"id": 3, "method": "Page.navigate", "params": {"url": link}}))
+                await asyncio.sleep(3)
+                await handle_cf(ws, "magic-link")
+                for _ in range(15):
+                    url = await cdp_eval(ws, "document.location.href") or ""
+                    if "magic-link" not in url: break
                     await asyncio.sleep(2)
-                else:
-                    print("  TIMEOUT waiting for magic link")
-                    return
-
-            # 7. Navigate magic link
-            await ws.send(json.dumps({"id": 3, "method": "Page.navigate", "params": {"url": link}}))
-            await asyncio.sleep(3)
-            await handle_cf(ws, "magic-link")
-            for _ in range(15):
-                url = await cdp_eval(ws, "document.location.href") or ""
-                if "magic-link" not in url: break
-                await asyncio.sleep(2)
-            await asyncio.sleep(3)
-            print(f"  After magic link: {(await cdp_eval(ws, 'document.location.href') or '')[:60]}")
+                await asyncio.sleep(3)
+                print(f"  After magic link: {(await cdp_eval(ws, 'document.location.href') or '')[:60]}")
 
             # 8. Launch CLI
             cli = subprocess.Popen(["claude", "auth", "login", "--email", email],
