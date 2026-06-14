@@ -706,6 +706,7 @@ class GlobalDispatcher:
                 config_dir=pool_config_dir,
                 enable_workflows=task.enable_workflows,
                 enabled_skills=task.enabled_skills,
+                system_prompt_mode=task.system_prompt_mode,
             )
 
             # Wait for process to finish (with timeout)
@@ -2235,6 +2236,7 @@ class GlobalDispatcher:
                 provider=task.provider,
                 enable_workflows=task.enable_workflows,
                 enabled_skills=effective_skills,
+                system_prompt_mode=task.system_prompt_mode,
             )
             inst_id = inst.id
 

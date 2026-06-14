@@ -42,6 +42,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   const [goalMaxTurns, setGoalMaxTurns] = useState('30');
   const [thinkingBudget, setThinkingBudget] = useState('');
   const [timeoutHours, setTimeoutHours] = useState('');
+  const [systemPromptMode, setSystemPromptMode] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [projects, setProjects] = useState<Project[]>([]);
@@ -225,6 +226,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
         model: model || activeDefaultModel,
         ...(effort ? { effort_level: effort } : {}),
         ...(thinkingBudget ? { thinking_budget: parseInt(thinkingBudget) || null } : {}),
+        ...(systemPromptMode ? { system_prompt_mode: systemPromptMode } : {}),
         ...(timeoutHours !== '' ? { timeout_hours: Number(timeoutHours) } : {}),
         enable_workflows: !!enabledTools['workflows'],
         enabled_skills: (() => {
@@ -245,6 +247,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
       setModel('');
       setEffort('');
       setThinkingBudget('');
+      setSystemPromptMode('');
       setTimeoutHours('');
       setCloneFromTaskId('');
       onCreated();
@@ -555,6 +558,17 @@ export function TaskForm({ onCreated }: TaskFormProps) {
                   <option value="12">12 hours</option>
                   <option value="24">24 hours</option>
                   <option value="0">No limit</option>
+                </select>
+
+                <span className="text-gray-400">System Prompt</span>
+                <select
+                  className="bg-gray-700 text-foreground rounded px-2 py-1 text-xs"
+                  value={systemPromptMode}
+                  onChange={(e) => setSystemPromptMode(e.target.value)}
+                >
+                  <option value="">Off</option>
+                  <option value="append">Fable 5 (Append)</option>
+                  <option value="replace">Fable 5 (Replace)</option>
                 </select>
               </div>
             </div>
