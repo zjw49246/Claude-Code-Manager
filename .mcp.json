@@ -4,11 +4,11 @@
       "command": "/home/ubuntu/Claude-Code-Manager/.venv/bin/claude-pty-channel",
       "args": [
         "--port",
-        "55381",
+        "43631",
         "--session-id",
-        "5aac0fe3-e250-4a8e-8994-8b129066d941",
+        "2c6bd6d3-896a-4b63-8131-88305d70dbc7",
         "--bridge-port",
-        "34467"
+        "37451"
       ]
     }
   }
