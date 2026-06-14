@@ -230,12 +230,17 @@ async def add_account(body: AddAccountRequest):
         login_py = Path(shutil.which("python3") or "python3")
 
     script = root / "scripts" / "auto_login.py"
-    # 用号池已有账号数 +1 作为 slot 名
+    # 找最小可用编号作为 slot 名
     pool = _get_pool()
-    existing = len(pool._accounts) if pool else 0
-    account_id = f"account-{existing + 1}" if existing > 0 else "default"
-    # 第一个账号用 ~/.claude，后续用 ~/.claude-account-N
-    config_dir = str(Path.home() / ".claude") if account_id == "default" else str(
+    existing_ids = {a.id for a in pool._accounts} if pool else set()
+    if not existing_ids:
+        account_id = "account-1"
+    else:
+        n = 1
+        while f"account-{n}" in existing_ids:
+            n += 1
+        account_id = f"account-{n}"
+    config_dir = str(Path.home() / ".claude") if account_id == "account-1" else str(
         Path.home() / f".claude-{account_id}"
     )
 
