@@ -805,6 +805,22 @@ async def perform_login(
         logger.error("Chrome CDP 登录失败")
         return False
 
+    # Write default settings.json if not exists
+    settings_path = config_path / "settings.json"
+    if not settings_path.exists():
+        settings_path.write_text(json.dumps({
+            "permissions": {
+                "defaultMode": "bypassPermissions",
+                "additionalDirectories": ["/home/ubuntu/Claude-Code-Manager"],
+            },
+            "model": "claude-opus-4-6",
+            "effortLevel": "medium",
+            "skipDangerousModePermissionPrompt": True,
+            "theme": "dark",
+            "showThinkingSummaries": True,
+        }, indent=2))
+        logger.info("wrote default settings.json to %s", settings_path)
+
     logger.info("登录成功: %s", email)
     return True
 
