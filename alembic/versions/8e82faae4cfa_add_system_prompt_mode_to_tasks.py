@@ -85,8 +85,11 @@ def upgrade() -> None:
                existing_type=sa.DATETIME(),
                nullable=False)
 
-    with op.batch_alter_table('workers', schema=None) as batch_op:
-        batch_op.drop_column('adopted')
+    conn = op.get_bind()
+    columns = [c['name'] for c in sa.inspect(conn).get_columns('workers')]
+    if 'adopted' in columns:
+        with op.batch_alter_table('workers', schema=None) as batch_op:
+            batch_op.drop_column('adopted')
 
     with op.batch_alter_table('worktrees', schema=None) as batch_op:
         batch_op.alter_column('base_branch',
