@@ -14,6 +14,7 @@ interface TaskListProps {
   onRefresh: () => void;
   onOpenChat: (task: Task) => void;
   activeTaskId?: number | null;
+  autoSortOnAccess?: boolean;
 }
 
 const statusColors: Record<string, string> = {
@@ -26,7 +27,7 @@ const statusColors: Record<string, string> = {
   cancelled: 'bg-gray-500',
 };
 
-export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId }: TaskListProps) {
+export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId, autoSortOnAccess }: TaskListProps) {
   const projectMap = useMemo(() => {
     const map: Record<number, { name: string; color: string | null }> = {};
     for (const p of projects) map[p.id] = { name: p.name, color: p.badge_color };
@@ -105,7 +106,7 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId 
   };
 
   // 拖拽排序（长按/拖动；标星置顶保留，仅同组内移动）
-  const { draggingId, overIndex, targetProps, pointerHandleProps, ghost } = useTaskReorder(tasks, onRefresh);
+  const { draggingId, overIndex, targetProps, pointerHandleProps, ghost } = useTaskReorder(tasks, onRefresh, autoSortOnAccess);
 
   if (tasks.length === 0) {
     return <p className="text-gray-500 text-sm text-center py-8">No tasks yet</p>;

@@ -140,6 +140,33 @@ describe('newSortFor', () => {
     expect(result).toBe(740); // 800 - 60, not (800 + 1500)/2 = 1150
   });
 
+  it('autoSort=false uses created_at as fallback', () => {
+    const list = [
+      makeTask({ id: 1, sort_order: null, created_at: '2025-01-01T00:00:00Z', last_accessed_at: '2025-06-01T00:00:00Z', starred: false }),
+      makeTask({ id: 2, sort_order: null, created_at: '2025-03-01T00:00:00Z', last_accessed_at: '2025-01-01T00:00:00Z', starred: false }),
+    ];
+    // autoSort=false: effectiveKey uses created_at, so t2 (Mar) > t1 (Jan)
+    expect(effectiveKey(list[0], false)).toBeLessThan(effectiveKey(list[1], false));
+    // autoSort=true: effectiveKey uses last_accessed_at, so t1 (Jun) > t2 (Jan)
+    expect(effectiveKey(list[0], true)).toBeGreaterThan(effectiveKey(list[1], true));
+  });
+
+  it('newSortFor respects autoSort=false', () => {
+    // Two tasks with no sort_order: created_at determines effective key
+    const list = [
+      makeTask({ id: 1, sort_order: null, created_at: '2025-06-01T00:00:00Z', last_accessed_at: null, starred: false }),
+      makeTask({ id: 2, sort_order: null, created_at: '2025-01-01T00:00:00Z', last_accessed_at: null, starred: false }),
+    ];
+    const ek1 = effectiveKey(list[0], false);
+    const ek2 = effectiveKey(list[1], false);
+    // Moving t2 to top: prev=null, next=t1 → nk + 60
+    const result = newSortFor(list, 1, 0, false);
+    expect(result).toBe(ek1 + 60);
+    // Same with autoSort=true (no last_accessed_at, same fallback)
+    const result2 = newSortFor(list, 1, 0, true);
+    expect(result2).toBe(ek1 + 60);
+  });
+
   it('handles drag within non-starred group past starred boundary', () => {
     // ★A(1000), B(800), C(500)
     const list = [

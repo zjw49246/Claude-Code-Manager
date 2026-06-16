@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '../api/client';
 import type { Task, Project, TagItem } from '../api/client';
+import { useWebSocket } from '../hooks/useWebSocket';
 import { TaskForm } from '../components/Tasks/TaskForm';
 import { TaskList } from '../components/Tasks/TaskList';
 import { PlanPanel } from '../components/PlanReview/PlanPanel';
@@ -41,6 +42,18 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
     setChatTask(t);
     onChatTaskChange(t?.id ?? null);
   }, [onChatTaskChange]);
+
+  const [autoSortOnAccess, setAutoSortOnAccess] = useState(true);
+  useEffect(() => {
+    api.getRuntimeSettings().then((s) => setAutoSortOnAccess(s.auto_sort_on_access)).catch(() => {});
+  }, []);
+  const handleSystemWs = useCallback((raw: Record<string, unknown>) => {
+    const msg = raw as { channel?: string; data?: Record<string, unknown> };
+    if (msg.channel === 'system' && msg.data?.event === 'runtime_settings_changed') {
+      setAutoSortOnAccess(Boolean(msg.data.auto_sort_on_access));
+    }
+  }, []);
+  useWebSocket(['system'], handleSystemWs);
 
   const [isWide, setIsWide] = useState(() => window.innerWidth >= 1280);
   useEffect(() => {
@@ -190,7 +203,7 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
 
   // 侧边栏拖拽排序（与主列表同一套逻辑）
   const sidebarTasks = searchResults ?? filteredTasks;
-  const sidebarReorder = useTaskReorder(sidebarTasks, refresh);
+  const sidebarReorder = useTaskReorder(sidebarTasks, refresh, autoSortOnAccess);
 
   const handleOpenChat = useCallback((t: Task) => {
     setChatTaskWrapped(t);
@@ -397,6 +410,7 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
         onRefresh={refresh}
         onOpenChat={handleOpenChat}
         activeTaskId={chatTask?.id ?? null}
+        autoSortOnAccess={autoSortOnAccess}
       />
 
       {totalPages > 1 && searchResults === null && (

@@ -251,36 +251,7 @@ async def get_chat_history(
 
     if touch:
         from datetime import datetime as _dt
-        from sqlalchemy import Float as _Float, func as _func
-        from backend.models.global_settings import GlobalSettings
-
-        gs = await db.get(GlobalSettings, 1)
-        _auto_sort = gs.auto_sort_on_access if gs and gs.auto_sort_on_access is not None else True
-
-        if _auto_sort:
-            _own = task.sort_order if task.sort_order is not None else (
-                task.last_accessed_at.timestamp() if task.last_accessed_at
-                else (task.created_at.timestamp() if task.created_at else 0)
-            )
-
         task.last_accessed_at = _dt.utcnow()
-
-        if _auto_sort:
-            _eff = _func.coalesce(
-                Task.sort_order,
-                _func.cast(_func.strftime("%s", _func.coalesce(Task.last_accessed_at, Task.created_at)), _Float),
-            )
-            _max_key = (
-                await db.execute(
-                    select(_func.max(_eff)).where(
-                        Task.archived == False,  # noqa: E712
-                        Task.starred == task.starred,
-                        Task.id != task_id,
-                    )
-                )
-            ).scalar()
-            if _max_key is not None and _own <= _max_key:
-                task.sort_order = _max_key + 60
         await db.commit()
 
     allowed = ["user_message", "message", "result", "tool_use", "tool_result", "system_init", "system_event", "thinking", "process_exit"]
