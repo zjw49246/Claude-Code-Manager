@@ -331,22 +331,57 @@ uv run python scripts/auto_login.py --email '{email}' --token '{token}' --config
             raise BootstrapError("account-login", "全部账号登录失败")
 
     async def _step_claude_warmup(self, ssh: SSHExecutor, worker_id: int):
-        """Run claude -p once to initialize caches (GrowthBook features, etc).
+        """Interactive PTY warmup to complete all onboarding dialogs.
 
-        Fresh Claude Code installs need a first run to populate
-        .claude.json caches. Without this, the first interactive PTY
-        session may stall on initialization dialogs.
+        Fresh Claude Code installs show theme picker, login method selector,
+        etc. in interactive mode. A -p warmup skips these (non-interactive),
+        so the first real PTY session still hits them and stalls.
+
+        This runs a short PTY session that lets the drain loop auto-confirm
+        all dialogs, then sends a test prompt. After this, .claude.json has
+        the full onboarding state and subsequent PTY sessions start clean.
         """
         remote_dir = settings.worker_remote_dir
         script = f"""
 set -e
 cd {remote_dir}
-# Warmup: first run populates GrowthBook cache + verifies credentials
+# Phase 1: -p warmup for GrowthBook cache + credential verify
 timeout 30 claude -p 'reply: ok' --dangerously-skip-permissions 2>/dev/null || true
+# Phase 2: interactive PTY warmup to complete onboarding dialogs
+.venv/bin/python3 -c '
+import asyncio
+
+async def warmup():
+    from claude_pty.session import Session
+    from claude_pty.config import PTYConfig
+    from claude_pty.bridge import BridgeHub
+
+    bridge = BridgeHub()
+    bridge.start()
+    try:
+        cfg = PTYConfig(default_model="claude-opus-4-6", dangerously_skip_permissions=True)
+        s = Session(cwd="{remote_dir}", config=cfg, bridge=bridge)
+        await s.start()
+        count = 0
+        async for ev in s.send_prompt("reply: ok"):
+            if ev.content:
+                count += 1
+                if count >= 2:
+                    break
+        await s.stop()
+        print("pty-warmup-ok")
+    except Exception as e:
+        print(f"pty-warmup-failed: {{e}}")
+    finally:
+        bridge.stop()
+
+asyncio.run(warmup())
+' 2>&1 | tail -1
 echo warmup-ok
 """
-        code, out = await ssh.run(script, timeout=60)
-        await self._log(worker_id, "claude warmup done")
+        code, out = await ssh.run(script, timeout=120)
+        last_line = out.strip().splitlines()[-1] if out.strip() else ""
+        await self._log(worker_id, f"claude warmup done ({last_line})")
 
     async def _step_ccm_service(self, ssh: SSHExecutor, worker: Worker):
         remote_dir = settings.worker_remote_dir

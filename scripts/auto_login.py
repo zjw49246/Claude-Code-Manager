@@ -809,6 +809,7 @@ async def perform_login(
             "model": "claude-opus-4-6",
             "effortLevel": "medium",
             "skipDangerousModePermissionPrompt": True,
+            "hasCompletedOnboarding": True,
             "theme": "dark",
             "showThinkingSummaries": True,
         }, indent=2))
