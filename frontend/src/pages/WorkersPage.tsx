@@ -140,7 +140,14 @@ function WorkerCard({ worker, onAction }: { worker: Worker; onAction: () => void
   const [poolOpen, setPoolOpen] = useState(false);
   const [pool, setPool] = useState<Awaited<ReturnType<typeof api.getWorkerPool>> | null>(null);
   const [poolErr, setPoolErr] = useState<string | null>(null);
+  const [ptyEnabled, setPtyEnabled] = useState<boolean | null>(null);
+  const [ptySwitching, setPtySwitching] = useState(false);
   const busy = BUSY.has(worker.status);
+
+  useEffect(() => {
+    if (worker.status !== 'ready') return;
+    api.getWorkerRuntimeSettings(worker.id).then((s) => setPtyEnabled(s.use_pty_mode)).catch(() => {});
+  }, [worker.id, worker.status]);
 
   const togglePool = async () => {
     if (poolOpen) { setPoolOpen(false); return; }
@@ -174,6 +181,22 @@ function WorkerCard({ worker, onAction }: { worker: Worker; onAction: () => void
           </span>
         </div>
         <div className="flex items-center gap-1 shrink-0">
+          {worker.status === 'ready' && ptyEnabled !== null && (
+            <button
+              title={ptyEnabled ? 'PTY 模式：开（点击关闭）' : 'PTY 模式：关（点击开启）'}
+              disabled={ptySwitching}
+              onClick={async () => {
+                if (ptyEnabled && !window.confirm('关闭 PTY 模式将回退到 claude -p 一次性进程。确定？')) return;
+                setPtySwitching(true);
+                try {
+                  const r = await api.updateWorkerRuntimeSettings(worker.id, { use_pty_mode: !ptyEnabled });
+                  setPtyEnabled(r.use_pty_mode);
+                } catch { /* keep current */ }
+                finally { setPtySwitching(false); }
+              }}
+              className={`flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-semibold ${ptyEnabled ? 'bg-green-600/30 text-green-400' : 'bg-gray-700 text-gray-400'}`}
+            >PTY</button>
+          )}
           {worker.status === 'ready' && (
             <button title="Worker 号池额度" onClick={togglePool}
               className={`flex items-center gap-0.5 px-1.5 py-0.5 rounded ${poolOpen ? 'bg-indigo-600/30 text-indigo-300' : 'bg-gray-700 text-gray-400'} hover:text-indigo-300 text-[10px] font-semibold`}>Pro</button>
