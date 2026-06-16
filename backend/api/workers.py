@@ -167,7 +167,7 @@ async def _migrate_back_then_destroy(prov, worker_id: int, db_factory=None):
             try:
                 from backend.services.worker_proxy import WorkerProxy
                 proxy = WorkerProxy(db_factory, worker_relay)
-                await proxy.proxy_to_worker(task, "POST", f"/api/tasks/{task.id}/stop")
+                await proxy.proxy_to_worker(task, "POST", f"/api/tasks/{task.id}/stop-session")
                 logger.info("destroy: stopped executing task %s before migration", task.id)
                 await asyncio.sleep(2)
             except Exception as e:
