@@ -9,6 +9,19 @@ from backend.models.log_entry import LogEntry
 from backend.models.task import Task
 
 
+def _effective_key_expr(auto_sort_on_access: bool = True):
+    """Build the SQL expression for task sort key.
+
+    auto_sort_on_access=True:  COALESCE(sort_order, ts(last_accessed_at ?? created_at))
+    auto_sort_on_access=False: COALESCE(sort_order, ts(created_at))
+    """
+    if auto_sort_on_access:
+        fallback = func.strftime("%s", func.coalesce(Task.last_accessed_at, Task.created_at))
+    else:
+        fallback = func.strftime("%s", Task.created_at)
+    return func.coalesce(Task.sort_order, func.cast(fallback, Float))
+
+
 class TaskQueue:
     def __init__(self, db: AsyncSession):
         self.db = db
@@ -23,6 +36,11 @@ class TaskQueue:
     async def get(self, task_id: int) -> Task | None:
         return await self.db.get(Task, task_id)
 
+    async def _auto_sort_enabled(self) -> bool:
+        from backend.models.global_settings import GlobalSettings
+        gs = await self.db.get(GlobalSettings, 1)
+        return gs.auto_sort_on_access if gs and gs.auto_sort_on_access is not None else True
+
     async def list_tasks(
         self, status: str | None = None, include_archived: bool = False,
         archived_only: bool = False,
@@ -30,13 +48,8 @@ class TaskQueue:
         has_unread: bool | None = None,
         limit: int = 50, offset: int = 0,
     ) -> list[Task]:
-        # 排序：标星置顶 → 组内位置键（sort_order）降序。
-        # 访问/拖动都通过改写 sort_order 实现"移到某个位置"，因此
-        # 显示顺序严格等于键序——拖拽的中点插入才能成立。
-        effective_key = func.coalesce(
-            Task.sort_order,
-            func.cast(func.strftime("%s", func.coalesce(Task.last_accessed_at, Task.created_at)), Float),
-        )
+        auto_sort = await self._auto_sort_enabled()
+        effective_key = _effective_key_expr(auto_sort)
         stmt = select(Task).order_by(Task.starred.desc(), effective_key.desc(), Task.id.desc())
         if archived_only:
             stmt = stmt.where(Task.archived == True)
@@ -83,13 +96,8 @@ class TaskQueue:
         if not task:
             return None
         task.starred = not task.starred
-        # Recalculate sort_order for the target group so the task
-        # appears at the top of its new group instead of carrying
-        # the old (possibly wrong) position.
-        effective_key = func.coalesce(
-            Task.sort_order,
-            func.cast(func.strftime("%s", func.coalesce(Task.last_accessed_at, Task.created_at)), Float),
-        )
+        auto_sort = await self._auto_sort_enabled()
+        effective_key = _effective_key_expr(auto_sort)
         group_max = (
             await self.db.execute(
                 select(func.max(effective_key)).where(

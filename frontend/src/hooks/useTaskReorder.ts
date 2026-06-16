@@ -2,18 +2,23 @@ import React, { useRef, useState, useCallback, useEffect } from 'react';
 import { api } from '../api/client';
 import type { Task } from '../api/client';
 
-/** 排序键：手动 sort_order 优先，否则最近访问/创建时间（秒）。越大越靠前。 */
-export function effectiveKey(t: Task): number {
-  if (t.sort_order != null) return t.sort_order;
-  const ts = t.last_accessed_at || t.created_at;
-  if (!ts) return 0;
-  const iso = ts.endsWith('Z') || ts.includes('+') ? ts : ts + 'Z';
+function tsFromIso(s: string): number {
+  const iso = s.endsWith('Z') || s.includes('+') ? s : s + 'Z';
   return new Date(iso).getTime() / 1000;
+}
+
+/** 排序键。autoSort=true: sort_order ?? last_accessed_at ?? created_at;
+ *  autoSort=false: sort_order ?? created_at。越大越靠前。 */
+export function effectiveKey(t: Task, autoSort = true): number {
+  if (t.sort_order != null) return t.sort_order;
+  const ts = autoSort ? (t.last_accessed_at || t.created_at) : t.created_at;
+  if (!ts) return 0;
+  return tsFromIso(ts);
 }
 
 /** 计算把 fromIdx 的任务移到 toIdx（移除后的下标）所需的 sort_order。
  *  只使用同 starred 组的邻居计算中点，避免跨组边界取到另一组的值。 */
-export function newSortFor(list: Task[], fromIdx: number, toIdx: number): number {
+export function newSortFor(list: Task[], fromIdx: number, toIdx: number, autoSort = true): number {
   const starred = list[fromIdx]?.starred ?? false;
   const without = list.filter((_, i) => i !== fromIdx);
   let prev: Task | null = null;
@@ -24,8 +29,8 @@ export function newSortFor(list: Task[], fromIdx: number, toIdx: number): number
   for (let i = toIdx; i < without.length; i++) {
     if ((without[i].starred ?? false) === starred) { next = without[i]; break; }
   }
-  const pk = prev ? effectiveKey(prev) : null;
-  const nk = next ? effectiveKey(next) : null;
+  const pk = prev ? effectiveKey(prev, autoSort) : null;
+  const nk = next ? effectiveKey(next, autoSort) : null;
   if (pk != null && nk != null) return (pk + nk) / 2;
   if (pk == null && nk != null) return nk + 60;
   if (pk != null && nk == null) return pk - 60;
@@ -71,7 +76,7 @@ interface ReorderApi {
  *   导致"浮起来但拖不动"）
  * - 标星置顶保留：只能在同 starred 分组内移动
  */
-export function useTaskReorder(tasks: Task[], onReordered: () => void): ReorderApi {
+export function useTaskReorder(tasks: Task[], onReordered: () => void, autoSort = true): ReorderApi {
   const [draggingId, setDraggingId] = useState<number | null>(null);
   const [overIndex, setOverIndex] = useState<number | null>(null);
   const longPress = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -83,6 +88,9 @@ export function useTaskReorder(tasks: Task[], onReordered: () => void): ReorderA
   const [ghostPos, setGhostPos] = useState<{ x: number; y: number } | null>(null);
   const pointerMode = useRef(false);
 
+  const autoSortRef = useRef(autoSort);
+  autoSortRef.current = autoSort;
+
   const commit = useCallback(async (fromId: number, toIdxRaw: number) => {
     const list = tasksRef.current;
     const fromIdx = list.findIndex((t) => t.id === fromId);
@@ -90,7 +98,7 @@ export function useTaskReorder(tasks: Task[], onReordered: () => void): ReorderA
     const [gs, ge] = groupRange(list, fromIdx);
     const toIdx = Math.min(Math.max(toIdxRaw, gs), ge);
     if (toIdx === fromIdx) return;
-    const sort = newSortFor(list, fromIdx, toIdx);
+    const sort = newSortFor(list, fromIdx, toIdx, autoSortRef.current);
     try {
       await api.updateTask(fromId, { sort_order: sort });
       onReordered();

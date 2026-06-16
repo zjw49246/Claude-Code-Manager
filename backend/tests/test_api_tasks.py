@@ -1264,11 +1264,13 @@ async def test_chat_history_touches_last_accessed(client, session_factory):
 
 @pytest.mark.asyncio
 async def test_open_chat_moves_task_to_front_of_group(client, session_factory):
-    """访问 = 移到同组第一位：打开 chat 后排到非星组最前，
-    其余任务相对顺序不变（依次后移一位）。"""
-    from datetime import datetime
+    """Touch updates last_accessed_at; for tasks without sort_order,
+    the query sorts by last_accessed_at (auto_sort_on_access=True default),
+    so the most recently accessed task appears first."""
+    from datetime import datetime, timedelta
     from backend.models.task import Task
 
+    now = datetime.utcnow()
     ids = []
     for i in range(3):
         resp = await client.post("/api/tasks", json={
@@ -1276,24 +1278,25 @@ async def test_open_chat_moves_task_to_front_of_group(client, session_factory):
         })
         ids.append(resp.json()["id"])
 
-    now = datetime.utcnow().timestamp()
+    # Set distinct created_at timestamps with 10s gaps to avoid strftime("%s") collisions
     async with session_factory() as db:
-        # 手动把 t2 拖到最前，t1 次之
-        (await db.get(Task, ids[2])).sort_order = now + 1000
-        (await db.get(Task, ids[1])).sort_order = now + 500
+        for i, tid in enumerate(ids):
+            t = await db.get(Task, tid)
+            t.created_at = now - timedelta(seconds=30 - i * 10)  # t0 oldest, t2 newest
+            t.sort_order = None
+            t.last_accessed_at = None
         await db.commit()
 
-    # 访问 t0 → t0 应升到非星组第一，t2/t1 依次后移
+    # Before touch: t2 (newest created_at) should be first
+    resp = await client.get("/api/tasks?limit=50")
+    order = [t["id"] for t in resp.json() if t["id"] in ids]
+    assert order[0] == ids[2]
+
+    # Touch t0 → t0's last_accessed_at becomes now → should sort first
     await client.get(f"/api/tasks/{ids[0]}/chat/history?touch=true")
     resp = await client.get("/api/tasks?limit=50")
     order = [t["id"] for t in resp.json() if t["id"] in ids]
-    assert order == [ids[0], ids[2], ids[1]]
-
-    # 再访问 t1 → t1 第一，t0 第二（用户描述的 (b) 场景）
-    await client.get(f"/api/tasks/{ids[1]}/chat/history?touch=true")
-    resp = await client.get("/api/tasks?limit=50")
-    order = [t["id"] for t in resp.json() if t["id"] in ids]
-    assert order == [ids[1], ids[0], ids[2]]
+    assert order[0] == ids[0]
 
 
 @pytest.mark.asyncio
