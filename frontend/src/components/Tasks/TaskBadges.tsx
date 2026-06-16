@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { Wrench, Users, Settings } from 'lucide-react';
 import { api } from '../../api/client';
 import type { Task, SubAgentSummary } from '../../api/client';
@@ -279,9 +280,10 @@ export function TaskConfigBadge({ task, onRefresh, openUp, align }: { task: Task
         <Settings size={12} />
         Config
       </button>
-      {open && (
+      {open && createPortal(
         <div
-          className="fixed bg-gray-800 border border-gray-600 rounded shadow-lg z-50 p-3 min-w-[250px] max-w-[calc(100vw-1rem)] max-h-[80vh] overflow-y-auto"
+          data-task-config
+          className="fixed bg-gray-800 border border-gray-600 rounded shadow-lg z-[9999] p-3 min-w-[250px] max-w-[calc(100vw-1rem)] max-h-[80vh] overflow-y-auto"
           style={{
             top: openUp ? undefined : pos.top,
             bottom: openUp ? `calc(100vh - ${pos.top}px)` : undefined,
@@ -371,7 +373,8 @@ export function TaskConfigBadge({ task, onRefresh, openUp, align }: { task: Task
             </select>
           </div>
           <div className="mt-2 text-[10px] text-gray-500">修改在下一轮对话生效</div>
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );
