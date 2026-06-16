@@ -121,18 +121,53 @@ class ClaudePool:
 
     @property
     def enabled(self) -> bool:
-        return len(self._accounts) >= 1
+        return True
 
     def _load(self):
         if not self._config_path.exists():
-            logger.info("Pool config not found at %s, pool disabled", self._config_path)
-            return
+            self._bootstrap_default_account()
+            if not self._config_path.exists():
+                logger.info("Pool config not found at %s, pool empty", self._config_path)
+                return
         try:
             data = json.loads(self._config_path.read_text(encoding="utf-8"))
             self._accounts = [PoolAccount(a) for a in data.get("accounts", [])]
             logger.info("Pool loaded %d accounts from %s", len(self._accounts), self._config_path)
         except Exception:
             logger.exception("Failed to load pool config from %s", self._config_path)
+
+    def _bootstrap_default_account(self):
+        """accounts.json 不存在时，检测默认账号自动加入号池。"""
+        default_cred = Path.home() / ".claude" / ".credentials.json"
+        if not default_cred.exists():
+            return
+        try:
+            creds = json.loads(default_cred.read_text(encoding="utf-8"))
+            oauth = creds.get("claudeAiOauth", {})
+            if not oauth.get("accessToken"):
+                return
+        except Exception:
+            return
+        email = "default"
+        try:
+            import httpx
+            r = httpx.get("https://api.claude.ai/api/auth/user",
+                          headers={"Authorization": f"Bearer {oauth['accessToken']}"},
+                          timeout=10)
+            if r.status_code == 200:
+                email = r.json().get("email_address", "default")
+        except Exception:
+            pass
+        data = {"accounts": [{
+            "id": "account-1",
+            "config_dir": str(Path.home() / ".claude"),
+            "email": email,
+            "role": "automation",
+            "enabled": True,
+        }]}
+        self._config_path.parent.mkdir(parents=True, exist_ok=True)
+        self._config_path.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+        logger.info("Bootstrapped default account (%s) into pool", email)
 
     def reload(self):
         self._accounts.clear()

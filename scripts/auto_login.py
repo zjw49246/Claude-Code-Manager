@@ -735,6 +735,7 @@ def add_to_pool(account_id: str, config_dir: str, email: str):
         })
         logger.info("added account %s to pool", account_id)
 
+    ACCOUNTS_FILE.parent.mkdir(parents=True, exist_ok=True)
     ACCOUNTS_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False))
 
 

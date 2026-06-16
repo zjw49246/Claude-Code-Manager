@@ -242,11 +242,7 @@ class GlobalDispatcher:
                 config_path=settings.pool_config_path,
                 cooldown_seconds=settings.pool_cooldown_seconds,
             )
-            if self.pool.enabled:
-                logger.info("Claude pool enabled with %d accounts", len(self.pool._accounts))
-            else:
-                logger.warning("Pool enabled in config but only %d account(s) — rotation disabled", len(self.pool._accounts))
-                self.pool = None
+            logger.info("Claude pool enabled with %d accounts", len(self.pool._accounts))
 
         await self._cleanup_stale_state()
 
