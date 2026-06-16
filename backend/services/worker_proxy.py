@@ -92,7 +92,6 @@ class WorkerProxy:
                     host=worker.private_ip, user=worker.ssh_user,
                     key_path=worker.ssh_key_path or _settings.worker_ssh_key_path,
                 )
-                await ssh.run(f"mkdir -p {path}")
                 await ssh.rsync_to(path + "/", path + "/", excludes=[], timeout=1200)
 
             async with httpx.AsyncClient(timeout=30) as c:
