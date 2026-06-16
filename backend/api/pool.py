@@ -14,6 +14,8 @@ router = APIRouter(prefix="/api/pool", tags=["pool"])
 
 # 重新登录后台任务状态：account_id -> {"status": running|success|failed, ...}
 _relogin_state: dict[str, dict] = {}
+# 全局登录锁：Chrome CDP 绑定固定端口(9222)，同时只能跑一个 auto_login
+_login_lock = asyncio.Lock()
 
 
 def _get_pool():
@@ -58,18 +60,21 @@ async def clear_cooldown(account_id: str):
 
 
 async def _watch_relogin(account_id: str, proc: asyncio.subprocess.Process):
-    out, _ = await proc.communicate()
-    tail = (out or b"").decode("utf-8", errors="replace")[-5000:]
-    _relogin_state[account_id] = {
-        "status": "success" if proc.returncode == 0 else "failed",
-        "detail": tail,
-        "finished_at": time.time(),
-    }
-    if proc.returncode == 0:
-        try:
-            _get_pool()._usage_cache = None  # 立即反映新凭证
-        except HTTPException:
-            pass
+    try:
+        out, _ = await proc.communicate()
+        tail = (out or b"").decode("utf-8", errors="replace")[-5000:]
+        _relogin_state[account_id] = {
+            "status": "success" if proc.returncode == 0 else "failed",
+            "detail": tail,
+            "finished_at": time.time(),
+        }
+        if proc.returncode == 0:
+            try:
+                _get_pool()._usage_cache = None
+            except HTTPException:
+                pass
+    finally:
+        _login_lock.release()
 
 
 @router.post("/accounts/{account_id}/relogin")
@@ -90,6 +95,12 @@ async def relogin_account(account_id: str):
     state = _relogin_state.get(account_id)
     if state and state.get("status") == "running":
         return {"ok": True, "method": "auto_login", "status": "running"}
+
+    # Chrome CDP 绑定固定端口，同时只能跑一个登录流程
+    if _login_lock.locked():
+        running = [k for k, v in _relogin_state.items() if v.get("status") == "running"]
+        raise HTTPException(status_code=409, detail=f"另一个账号正在登录中（{', '.join(running)}），请等它完成后再试")
+
     root = Path(__file__).resolve().parents[2]
     # auto_login 的依赖（playwright/mitmproxy）装在仓库自带的 .login-venv，
     # 不在 CCM 主 venv 里——6/7 三个号就是用它登录的
@@ -113,6 +124,7 @@ async def relogin_account(account_id: str):
             "安装 google-chrome-stable 或 .login-venv/bin/python3 -m playwright install chromium"
         ))
     await _ensure_xvfb()
+    await _login_lock.acquire()
     script = root / "scripts" / "auto_login.py"
     proc = await asyncio.create_subprocess_exec(
         str(login_py), str(script), "--email", acc.email, "--config-dir", acc.config_dir,
@@ -120,6 +132,7 @@ async def relogin_account(account_id: str):
         env={**os.environ, "DISPLAY": ":99", "PYTHONUNBUFFERED": "1"},
     )
     _relogin_state[account_id] = {"status": "running", "started_at": time.time()}
+    # _watch_relogin 负责在进程结束后 release lock
     asyncio.get_running_loop().create_task(_watch_relogin(account_id, proc))
     return {"ok": True, "method": "auto_login", "status": "running"}
 
