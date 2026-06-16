@@ -150,7 +150,7 @@ class WorkerProxy:
         worker = await self.get_worker(task.worker_id)
         if not worker or worker.status != "ready":
             raise RuntimeError(
-                f"Worker {task.worker_id} 不可用"
+                f"Worker {worker.name if worker else task.worker_id} 不可用"
                 f"（{worker.status if worker else 'not found'}）"
             )
 

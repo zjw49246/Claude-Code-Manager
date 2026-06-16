@@ -107,15 +107,18 @@ class AWSProvider(CloudProvider):
     async def describe_instance(self, instance_id: str) -> dict:
         ec2 = await self._ec2()
         # AWS 最终一致性：run_instances 返回 ID 后 describe 可能短暂 NotFound
-        for attempt in range(5):
-            resp = await asyncio.to_thread(
-                ec2.describe_instances, InstanceIds=[instance_id]
-            )
-            if resp["Reservations"]:
-                return self._parse(resp["Reservations"][0]["Instances"][0])
-            if attempt < 4:
-                await asyncio.sleep(2)
-        raise RuntimeError(f"instance {instance_id} not found after 5 attempts")
+        for attempt in range(8):
+            try:
+                resp = await asyncio.to_thread(
+                    ec2.describe_instances, InstanceIds=[instance_id]
+                )
+                if resp["Reservations"]:
+                    return self._parse(resp["Reservations"][0]["Instances"][0])
+            except Exception as e:
+                if "InvalidInstanceID" not in str(e) or attempt >= 7:
+                    raise
+            await asyncio.sleep(3)
+        raise RuntimeError(f"instance {instance_id} not found after 8 attempts")
 
     async def create_instance(self, name: str, overrides: dict | None = None) -> str:
         me = await self.self_describe()

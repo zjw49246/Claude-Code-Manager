@@ -210,6 +210,7 @@ class WorkerProvisioner:
         await run_step("ccm-deploy", self._step_ccm_deploy(ssh, worker, worker_id))
         await run_step("ccm-config", self._step_ccm_config(ssh, worker_id))
         await run_step("account-login", self._step_account_login(ssh, worker_id, accounts))
+        await run_step("claude-warmup", self._step_claude_warmup(ssh, worker_id))
         await run_step("ccm-service", self._step_ccm_service(ssh, worker))
         await run_step("health-check", self._step_health_check(worker_id))
 
@@ -328,6 +329,24 @@ uv run python scripts/auto_login.py --email '{email}' --token '{token}' --config
         await self._update(worker_id, accounts=results)
         if all(r["status"] == "failed" for r in results):
             raise BootstrapError("account-login", "全部账号登录失败")
+
+    async def _step_claude_warmup(self, ssh: SSHExecutor, worker_id: int):
+        """Run claude -p once to initialize caches (GrowthBook features, etc).
+
+        Fresh Claude Code installs need a first run to populate
+        .claude.json caches. Without this, the first interactive PTY
+        session may stall on initialization dialogs.
+        """
+        remote_dir = settings.worker_remote_dir
+        script = f"""
+set -e
+cd {remote_dir}
+# Warmup: first run populates GrowthBook cache + verifies credentials
+timeout 30 claude -p 'reply: ok' --dangerously-skip-permissions 2>/dev/null || true
+echo warmup-ok
+"""
+        code, out = await ssh.run(script, timeout=60)
+        await self._log(worker_id, "claude warmup done")
 
     async def _step_ccm_service(self, ssh: SSHExecutor, worker: Worker):
         remote_dir = settings.worker_remote_dir

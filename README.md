@@ -75,7 +75,12 @@ claude-manager/
 │   │   ├── dispatcher.py        # 全局调度器 (9 步任务生命周期 + 子 agent 管理)
 │   │   ├── instance_manager.py  # Claude Code 子进程管理
 │   │   ├── mcp_config.py        # MCP config 动态生成 (主 agent + 子 agent)
-│   │   ├── ralph_loop.py        # 自动取活循环 (legacy)
+│   │   ├── claude_pool.py        # 多账号池管理 + OAuth 刷新 + 额度查询
+│   │   ├── cloud_provider.py    # AWS EC2 Provider (Worker 实例创建/启停/销毁)
+│   │   ├── worker_provisioner.py # Worker 全生命周期 (创建→bootstrap→ready)
+│   │   ├── worker_proxy.py      # 任务转发到 Worker (创建/chat/stop)
+│   │   ├── worker_relay.py      # Manager↔Worker WebSocket 事件中继
+│   │   ├── task_migrator.py     # 任务在本机↔Worker 之间迁移 (session 同步)
 │   │   ├── stream_parser.py     # NDJSON stream-json 解析
 │   │   ├── task_queue.py        # 优先级任务队列
 │   │   ├── worktree_manager.py  # Git worktree 管理 + rebase + push
@@ -101,11 +106,12 @@ claude-manager/
 
 ### 前置条件
 
-- macOS（Claude Code 部署在本机）
+- macOS / Linux（推荐 Ubuntu 22.04+，支持 EC2 部署）
 - Python 3.11+
 - Node.js 18+
 - [uv](https://docs.astral.sh/uv/) — Python 包管理器
-- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) 已安装
+- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) 已安装并登录（`claude auth login`）
+- Google Chrome + Xvfb（号池自动登录需要，服务器部署时安装）
 
 ### 安装
 
@@ -263,9 +269,48 @@ PR Monitor 的审核流程会在后端 shell out 调用 `gh pr view` / `gh pr re
 | `MERGE_PUSH_RETRIES` | `3` | rebase + push 最大重试次数 |
 | `AUTO_PUSH_TO_ORIGIN` | `true` | 完成后是否自动 push |
 | `TASK_TIMEOUT_SECONDS` | `1800` | 单个任务最长执行时间（秒），超时后 kill 进程 |
-| `POOL_ENABLED` | `false` | 启用 Claude 账号池自动切换 |
+| `POOL_ENABLED` | `true` | 启用 Claude 账号池（默认开启，自动检测 `~/.claude` 下的已登录账号） |
 | `POOL_CONFIG_PATH` | `~/.claude-pool/accounts.json` | 账号池配置文件路径 |
 | `POOL_COOLDOWN_SECONDS` | `300` | 撞限账号的冷却时长（秒） |
+
+### 号池配置
+
+号池默认启用。首次启动时，如果 `accounts.json` 不存在但 `~/.claude/.credentials.json` 有有效凭证，系统会自动将默认账号加入号池。
+
+通过 Header 右侧的 **Pro** 按钮打开号池面板，可以：
+- 查看每个账号的 5h/7d 额度利用率
+- 点击 **+** 添加新账号（需要邮箱 + 接码 token）
+- 刷新 OAuth Token / 重新登录
+- 手动切换首选账号
+
+多账号时，撞限或认证失败会自动换号，通过硬链接 session 目录实现无缝 `--resume`。
+
+### Worker（分布式执行节点）
+
+Worker 系统支持将任务分发到远程 EC2 实例执行，适合需要更多并行能力的场景。
+
+#### 前置条件
+
+1. **Manager 运行在 EC2 上**：Worker 创建时自动继承 Manager 的 AMI、实例类型、子网、安全组和密钥对
+2. **IAM 角色权限**：Manager EC2 的 IAM Role 需要：
+   - `ec2:RunInstances`、`ec2:DescribeInstances`、`ec2:StartInstances`、`ec2:StopInstances`、`ec2:TerminateInstances`、`ec2:CreateTags`
+3. **SSH 密钥**：`.env` 中配置 `WORKER_SSH_KEY_PATH`，指向 Manager 用来 SSH 连接 Worker 的 `.pem` 私钥文件
+4. **安全组**：Manager 和 Worker 需在同一 VPC，安全组允许互访 CCM 端口（默认 8000）和 SSH（22）
+
+#### 配置
+
+| 环境变量 | 默认值 | 说明 |
+|----------|--------|------|
+| `WORKER_SSH_KEY_PATH` | (必填) | SSH 私钥 `.pem` 文件路径 |
+| `WORKER_SSH_USER` | `ubuntu` | Worker EC2 的 SSH 用户名 |
+
+#### 使用流程
+
+1. **创建 Worker**：Workers 页面点 **+**，输入名称，系统自动创建 EC2 → 安装依赖 → 部署代码 → 启动服务
+2. **分配账号**：Worker 详情页的号池面板添加 Claude 账号（Worker 有独立的号池）
+3. **分配任务**：任务的 Config 面板 → "Run on" 下拉选择 Worker
+4. **任务迁移**：运行中的任务可随时在"本机"和 Worker 之间迁移，session 自动同步
+5. **关机/销毁**：Stop 保留实例数据（可重新 Start），Destroy 会先将所有任务迁回本机再终止实例
 
 ### 数据库自动备份（可选）
 
@@ -400,7 +445,7 @@ cloudflared tunnel run <tunnel-name>
 ## 架构要点
 
 - **GlobalDispatcher**：只负责分配任务、启动 Claude Code、判断成败。所有 git 操作（worktree 创建/清理、commit/merge/push/冲突解决）全由 Claude Code 自主完成
-- **Claude Code 集成**：通过 `claude -p [prompt] --dangerously-skip-permissions --output-format stream-json --verbose` 非交互模式调用，Claude Code 读项目 CLAUDE.md 决定 git 操作
+- **Claude Code 集成**：默认 PTY 模式（常驻交互会话，多轮免冷启动）；可切换为 `claude -p` 一次性进程模式
 - **进程超时保护**：任务执行超过 `TASK_TIMEOUT_SECONDS`（默认 30 分钟）后自动 kill，防止进程挂死
 - **多轮对话**：session_id 绑定在 Task 上，follow-up 时使用 `--resume <session_id>` 续接会话
 - **子 Agent 系统**：Monitor 是第一个子 Agent 类型，持久 Claude 子进程拥有独立 MCP server，通过 HTTP API 与系统通信，架构为后续子 Agent 类型预留
