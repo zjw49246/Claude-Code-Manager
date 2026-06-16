@@ -131,6 +131,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState(task.title || '');
   const titleInputRef = useRef<HTMLInputElement>(null);
+  const [titleExpanded, setTitleExpanded] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -757,21 +758,72 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
 
   return (
     <div className={inline ? "flex flex-col h-full bg-gray-950" : "fixed inset-0 bg-gray-950 flex flex-col z-50"}>
-      {/* Header */}
-      <div className="flex items-center gap-2 sm:gap-3 px-3 sm:px-4 py-2 pt-[max(0.5rem,env(safe-area-inset-top))] border-b border-gray-800 bg-gray-900">
-        <button onClick={onBack} className="text-gray-400 hover:text-foreground shrink-0">
-          <ArrowLeft size={20} />
-        </button>
-        <div className="flex-1 min-w-0 overflow-hidden">
-          <div className="flex items-center gap-1.5 sm:gap-2">
+      {/* Header — two rows */}
+      <div className="px-3 sm:px-4 py-1.5 pt-[max(0.375rem,env(safe-area-inset-top))] border-b border-gray-800 bg-gray-900">
+        {/* Row 1: back + task info + action buttons */}
+        <div className="flex items-center gap-2 sm:gap-3">
+          <button onClick={onBack} className="text-gray-400 hover:text-foreground shrink-0">
+            <ArrowLeft size={20} />
+          </button>
+          <div className="flex items-center gap-1.5 min-w-0 flex-1">
             <p className="text-foreground font-medium text-sm whitespace-nowrap">Task #{task.id}</p>
             <span className={`text-xs px-1.5 rounded font-medium whitespace-nowrap ${task.provider === 'codex' ? 'bg-green-600/30 text-green-300' : 'bg-blue-600/30 text-blue-300'}`}>
               {providerLabel}
             </span>
             {projectName && (
-              <span className="text-xs bg-emerald-600/30 text-emerald-300 px-1.5 rounded font-medium whitespace-nowrap">{projectName}</span>
+              <span className="text-xs bg-emerald-600/30 text-emerald-300 px-1.5 rounded font-medium whitespace-nowrap truncate">{projectName}</span>
             )}
-            <span className="text-gray-700 hidden sm:inline">·</span>
+          </div>
+          <div className="flex items-center gap-1 shrink-0">
+            <SubAgentIndicator
+              taskId={task.id}
+              count={monitorCount}
+              active={monitorCount > 0}
+              onNavigate={() => setShowMonitorPanel(!showMonitorPanel)}
+            />
+            <TaskConfigBadge task={task} onRefresh={() => onTaskUpdated?.()} align="right" />
+            <button
+              onClick={handleStar}
+              className={`p-1.5 transition-colors ${starred ? 'text-yellow-400 hover:text-yellow-300' : 'text-gray-600 hover:text-yellow-400'}`}
+              title={starred ? "Unstar" : "Star"}
+            >
+              <Star size={18} fill={starred ? 'currentColor' : 'none'} />
+            </button>
+            {(sending || stillRunning || ['in_progress', 'executing'].includes(task.status)) && (
+              <button
+                onClick={async () => {
+                  setInterrupting(true);
+                  try {
+                    const resp = await api.stopTaskSession(task.id);
+                    setSending(false);
+                    setStillRunning(false);
+                    if (resp.stopped === false) {
+                      const cleared = resp.cleared_messages ?? 0;
+                      setError(
+                        `Interrupt: no running process found${cleared > 0 ? `, cleared ${cleared} queued message(s)` : ''}. ` +
+                        'If output keeps arriving, the session may still be finishing.'
+                      );
+                    } else {
+                      setError(null);
+                    }
+                  } catch (e) {
+                    setError(`Interrupt failed: ${e instanceof Error ? e.message : String(e)}`);
+                  }
+                  finally { setInterrupting(false); }
+                }}
+                disabled={interrupting}
+                className="flex items-center gap-1 px-2.5 py-1.5 text-xs text-red-400 hover:text-red-300 border border-red-500/30 rounded hover:bg-red-500/10 disabled:opacity-50"
+                title="Interrupt session"
+              >
+                <StopCircle size={14} />
+                <span className="hidden sm:inline">{interrupting ? 'Interrupting...' : 'Interrupt'}</span>
+              </button>
+            )}
+          </div>
+        </div>
+        {/* Row 2: title + context usage */}
+        <div className="flex items-center gap-2 mt-0.5 pl-7 sm:pl-8">
+          <div className="flex-1 min-w-0">
             {editingTitle ? (
               <input
                 ref={titleInputRef}
@@ -780,73 +832,31 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
                 onChange={(e) => setTitleDraft(e.target.value)}
                 onBlur={handleTitleSave}
                 onKeyDown={(e) => { if (e.key === 'Enter') handleTitleSave(); if (e.key === 'Escape') { setTitleDraft(task.title || ''); setEditingTitle(false); } }}
-                className="flex-1 min-w-0 bg-gray-800 text-foreground text-sm rounded px-2 py-0.5 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                className="w-full bg-gray-800 text-foreground text-xs rounded px-2 py-0.5 focus:outline-none focus:ring-1 focus:ring-indigo-500"
                 placeholder="Enter title..."
               />
             ) : (
               <div className="flex items-center gap-1 min-w-0 group/title">
-                <span className="text-sm text-gray-400 truncate">{task.title || task.description || 'Untitled'}</span>
+                <span className={`text-xs text-gray-500 ${titleExpanded ? 'whitespace-normal break-all' : 'truncate'}`}>{task.title || task.description || 'Untitled'}</span>
+                <button
+                  onClick={() => setTitleExpanded(!titleExpanded)}
+                  className="text-[10px] text-gray-600 hover:text-gray-300 shrink-0 whitespace-nowrap"
+                >{titleExpanded ? 'less' : 'more'}</button>
                 <button
                   onClick={() => { setTitleDraft(task.title || ''); setEditingTitle(true); }}
                   className="text-gray-600 hover:text-gray-400 opacity-0 group-hover/title:opacity-100 transition-opacity shrink-0"
                   title="Edit title"
                 >
-                  <Pencil size={12} />
+                  <Pencil size={10} />
                 </button>
               </div>
             )}
           </div>
-        </div>
-        <div className="flex items-center gap-1 shrink-0">
-        {contextUsage && (
-          <span className="hidden sm:flex items-center mr-1">
-            <ContextUsageIndicator usage={contextUsage} />
-          </span>
-        )}
-        <SubAgentIndicator
-          taskId={task.id}
-          count={monitorCount}
-          active={monitorCount > 0}
-          onNavigate={() => setShowMonitorPanel(!showMonitorPanel)}
-        />
-        <TaskConfigBadge task={task} onRefresh={() => onTaskUpdated?.()} align="right" />
-        <button
-          onClick={handleStar}
-          className={`p-1.5 transition-colors ${starred ? 'text-yellow-400 hover:text-yellow-300' : 'text-gray-600 hover:text-yellow-400'}`}
-          title={starred ? "Unstar" : "Star"}
-        >
-          <Star size={18} fill={starred ? 'currentColor' : 'none'} />
-        </button>
-        {(sending || stillRunning || ['in_progress', 'executing'].includes(task.status)) && (
-          <button
-            onClick={async () => {
-              setInterrupting(true);
-              try {
-                const resp = await api.stopTaskSession(task.id);
-                setSending(false);
-                setStillRunning(false);
-                if (resp.stopped === false) {
-                  const cleared = resp.cleared_messages ?? 0;
-                  setError(
-                    `Interrupt: no running process found${cleared > 0 ? `, cleared ${cleared} queued message(s)` : ''}. ` +
-                    'If output keeps arriving, the session may still be finishing.'
-                  );
-                } else {
-                  setError(null);
-                }
-              } catch (e) {
-                setError(`Interrupt failed: ${e instanceof Error ? e.message : String(e)}`);
-              }
-              finally { setInterrupting(false); }
-            }}
-            disabled={interrupting}
-            className="flex items-center gap-1 px-2.5 py-1.5 text-xs text-red-400 hover:text-red-300 border border-red-500/30 rounded hover:bg-red-500/10 disabled:opacity-50"
-            title="Interrupt session"
-          >
-            <StopCircle size={14} />
-            <span className="hidden sm:inline">{interrupting ? 'Interrupting...' : 'Interrupt'}</span>
-          </button>
-        )}
+          {contextUsage && (
+            <span className="flex items-center shrink-0">
+              <ContextUsageIndicator usage={contextUsage} />
+            </span>
+          )}
         </div>
       </div>
 
@@ -951,43 +961,42 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
             <span>{providerLabel} is thinking...</span>
           </div>
         )}
-        <div ref={bottomRef} />
+        <div ref={bottomRef} className="h-12" />
       </div>
-      {userMsgCount >= 2 && (
-        <div className="absolute bottom-28 right-6 z-10 flex flex-col gap-1.5">
-          <button
-            onClick={() => navigateUserMessage('up')}
-            className="p-2 bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-white rounded-full shadow-lg transition-all"
-            title="Previous user message"
-          >
-            <ChevronUp size={18} />
-          </button>
-          <button
-            onClick={() => navigateUserMessage('down')}
-            className="p-2 bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-white rounded-full shadow-lg transition-all"
-            title="Next user message"
-          >
-            <ChevronDown size={18} />
-          </button>
-          {showScrollBottom && (
-            <button
-              onClick={() => bottomRef.current?.scrollIntoView({ behavior: 'smooth' })}
-              className="p-2 bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-white rounded-full shadow-lg transition-all"
-              title="Scroll to bottom"
-            >
-              <ArrowDown size={18} />
-            </button>
-          )}
+
+      {/* Scroll navigation buttons — vertical stack above the bottom bar */}
+      {(userMsgCount >= 2 || showScrollBottom) && (
+        <div className="flex justify-end px-4 py-1">
+          <div className="flex flex-col gap-1.5">
+            {userMsgCount >= 2 && (
+              <>
+                <button
+                  onClick={() => navigateUserMessage('up')}
+                  className="p-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-white rounded-full shadow-lg transition-all"
+                  title="Previous user message"
+                >
+                  <ChevronUp size={16} />
+                </button>
+                <button
+                  onClick={() => navigateUserMessage('down')}
+                  className="p-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-white rounded-full shadow-lg transition-all"
+                  title="Next user message"
+                >
+                  <ChevronDown size={16} />
+                </button>
+              </>
+            )}
+            {showScrollBottom && (
+              <button
+                onClick={() => bottomRef.current?.scrollIntoView({ behavior: 'smooth' })}
+                className="p-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-white rounded-full shadow-lg transition-all"
+                title="Scroll to bottom"
+              >
+                <ArrowDown size={16} />
+              </button>
+            )}
+          </div>
         </div>
-      )}
-      {userMsgCount < 2 && showScrollBottom && (
-        <button
-          onClick={() => bottomRef.current?.scrollIntoView({ behavior: 'smooth' })}
-          className="absolute bottom-28 right-6 z-10 p-2.5 bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-white rounded-full shadow-lg transition-all"
-          title="Scroll to bottom"
-        >
-          <ArrowDown size={18} />
-        </button>
       )}
 
       {/* Error */}
