@@ -703,6 +703,10 @@ export const api = {
     request<{ ok: boolean }>(`/api/workers/${workerId}/pool/${accountId}`, { method: 'DELETE' }),
   getWorkerPoolUsage: (id: number) =>
     request<any>(`/api/workers/${id}/pool/usage`),
+  getWorkerRuntimeSettings: (id: number) =>
+    request<RuntimeSettings>(`/api/workers/${id}/settings/runtime`),
+  updateWorkerRuntimeSettings: (id: number, data: Partial<RuntimeSettings>) =>
+    request<RuntimeSettings>(`/api/workers/${id}/settings/runtime`, { method: 'PUT', body: JSON.stringify(data) }),
   getWorkerPool: (id: number) =>
     request<{ enabled: boolean; total: number; available: number; accounts: { id: string; email: string | null; enabled: boolean; available: boolean; cooldown_remaining: number }[] }>(`/api/workers/${id}/pool`),
   createWorker: (data: { accounts: { email: string; token?: string }[]; name?: string }) =>

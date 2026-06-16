@@ -161,6 +161,21 @@ async def _migrate_back_then_destroy(prov, worker_id: int, db_factory=None):
     async with db_factory() as db:
         result = await db.execute(select(Task).where(Task.worker_id == worker_id))
         tasks = result.scalars().all()
+    # Stop executing tasks before migrating — running sessions can't be migrated
+    for task in tasks:
+        if task.status in ("executing", "in_progress"):
+            try:
+                from backend.services.worker_proxy import WorkerProxy
+                proxy = WorkerProxy(db_factory, worker_relay)
+                await proxy.proxy_to_worker(task, "POST", f"/api/tasks/{task.id}/stop")
+                logger.info("destroy: stopped executing task %s before migration", task.id)
+                await asyncio.sleep(2)
+            except Exception as e:
+                logger.warning("destroy: failed to stop task %s: %s", task.id, e)
+    # Refresh task statuses after stopping
+    async with db_factory() as db:
+        result = await db.execute(select(Task).where(Task.worker_id == worker_id))
+        tasks = result.scalars().all()
     for task in tasks:
         try:
             if task_migrator is not None:
@@ -357,3 +372,40 @@ async def get_worker_pool_usage(worker_id: int, db: AsyncSession = Depends(get_d
             return r2.json() if r2.status_code == 200 else {"accounts": []}
     except Exception as e:
         raise HTTPException(503, f"Worker 不可达: {e}")
+
+
+@router.get("/{worker_id}/settings/runtime")
+async def get_worker_runtime_settings(worker_id: int, db: AsyncSession = Depends(get_db)):
+    worker = await db.get(Worker, worker_id)
+    if not worker:
+        raise HTTPException(404, "Worker not found")
+    if worker.status != "ready" or not worker.private_ip:
+        raise HTTPException(409, f"Worker 未就绪（{worker.status}）")
+    import httpx
+    async with httpx.AsyncClient(timeout=10) as c:
+        r = await c.get(
+            f"http://{worker.private_ip}:{worker.ccm_port}/api/settings/runtime",
+            headers={"Authorization": f"Bearer {worker.auth_token}"},
+        )
+    if r.status_code >= 400:
+        raise HTTPException(r.status_code, r.text[:300])
+    return r.json()
+
+
+@router.put("/{worker_id}/settings/runtime")
+async def update_worker_runtime_settings(worker_id: int, body: dict, db: AsyncSession = Depends(get_db)):
+    worker = await db.get(Worker, worker_id)
+    if not worker:
+        raise HTTPException(404, "Worker not found")
+    if worker.status != "ready" or not worker.private_ip:
+        raise HTTPException(409, f"Worker 未就绪（{worker.status}）")
+    import httpx
+    async with httpx.AsyncClient(timeout=10) as c:
+        r = await c.put(
+            f"http://{worker.private_ip}:{worker.ccm_port}/api/settings/runtime",
+            headers={"Authorization": f"Bearer {worker.auth_token}"},
+            json=body,
+        )
+    if r.status_code >= 400:
+        raise HTTPException(r.status_code, r.text[:300])
+    return r.json()
