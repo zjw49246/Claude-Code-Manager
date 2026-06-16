@@ -1,4 +1,5 @@
 import { useState, useMemo, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { api } from '../../api/client';
 import type { Task, Project } from '../../api/client';
 import { Trash2, RotateCcw, XCircle, MessageCircle, Archive, ArchiveRestore, Star, Copy, Check, MoreVertical, Pencil, Mail, MailOpen, Clock, GripVertical } from 'lucide-react';
@@ -36,9 +37,11 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId,
 
   const [copiedId, setCopiedId] = useState<number | null>(null);
   const [menuOpenId, setMenuOpenId] = useState<number | null>(null);
+  const [menuPos, setMenuPos] = useState<{ top: number; right: number }>({ top: 0, right: 0 });
   const [editingTitleId, setEditingTitleId] = useState<number | null>(null);
   const [titleDraft, setTitleDraft] = useState('');
   const menuRef = useRef<HTMLDivElement>(null);
+  const menuBtnRef = useRef<HTMLButtonElement>(null);
   const titleInputRef = useRef<HTMLInputElement>(null);
 
   // Close overflow menu on outside click
@@ -119,7 +122,7 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId,
         <div
           key={t.id}
           {...targetProps(t, idx)}
-          className={`relative rounded-lg p-3 overflow-hidden transition-opacity ${
+          className={`relative rounded-lg p-3 transition-opacity ${
             draggingId === t.id ? 'opacity-40' : ''
           } ${overIndex === idx && draggingId !== null && draggingId !== t.id ? 'ring-2 ring-indigo-400' : ''} ${
             activeTaskId === t.id ? 'bg-indigo-900/60 ring-1 ring-indigo-400/60' : t.has_unread ? 'bg-indigo-900/50 ring-1 ring-indigo-500/50' : 'bg-gray-800'
@@ -192,14 +195,20 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId,
               {/* Overflow menu */}
               <div className="relative" ref={menuOpenId === t.id ? menuRef : undefined}>
                 <button
-                  onClick={() => setMenuOpenId(menuOpenId === t.id ? null : t.id)}
+                  ref={menuOpenId === t.id ? menuBtnRef : undefined}
+                  onClick={(e) => {
+                    if (menuOpenId === t.id) { setMenuOpenId(null); return; }
+                    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                    setMenuPos({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
+                    setMenuOpenId(t.id);
+                  }}
                   className="p-1.5 text-gray-600 hover:text-gray-300 transition-colors"
                   title="More actions"
                 >
                   <MoreVertical size={16} />
                 </button>
-                {menuOpenId === t.id && (
-                  <div className="absolute right-0 top-8 z-50 bg-gray-900 border border-gray-700 rounded-lg shadow-xl py-1 min-w-[140px]">
+                {menuOpenId === t.id && createPortal(
+                  <div ref={menuRef} className="fixed z-[9999] bg-gray-900 border border-gray-700 rounded-lg shadow-xl py-1 min-w-[140px]" style={{ top: menuPos.top, right: menuPos.right }}>
                     <button
                       onClick={() => { setTitleDraft(t.title || ''); setEditingTitleId(t.id); setMenuOpenId(null); }}
                       className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-gray-300 hover:bg-gray-800 text-left"
@@ -237,7 +246,8 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId,
                         <Trash2 size={14} /> Delete
                       </button>
                     )}
-                  </div>
+                  </div>,
+                  document.body
                 )}
               </div>
             </div>

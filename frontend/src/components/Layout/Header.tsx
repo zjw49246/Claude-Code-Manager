@@ -36,6 +36,10 @@ export function Header({ currentPage, onNavigate }: HeaderProps) {
 
   const togglePtyMode = useCallback(async () => {
     if (!runtime || switching || !runtime.pty_available) return;
+    if (runtime.use_pty_mode) {
+      const ok = window.confirm('关闭 PTY 模式将回退到 claude -p 一次性进程，新任务不再复用会话。确定关闭？');
+      if (!ok) return;
+    }
     setSwitching(true);
     try {
       const updated = await api.updateRuntimeSettings({ use_pty_mode: !runtime.use_pty_mode });

@@ -10,7 +10,7 @@ import { QuickPhraseDropdown } from '../QuickPhrases/QuickPhraseDropdown';
 import { ListFilter, Syringe } from 'lucide-react';
 import { TaskConfigBadge } from '../Tasks/TaskBadges';
 import { ExpandableText } from '../ExpandableText';
-import { formatMessageTime, formatDateTime } from '../../config/timezone';
+import { formatMessageTime } from '../../config/timezone';
 import { useFileDrop } from '../../hooks/useFileDrop';
 import { SubAgentIndicator } from './SubAgentIndicator';
 import { MonitorPanel } from './MonitorPanel';
@@ -763,7 +763,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
           <ArrowLeft size={20} />
         </button>
         <div className="flex-1 min-w-0 overflow-hidden">
-          <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
+          <div className="flex items-center gap-1.5 sm:gap-2">
             <p className="text-foreground font-medium text-sm whitespace-nowrap">Task #{task.id}</p>
             <span className={`text-xs px-1.5 rounded font-medium whitespace-nowrap ${task.provider === 'codex' ? 'bg-green-600/30 text-green-300' : 'bg-blue-600/30 text-blue-300'}`}>
               {providerLabel}
@@ -771,42 +771,31 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
             {projectName && (
               <span className="text-xs bg-emerald-600/30 text-emerald-300 px-1.5 rounded font-medium whitespace-nowrap">{projectName}</span>
             )}
-            <p className="hidden sm:inline text-xs text-gray-500 whitespace-nowrap">
-              {task.session_id ? 'Session active' : 'No session yet'}
-            </p>
-            {task.created_at && (
-              <span className="hidden sm:inline text-xs text-gray-600 whitespace-nowrap">
-                Created {formatDateTime(task.created_at)}
-              </span>
+            <span className="text-gray-700 hidden sm:inline">·</span>
+            {editingTitle ? (
+              <input
+                ref={titleInputRef}
+                autoFocus
+                value={titleDraft}
+                onChange={(e) => setTitleDraft(e.target.value)}
+                onBlur={handleTitleSave}
+                onKeyDown={(e) => { if (e.key === 'Enter') handleTitleSave(); if (e.key === 'Escape') { setTitleDraft(task.title || ''); setEditingTitle(false); } }}
+                className="flex-1 min-w-0 bg-gray-800 text-foreground text-sm rounded px-2 py-0.5 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                placeholder="Enter title..."
+              />
+            ) : (
+              <div className="flex items-center gap-1 min-w-0 group/title">
+                <span className="text-sm text-gray-400 truncate">{task.title || task.description || 'Untitled'}</span>
+                <button
+                  onClick={() => { setTitleDraft(task.title || ''); setEditingTitle(true); }}
+                  className="text-gray-600 hover:text-gray-400 opacity-0 group-hover/title:opacity-100 transition-opacity shrink-0"
+                  title="Edit title"
+                >
+                  <Pencil size={12} />
+                </button>
+              </div>
             )}
           </div>
-          {editingTitle ? (
-            <input
-              ref={titleInputRef}
-              autoFocus
-              value={titleDraft}
-              onChange={(e) => setTitleDraft(e.target.value)}
-              onBlur={handleTitleSave}
-              onKeyDown={(e) => { if (e.key === 'Enter') handleTitleSave(); if (e.key === 'Escape') { setTitleDraft(task.title || ''); setEditingTitle(false); } }}
-              className="w-full bg-gray-800 text-foreground text-sm rounded px-2 py-0.5 mt-0.5 focus:outline-none focus:ring-1 focus:ring-indigo-500"
-              placeholder="Enter title..."
-            />
-          ) : (
-            <div className="flex items-center gap-1.5 mt-0.5 group/title">
-              <ExpandableText
-                text={task.title || task.description || 'Untitled'}
-                collapsedLines={1}
-                className="text-sm text-gray-400"
-              />
-              <button
-                onClick={() => { setTitleDraft(task.title || ''); setEditingTitle(true); }}
-                className="text-gray-600 hover:text-gray-400 opacity-0 group-hover/title:opacity-100 transition-opacity shrink-0"
-                title="Edit title"
-              >
-                <Pencil size={12} />
-              </button>
-            </div>
-          )}
         </div>
         <div className="flex items-center gap-1 shrink-0">
         {contextUsage && (
