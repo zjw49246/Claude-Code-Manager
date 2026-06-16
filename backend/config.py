@@ -51,7 +51,7 @@ class Settings(BaseSettings):
     use_pty_mode: bool = True
 
     # --- Claude account pool (auto-rotation on rate limit) ---
-    pool_enabled: bool = False
+    pool_enabled: bool = True
     pool_config_path: str = "~/.claude-pool/accounts.json"
     pool_cooldown_seconds: int = 300  # per-account cooldown after rate limit
 
