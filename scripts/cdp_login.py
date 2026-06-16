@@ -157,10 +157,14 @@ async def cdp_login(email: str, token: str, config_dir: str, oauth_url: str = ""
             await handle_cf(ws, "OAuth")
             await asyncio.sleep(8)
 
-            # 10. Authorize API
+            # 10. Authorize API (React fiber 提取 org UUID + 直接 POST)
             JS_ORG = """(function(){var btn=[...document.querySelectorAll("button")].find(b=>b.textContent.trim()==="Authorize");if(!btn)return null;var fk=Object.keys(btn).find(k=>k.startsWith("__reactFiber"));if(!fk)return null;var c=btn[fk];for(var i=0;i<30&&c;i++){if(c.memoizedState){var s=c.memoizedState;var x=0;while(s&&x<20){var v=s.memoizedState;if(v&&Array.isArray(v)){for(var it of v){if(it&&it.email_address)return(it.memberships&&it.memberships[0]&&it.memberships[0].organization)?it.memberships[0].organization.uuid:null;if(Array.isArray(it)){for(var sub of it){if(sub&&sub.email_address)return(sub.memberships&&sub.memberships[0]&&sub.memberships[0].organization)?sub.memberships[0].organization.uuid:null;}}}}s=s.next;x++;}}c=c.return;}return null;})()"""
+            code, state = None, None
             org = None
             for _retry in range(5):
+                if _retry == 0:
+                    page_text = await cdp_eval(ws, "document.body?.innerText?.substring(0,500)") or ""
+                    print(f"  Page text: {page_text[:200]}")
                 org = await cdp_eval(ws, JS_ORG)
                 if org:
                     break
@@ -177,27 +181,29 @@ async def cdp_login(email: str, token: str, config_dir: str, oauth_url: str = ""
                     _, txt = result.split(" | ", 1)
                     rd = json.loads(txt).get("redirect_uri","")
                     cp = parse_qs(urlparse(rd).query)
-                    code, state = cp.get("code",[""])[0], cp.get("state",[""])[0]
-                    if code and state:
-                        print(f"  Feeding code#state to CLI stdin...")
-                        cli.stdin.write(f"{code}#{state}\n".encode())
-                        cli.stdin.flush()
-                        cli.stdin.close()
-                        for _ in range(30):
-                            if cli.poll() is not None: break
-                            await asyncio.sleep(1)
-                        cred_path = Path(config_dir) / ".credentials.json"
-                        if cred_path.exists():
-                            try:
-                                creds = json.loads(cred_path.read_text())
-                                if creds.get("claudeAiOauth", {}).get("accessToken"):
-                                    print("SUCCESS!")
-                                    return {"code": code, "state": state, "success": True}
-                            except Exception:
-                                pass
-                        print("FAILED: credentials not valid after login")
-                        return {"code": code, "state": state, "success": False}
-            print("FAILED: authorize")
+                    code = cp.get("code", [""])[0]
+                    state = cp.get("state", [""])[0]
+
+            if code and state:
+                print(f"  Feeding code#state to CLI stdin...")
+                cli.stdin.write(f"{code}#{state}\n".encode())
+                cli.stdin.flush()
+                cli.stdin.close()
+                for _ in range(30):
+                    if cli.poll() is not None: break
+                    await asyncio.sleep(1)
+                cred_path = Path(config_dir) / ".credentials.json"
+                if cred_path.exists():
+                    try:
+                        creds = json.loads(cred_path.read_text())
+                        if creds.get("claudeAiOauth", {}).get("accessToken"):
+                            print("SUCCESS!")
+                            return {"code": code, "state": state, "success": True}
+                    except Exception:
+                        pass
+                print("FAILED: credentials not valid after login")
+                return {"code": code, "state": state, "success": False}
+            print("FAILED: authorize (no code/state obtained)")
             return None
     finally:
         chrome.kill(); chrome.wait()
