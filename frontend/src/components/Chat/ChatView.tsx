@@ -136,7 +136,6 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const [showScrollBottom, setShowScrollBottom] = useState(false);
   const [starred, setStarred] = useState(task.starred);
 
   // Temp model override (one-shot per message, not persisted to the task)
@@ -195,11 +194,6 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
   const [hasMoreHistory, setHasMoreHistory] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const HISTORY_PAGE_SIZE = 200;
-
-  const userMsgCount = useMemo(() => {
-    const chatUserMsgs = messages.filter((m) => m.role === 'user').length;
-    return (task.description ? 1 : 0) + chatUserMsgs;
-  }, [messages, task.description]);
 
   const navigateUserMessage = useCallback((direction: 'up' | 'down') => {
     const container = messagesContainerRef.current;
@@ -559,16 +553,6 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
     };
   }, []);
 
-  useEffect(() => {
-    const el = messagesContainerRef.current;
-    if (!el) return;
-    const handleScroll = () => {
-      const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-      setShowScrollBottom(distanceFromBottom > 300);
-    };
-    el.addEventListener('scroll', handleScroll, { passive: true });
-    return () => el.removeEventListener('scroll', handleScroll);
-  }, []);
 
   const loadMoreRef = useRef(loadMoreHistory);
   loadMoreRef.current = loadMoreHistory;
@@ -961,43 +945,8 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
             <span>{providerLabel} is thinking...</span>
           </div>
         )}
-        <div ref={bottomRef} className="h-12" />
+        <div ref={bottomRef} className="h-4" />
       </div>
-
-      {/* Scroll navigation buttons — vertical stack above the bottom bar */}
-      {(userMsgCount >= 2 || showScrollBottom) && (
-        <div className="flex justify-end px-4 py-1">
-          <div className="flex flex-col gap-1.5">
-            {userMsgCount >= 2 && (
-              <>
-                <button
-                  onClick={() => navigateUserMessage('up')}
-                  className="p-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-white rounded-full shadow-lg transition-all"
-                  title="Previous user message"
-                >
-                  <ChevronUp size={16} />
-                </button>
-                <button
-                  onClick={() => navigateUserMessage('down')}
-                  className="p-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-white rounded-full shadow-lg transition-all"
-                  title="Next user message"
-                >
-                  <ChevronDown size={16} />
-                </button>
-              </>
-            )}
-            {showScrollBottom && (
-              <button
-                onClick={() => bottomRef.current?.scrollIntoView({ behavior: 'smooth' })}
-                className="p-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-white rounded-full shadow-lg transition-all"
-                title="Scroll to bottom"
-              >
-                <ArrowDown size={16} />
-              </button>
-            )}
-          </div>
-        </div>
-      )}
 
       {/* Error */}
       {error && (
@@ -1195,6 +1144,30 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
                 <Syringe size={18} />
               </button>
             )}
+            {/* Message navigation — always visible, right-aligned */}
+            <div className="ml-auto flex items-center gap-0.5">
+              <button
+                onClick={() => navigateUserMessage('up')}
+                className="p-1.5 text-gray-500 hover:text-gray-300 rounded transition-colors"
+                title="Previous user message"
+              >
+                <ChevronUp size={16} />
+              </button>
+              <button
+                onClick={() => navigateUserMessage('down')}
+                className="p-1.5 text-gray-500 hover:text-gray-300 rounded transition-colors"
+                title="Next user message"
+              >
+                <ChevronDown size={16} />
+              </button>
+              <button
+                onClick={() => bottomRef.current?.scrollIntoView({ behavior: 'smooth' })}
+                className="p-1.5 text-gray-500 hover:text-gray-300 rounded transition-colors"
+                title="Scroll to bottom"
+              >
+                <ArrowDown size={16} />
+              </button>
+            </div>
           </div>
           {/* Row 2: full-width input */}
           <div className="flex gap-2 items-end">
