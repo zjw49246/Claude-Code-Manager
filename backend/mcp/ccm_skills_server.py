@@ -32,34 +32,80 @@ def _headers() -> dict[str, str]:
 
 @mcp.tool()
 async def ccm_command_help() -> str:
-    """列出所有可用的 CCM 命令和工具。
+    """列出所有可用的 CCM 命令和技能。
 
-    返回每个命令的名称、描述、以及当前 task 是否已启用该工具。
-    用户可以通过 $command_name 语法临时使用未启用的工具。
+    返回：
+    - 内置命令列表（$help 等）
+    - 可用技能列表（从 SKILL.md 文件加载）及启用状态
+    用户可以通过 $command_name 语法使用命令，或通过 ccm_read_skill 读取技能详情。
     """
     try:
         from backend.services.command_registry import COMMAND_REGISTRY
+        from backend.services.skill_loader import discover_skills
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.get(_api_url(""), headers=_headers())
             resp.raise_for_status()
             task_data = resp.json()
             enabled_skills = task_data.get("enabled_skills") or {}
 
+        # Built-in commands
         commands = []
         for cmd in COMMAND_REGISTRY.values():
-            is_enabled = cmd.always_available
-            if not is_enabled and cmd.required_skills:
-                is_enabled = all(enabled_skills.get(k) for k in cmd.required_skills)
             commands.append({
                 "command": f"${cmd.name}",
                 "description": cmd.description,
-                "enabled": is_enabled,
-                "always_available": cmd.always_available,
+                "type": "command",
             })
+
+        # Skills from SKILL.md files
+        skills = discover_skills()
+        skill_list = []
+        for name, skill in skills.items():
+            skill_list.append({
+                "name": name,
+                "description": skill.description.strip()[:150],
+                "enabled": enabled_skills.get(name, False),
+                "commands": [c["name"] for c in skill.ccm.commands],
+                "type": "skill",
+            })
+
         return json.dumps({
             "success": True,
             "commands": commands,
-            "usage": "在聊天中输入 $命令名 即可使用，例如 $monitor 监控某个进程",
+            "skills": skill_list,
+            "usage": "用 $命令名 触发命令，用 ccm_read_skill(name) 读取技能详情，用 ccm_enable_skill(name) 启用技能。",
+        }, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+
+
+@mcp.tool()
+async def ccm_read_skill(skill_name: str) -> str:
+    """读取一个技能的完整内容。
+
+    技能目录（name + description）在 system prompt 中可见。
+    当需要某个技能的详细指南时，调用此工具获取全文。
+
+    Args:
+        skill_name: 技能名称（如 monitor, code-review）
+    """
+    try:
+        from backend.services.skill_loader import discover_skills
+        skills = discover_skills()
+        skill = skills.get(skill_name)
+        if not skill:
+            available = ", ".join(skills.keys())
+            return json.dumps({
+                "success": False,
+                "error": f"技能 '{skill_name}' 不存在。可用技能: {available}",
+            }, ensure_ascii=False)
+        return json.dumps({
+            "success": True,
+            "name": skill.name,
+            "description": skill.description,
+            "body": skill.body,
+            "commands": skill.ccm.commands,
+            "tags": skill.ccm.tags,
         }, ensure_ascii=False)
     except Exception as e:
         return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
