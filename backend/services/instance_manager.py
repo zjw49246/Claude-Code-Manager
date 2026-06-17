@@ -300,7 +300,6 @@ class InstanceManager:
             enable_workflows=enable_workflows,
             enabled_skills=enabled_skills,
             mcp_config_path=mcp_config_path,
-            disallowed_tools=sorted(set(disallowed)) if disallowed else None,
         )
 
         process = self.processes.get(instance_id)
