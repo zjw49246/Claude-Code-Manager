@@ -386,24 +386,38 @@ class WorkerRelay:
                         remote = remote.get("messages", [])
                     remote_non_user = [m for m in remote if m.get("event_type") != "user_message"]
                     missing = remote_non_user[local_count:]
-                    if not missing:
-                        continue
-                    async with self.db_factory() as db:
-                        for m in missing:
-                            db.add(LogEntry(
-                                instance_id=None,
-                                task_id=tid,
-                                event_type=m.get("event_type") or "message",
-                                role=m.get("role"),
-                                content=m.get("content"),
-                                tool_name=m.get("tool_name"),
-                                tool_input=m.get("tool_input"),
-                                tool_output=m.get("tool_output"),
-                                raw_json=m.get("raw_json"),
-                                is_error=m.get("is_error", False),
-                                loop_iteration=m.get("loop_iteration"),
-                            ))
-                        await db.commit()
-                    logger.info("backfilled %d log entries for task %s", len(missing), tid)
+                    if missing:
+                        async with self.db_factory() as db:
+                            for m in missing:
+                                db.add(LogEntry(
+                                    instance_id=None,
+                                    task_id=tid,
+                                    event_type=m.get("event_type") or "message",
+                                    role=m.get("role"),
+                                    content=m.get("content"),
+                                    tool_name=m.get("tool_name"),
+                                    tool_input=m.get("tool_input"),
+                                    tool_output=m.get("tool_output"),
+                                    raw_json=m.get("raw_json"),
+                                    is_error=m.get("is_error", False),
+                                    loop_iteration=m.get("loop_iteration"),
+                                ))
+                            await db.commit()
+                        logger.info("backfilled %d log entries for task %s", len(missing), tid)
+                    # Sync task status + session_id (may have been missed during disconnect)
+                    r2 = await client.get(
+                        self._api(worker, f"/api/tasks/{tid}"),
+                        headers=self._headers(worker),
+                    )
+                    if r2.status_code == 200:
+                        remote_task = r2.json()
+                        async with self.db_factory() as db:
+                            t = await db.get(Task, tid)
+                            if t:
+                                if remote_task.get("status") and remote_task["status"] != t.status:
+                                    t.status = remote_task["status"]
+                                if remote_task.get("session_id") and not t.session_id:
+                                    t.session_id = remote_task["session_id"]
+                                await db.commit()
                 except Exception:
                     logger.exception("backfill task %s from worker %s failed", tid, worker.id)
