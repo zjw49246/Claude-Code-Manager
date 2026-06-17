@@ -1,5 +1,5 @@
 from datetime import datetime
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_serializer
 
 
 class WorkerAccountIn(BaseModel):
@@ -27,6 +27,14 @@ class WorkerResponse(BaseModel):
     ccm_port: int
     ccm_commit: str | None
     accounts: list | None
+
+    @field_serializer("accounts")
+    @classmethod
+    def strip_tokens(cls, v: list | None) -> list | None:
+        if not v:
+            return v
+        return [{"email": a.get("email", ""), "status": a.get("status", "")} for a in v]
+
     last_heartbeat: datetime | None
     bootstrap_step: str | None
     bootstrap_error: str | None
