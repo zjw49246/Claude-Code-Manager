@@ -99,11 +99,24 @@ async def ccm_read_skill(skill_name: str) -> str:
                 "success": False,
                 "error": f"技能 '{skill_name}' 不存在。可用技能: {available}",
             }, ensure_ascii=False)
+        # Merge DB lessons into skill body
+        body_with_lessons = skill.body
+        try:
+            from backend.services.skill_evolution import get_lessons_for_skill
+            from backend.database import async_session
+            async with async_session() as db:
+                lessons = await get_lessons_for_skill(skill_name, db)
+                if lessons:
+                    body_with_lessons += "\n\n## Learned Lessons\n"
+                    body_with_lessons += "\n".join(f"- {l}" for l in lessons)
+        except Exception:
+            pass
+
         return json.dumps({
             "success": True,
             "name": skill.name,
             "description": skill.description,
-            "body": skill.body,
+            "body": body_with_lessons,
             "commands": skill.ccm.commands,
             "tags": skill.ccm.tags,
         }, ensure_ascii=False)
