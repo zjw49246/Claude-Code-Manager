@@ -865,6 +865,23 @@ class InstanceManager:
                 )
                 await db.commit()
 
+        # Reactivate completed task if sub-agent produces new output
+        if (
+            task_id
+            and event.get("role") == "assistant"
+            and event["event_type"] in ("message", "tool_use")
+        ):
+            async with self.db_factory() as db:
+                task = await db.get(Task, task_id)
+                if task and task.status == "completed":
+                    task.status = "executing"
+                    await db.commit()
+                    await self.broadcaster.broadcast("tasks", {
+                        "event": "status_change",
+                        "task_id": task_id,
+                        "new_status": "executing",
+                    })
+
         # Store in DB
         async with self.db_factory() as db:
             entry = LogEntry(
@@ -1059,6 +1076,27 @@ class InstanceManager:
                     "agent_type": existing.agent_type,
                     "status": "completed",
                 })
+                # Check if all native sub-agents are done — if task was deferred,
+                # now mark it completed
+                still_running = (await db.execute(
+                    _select(SubAgentSession).where(
+                        SubAgentSession.task_id == task_id,
+                        SubAgentSession.source == "native",
+                        SubAgentSession.status == "running",
+                    )
+                )).scalars().all()
+                if not still_running:
+                    task = await db.get(Task, task_id)
+                    if task and task.status == "executing":
+                        task.status = "completed"
+                        task.completed_at = datetime.utcnow()
+                        await db.commit()
+                        await self.broadcaster.broadcast("tasks", {
+                            "event": "status_change",
+                            "task_id": task_id,
+                            "new_status": "completed",
+                        })
+                        logger.info("Task %s completed after all sub-agents finished", task_id)
 
     # ---------------------------------------------------- PTY 权限透传
 
