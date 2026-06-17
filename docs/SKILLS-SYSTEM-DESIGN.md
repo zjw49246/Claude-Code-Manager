@@ -3,6 +3,8 @@
 > 基于 agent-ml-research、Hermes Agent、MiMo Code 的深度源码级调研，**针对 CCM 架构约束**做适配设计。
 >
 > v4 更新：所有借鉴点逐一对照 CCM 架构做适配，不再照搬任何单一项目。
+>
+> **实施状态**：Phase 1-3 已完成，Phase 4 部分完成（curator 定时任务已实现，skill_state 表未实现），Phase 5 部分完成（ccm_create_skill 已实现）。
 
 ## 1. CCM 架构约束（决定设计的前提）
 
@@ -30,16 +32,14 @@
 
 ```
 {CCM_REPO}/skills/                    # 全局 skills（版本控制，rsync 部署）
-  code-review/SKILL.md
-  monitor/SKILL.md
-  help/SKILL.md
+  monitor/SKILL.md                    # ✅ 已实现
 
 {project}/.ccm/skills/                # 项目级 skills（可选，覆盖同名）
   custom-deploy/SKILL.md              # 项目特有的 skill
 
-数据库 task.enabled_skills            # per-task 启用/禁用（现有机制）
+数据库 task.enabled_skills            # per-task 启用/禁用（✅ 已实现）
 
-数据库 skill_lessons 表               # 进化教训（不写 skill 文件，避免 Worker 回传问题）
+数据库 skill_lessons 表               # 进化教训（✅ 已实现，不写 skill 文件）
 ```
 
 **为什么不写 skill 文件存教训**：agent-ml-research 把教训直接追加到 `.skill.md` 文件里。但 CCM 的 Worker 是只读部署（rsync 单向），Worker 上的教训写不回 Manager。改为 DB 存储，注入时动态合并。
@@ -52,26 +52,29 @@
 | Hermes | 3-tier progressive disclosure（metadata → full → references） | ✅ 分层加载思路<br>❌ skill_view MCP 工具（CCM 可做类似的 `ccm_read_skill`） |
 | MiMo | CC 原生 skill 发现（放 `.claude/skills/`） | ❌ 不能写 cwd/config_dir |
 
-**CCM 决策**：
+**CCM 决策**（✅ 已全部实现）：
 
 ```
 L0：Skill 目录（system prompt 注入）
     所有 skill 的 name + description 写入 --append-system-prompt-file
     Budget：4000 chars（不含 always-on body）
+    实现：skill_loader.build_skill_prompt_file()
     
 L1：always-on skill body（system prompt 注入）
     ccm.always: true 的 skill 全文追加到同一个 system prompt file
     Budget：4000 chars body + 最多 10 个
     选择算法：priority 降序贪心，第一个不受 budget 限
+    实现：skill_loader.select_always_skills()
 
 L2：on-demand（MCP 工具）
-    ccm_skills_server 新增 ccm_read_skill(name) 工具
+    ccm_skills_server 的 ccm_read_skill(name) 工具
     Agent 在 L0 目录中看到 skill 后调用此工具获取全文
     返回内容包括 body + 关联的 lessons（从 DB 动态合并）
+    同时记录 skill_usage（trigger_type="read"）
 
 注入时机：
     instance_manager.launch() 时生成临时 system prompt file
-    路径：/tmp/ccm_skills_{task_id}.md
+    路径：/tmp/ccm-skills-{task_id}-{random}.md
     PTY 通过 --append-system-prompt-file 传给 CC
     非 PTY 通过 --append-system-prompt 传给 claude -p
 ```
@@ -80,27 +83,25 @@ L2：on-demand（MCP 工具）
 
 | 项目 | 做法 | CCM 适配 |
 |------|------|---------|
-| agent-ml-research | decorator 注册 + mode/visitor guard 自动应用 | ✅ 保留现有 COMMAND_REGISTRY decorator 模式<br>✅ 增加 guard 自动应用 |
-| Hermes | 每个 skill 自动注册为 /command | ✅ skill 的 ccm.commands 自动注册<br>❌ 所有 skill 都注册为命令（有的 skill 不需要命令） |
-| MiMo | /dream /distill 等内置命令 | ✅ 系统维护命令（$curator $distill）作为内置命令 |
+| agent-ml-research | decorator 注册 + mode/visitor guard 自动应用 | ✅ 保留现有 COMMAND_REGISTRY decorator 模式 |
+| Hermes | 每个 skill 自动注册为 /command | ❌ 未实现自动注册（命令仍在 command_registry.py 硬编码） |
+| MiMo | /dream /distill 等内置命令 | ✅ $distill 作为内置命令 |
 
-**CCM 决策**：
+**CCM 实际实现**：
+
+命令注册在 `command_registry.py` 中用 `register_command()` 静态注册，共 3 个命令：
 
 ```python
-# 启动时自动注册
-def register_all_commands():
-    # 1. 内置命令（Python 代码）
-    # $help, $status, $stop — 现有 COMMAND_REGISTRY
-    
-    # 2. Skill 自动命令
-    for skill in discover_skills():
-        for cmd in skill.ccm.get("commands", []):
-            COMMAND_REGISTRY.register_skill_command(cmd, skill)
-    
-    # 3. 系统维护命令
-    # $curator — 手动触发 curator 整理
-    # $distill — 手动触发 distill 提炼
+# 内置命令（command_registry.py 中 register_command）
+$help     # always_available=True，调用 ccm_command_help 工具
+$monitor  # required_skills={"monitor": True}，禁用内置 Monitor 工具
+$distill  # always_available=True，调用 ccm_distill 工具
+
+# ccm_command_help 工具返回命令列表时，同时返回 skill 目录
+# ccm_read_skill 返回 skill 的 ccm.commands 字段供 agent 了解命令
 ```
+
+> **与设计差异**：设计文档提到 skill 的 `ccm.commands` 启动时自动注册到 COMMAND_REGISTRY。实际未实现自动注册——skill 的 commands 信息通过 `ccm_command_help` 和 `ccm_read_skill` 返回给 agent，由 agent 自行理解和使用，而非注册为可解析的 `$command`。
 
 ### 2.4 自进化系统
 
@@ -110,42 +111,33 @@ def register_all_commands():
 | Hermes | Curator 定期整理（启动时+空闲时检查） | ✅ 生命周期管理<br>❌ "启动时检查"（CCM 是常驻服务）<br>→ **改为 asyncio 定时任务** |
 | MiMo | Dream(7天) + Distill(30天)，启动时检查 last session | ✅ 周期性整理<br>❌ 启动检查<br>→ **改为后台 asyncio cron** |
 
-**CCM 决策——进化数据存 DB 不存文件**：
+**CCM 决策——进化数据存 DB 不存文件**（✅ 已实现）：
 
 ```sql
--- 新表：skill_lessons（进化教训）
+-- skill_lessons 表（✅ 已实现）
 CREATE TABLE skill_lessons (
     id INTEGER PRIMARY KEY,
     skill_name TEXT NOT NULL,          -- 关联的 skill
     lesson TEXT NOT NULL,              -- 教训内容
     source TEXT DEFAULT 'evolution',   -- evolution | distill | manual
     tool_name TEXT,                    -- 触发失败的工具
-    worker_id INTEGER,                -- 来自哪个 Worker（NULL=本机）
-    created_at TIMESTAMP DEFAULT NOW,
-    UNIQUE(skill_name, lesson_hash)    -- 去重用
+    worker_id INTEGER,                 -- 来自哪个 Worker（NULL=本机）
+    lesson_hash TEXT UNIQUE,           -- MD5 去重
+    created_at TIMESTAMP DEFAULT NOW
 );
 
--- 新表：skill_usage（使用追踪）
+-- skill_usage 表（✅ 已实现）
 CREATE TABLE skill_usage (
     id INTEGER PRIMARY KEY,
     skill_name TEXT NOT NULL,
-    trigger_type TEXT NOT NULL,        -- inject | read | command | trigger
+    trigger_type TEXT NOT NULL,        -- read | command | test
     task_id INTEGER,
     project_id INTEGER,
     created_at TIMESTAMP DEFAULT NOW
 );
-
--- 新表：skill_state（生命周期状态）
-CREATE TABLE skill_state (
-    skill_name TEXT PRIMARY KEY,
-    state TEXT DEFAULT 'active',       -- active | stale | archived
-    pinned BOOLEAN DEFAULT FALSE,
-    created_by TEXT DEFAULT 'system',  -- system | agent | distill
-    last_used_at TIMESTAMP,
-    state_changed_at TIMESTAMP,
-    absorbed_into TEXT                 -- 合并追踪
-);
 ```
+
+> **与设计差异**：设计文档提到 `skill_state` 表（active/stale/archived 状态管理），实际未实现。curator 的生命周期判断直接通过 `skill_usage` 表查询 last_used 时间，不依赖独立状态表。
 
 **为什么用 DB 不用文件**：
 - Worker 上的教训通过 relay 事件回传，写入 Manager DB → 解决单向 rsync 问题
@@ -154,55 +146,51 @@ CREATE TABLE skill_state (
 
 ### 2.5 即时进化（失败反思）
 
+✅ 已在 `skill_evolution.py` 实现。
+
 ```python
-async def evolve_on_failure(tool_name, error, context, task_id, skill_registry):
-    """适配 CCM：教训写 DB 而非文件。"""
+async def evolve_on_failure(tool_name, error, context, db, skills=None, worker_id=None):
+    """工具失败 → 反思 → 教训写 DB。"""
     
-    # 1. 定位关联 skill（agent-ml-research 3 级匹配）
-    related = find_related_skill(tool_name, skill_registry)
+    # 1. 定位关联 skill（3 级匹配：tools list → tag → name substring）
+    related = find_related_skill(tool_name, skills)
     if not related:
-        return
+        return False
     
-    # 2. 节流（DB 查询代替文件时间戳）
-    recent = await db.execute(
-        select(SkillLesson)
-        .where(SkillLesson.skill_name == related.name)
-        .where(SkillLesson.created_at > now() - timedelta(seconds=600))
-    )
-    if recent.first():
-        return
+    # 2. 节流（内存 cooldown dict，600 秒间隔）
+    if _cooldowns.get(related, 0) > now - _COOLDOWN_SECONDS:
+        return False
     
-    # 3. LLM 反思（同 agent-ml-research）
-    lesson = await reflect_on_failure(tool_name, error, context, model="claude-haiku-4-5")
-    if lesson == "SKIP":
-        return
+    # 3. LLM 反思（claude-haiku-4-5，三级 fallback：SDK → httpx → 启发式提取）
+    lesson = await _reflect_on_failure(tool_name, error, context, existing)
+    if lesson == "SKIP":  # 跳过瞬态错误（timeout/rate_limit/503 等）
+        return False
     
-    # 4. 去重（字符级 bigram，适配中文）
-    existing = await get_recent_lessons(related.name, limit=5)
-    if is_duplicate_bigram(lesson, existing, threshold=0.5):
-        return
+    # 4. 去重（字符级 bigram 重叠 > 50% 判为重复）
+    if is_duplicate(lesson, existing):
+        return False
     
-    # 5. 写 DB（不写文件，Worker 通过 relay 调用此函数）
-    await db.add(SkillLesson(
-        skill_name=related.name,
-        lesson=lesson,
-        tool_name=tool_name,
-        worker_id=current_worker_id,  # None=本机
+    # 5. 写 DB（lesson_hash 唯一约束防并发重复）
+    db.add(SkillLesson(
+        skill_name=related, lesson=lesson,
+        tool_name=tool_name, worker_id=worker_id,
+        lesson_hash=md5(f"{related}:{lesson}"),
     ))
-    await db.commit()
 ```
 
 **Worker 进化回传**：
+
+> **与设计差异**：设计文档提到专用 `skill_evolution` 事件类型。实际实现更简洁——Worker relay 在处理 `tool_result` 事件时，若 `is_error=True`，直接在 Manager 侧调用 `evolve_on_failure()`，不需要 Worker 主动发起进化事件。
+
 ```python
-# Worker 上的失败反思结果通过 relay 事件发回 Manager
-# relay._handle() 新增 skill_evolution 事件类型
-if event_type == "skill_evolution":
-    await db.add(SkillLesson(
-        skill_name=data["skill_name"],
-        lesson=data["lesson"],
+# worker_relay.py _handle() 中
+if event_type == "tool_result" and data.get("is_error") and data.get("tool_name"):
+    await evolve_on_failure(
         tool_name=data["tool_name"],
-        worker_id=worker.id,
-    ))
+        error=str(data.get("tool_output", ""))[:500],
+        context=str(data.get("tool_input", ""))[:300],
+        db=db, worker_id=worker.id,
+    )
 ```
 
 ### 2.6 周期进化（Curator + Distill）
@@ -213,44 +201,53 @@ if event_type == "skill_evolution":
 | Hermes | CLI 启动时 + idle 检查 | ❌ CCM 是常驻服务 |
 | MiMo | 查 DB last session 时间 | ✅ 但改为 asyncio 定时任务 |
 
-**CCM 决策**：
+**CCM 实际实现**（✅ dispatcher._curator_loop）：
 
 ```python
-# dispatcher.py 中增加后台 cron 任务
 class GlobalDispatcher:
     async def start(self):
         ...
         self._curator_task = asyncio.create_task(self._curator_loop())
     
     async def _curator_loop(self):
-        """后台定期运行 Curator + Distill。"""
+        """后台定期运行 Curator + Distill。每小时检查一次。"""
+        _last_curator_run: datetime | None = None
         while self._running:
-            await asyncio.sleep(3600)  # 每小时检查一次
+            await asyncio.sleep(3600)  # 每小时检查
             
-            if not self._should_run_curator():
+            # 首次运行：种子时间戳，跳过（Hermes 模式）
+            if _last_curator_run is None:
+                _last_curator_run = now
                 continue
             
-            # 只在空闲时运行（无 executing task）
-            if any(t.status == "executing" for t in active_tasks):
+            # 7 天间隔检查
+            if hours_since < 168:
                 continue
             
-            await self._run_curator()   # Phase 1: 确定性整理
-            await self._run_distill()   # Phase 2: 提炼新 skill
-    
-    def _should_run_curator(self):
-        """融合 Hermes 首次延迟 + MiMo 项目年龄检查。"""
-        last_run = self._get_last_curator_run()  # DB 查询
-        if last_run is None:
-            self._set_last_curator_run(now())  # 首次种子（Hermes）
-            return False
-        if (now() - last_run).days < 7:
-            return False
-        # 项目年龄检查（MiMo）：有项目至少 7 天历史
-        oldest_task = self._get_oldest_task()
-        if oldest_task and (now() - oldest_task.created_at).days < 7:
-            return False
-        return True
+            # 空闲检查（无 executing/in_progress task）
+            if executing > 0:
+                continue
+            
+            # Phase 1: Curator 确定性整理（skill_usage 查 last_used）
+            await run_curator(db)
+            
+            # Phase 2: Distill 提炼（每 30 天）
+            if hours_since >= 720:
+                await analyze_patterns(db)
 ```
+
+**Curator 功能**（`skill_curator.py`）：
+- `run_curator()`：检查所有 skill 的 usage/lesson 统计，标记 30 天未用的为 stale
+- `log_skill_usage()`：记录 skill 使用事件
+- `get_usage_report()`：返回使用统计报告
+
+**Distill 功能**（`skill_distill.py`）：
+- `analyze_patterns()`：分析近 N 天的 tool 使用模式
+  - 高频工具统计
+  - 高错误率工具 → 建议创建 skill
+  - 工具组合共现分析 → 建议创建工作流 skill
+
+> **与设计差异**：设计文档提到 `skill_state` 表的状态转换（active → stale → archived），实际未建此表，curator 只做统计报告和日志标记，不做持久化状态转换。
 
 ### 2.7 Progressive Disclosure 对照
 
@@ -259,46 +256,43 @@ class GlobalDispatcher:
 | agent-ml-research | always body 注入 CLAUDE.md | on-demand 列目录，agent Read 文件 | references/ 子目录 |
 | Hermes | skills_list 返回 metadata | skill_view 返回 SKILL.md | skill_view 返回 reference 文件 |
 | MiMo | CC 原生发现 | CC 原生加载 | — |
-| **CCM** | **system prompt file 列目录** | **MCP ccm_read_skill 返回 body+lessons** | **MCP 返回 references（Phase 5）** |
+| **CCM** | **system prompt file 列目录** | **MCP ccm_read_skill 返回 body+lessons** | **未实现（计划中）** |
 
 CCM 的 L0 通过 `--append-system-prompt-file` 注入目录列表。L1 通过 MCP 工具 `ccm_read_skill(name)` 按需返回。这避免了写 cwd（MiMo 方式）或写 CLAUDE.md（agent-ml-research 方式）。
 
 ## 3. Skill 定义格式
 
-保持 SKILL.md 标准格式，但 CCM 扩展字段需适配上述决策：
+保持 SKILL.md 标准格式，CCM 扩展字段适配上述决策：
 
 ```yaml
 ---
-name: code-review
+name: monitor
 description: >
-  当用户要求审查代码、提交 PR 前检查、或评估代码质量时使用。
+  当用户需要持续监控进程、端口、日志、构建状态等后台任务时使用。
+  适用于需要定期检查并汇报状态的长时间运行监控场景。
 when_to_use: >
-  用户提到"审查"、"review"、"检查代码"时激活。
-arguments:
-  - name: target
-    description: 要审查的文件或目录
-allowed-tools:
-  - Read
-  - Bash(grep *)
+  用户要求监控某个进程、服务端口、日志文件、构建状态，
+  或者需要后台定期检查某个条件并汇报时激活。
+disallowed-tools:
+  - Monitor
 
 ccm:
   always: false
-  priority: 5
-  version: 3
-  tags: [quality, review]
-  roles: []
-  modes: []
-  tools: [Read, Bash]           # 进化定位用
+  priority: 8
+  version: 1
+  tags: [monitoring, sub-agent]
+  tools: [create_monitor, check_monitors, stop_monitor]  # 进化定位用
   commands:
-    - name: review
-      pattern: "$review {target}"
-      description: "审查指定文件或 PR"
-  triggers:
-    - "帮我审查"
-    - "review this"
+    - name: monitor
+      pattern: "$monitor {task_description}"
+      description: "创建后台监控子 agent"
+  # 以下字段已被解析但暂未使用
+  # roles: []        # 按角色过滤
+  # modes: []        # 按模式过滤
+  # triggers: []     # 自然语言触发匹配（未实现）
 ---
 
-## 审查要点
+## 监控规则
 ...
 
 ## Lessons Learned
@@ -311,43 +305,74 @@ ccm:
 ```
 Task 启动
   │
-  ├─ 1. discover_skills()
+  ├─ 1. discover_skills()                          [skill_loader.py]
   │     扫描 {CCM_REPO}/skills/ + {project}/.ccm/skills/
   │     过滤 roles/modes
   │     和 task.enabled_skills 合并
   │
-  ├─ 2. 生成 /tmp/ccm_skills_{task_id}.md
+  ├─ 2. build_skill_prompt_file()                  [skill_loader.py]
+  │     生成 /tmp/ccm-skills-{task_id}-{random}.md
   │     ├─ L0 目录：所有 skill 的 name + description
   │     └─ L1 body：always:true skills 全文（budget 控制）
   │
-  ├─ 3. 生成 /tmp/ccm_mcp_{task_id}.json
-  │     ├─ ccm_skills_server（现有 + 新增 ccm_read_skill）
+  ├─ 3. 生成 /tmp/ccm_mcp_{task_id}.json           [mcp_config.py]
+  │     ├─ ccm_skills_server（9 个 MCP 工具）
   │     └─ pty-bridge（PTY 模式）
   │
-  ├─ 4. 启动 CC
-  │     claude --append-system-prompt-file /tmp/ccm_skills_{task_id}.md
+  ├─ 4. 启动 CC                                    [instance_manager.py]
+  │     claude --append-system-prompt-file /tmp/ccm-skills-{task_id}-xxx.md
   │           --mcp-config /tmp/ccm_mcp_{task_id}.json
-  │           --dangerously-load-development-channels server:pty-bridge
+  │           --disallowedTools {skill_disallowed_tools}
   │
   └─ 5. 运行中
-        ├─ Agent 调用 ccm_read_skill(name) → L2 on-demand 加载
+        ├─ Agent 调用 ccm_read_skill(name) → L2 on-demand 加载 + usage 记录
         ├─ Agent 用 $command → 加载关联 skill + 执行命令逻辑
         ├─ 工具失败 → evolve_on_failure() → lesson 写 DB
-        └─ ccm_read_skill 返回时动态合并 DB lessons
+        ├─ ccm_read_skill 返回时动态合并 DB lessons
+        └─ Agent 可用 ccm_create_skill 创建新 skill
 ```
 
-## 5. Worker 同步方案
+## 5. MCP 工具清单
+
+`ccm_skills_server.py` 提供 9 个 MCP 工具：
+
+| 工具 | 说明 | 状态 |
+|------|------|------|
+| `ccm_command_help` | 列出所有命令 + skill 目录 | ✅ |
+| `ccm_read_skill(name)` | 读取 skill 全文 + DB lessons | ✅ |
+| `ccm_create_skill(name, ...)` | 创建新 SKILL.md 文件 | ✅ |
+| `ccm_distill(days)` | 分析使用模式，提炼新 skill 建议 | ✅ |
+| `ccm_enable_skill(name)` | 为当前 task 启用 skill | ✅ |
+| `ccm_disable_skill(name)` | 为当前 task 禁用 skill（内置命令不可禁用） | ✅ |
+| `create_monitor(desc, ...)` | 创建监控子 agent session | ✅ |
+| `check_monitors()` | 查看当前 task 所有 monitor 状态 | ✅ |
+| `stop_monitor(id)` | 停止指定 monitor | ✅ |
+
+## 6. API 端点
+
+| 端点 | 说明 | 状态 |
+|------|------|------|
+| `GET /api/system/skills` | 列出所有可用 skill（from SKILL.md） | ✅ |
+| `GET /api/system/skills/usage` | skill 使用统计 | ✅ |
+| `POST /api/system/skills/curator` | 手动触发 curator 整理 | ✅ |
+| `POST /api/system/skills/distill` | 手动触发 distill 分析 | ✅ |
+| `POST /api/tasks/{id}/monitor-sessions` | 创建 monitor（需 skill enabled + task active） | ✅ |
+| `GET /api/tasks/{id}/monitor-sessions` | 列出 monitor sessions | ✅ |
+| `GET /api/tasks/{id}/monitor-sessions/{mid}` | 获取单个 monitor | ✅ |
+| `DELETE /api/tasks/{id}/monitor-sessions/{mid}` | 停止 monitor | ✅ |
+
+## 7. Worker 同步方案
 
 ```
 Manager                          Worker
   │                                │
   ├─ skills/ 在 CCM repo 里        ├─ rsync 自动获得 skills/
   │                                │
-  ├─ skill_lessons DB              │  工具失败 → evolve_on_failure()
+  ├─ skill_lessons DB              │  工具失败事件
   │                                │     ↓
-  │  ← relay "skill_evolution" ←── │  relay 事件回传 lesson
-  │     ↓                          │
-  │  写入 Manager DB               │
+  │  ← relay tool_result ←──────── │  relay 中继 tool_result（is_error=true）
+  │     ↓                          │     Manager 侧直接调用 evolve_on_failure()
+  │  写入 Manager DB               │     不需要 Worker 主动发起进化
   │                                │
   ├─ ccm_read_skill(name)          ├─ ccm_read_skill(name)
   │  → body + Manager DB lessons   │  → body + Worker 本地 DB lessons
@@ -355,42 +380,44 @@ Manager                          Worker
   │                                │   但核心 skill body 一致）
 ```
 
-## 6. 现有系统改造路径
+## 8. 实施状态
 
-### Phase 1：Skill 文件化 + 发现机制（2-3 天）
-- 将 help/workflows/monitor 迁移为 `{CCM_REPO}/skills/` 下的 SKILL.md
-- 实现 `discover_skills()` 替代硬编码 `ALL_TOOLS` 和 `COMMAND_REGISTRY`
-- 生成 `/tmp/ccm_skills_{task_id}.md` 注入 system prompt
-- 前端从 `/api/skills` API 获取列表（不再硬编码）
-- DB migration：skill_lessons + skill_usage + skill_state 表
+### Phase 1：Skill 文件化 + 发现机制 ✅ 已完成
+- [x] monitor 迁移为 `skills/monitor/SKILL.md`
+- [x] 实现 `discover_skills()` 扫描 skills/ 目录
+- [x] 生成 `/tmp/ccm-skills-{task_id}-xxx.md` 注入 system prompt
+- [x] 前端从 `/api/system/skills` API 获取列表
+- [x] DB migration：skill_lessons + skill_usage 表
 
-### Phase 2：MCP 扩展 + 命令自动注册（2-3 天）
-- ccm_skills_server 新增 `ccm_read_skill(name)` 工具
-- Skill 的 `ccm.commands` 启动时自动注册到 COMMAND_REGISTRY
-- `ccm_read_skill` 返回时动态合并 DB lessons
-- triggers 子串匹配（简单实现，top 3 限制）
+### Phase 2：MCP 扩展 + 命令注册 ✅ 已完成
+- [x] `ccm_read_skill(name)` MCP 工具
+- [x] `ccm_command_help` 返回命令 + skill 目录
+- [x] `ccm_read_skill` 返回时动态合并 DB lessons
+- [x] `$help` / `$monitor` / `$distill` 命令注册
+- [ ] ~~triggers 子串匹配~~（字段已解析，触发未实现——优先级低）
+- [ ] ~~skill 的 ccm.commands 自动注册到 COMMAND_REGISTRY~~（改为通过 ccm_command_help 暴露给 agent）
 
-### Phase 3：即时进化（2-3 天）
-- `evolve_on_failure()`：失败反思 → 教训写 DB
-- Worker 进化通过 relay 回传
-- 使用追踪写 DB（替代 JSONL 文件，避免 Worker 同步问题）
-- 前端 skill 使用统计
+### Phase 3：即时进化 ✅ 已完成
+- [x] `evolve_on_failure()`：失败反思 → 教训写 DB
+- [x] Worker 进化通过 relay 的 tool_result 事件触发（Manager 侧执行）
+- [x] 使用追踪 `log_skill_usage()` 写 DB
+- [x] API skill 使用统计
 
-### Phase 4：周期进化（3-5 天）
-- Curator asyncio 定时任务（dispatcher 内）
-- 确定性状态转换（active → stale → archived）
-- Distill 6 阶段流程
-- 审批门控 UI
-- 首次延迟 + 项目年龄检查
+### Phase 4：周期进化 ⚠️ 部分完成
+- [x] Curator asyncio 定时任务（`dispatcher._curator_loop`，每 7 天）
+- [x] Distill 分析（每 30 天）
+- [x] 首次延迟 + 空闲检查
+- [ ] ~~skill_state 表的状态转换~~（未建表，curator 直接查 skill_usage 判断）
+- [ ] ~~审批门控 UI~~
 
-### Phase 5：高级功能（后续）
-- 优化环（对比分析）
-- Skill Creator
-- references/ 子目录 L2 加载
-- Plugin 热加载
-- Skill 依赖图
+### Phase 5：高级功能 ⚠️ 部分完成
+- [x] `ccm_create_skill` MCP 工具（agent 可创建新 skill）
+- [x] `ccm_distill` MCP 工具（agent 可分析使用模式）
+- [ ] references/ 子目录 L2 加载
+- [ ] Plugin 热加载
+- [ ] Skill 依赖图
 
-## 7. 关键设计决策总结
+## 9. 关键设计决策总结
 
 | 决策 | 选择 | 对比参考项目 | 理由 |
 |------|------|------------|------|
@@ -400,14 +427,14 @@ Manager                          Worker
 | 周期任务调度 | asyncio 定时任务 | Hermes: CLI 启动检查<br>MiMo: session 时间差 | CCM 是常驻服务不是 CLI |
 | 使用追踪 | DB 表 | agent-ml-research: JSONL<br>Hermes: JSON per-skill | Worker 同步；SQL 聚合查询更方便 |
 | 去重算法 | 字符级 bigram | agent-ml-research: 词重叠 60% | 中文兼容（词重叠对中文无效） |
-| 命令注册 | decorator + skill 自动注册 | agent-ml-research: 纯 decorator<br>Hermes: 纯 skill 注册 | 兼容现有内置命令 + 支持 skill 扩展 |
-| 触发匹配 | 子串匹配 + top 3 | 三个项目都不做自然语言触发 | CCM 独有需求，简单实现先 |
+| 命令注册 | 硬编码 + MCP 暴露 | agent-ml-research: 纯 decorator<br>Hermes: 纯 skill 注册 | 简单可控；agent 通过 ccm_command_help 获取 |
+| Worker 进化回传 | relay 侧直接调用 | 设计文档: 专用事件 | 更简洁，不需要 Worker 改代码 |
 
-## 8. 参考来源
+## 10. 参考来源
 
 | 项目 | 主要借鉴（适配后） |
 |------|-----------------|
 | agent-ml-research | Skill 格式 + budget 控制 + 3 级进化定位 + 使用追踪 + Worker budget 分离 |
-| Hermes Agent | Curator 生命周期 + absorbed_into + 原子写入 + pinning + 首次延迟 + scaffolding extraction |
-| MiMo Code | Distill 6 阶段 + 项目年龄检查 + CSO 描述原则 + 调度间隔设计 |
+| Hermes Agent | Curator 生命周期 + 首次延迟 + pinning 概念 |
+| MiMo Code | Distill 分析 + 项目年龄检查 + CSO 描述原则 + 调度间隔设计 |
 | Claude Code | SKILL.md 标准格式 + --append-system-prompt-file 注入路径 |
