@@ -300,6 +300,7 @@ class InstanceManager:
             enable_workflows=enable_workflows,
             enabled_skills=enabled_skills,
             mcp_config_path=mcp_config_path,
+            disallowed_tools=sorted(set(disallowed)) if disallowed else None,
         )
 
         process = self.processes.get(instance_id)
@@ -355,18 +356,20 @@ class InstanceManager:
                 cmd.extend(["--model", model])
             if effort_level:
                 cmd.extend(["--effort", effort_level])
-            from backend.services.command_registry import COMMAND_REGISTRY
+            from backend.services.skill_loader import discover_skills, build_skill_prompt_file, get_skill_disallowed_tools
+            skills = discover_skills(project_dir=cwd)
             disallowed = []
             if not enable_workflows:
                 disallowed.append("Workflow")
-            if enabled_skills:
-                for skill, enabled in enabled_skills.items():
-                    if enabled and skill in COMMAND_REGISTRY:
-                        disallowed.extend(COMMAND_REGISTRY[skill].disallowed_builtins)
+            disallowed.extend(get_skill_disallowed_tools(skills, enabled_skills))
             if disallowed:
                 cmd.extend(["--disallowedTools", ",".join(sorted(set(disallowed)))])
             if mcp_config_path and Path(mcp_config_path).exists():
                 cmd.extend(["--mcp-config", mcp_config_path])
+            # Skill prompt injection
+            skill_prompt_path = build_skill_prompt_file(skills, enabled_skills, task_id)
+            if skill_prompt_path:
+                cmd.extend(["--append-system-prompt-file", skill_prompt_path])
             if system_prompt_mode and settings.append_system_prompt_file:
                 sp_path = Path(settings.append_system_prompt_file)
                 if not sp_path.is_absolute():

@@ -4,16 +4,31 @@ import { Wrench, Users, Settings } from 'lucide-react';
 import { api } from '../../api/client';
 import type { Task, SubAgentSummary } from '../../api/client';
 
-export const ALL_TOOLS = [
-  { key: 'help', label: 'Help' },
-  { key: 'workflows', label: 'Workflows' },
-  { key: 'monitor', label: 'Monitor' },
-];
+// Skills loaded from API at page load, cached globally
+let _skillsCache: { key: string; label: string }[] | null = null;
+
+export const ALL_TOOLS: { key: string; label: string }[] = [];
+
+export async function loadSkills(): Promise<{ key: string; label: string }[]> {
+  if (_skillsCache) return _skillsCache;
+  try {
+    const skills = await api.listSkills();
+    _skillsCache = skills.map((s: { key: string; label: string }) => ({ key: s.key, label: s.label }));
+    return _skillsCache;
+  } catch {
+    return [{ key: 'monitor', label: 'Monitor' }];
+  }
+}
 
 /** Wrench badge with a dropdown to toggle per-task tools (shared by the
  * task list and the split-mode sidebar). */
 export function ToolsBadge({ task, onRefresh }: { task: Task; onRefresh: () => void }) {
   const [open, setOpen] = useState(false);
+  const [tools, setTools] = useState<{ key: string; label: string }[]>([]);
+
+  useEffect(() => {
+    loadSkills().then(setTools).catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (!open) return;
@@ -29,14 +44,14 @@ export function ToolsBadge({ task, onRefresh }: { task: Task; onRefresh: () => v
       <button
         onClick={(e) => { e.stopPropagation(); setOpen(!open); }}
         className="text-xs bg-amber-600/30 text-amber-300 px-1.5 rounded cursor-pointer hover:bg-amber-600/40 flex items-center gap-0.5"
-        title="Tools"
+        title="Skills"
       >
         <Wrench size={12} />
         {task.enabled_skills ? Object.values(task.enabled_skills).filter(Boolean).length : 0}
       </button>
       {open && (
         <div className="absolute top-full mt-1 left-0 bg-gray-800 border border-gray-600 rounded shadow-lg z-20 min-w-[160px] py-1">
-          {ALL_TOOLS.map((tool) => {
+          {tools.map((tool) => {
             const enabled = !!(task.enabled_skills && task.enabled_skills[tool.key]);
             return (
               <button
