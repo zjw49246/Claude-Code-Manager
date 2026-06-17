@@ -122,16 +122,17 @@ class TestClaudePool:
         accounts = pool.list_accounts()
         assert len(accounts) == 3
 
-    def test_disabled_pool_when_single_account(self, tmp_path):
+    def test_single_account_pool_still_enabled(self, tmp_path):
         config = {"accounts": [{"id": "only", "config_dir": "/tmp/x", "enabled": True}]}
         path = tmp_path / "accounts.json"
         path.write_text(json.dumps(config))
         p = ClaudePool(config_path=path)
-        assert p.enabled is False
+        assert p.enabled is True
 
-    def test_missing_config_file(self, tmp_path):
+    def test_missing_config_file(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
         p = ClaudePool(config_path=tmp_path / "nonexistent.json")
-        assert p.enabled is False
+        assert p.enabled is True
         assert p.list_accounts() == []
 
     def test_select_returns_config_dir(self, pool, tmp_path):

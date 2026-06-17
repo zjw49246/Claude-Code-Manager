@@ -182,6 +182,8 @@ class InstanceManager:
             mcp_config_path=str(mcp_config_path) if mcp_config_path else None,
             enabled_skills=enabled_skills,
             system_prompt_mode=system_prompt_mode,
+            cwd=cwd,
+            task_id=task_id,
         )
 
         # Must unset CLAUDE_CODE env var to avoid nested session detection
@@ -339,6 +341,8 @@ class InstanceManager:
         mcp_config_path: str | None = None,
         enabled_skills: dict | None = None,
         system_prompt_mode: str | None = None,
+        cwd: str | None = None,
+        task_id: int | None = None,
     ) -> list[str]:
         """Build the subprocess command for a supported coding-agent CLI."""
         if provider == "claude":
