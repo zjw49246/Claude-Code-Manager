@@ -208,6 +208,18 @@ class WorkerRelay:
                     loop_iteration=data.get("loop_iteration"),
                 ))
                 await db.commit()
+            # session_id 同步：worker 广播前 pop 了 session_id，首条事件到达时从 Worker 拉取
+            if event_type == "system_init":
+                try:
+                    sid = await self._fetch_task_field(worker, task_id, "session_id")
+                    if sid:
+                        async with self.db_factory() as db:
+                            t = await db.get(Task, task_id)
+                            if t and not t.session_id:
+                                t.session_id = sid
+                                await db.commit()
+                except Exception:
+                    pass
             # 助手产出 → 未读标记（与本地 _process_event 行为一致）
             if data.get("role") == "assistant" and event_type in ("message", "result"):
                 async with self.db_factory() as db:
