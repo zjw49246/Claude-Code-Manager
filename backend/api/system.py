@@ -69,6 +69,13 @@ async def run_skill_curator(db: AsyncSession = Depends(get_db)):
     return await run_curator(db)
 
 
+@router.post("/skills/distill")
+async def distill_skills(db: AsyncSession = Depends(get_db)):
+    """Analyze conversation history and propose new skill candidates."""
+    from backend.services.skill_distill import analyze_patterns
+    return await analyze_patterns(db)
+
+
 @router.get("/skills")
 async def list_skills():
     """List all available skills (from SKILL.md files)."""
