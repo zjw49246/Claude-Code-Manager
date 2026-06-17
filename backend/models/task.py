@@ -69,16 +69,13 @@ class Task(Base):
 def _configure_task_properties():
     from backend.models.monitor_session import MonitorSession
     ms = MonitorSession.__table__
-    # Task 终态时 sub-agent 不可能还在跑——即使 DB 有残留 running 记录也返回 0
-    _terminal = ("completed", "failed", "cancelled")
+    # Always show real running sub-agent count — background agents can
+    # outlive the main turn, so even completed tasks may have active sub-agents.
     Task.active_sub_agents = column_property(
-        case(
-            (Task.status.in_(_terminal), 0),
-            else_=select(func.count(ms.c.id))
-            .where(ms.c.task_id == Task.id, ms.c.status == "running")
-            .correlate(Task.__table__)
-            .scalar_subquery(),
-        )
+        select(func.count(ms.c.id))
+        .where(ms.c.task_id == Task.id, ms.c.status == "running")
+        .correlate(Task.__table__)
+        .scalar_subquery()
     )
 
 _configure_task_properties()
