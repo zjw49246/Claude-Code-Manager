@@ -149,9 +149,9 @@ class InstanceManager:
         provider = (provider or "claude").lower()
 
         mcp_config_path = None
-        if enabled_skills and provider == "claude" and task_id:
+        if provider == "claude" and task_id:
             from backend.services.mcp_config import generate_mcp_config
-            mcp_config_path = generate_mcp_config(task_id, enabled_skills)
+            mcp_config_path = generate_mcp_config(task_id, enabled_skills or {})
 
         if provider == "claude" and self.pty_mode_enabled:
             return await self._launch_pty(
