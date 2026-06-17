@@ -437,13 +437,25 @@ class GlobalDispatcher:
                 if executing > 0:
                     continue
 
-                # Run curator
+                # Run curator (every 7 days)
                 logger.info("curator: starting periodic run")
                 async with self.db_factory() as db:
                     from backend.services.skill_curator import run_curator
                     summary = await run_curator(db)
                     logger.info("curator: checked %d skills, %d stale",
                                 summary["checked"], len(summary["stale"]))
+
+                # Run distill (every 30 days — check if 30 days since last distill)
+                if hours_since >= 720:  # 30 days
+                    try:
+                        logger.info("distill: starting periodic analysis")
+                        async with self.db_factory() as db:
+                            from backend.services.skill_distill import analyze_patterns
+                            result = await analyze_patterns(db)
+                            logger.info("distill: %s", result.get("summary", ""))
+                    except Exception:
+                        logger.exception("distill: periodic analysis failed")
+
                 _last_curator_run = now
 
             except asyncio.CancelledError:
