@@ -174,29 +174,66 @@ async def _reflect_on_failure(
     """Use a lightweight LLM to reflect on a failure and extract a lesson.
 
     Returns the lesson string, or "SKIP" for transient errors.
+    Tries Anthropic SDK first, falls back to httpx direct API call,
+    then to simple heuristic extraction.
     """
+    # Skip transient errors
+    transient_keywords = ["timeout", "ETIMEDOUT", "ECONNREFUSED", "rate_limit", "503", "502"]
+    if any(kw.lower() in error.lower() for kw in transient_keywords):
+        return "SKIP"
+
+    existing_text = "\n".join(f"- {l}" for l in existing_lessons[:5]) if existing_lessons else "（无）"
+    prompt = (
+        f"工具 `{tool_name}` 执行失败。\n"
+        f"错误信息：{error[:500]}\n"
+        f"上下文：{context[:300]}\n\n"
+        f"已有教训：\n{existing_text}\n\n"
+        "请提取一条简短的经验教训（一句话，中文）。"
+        "如果和已有教训重复，输出 SKIP。"
+    )
+
+    # Try Anthropic SDK
     try:
         import anthropic
-
         client = anthropic.Anthropic()
-        existing_text = "\n".join(f"- {l}" for l in existing_lessons[:5]) if existing_lessons else "（无）"
-
         response = client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=200,
-            messages=[{
-                "role": "user",
-                "content": (
-                    f"工具 `{tool_name}` 执行失败。\n"
-                    f"错误信息：{error[:500]}\n"
-                    f"上下文：{context[:300]}\n\n"
-                    f"已有教训：\n{existing_text}\n\n"
-                    "请提取一条简短的经验教训（一句话，中文）。"
-                    "如果是网络超时等瞬时错误，或者和已有教训重复，输出 SKIP。"
-                ),
-            }],
+            messages=[{"role": "user", "content": prompt}],
         )
         return response.content[0].text.strip()
+    except ImportError:
+        pass
     except Exception as e:
-        logger.warning("evolution: LLM reflection failed: %s", e)
-        return None
+        logger.debug("evolution: Anthropic SDK failed: %s", e)
+
+    # Try httpx direct API call
+    try:
+        import httpx
+        import os
+        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        if api_key:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.post(
+                    "https://api.anthropic.com/v1/messages",
+                    headers={
+                        "x-api-key": api_key,
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json",
+                    },
+                    json={
+                        "model": "claude-haiku-4-5-20251001",
+                        "max_tokens": 200,
+                        "messages": [{"role": "user", "content": prompt}],
+                    },
+                )
+                if resp.status_code == 200:
+                    return resp.json()["content"][0]["text"].strip()
+    except Exception as e:
+        logger.debug("evolution: httpx API call failed: %s", e)
+
+    # Fallback: simple heuristic — extract key error message as lesson
+    error_clean = error.strip()[:100]
+    if error_clean:
+        return f"工具 {tool_name} 失败：{error_clean}"
+    return None

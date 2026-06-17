@@ -901,6 +901,30 @@ class InstanceManager:
                 )
                 await db.commit()
 
+        # Track last tool_use name for evolution (tool_result may not carry tool_name)
+        if event["event_type"] == "tool_use" and event.get("tool_name"):
+            self._last_tool_name = event["tool_name"]
+
+        # Skill evolution: learn from tool failures
+        if (
+            task_id
+            and event["event_type"] == "tool_result"
+            and event.get("is_error")
+        ):
+            failed_tool = event.get("tool_name") or getattr(self, "_last_tool_name", None)
+            if failed_tool:
+                try:
+                    from backend.services.skill_evolution import evolve_on_failure
+                    async with self.db_factory() as db:
+                        await evolve_on_failure(
+                            tool_name=failed_tool,
+                            error=str(event.get("content") or event.get("tool_output", ""))[:500],
+                            context=str(event.get("tool_input", ""))[:300],
+                            db=db,
+                        )
+                except Exception:
+                    logger.debug("skill evolution failed", exc_info=True)
+
         # Broadcast via WebSocket
         broadcast_data = {k: v for k, v in event.items() if k != "raw_json"}
         if loop_iteration is not None:
