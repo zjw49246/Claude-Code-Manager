@@ -603,9 +603,9 @@ export function TaskForm({ onCreated }: TaskFormProps) {
               {enabledToolCount > 0 && <span className="sm:hidden">{enabledToolCount}</span>}
             </button>
             {showToolsDropdown && (
-              <div className="absolute bottom-full mb-1 left-0 bg-gray-800 border border-gray-600 rounded shadow-lg z-20 min-w-[180px]">
+              <div className="absolute top-full mt-1 left-0 bg-gray-800 border border-gray-600 rounded shadow-lg z-20 min-w-[180px]">
                 {AVAILABLE_TOOLS.map((tool) => {
-                  const locked = tool.key === 'help';
+                  const locked = false;
                   return (
                     <label
                       key={tool.key}

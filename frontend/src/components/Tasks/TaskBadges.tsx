@@ -47,7 +47,7 @@ export function ToolsBadge({ task, onRefresh }: { task: Task; onRefresh: () => v
         title="Skills"
       >
         <Wrench size={12} />
-        {task.enabled_skills ? Object.values(task.enabled_skills).filter(Boolean).length : 0}
+        {task.enabled_skills ? Object.entries(task.enabled_skills).filter(([k, v]) => v && tools.some(t => t.key === k)).length : 0}
       </button>
       {open && (
         <div className="absolute top-full mt-1 left-0 bg-gray-800 border border-gray-600 rounded shadow-lg z-20 min-w-[160px] py-1">
