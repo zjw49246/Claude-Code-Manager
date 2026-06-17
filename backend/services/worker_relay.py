@@ -238,6 +238,15 @@ class WorkerRelay:
                         t.status = new_status
                         if data.get("error_message"):
                             t.error_message = data["error_message"]
+                        # session_id 同步：worker 广播 pop 了 session_id，
+                        # 状态变为 executing 时从 Worker 拉取
+                        if new_status in ("executing", "completed") and not t.session_id:
+                            try:
+                                sid = await self._fetch_task_field(worker, task_id, "session_id")
+                                if sid:
+                                    t.session_id = sid
+                            except Exception:
+                                pass
                         await db.commit()
 
         elif event_type == "context_usage":
