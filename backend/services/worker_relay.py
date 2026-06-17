@@ -228,6 +228,25 @@ class WorkerRelay:
                         t.has_unread = True
                         await db.commit()
 
+        # 2b) Skill evolution from Worker tool failures
+        if (
+            event_type == "tool_result"
+            and data.get("is_error")
+            and data.get("tool_name")
+        ):
+            try:
+                from backend.services.skill_evolution import evolve_on_failure
+                async with self.db_factory() as db:
+                    await evolve_on_failure(
+                        tool_name=data["tool_name"],
+                        error=str(data.get("tool_output", ""))[:500],
+                        context=str(data.get("tool_input", ""))[:300],
+                        db=db,
+                        worker_id=worker.id,
+                    )
+            except Exception:
+                logger.debug("worker skill evolution failed", exc_info=True)
+
         # 3) 字段同步
         if event_type == "status_change":
             new_status = data.get("new_status")
