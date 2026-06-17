@@ -11,6 +11,16 @@ from backend.models.instance import Instance
 from backend.models.task import Task
 
 
+@pytest.fixture(autouse=True)
+def _no_pty_no_skills(monkeypatch):
+    """Disable PTY mode and mock discover_skills for all tests in this module."""
+    monkeypatch.setattr("backend.config.settings.use_pty_mode", False)
+    with patch("backend.services.skill_loader.discover_skills", return_value={}), \
+         patch("backend.services.skill_loader.build_skill_prompt_file", return_value=""), \
+         patch("backend.services.skill_loader.get_skill_disallowed_tools", return_value=[]):
+        yield
+
+
 def test_parse_codex_agent_message():
     im = InstanceManager(MagicMock(), MagicMock())
     event = im._parse_codex_line(json.dumps({

@@ -23,6 +23,7 @@ from backend.models.quick_phrase import QuickPhrase  # noqa: F401
 from backend.models.monitor_session import MonitorSession, MonitorCheck  # noqa: F401
 from backend.models.pr_monitor import MonitoredRepo, PRReview  # noqa: F401
 from backend.models.worker import Worker  # noqa: F401
+from backend.models.skill_lesson import SkillLesson, SkillUsage  # noqa: F401
 from backend.database import Base, _async_url_to_sync, _is_sqlite
 
 target_metadata = Base.metadata
