@@ -1,8 +1,8 @@
-# CCM Skills 系统设计方案 v2
+# CCM Skills 系统设计方案 v3
 
 > 基于 agent-ml-research、Hermes Agent、MiMo Code、Claude Code 原生 skills、SkillEvolver 等项目的深度源码级调研，融合设计。
 >
-> v2 更新：补充了三个项目的源码级实现细节，修正了多处设计遗漏。
+> v3 更新：设计验证——修正 4 个关键问题、7 个重要缺陷、5 个改进点。
 
 ## 1. 设计目标
 
@@ -641,3 +641,231 @@ GET /api/skills/usage
 | SkillEvolver | [arXiv:2605.10500](https://arxiv.org/abs/2605.10500) | 对比分析优化、9 项审计、策略多样化 |
 | EvoSkills | [arXiv:2604.01687](https://arxiv.org/abs/2604.01687) | 协同进化验证、信息隔离 |
 | ASG-SI | [arXiv:2512.23760](https://arxiv.org/abs/2512.23760) | Skill 依赖图、可验证奖励、预算分配 |
+
+## 12. 设计验证：发现的问题与修正决策
+
+### 🔴 关键问题
+
+#### 12.1 文件命名矛盾：SKILL.md vs .skill.md
+
+**问题**：设计中混用了两种格式——目录结构用 `code-review/SKILL.md`（Claude Code 标准），代码引用用 `code-review.skill.md`（agent-ml-research 格式）。`detect_skill_from_path` 检查 `.skill.md` 但 `discover_skills` 遍历子目录找 `SKILL.md`，互相不兼容。
+
+**决策**：**统一用子目录 + `SKILL.md` 格式（Claude Code 标准）**。理由：
+- 兼容 Claude Code 原生 skill 系统
+- 子目录可放 `scripts/`、`references/` 等附属文件
+- `detect_skill_from_path` 改为检查路径中是否包含 `/skills/` 且文件名为 `SKILL.md`
+
+#### 12.2 Claude Code 原生 skill 冲突
+
+**问题**：如果 CCM 的 skill 文件放在 `~/.claude/skills/`，Claude Code 会自动发现并加载它们到自己的 context。CCM 同时通过 L1 注入相同内容，导致 context 中出现双份，浪费 token。更严重的是，CC 的原生 `when_to_use` 匹配可能和 CCM 的 `triggers` 同时触发，产生冲突行为。
+
+**决策**：**CCM skills 放在独立目录 `~/.ccm/skills/`，不放 `~/.claude/skills/`**。
+- 避免和 CC 原生 skill 冲突
+- CCM 通过自己的注入机制控制 skill 加载
+- 如果用户同时安装了 CC 原生 skill 和 CCM skill，两者独立不干扰
+- 项目级 skills 放在 `{project}/.ccm/skills/`（不是 `.claude/skills/`）
+
+```
+~/.ccm/skills/                    # CCM 全局 skills（不被 CC 扫描）
+  code-review/
+    SKILL.md
+{project}/.ccm/skills/            # CCM 项目级 skills
+  deploy/
+    SKILL.md
+```
+
+#### 12.3 triggers 匹配机制
+
+**问题**：设计声明了 `ccm.triggers` 功能但完全没定义实现——谁匹配、什么算法、多匹配怎么办。
+
+**决策**：**Phase 1 不实现 triggers，Phase 2 用简单子串匹配 + 优先级**。
+
+```python
+# Phase 2 实现方案
+def match_triggers(user_message: str, skills: dict) -> list[Skill]:
+    """简单子串匹配，中英文均适用。"""
+    matched = []
+    msg_lower = user_message.lower()
+    for skill in skills.values():
+        for trigger in skill.ccm.get("triggers", []):
+            if trigger.lower() in msg_lower:
+                matched.append(skill)
+                break  # 每个 skill 只匹配一次
+    # 按 priority 降序，只取 top 3 避免过度加载
+    return sorted(matched, key=lambda s: s.ccm.priority, reverse=True)[:3]
+```
+
+- 匹配在 CCM 后端 Python 层执行，不依赖 LLM
+- 每条用户消息检查一次（在 `send_prompt` 之前）
+- 多匹配取 top 3（按 priority）
+- 中文子串匹配天然可用（不需要分词）
+- 后续可升级为 embedding 相似度
+
+#### 12.4 进化写入原子性
+
+**问题**：设计声称用 `tempfile + os.replace()` 做原子写入，但伪代码是 `prepend_lesson()` 直接修改文件——进程崩溃会腐蚀文件。agent-ml-research 的源码也是非原子的。
+
+**决策**：**实际实现时必须用 tempfile + os.replace()**。
+
+```python
+def prepend_lesson(skill_path: Path, lesson: str):
+    """原子写入（真正的）。"""
+    content = skill_path.read_text()
+    # 在 "## 经验教训" 后插入新教训
+    updated = insert_lesson(content, lesson)
+    # 先写临时文件，再原子替换
+    tmp = skill_path.with_suffix(".skill.md.tmp")
+    tmp.write_text(updated)
+    os.replace(tmp, skill_path)  # 原子操作
+```
+
+### 🟡 重要缺陷
+
+#### 12.5 进化并发文件锁
+
+**问题**：两个 session 同时对同一 skill 触发 evolution，后写的会覆盖先写的教训。cooldown 检查有 TOCTOU 竞态。
+
+**决策**：**使用 `fcntl.flock` 对每个 skill 文件加写锁**。
+
+```python
+async def evolve_on_failure(tool_name, error, context, skill_registry):
+    related_skill = find_related_skill(tool_name, skill_registry)
+    if not related_skill:
+        return
+
+    lock_path = related_skill.path.with_suffix(".lock")
+    with open(lock_path, "w") as lock_fd:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # 非阻塞
+        except BlockingIOError:
+            return  # 另一个 session 正在进化，跳过
+
+        # cooldown + reflect + dedup + write（在锁内完成）
+        ...
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+```
+
+#### 12.6 多版本备份
+
+**问题**：单个 `.bak` 在连续腐蚀时会丢失最后一个好备份。
+
+**决策**：**保留最近 3 个带时间戳的备份**。
+
+```
+code-review/
+  SKILL.md
+  .backups/
+    SKILL.md.2026-06-17T10:30:00
+    SKILL.md.2026-06-16T15:20:00
+    SKILL.md.2026-06-15T08:45:00   # 最多保留 3 个
+```
+
+#### 12.7 Worker skill 同步
+
+**问题**：Worker 和 Manager 的 skill 文件独立，进化后不同步。
+
+**决策**：**Skills 跟随 CCM 代码部署，不独立同步。Worker 的进化教训上报 Manager。**
+
+- skill 文件放在 CCM 仓库的 `skills/` 目录中（不是 `~/.ccm/skills/`）
+- Worker bootstrap 时 rsync 自动包含
+- Worker 上的进化教训通过 relay 事件上报 Manager
+- Manager 收到后写入本地 skill 文件
+- 下次 Worker 重启/重新部署时自动获取最新 skill
+
+修正后的目录结构：
+```
+{ccm_repo}/skills/global/           # 仓库内全局 skills（rsync 部署）
+  code-review/SKILL.md
+  monitor/SKILL.md
+{project}/.ccm/skills/              # 项目级 skills（rsync 项目目录时包含）
+  deploy/SKILL.md
+```
+
+#### 12.8 Curator/Distill 归档引用断裂
+
+**问题**：Curator 归档 Skill A → Distill 创建 Skill C 引用 Skill A → 引用断裂。
+
+**决策**：
+- Distill 第 5 步（筛选）增加检查：新 skill 引用的所有 skill 必须是 active 状态
+- Curator 归档前检查：被其他 active skill 引用的 skill 不归档（加入 `referenced_by` 计数）
+- Phase 4 实现时加入简单的引用检查（grep skill body 中是否提到其他 skill name）
+
+#### 12.9 中文去重
+
+**问题**：词重叠按空格分词，中文句子是一个"词"，两条语义相同但措辞不同的中文教训会被判为不重复。
+
+**决策**：**使用字符级 n-gram 重叠代替词重叠**。
+
+```python
+def is_duplicate(new_lesson: str, existing: list[str], threshold=0.5) -> bool:
+    """字符级 bigram 重叠，中英文通用。"""
+    def bigrams(text):
+        text = re.sub(r'\s+', '', text.lower())  # 去空白统一小写
+        return set(text[i:i+2] for i in range(len(text)-1))
+
+    new_bg = bigrams(new_lesson)
+    for old in existing:
+        old_bg = bigrams(old)
+        if not new_bg or not old_bg:
+            continue
+        overlap = len(new_bg & old_bg) / min(len(new_bg), len(old_bg))
+        if overlap > threshold:
+            return True
+    return False
+```
+
+- bigram 对中文天然有效（每两个字一组）
+- 阈值从 0.6 调整为 0.5（bigram 比词重叠更精细）
+- `min()` 分母避免短句被长句稀释
+
+#### 12.10 MCP 工具动态注册
+
+**问题**：FastMCP 的 MCP server 不支持运行时动态添加工具。Skill 的 `ccm.commands` 不能直接注册为 MCP tool。
+
+**决策**：**Skill commands 走 CCM 命令系统（$command），不走 MCP 工具注册**。
+
+- `ccm_skills_server` 保留核心工具（help、enable/disable、monitor）
+- Skill 定义的 commands 由 CCM 的命令 dispatcher 处理
+- Agent 通过 `$command` 前缀触发，或自然语言匹配 triggers 触发
+- 不需要动态注册 MCP 工具
+
+#### 12.11 DB 模型兼容
+
+**问题**：`Task.enabled_skills` 是扁平 `{name: bool}` JSON，新系统需要更多元数据。
+
+**决策**：**Phase 1 保持扁平 JSON 兼容**，只存启用/禁用状态。Skill 的完整元数据由 SKILL.md 文件提供，不存 DB。
+
+```python
+# 保持现有模型不变
+enabled_skills: Mapped[dict | None]  # {"code-review": true, "monitor": true}
+
+# Skill 元数据从文件系统读取，不从 DB 读
+# 前端调 GET /api/skills 获取完整列表（从文件系统）
+# 前端调 PUT /api/tasks/{id} 只传 enabled_skills: {name: bool}
+```
+
+### 🟢 改进点
+
+#### 12.12 harness_exclude 动态禁用
+
+**来自 agent-ml-research**：后端可临时禁用特定 skill（不修改 SKILL.md）。
+
+**决策**：`discover_skills()` 增加 `exclude: set[str]` 参数。CCM 后端在特定条件下（如调试模式、Worker 限制）传入排除列表。
+
+#### 12.13 经验教训区 section header
+
+**问题**：agent-ml-research 用 `## 经验沉淀`，设计文档用 `## 经验教训`。
+
+**决策**：统一用 `## Lessons Learned`（英文，避免中英混杂；且 agent-ml-research 的实际实现也支持英文 header）。
+
+#### 12.14 detect_skill_from_path 在 PTY 架构中不可行
+
+**问题**：CCM 通过 JSONL 外部观察 CC 的工具调用，JSONL 中的 `tool_use` block 可能不包含 Read 工具的完整文件路径。
+
+**决策**：**不在 PTY 层实现 detect_skill_from_path**。改为在 CCM 的 `send_prompt` 触发点记录 skill 使用（如果 prompt 经过了 trigger 匹配或 command 解析，就记录对应 skill）。
+
+#### 12.15 Skill 依赖声明
+
+**来自 ASG-SI 论文**：显式声明 skill 间依赖关系。
+
+**决策**：**Phase 4+ 考虑**。在 SKILL.md frontmatter 增加 `depends_on: [skill-name]`。Curator 归档时检查依赖链。Phase 1-3 用简单的 body grep 做弱引用检查。
