@@ -156,7 +156,7 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId,
               <span className={`hidden sm:inline text-xs px-1.5 rounded font-medium ${t.provider === 'codex' ? 'bg-green-600/30 text-green-300' : 'bg-blue-600/30 text-blue-300'}`}>
                 {t.provider === 'codex' ? 'Codex' : 'Claude'}
               </span>
-              <TaskConfigBadge task={t} onRefresh={onRefresh} compact />
+              <TaskConfigBadge task={t} onRefresh={onRefresh} />
               <ToolsBadge task={t} onRefresh={onRefresh} />
               <SubAgentsBadge task={t} />
             </div>
