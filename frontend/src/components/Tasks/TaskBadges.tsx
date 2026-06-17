@@ -226,7 +226,7 @@ const THINKING_OPTIONS: { value: string; label: string }[] = [
 /** Per-task Config: gear button opening a panel to edit Model / Effort /
  * Timeout / Thinking in place (each change persists via updateTask).
  * Shared by the task list, the sidebar, and the chat header. */
-export function TaskConfigBadge({ task, onRefresh, openUp, align }: { task: Task; onRefresh: () => void; openUp?: boolean; align?: 'left' | 'right' }) {
+export function TaskConfigBadge({ task, onRefresh, openUp, align, compact }: { task: Task; onRefresh: () => void; openUp?: boolean; align?: 'left' | 'right'; compact?: boolean }) {
   const [open, setOpen] = useState(false);
   const [opts, setOpts] = useState<ConfigOptions | null>(null);
   const [workers, setWorkers] = useState<{ id: number; name: string; status: string }[]>([]);
@@ -278,7 +278,7 @@ export function TaskConfigBadge({ task, onRefresh, openUp, align }: { task: Task
         title={`Config（model: ${task.model || 'default'}）`}
       >
         <Settings size={12} />
-        Config
+        {!compact && 'Config'}
       </button>
       {open && createPortal(
         <div
