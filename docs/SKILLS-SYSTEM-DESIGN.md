@@ -1,6 +1,8 @@
-# CCM Skills 系统设计方案
+# CCM Skills 系统设计方案 v2
 
-> 基于 agent-ml-research、Hermes Agent、MiMo Code、Claude Code 原生 skills、SkillEvolver 等项目的深度调研，融合设计。
+> 基于 agent-ml-research、Hermes Agent、MiMo Code、Claude Code 原生 skills、SkillEvolver 等项目的深度源码级调研，融合设计。
+>
+> v2 更新：补充了三个项目的源码级实现细节，修正了多处设计遗漏。
 
 ## 1. 设计目标
 
@@ -9,6 +11,7 @@
 - Commands 和 Skills 互补但不混淆
 - 前端从 API 动态获取，不再硬编码
 - 三环自进化：即时反思 → 周期整理 → 按需优化
+- Worker 场景下的 skill 注入有独立 budget
 
 ## 2. 现状问题
 
@@ -26,20 +29,27 @@
 
 ### 3.1 目录结构
 
+三层层级（参考 agent-ml-research 的 global/project/role 架构）：
+
 ```
-~/.claude/skills/              # 用户级 skills（Claude Code 标准路径）
+~/.claude/skills/                          # 用户级（全局）
   code-review/
     SKILL.md
-    scripts/                   # 可选脚本
-    references/                # 可选参考文档（按需加载）
+    scripts/                               # 可选脚本（Hermes 标准）
+    references/                            # 可选参考文档（按需加载）
   monitor/
     SKILL.md
-    scripts/
 
-{project}/.claude/skills/      # 项目级 skills（覆盖用户级同名 skill）
+{project}/.claude/skills/                  # 项目级（覆盖同名全局 skill）
   deploy/
     SKILL.md
+
+{project}/.claude/sessions/{role}/skills/  # 角色级（最高优先级）
+  worker-specific/
+    SKILL.md
 ```
+
+**覆盖规则**（参考 Claude Code scope hierarchy）：角色级 > 项目级 > 全局。同名 skill，高层级覆盖低层级。
 
 ### 3.2 SKILL.md 格式
 
@@ -47,11 +57,13 @@
 ---
 # === Agent Skills 标准字段 ===
 name: code-review
+# 描述原则（MiMo CSO 洞察）：描述 WHEN to use，不要描述 WHAT it does
+# 测试表明 agent 会直接根据 description 行动而不读 skill body
 description: >
-  审查代码质量：安全性（OWASP Top 10）、性能、可维护性。
-  当用户提到"审查"、"review"、"检查代码"时自动激活。
+  当用户要求审查代码、提交 PR 前检查、或评估代码质量时使用。
+  适用于安全审计、性能分析、规范检查。
 when_to_use: >
-  用户要求审查代码、提交 PR 前检查、代码质量评估时使用。
+  用户提到"审查"、"review"、"检查代码"、"code quality"时激活。
 arguments:
   - name: target
     description: 要审查的文件或目录
@@ -66,8 +78,10 @@ ccm:
   priority: 5                # 注入优先级（budget 满时决定取舍）
   scope: global              # global | project
   version: 3
+  heavy: false               # >5KB 标记（UI 提示 token 开销）
   tags: [quality, review]
   roles: []                  # 空=所有角色可用
+  modes: []                  # 项目类型过滤（空=所有类型）
   tools: [Read, Bash]        # 关联工具（用于失败反思定位 skill）
   commands:                  # 自动注册为 CCM 命令
     - name: review
@@ -97,49 +111,61 @@ ccm:
 - 测试覆盖
 
 ## 经验教训
-<!-- 自进化系统自动追加 -->
+<!-- 自进化系统自动追加，最新的在最前面 -->
 ```
 
-### 3.3 字段说明
+### 3.3 字段详解
 
 | 字段 | 来源 | 说明 |
 |------|------|------|
-| `name`, `description`, `when_to_use` | Claude Code 标准 | 驱动自动触发；description 限 1536 chars |
-| `arguments` | Claude Code 标准 | 命名参数，支持 `$name` 替换 |
-| `allowed-tools` / `disallowed-tools` | Claude Code 标准 | Skill 激活时的工具权限 |
+| `name`, `description` | Claude Code 标准 | description 限 1536 chars；**写 WHEN 不写 WHAT**（MiMo CSO） |
+| `when_to_use` | Claude Code 标准 | 追加到 description 用于匹配，共享 1536 上限 |
+| `arguments` | Claude Code 标准 | 命名参数，支持 `$name` / `$0` / `$1` 替换 |
+| `allowed-tools` / `disallowed-tools` | Claude Code 标准 | Skill 激活时的工具权限变更 |
 | `ccm.always` | agent-ml-research | 是否自动注入 system prompt |
-| `ccm.priority` | agent-ml-research | Budget 满时的取舍优先级 |
-| `ccm.tools` | agent-ml-research | 关联工具，用于失败反思定位 |
+| `ccm.priority` | agent-ml-research | Budget 满时的取舍优先级（高优先） |
+| `ccm.heavy` | agent-ml-research | >5KB 警告标记 |
+| `ccm.tools` | agent-ml-research | **关联工具列表——进化系统用此字段确定性定位失败关联的 skill**，避免模糊匹配 |
 | `ccm.commands` | Hermes | 自动注册为 CCM 命令 |
 | `ccm.triggers` | 新增 | 自然语言触发词 |
-| `ccm.tags` | 通用 | 分类标签 |
+| `ccm.roles` | agent-ml-research | 角色过滤（空=所有），在 discovery 阶段过滤 |
+| `ccm.modes` | agent-ml-research | 项目类型过滤（空=所有） |
+| `ccm.tags` | 通用 | 分类标签（进化系统的第二级定位依据） |
 
 ## 4. 发现与注入机制
 
 ### 4.1 三层渐进加载
 
-借鉴 Hermes 的 Progressive Disclosure + agent-ml-research 的 Budget 控制 + Claude Code 的 context budget：
+融合 agent-ml-research 的 budget 控制 + Hermes 的 Progressive Disclosure + Claude Code 的 context budget：
 
 ```
 Session 启动
   │
-  ├─ L0：元数据注入（始终在 system prompt 中）
+  ├─ L0：Skill 目录（始终在 system prompt 中）
   │     所有 skill 的 name + description（一行摘要）
   │     Budget：context window 的 1%（Claude Code 标准）
-  │     溢出时按 priority 排序，低优先级的 description 降级为仅 name
+  │     溢出时按 usage 频率排序，低频 skill 的 description 降级为仅 name
   │
   ├─ L1：always 注入
   │     ccm.always: true 的 skill 全文注入 system prompt
   │     Budget：max_always_prompt_chars（默认 4000 chars）
   │     最多 max_always_in_prompt 个（默认 10）
+  │     选择算法：按 priority 降序贪心填充
+  │     ⚠️ 第一个 skill 即使超过 budget 也必须包含（agent-ml-research 设计）
   │
-  └─ L2：按需加载
-        触发方式：
-        ├─ 用户 /command 或 $command → 加载关联 skill
-        ├─ 自然语言匹配 ccm.triggers → 自动加载
-        └─ Agent 主动 Read skill 文件
-        加载后持久到 session 结束
-        Context compaction 后重新附加前 5000 tokens/skill
+  ├─ L2：按需加载
+  │     触发方式：
+  │     ├─ 用户 $command → 加载关联 skill
+  │     ├─ 自然语言匹配 ccm.triggers → 自动加载
+  │     ├─ Agent 主动 Read skill 文件
+  │     └─ 工具流检测（tracker 识别 Read .skill.md）
+  │     加载后持久到 session 结束
+  │     Context compaction 后重新附加前 5000 tokens/skill，总计上限 25000 tokens
+  │
+  └─ Worker 独立 budget
+        Worker 场景下的 skill 注入使用独立 budget
+        max_worker_skill_chars：6000（比主 agent 的 4000 更宽松）
+        （参考 agent-ml-research：Worker 需要更具体的操作指南）
 ```
 
 ### 4.2 发现流程
@@ -149,60 +175,110 @@ def discover_skills(config_dir, project_dir, role=None, mode=None):
     """扫描 skill 目录，构建 registry。"""
     skills = {}
 
-    # 用户级 skills
+    # 全局 skills
     user_dir = Path(config_dir) / "skills"
     for skill_dir in user_dir.iterdir():
         if (skill_dir / "SKILL.md").exists():
             skills[skill_dir.name] = parse_skill(skill_dir / "SKILL.md")
 
     # 项目级 skills（覆盖同名）
-    project_dir = Path(project_dir) / ".claude" / "skills"
-    for skill_dir in project_dir.iterdir():
+    proj_skill_dir = Path(project_dir) / ".claude" / "skills"
+    for skill_dir in proj_skill_dir.iterdir():
         if (skill_dir / "SKILL.md").exists():
             skills[skill_dir.name] = parse_skill(skill_dir / "SKILL.md")
 
-    # 过滤：role、mode
+    # 角色级 skills（最高优先级覆盖）
+    if role:
+        role_dir = Path(project_dir) / ".claude" / "sessions" / role / "skills"
+        for skill_dir in role_dir.iterdir():
+            if (skill_dir / "SKILL.md").exists():
+                skills[skill_dir.name] = parse_skill(skill_dir / "SKILL.md")
+
+    # 过滤：role、mode（在 discovery 阶段过滤，filtered skills 完全不可见）
     if role:
         skills = {k: v for k, v in skills.items()
                   if not v.ccm.roles or role in v.ccm.roles}
+    if mode:
+        skills = {k: v for k, v in skills.items()
+                  if not v.ccm.modes or mode in v.ccm.modes}
 
     return skills
+```
+
+### 4.3 Budget 选择算法
+
+```python
+def select_skills_within_budget(skills, max_count=10, max_chars=4000):
+    """贪心选择 always:true 的 skills，按 priority 降序。
+    
+    关键设计（agent-ml-research）：
+    第一个 skill 即使超过 max_chars 也必须包含，防止高优先级大 skill 被静默丢弃。
+    """
+    always_skills = [s for s in skills.values() if s.ccm.always]
+    sorted_skills = sorted(always_skills, key=lambda s: s.ccm.priority, reverse=True)
+    
+    selected = []
+    total_chars = 0
+    for skill in sorted_skills:
+        body_len = len(skill.body)
+        if len(selected) >= max_count:
+            break
+        if total_chars + body_len > max_chars and selected:  # 第一个不受限
+            break
+        selected.append(skill)
+        total_chars += body_len
+    return selected
 ```
 
 ## 5. 命令系统
 
 ### 5.1 命令与 Skill 的关系
 
+两个独立但互补的系统（agent-ml-research 的核心设计理念）：
+
 ```
-        ┌──────────────────────────────────────────┐
-        │             命令来源                       │
-        │                                           │
-        │  1. 内置命令（Python 代码，管理系统状态）     │
-        │     $help, $status, $stop, $config         │
-        │     → 不关联 skill，直接执行 Python 逻辑     │
-        │                                           │
-        │  2. Skill 自动命令（SKILL.md ccm.commands） │
-        │     $review, $monitor, $deploy             │
-        │     → 加载 skill 内容作为上下文 + 执行逻辑   │
-        │                                           │
-        │  3. Agent 创建的命令（skill-creator 生成）    │
-        │     $run-tests, $check-lint                │
-        │     → 完全由 SKILL.md 定义                  │
-        └──────────────────────────────────────────┘
+        ┌──────────────────────────────────────────────┐
+        │             命令来源                           │
+        │                                               │
+        │  1. 内置命令（Python 代码，管理系统状态）         │
+        │     $help, $status, $stop, $config             │
+        │     → 不关联 skill，直接执行 Python 逻辑         │
+        │     → decorator 注册，自带 mode/visitor guard   │
+        │                                               │
+        │  2. Skill 自动命令（SKILL.md ccm.commands）     │
+        │     $review, $monitor, $deploy                 │
+        │     → 加载 skill 内容作为上下文 + 执行逻辑       │
+        │                                               │
+        │  3. Agent 创建的命令（skill-creator 生成）        │
+        │     $run-tests, $check-lint                     │
+        │     → 完全由 SKILL.md 定义                      │
+        └──────────────────────────────────────────────┘
+
+互补关系示例：
+  $review 命令 → 触发 Python 逻辑（收集 diff、设定上下文）
+                + 加载 code-review.skill.md（审查标准和经验教训）
 ```
 
 ### 5.2 内置命令注册
 
 ```python
-# 保留现有的 decorator 模式（来自 agent-ml-research）
+# 保留 decorator 模式（agent-ml-research），增加自动 guard
 @command(
     name="help",
     patterns=(r"\$help\s*(.*)",),
     always_available=True,
+    modes=(),          # 空=所有模式
+    visitor=True,      # 是否允许只读模式使用
+    category="system",
 )
 def handle_help(ctx: CommandContext) -> str:
     """列出所有可用命令和 skills。"""
     ...
+
+# dispatcher 自动应用 guard（agent-ml-research 模式）：
+# - visitor guard（只读模式限制）
+# - mode guard（项目类型限制）
+# handler 本身不需要检查这些条件
 ```
 
 ### 5.3 Skill 自动命令注册
@@ -225,47 +301,66 @@ for skill in skills.values():
 ### 6.1 架构总览
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    三环自进化                              │
-│                                                          │
-│  即时环（每次失败）          ← agent-ml-research           │
-│  ├─ 触发：工具执行失败 / 任务失败                           │
-│  ├─ 动作：LLM 反思 → 追加经验教训到关联 skill               │
-│  ├─ 节流：同一 skill 600s 内不重复                         │
-│  ├─ 去重：新教训与已有教训词重叠 > 70% 则跳过               │
-│  └─ 安全：写入前创建 .bak 备份                             │
-│                                                          │
-│  周期环（定期）              ← MiMo + Hermes Curator       │
-│  ├─ 触发条件：                                            │
-│  │   ├─ 距上次运行 >= interval_hours（默认 168h = 7 天）   │
-│  │   └─ 当前空闲 >= min_idle_hours（默认 2h）              │
-│  ├─ Phase 1 - 确定性整理（Hermes Curator）：               │
-│  │   ├─ 30 天未使用 → stale                               │
-│  │   ├─ 90 天未使用 → archived（移到 .archive/）           │
-│  │   └─ 永不自动删除                                      │
-│  ├─ Phase 2 - Distill（MiMo）：                           │
-│  │   ├─ 分析近期对话历史                                   │
-│  │   ├─ 识别重复手动操作模式                               │
-│  │   └─ 生成新 skill 候选 → 审批门控                       │
-│  └─ Phase 3 - Consolidate（Hermes Curator LLM 驱动）：     │
-│      ├─ 审查 agent 创建的 skills                           │
-│      ├─ 合并重叠的 skills                                  │
-│      └─ max_iterations = 8（防止无限循环）                  │
-│                                                          │
-│  优化环（按需）              ← Hermes + SkillEvolver       │
-│  ├─ 触发：人工执行 /optimize-skills                        │
-│  ├─ 方法：对比分析（高效 trace vs 低效 trace）               │
-│  │   delta = features(成功执行) - features(失败执行)        │
-│  │   → 定向修改 skill（保留有效部分，补充缺失约束）          │
-│  ├─ 验证：修改前后各 5 次独立测试对比                       │
-│  └─ 审计：9 项检查（内容泄露 1-6、部署失败 7-9）            │
-└─────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│                    三环自进化                               │
+│                                                           │
+│  即时环（每次失败）           ← agent-ml-research            │
+│  ├─ 触发：工具执行失败 / 任务失败                            │
+│  ├─ 定位：skill.tools 确定性匹配 → tags → name 子串（3 级）  │
+│  ├─ 反思：LLM (haiku) 分析失败原因                          │
+│  ├─ 去重：词重叠 > 60% 跳过（快速路径，无 LLM 调用）          │
+│  ├─ 瞬时错误：LLM 输出 "SKIP" 跳过网络超时等                 │
+│  ├─ 节流：同一 skill 600s 内不重复（持久化到磁盘）            │
+│  ├─ 安全：写入前创建 .bak 备份                              │
+│  └─ 格式：时间戳前缀，最新在前，追加到 "## 经验教训" 区       │
+│                                                           │
+│  周期环（定期）               ← MiMo + Hermes Curator        │
+│  ├─ 触发条件（Hermes 模式）：                                │
+│  │   ├─ 距上次运行 >= interval_hours（默认 168h = 7 天）      │
+│  │   ├─ 当前空闲 >= min_idle_hours（默认 2h）                │
+│  │   └─ 首次运行延迟：种子 last_run_at 为当前时间（Hermes）    │
+│  │       防止新安装立刻触发激进整理                            │
+│  ├─ 项目年龄检查（MiMo）：                                   │
+│  │   项目最早 session < interval_days 则跳过（太新没东西整理）  │
+│  ├─ Phase 1 - 确定性整理（Hermes Curator）：                  │
+│  │   ├─ 30 天未使用 → stale                                  │
+│  │   ├─ 90 天未使用 → archived（移到 .archive/）              │
+│  │   ├─ 使用后自动 stale → active（复活）                     │
+│  │   └─ 永不自动删除                                         │
+│  ├─ Phase 2 - Distill（MiMo 6 阶段）：                       │
+│  │   ├─ 1. 定位数据源（对话历史、工具日志）                   │
+│  │   ├─ 2. 盘点现有 skills/commands/agents                   │
+│  │   ├─ 3. 从记忆中发现重复工作流                             │
+│  │   ├─ 4. 在原始 trajectory 中确认（SQLite 查询）            │
+│  │   ├─ 5. 筛选（出现 >= 2 次、输入稳定、有明确停止条件）     │
+│  │   └─ 6. 仅创建高置信度资产 → 审批门控                     │
+│  ├─ Phase 3 - Consolidate（Hermes Curator LLM 驱动）：        │
+│  │   ├─ 扫描 agent 创建的 skills，寻找前缀聚类                │
+│  │   ├─ 判断是否需要合并为 umbrella skill                     │
+│  │   ├─ 合并时 references/templates/scripts 必须完整迁移      │
+│  │   ├─ 记录 absorbed_into（Hermes 模式，追踪合并关系）       │
+│  │   ├─ max_iterations = 8（防止无限循环）                    │
+│  │   └─ 支持 dry-run 模式（只报告不执行）                     │
+│  └─ 防重入：10 秒最小间隔（MiMo MIN_SPAWN_GAP）              │
+│                                                           │
+│  优化环（按需）               ← Hermes + SkillEvolver        │
+│  ├─ 触发：人工执行 $optimize-skills                          │
+│  ├─ 方法：对比分析（SkillEvolver）                           │
+│  │   K=4 策略多样化并行执行                                   │
+│  │   delta = features(成功) - features(失败)                  │
+│  │   → 外科手术式修补（保留有效部分，补充缺失约束）            │
+│  ├─ 验证：V=5 次独立测试对比                                  │
+│  └─ 审计：9 项检查（内容泄露 1-6、部署失败 7-9）              │
+└──────────────────────────────────────────────────────────┘
 ```
 
 ### 6.2 即时环：失败反思
 
 ```python
-# core/skills/evolution.py（参考 agent-ml-research）
+# core/skills/evolution.py（基于 agent-ml-research 源码）
+
+COOLDOWN_FILE = "config/skill_evolution_cooldown.json"  # 持久化，进程重启不丢失
+DEFAULT_COOLDOWN = 600  # 10 分钟
 
 async def evolve_on_failure(
     tool_name: str,
@@ -275,118 +370,181 @@ async def evolve_on_failure(
 ):
     """工具执行失败时，反思并追加经验到关联 skill。"""
 
-    # 1. 找关联 skill
-    #    优先：skill.ccm.tools 包含该工具
-    #    其次：skill.ccm.tags 匹配
-    #    最后：skill.name 子串匹配
+    # 1. 定位关联 skill（3 级确定性匹配）
+    #    Level 1: skill.ccm.tools 包含该工具名（最精确）
+    #    Level 2: skill.ccm.tags 与工具名/错误类型匹配
+    #    Level 3: skill.name 子串匹配（最模糊）
     related_skill = find_related_skill(tool_name, skill_registry)
     if not related_skill:
         return
 
-    # 2. 节流检查
-    if recently_evolved(related_skill, cooldown=600):
+    # 2. 节流检查（持久化到磁盘）
+    cooldowns = load_json(COOLDOWN_FILE, {})
+    if cooldowns.get(related_skill.name, 0) > time.time() - DEFAULT_COOLDOWN:
         return
 
-    # 3. LLM 反思
+    # 3. 提取现有教训（最近 5 条，避免 prompt 过长）
+    existing_lessons = extract_lessons(related_skill.body, max_count=5)
+
+    # 4. LLM 反思（用轻量模型）
     lesson = await reflect_on_failure(
         tool_name=tool_name,
         error=error,
         context=context,
-        existing_lessons=related_skill.lessons,
-        model="claude-haiku-4-5",  # 用轻量模型
+        existing_lessons=existing_lessons,
+        model="claude-haiku-4-5",
+        # 明确指示：瞬时错误（网络超时等）输出 "SKIP"
     )
-
-    # 4. 跳过瞬时错误
     if lesson == "SKIP":
         return
 
-    # 5. 去重
-    if is_duplicate(lesson, related_skill.lessons, threshold=0.7):
+    # 5. 去重（快速路径，无 LLM 调用）
+    #    Strip 日期前缀 [YYYY-MM-DD]，然后计算词重叠
+    #    重叠 > 60% 则判定为重复
+    if is_duplicate_by_word_overlap(lesson, existing_lessons, threshold=0.6):
         return
 
-    # 6. 追加（原子写入 + 备份）
-    backup_skill(related_skill)
-    append_lesson(related_skill, lesson, timestamp=now())
-    log_evolution(related_skill, tool_name, lesson)
+    # 6. 原子写入（备份 → 修改 → 更新 cooldown）
+    backup_path = related_skill.path.with_suffix(".skill.md.bak")
+    shutil.copy2(related_skill.path, backup_path)
+
+    # 最新教训 prepend 到 "## 经验教训" 区
+    prepend_lesson(related_skill.path, f"- [{today()}] **{lesson}**")
+
+    # 更新 cooldown
+    cooldowns[related_skill.name] = time.time()
+    save_json(COOLDOWN_FILE, cooldowns)
+
+    # 记录进化日志
+    log_evolution(related_skill.name, tool_name, lesson)
 ```
 
-### 6.3 周期环：Curator + Distill
+### 6.3 周期环调度逻辑
 
 ```python
-# 触发条件（Hermes Curator 模式）
-def should_run_curator(last_run: datetime, idle_since: datetime) -> bool:
-    hours_since_run = (now() - last_run).total_hours
-    hours_idle = (now() - idle_since).total_hours
-    return hours_since_run >= 168 and hours_idle >= 2  # 7天 + 2小时空闲
+# 触发条件（融合 Hermes Curator + MiMo 调度）
+def should_run_curator(
+    last_run: datetime | None,
+    idle_since: datetime,
+    project_created: datetime,
+    interval_hours: int = 168,
+    min_idle_hours: int = 2,
+) -> bool:
+    now = datetime.utcnow()
 
-# Phase 1: 确定性状态转换
-def deterministic_transitions(skills: dict, usage_tracker):
-    for skill in skills.values():
-        if skill.created_by != "agent":
-            continue  # 只管理 agent 创建的 skills
-        days_unused = usage_tracker.days_since_last_use(skill.name)
-        if days_unused >= 90:
-            archive_skill(skill)  # 移到 .archive/，不删除
-        elif days_unused >= 30:
-            mark_stale(skill)
+    # 首次运行延迟（Hermes 设计）：
+    # 新安装种子 last_run_at 为当前时间，延迟一个完整周期
+    if last_run is None:
+        save_last_run(now)  # seed
+        return False
 
-# Phase 2: Distill（分析对话历史，提炼新 skill）
-async def distill(conversation_history, existing_skills):
-    """识别重复模式，生成新 skill 候选。"""
-    patterns = analyze_patterns(conversation_history)
-    candidates = []
-    for pattern in patterns:
-        if pattern.frequency >= 3 and pattern.confidence >= 0.8:
-            skill_md = generate_skill_md(pattern)
-            candidates.append(skill_md)
-    return candidates  # 进入审批门控
+    # 项目年龄检查（MiMo 设计）：
+    # 项目太新（< interval）没有足够历史可整理
+    project_age_hours = (now - project_created).total_seconds() / 3600
+    if project_age_hours < interval_hours:
+        return False
+
+    # 时间 + 空闲双条件
+    hours_since_run = (now - last_run).total_seconds() / 3600
+    hours_idle = (now - idle_since).total_seconds() / 3600
+    return hours_since_run >= interval_hours and hours_idle >= min_idle_hours
 ```
 
 ### 6.4 使用追踪
 
 ```python
-# core/skills/tracker.py（参考 agent-ml-research）
+# core/skills/tracker.py（基于 agent-ml-research 源码）
+
+import fcntl  # 跨进程文件锁
+
+USAGE_LOG = "skill_usage.jsonl"
+MAX_LOG_SIZE = 5 * 1024 * 1024  # 5MB 轮转
 
 def log_skill_usage(skill_name, trigger_type, project, session_id):
-    """每次 skill 加载时记录。"""
+    """每次 skill 加载时记录。
+    
+    trigger_type:
+      - "inject": always-on 自动注入
+      - "read": agent 显式 Read 加载
+      - "command": 通过 $command 触发
+      - "trigger": 自然语言匹配触发
+    """
     entry = {
         "timestamp": now().isoformat(),
         "skill": skill_name,
-        "trigger": trigger_type,  # "inject" | "read" | "command" | "trigger"
+        "trigger": trigger_type,
         "project": project,
         "session": session_id,
     }
-    append_jsonl("skill_usage.jsonl", entry)
+    with open(USAGE_LOG, "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)  # 跨进程安全
+        f.write(json.dumps(entry) + "\n")
+        fcntl.flock(f, fcntl.LOCK_UN)
 
-# 日志轮转：5MB 上限
-# 聚合查询：summarize() 返回使用频率、趋势
+    # 日志轮转
+    if os.path.getsize(USAGE_LOG) > MAX_LOG_SIZE:
+        rotate_log(USAGE_LOG)
+
+def detect_skill_from_path(tool_name, tool_input):
+    """识别 agent 用 Read 工具读取 .skill.md 的行为，自动记录使用。
+    （agent-ml-research 模式）"""
+    if tool_name == "Read" and ".skill.md" in str(tool_input):
+        skill_name = extract_skill_name_from_path(tool_input)
+        if skill_name:
+            log_skill_usage(skill_name, "read", ...)
+```
+
+### 6.5 记忆与 Skill 的隔离
+
+**问题**（Hermes 发现）：当 skill 被调用时，展开的 prompt 包含完整 skill body。如果这被存入语义记忆，会污染未来的搜索结果。
+
+**解决方案**：
+
+```python
+def extract_user_instruction_from_skill_message(message):
+    """Strip skill scaffolding, keep only user's actual instruction.
+    （Hermes scaffolding extraction 模式）
+    
+    存入记忆的是用户的原始意图，不是 skill 内容。
+    """
+    # 移除 skill body markers
+    # 保留 user instruction 部分
+    return cleaned_instruction
 ```
 
 ## 7. Skill 生命周期
 
 ```
-创建                    Agent 创建 / Distill 生成 / 用户手写
+创建                       Agent 创建 / Distill 生成 / 用户手写 / skill-creator
   ↓
-草稿（pending/）         审批门控（可选，ccm config 控制）
+草稿（pending/）            审批门控（可选，ccm config 控制）
   ↓
-激活                    注册到 registry，可被发现和加载
+激活（active）              注册到 registry，可被发现和加载
   ↓
-使用                    usage_tracker.jsonl 记录每次加载
+使用                       usage_tracker.jsonl 记录每次加载
   ↓
-进化                    即时环追加经验 / 周期环整理
+进化                       即时环追加经验 / 周期环整理
   ↓
-30 天未使用 → stale      标记，但不影响功能
+30 天未使用 → stale         标记，但不影响功能
   ↓
-90 天未使用 → archived   移到 .archive/，从 registry 移除
+使用 → 复活为 active        stale 状态被使用后自动恢复
   ↓
-永不自动删除             人工确认后才删除
+90 天未使用 → archived      移到 .archive/，从 registry 移除
+  ↓
+永不自动删除                人工确认后才删除
+
+合并时：
+  absorbed_into: umbrella-skill    # 记录被哪个 skill 吸收（Hermes）
+  → 驱动自动引用迁移
 ```
 
 **安全措施**：
-- 原子写入（Hermes）：`tempfile + os.replace()`
+- 原子写入（Hermes）：`tempfile + os.replace()`，失败不产生残缺文件
 - 修改前备份（agent-ml-research）：`.bak` 文件
-- Pinning（Hermes）：`pinned: true` 的 skill 不受 curator 影响
-- Curator 备份（Hermes）：每次 curator 运行前完整备份
+- Pinning（Hermes）：`pinned: true` 的 skill 不受 curator 影响，但可以被 patch
+- Curator 备份（Hermes）：每次 curator 运行前完整备份到 `.curator_backups/`
+- Dry-run 模式（Hermes）：`$curator --dry-run` 只报告不执行
+- Plugin 安全（agent-ml-research）：AST 解析检查 blocklist 模式
 
 ## 8. 前端改造
 
@@ -394,10 +552,16 @@ def log_skill_usage(skill_name, trigger_type, project, session_id):
 
 ```
 GET /api/skills
-→ [{ name, description, scope, always, enabled, tags, commands }]
+→ [{ name, description, scope, always, enabled, tags, commands, heavy, version }]
+
+GET /api/skills/{name}
+→ { name, description, body, ccm: {...}, ... }  # L2 完整加载
 
 PUT /api/tasks/{id}/skills
 → { enabled_skills: { "code-review": true, "monitor": true } }
+
+GET /api/skills/usage
+→ { skills: [{ name, total_uses, last_used, trigger_breakdown }] }
 ```
 
 前端从 API 动态获取 skill 列表，不再硬编码 `ALL_TOOLS`。
@@ -405,14 +569,16 @@ PUT /api/tasks/{id}/skills
 ### 8.2 Task Skill 面板
 
 ```
-┌─ Skills ──────────────────────────┐
-│ ✓ code-review  审查代码质量       │
-│ ✓ monitor      后台监控          │
-│ ○ deploy       部署流程          │
-│ ○ test-runner  自动化测试        │
-│                                  │
-│ [+ Create Skill]                 │
-└──────────────────────────────────┘
+┌─ Skills ──────────────────────────────────────┐
+│ ✓ code-review   审查代码质量            v3    │
+│ ✓ monitor       后台监控               v2     │
+│ ○ deploy        部署流程               v1     │
+│ ○ test-runner   自动化测试  ⚠️ 5.2KB   v1    │
+│                                               │
+│ Usage: code-review (45次) monitor (23次)      │
+│                                               │
+│ [+ Create Skill]  [⚙ Curator Status]         │
+└───────────────────────────────────────────────┘
 ```
 
 ## 9. 现有系统改造路径
@@ -421,37 +587,57 @@ PUT /api/tasks/{id}/skills
 - 将现有 3 个 skill（help、workflows、monitor）迁移为 `.skill.md` 文件
 - 实现 `discover_skills()` 替代硬编码 `ALL_TOOLS` 和 `COMMAND_REGISTRY`
 - 前端从 API 获取 skill 列表
+- Worker skill 注入独立 budget
 
 ### Phase 2：自动命令注册 + 触发（2-3 天）
 - Skill 的 `ccm.commands` 自动注册
 - 实现 `ccm.triggers` 自然语言触发
 - Progressive Disclosure 三层加载
+- 记忆隔离（scaffolding extraction）
 
 ### Phase 3：即时进化（2-3 天）
 - 实现 `evolution.py`（失败反思 + 经验追加）
 - 使用追踪（`skill_usage.jsonl`）
+- 工具流自动检测（detect_skill_from_path）
 - 前端 skill 使用统计面板
 
 ### Phase 4：周期进化（3-5 天）
-- Curator（确定性状态转换 + LLM 整理）
-- Distill（对话历史分析 → 生成新 skill）
-- 审批门控 UI
+- Curator 确定性状态转换（active → stale → archived）
+- Distill 6 阶段流程（发现 → 确认 → 创建）
+- Consolidate LLM 驱动合并（前缀聚类 + umbrella skill）
+- 审批门控 UI + dry-run 模式
+- 调度系统（interval + idle + 项目年龄检查）
 
 ### Phase 5：优化环 + Skill Creator（可选，后续）
-- 对比分析优化
-- Skill Creator 交互式创建流程
-- Eval 系统
+- 对比分析优化（SkillEvolver 模式）
+- Skill Creator 交互式创建流程（带 eval + benchmark）
+- 9 项审计检查
+- Plugin 热加载系统
 
-## 10. 参考来源
+## 10. 关键设计决策记录
+
+| 决策 | 选择 | 理由 |
+|------|------|------|
+| Skill 格式 | SKILL.md + YAML frontmatter | 兼容 Agent Skills 开放标准，Claude Code / Hermes / MiMo 通用 |
+| 进化去重 | 词重叠 60%（无 LLM） | agent-ml-research 实测有效；LLM 去重被移除说明收益不大 |
+| Cooldown 持久化 | JSON 文件 | 进程重启不丢失（agent-ml-research 设计） |
+| Curator 首次运行 | 延迟一个周期 | 防止新安装激进整理（Hermes 设计） |
+| Description 原则 | WHEN not WHAT | MiMo CSO 测试证实 agent 走描述捷径 |
+| Budget 溢出 | 第一个 skill 不受限 | 防止高优先级大 skill 被静默丢弃（agent-ml-research） |
+| Worker budget | 独立 6000 chars | Worker 需要更具体操作指南（agent-ml-research） |
+| 合并追踪 | absorbed_into 字段 | 自动迁移引用，防止合并断链（Hermes） |
+| 安全 | 多层：原子写入 + 备份 + pin + dry-run | 融合 Hermes（最严格）+ agent-ml-research（实用） |
+
+## 11. 参考来源
 
 | 项目 | 链接 | 主要借鉴 |
 |------|------|---------|
-| agent-ml-research | [GitHub](https://github.com/caoxiaoyuyuyuyuyu/agent-ml-research) | Skill 格式、失败反思进化、使用追踪、Budget 控制 |
-| Hermes Agent | [GitHub](https://github.com/NousResearch/hermes-agent) | Progressive Disclosure、Curator、原子写入、安全扫描 |
+| agent-ml-research | [GitHub](https://github.com/caoxiaoyuyuyuyuyu/agent-ml-research) | Skill 格式、失败反思进化（源码级）、使用追踪、Budget 控制、三层 CLAUDE.md、Worker budget |
+| Hermes Agent | [GitHub](https://github.com/NousResearch/hermes-agent) | Progressive Disclosure、Curator（确定性+LLM）、原子写入、absorbed_into、scaffolding extraction、pinning、dry-run |
 | Hermes Self-Evolution | [GitHub](https://github.com/NousResearch/hermes-agent-self-evolution) | GEPA 遗传优化、trace 分析 |
-| MiMo Code | [GitHub](https://github.com/XiaomiMiMo/MiMo-Code) | Dream/Distill 双循环、四层记忆 |
-| Claude Code Skills | [Docs](https://code.claude.com/docs/en/skills) | SKILL.md 标准格式、skill-creator |
+| MiMo Code | [GitHub](https://github.com/XiaomiMiMo/MiMo-Code) | Dream/Distill 双循环（6阶段）、调度系统（interval+idle+年龄）、CSO 描述优化、hook 系统 |
+| Claude Code Skills | [Docs](https://code.claude.com/docs/en/skills) | SKILL.md 标准格式、context budget、scope hierarchy |
 | Agent Skills 标准 | [agentskills.io](https://agentskills.io) | 跨平台兼容格式 |
-| SkillEvolver | [arXiv:2605.10500](https://arxiv.org/abs/2605.10500) | 对比分析优化、9 项审计 |
-| EvoSkills | [arXiv:2604.01687](https://arxiv.org/abs/2604.01687) | 协同进化验证 |
-| ASG-SI | [arXiv:2512.23760](https://arxiv.org/abs/2512.23760) | Skill 依赖图、可验证奖励 |
+| SkillEvolver | [arXiv:2605.10500](https://arxiv.org/abs/2605.10500) | 对比分析优化、9 项审计、策略多样化 |
+| EvoSkills | [arXiv:2604.01687](https://arxiv.org/abs/2604.01687) | 协同进化验证、信息隔离 |
+| ASG-SI | [arXiv:2512.23760](https://arxiv.org/abs/2512.23760) | Skill 依赖图、可验证奖励、预算分配 |
