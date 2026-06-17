@@ -34,15 +34,24 @@ def parse_command(message: str) -> tuple[Command | None, str]:
 
 
 def get_default_skills() -> dict[str, bool]:
-    """Return skills that should be enabled on every task by default."""
-    return {cmd.name: True for cmd in COMMAND_REGISTRY.values() if cmd.always_available}
+    """Return skills that should be enabled on every task by default.
+
+    Now sources defaults from SKILL.md files (always:true) instead of
+    the command registry's always_available flag.
+    """
+    try:
+        from backend.services.skill_loader import discover_skills
+        skills = discover_skills()
+        return {name: True for name, skill in skills.items() if skill.ccm.always}
+    except Exception:
+        return {}
 
 
 def ensure_default_skills(skills: dict | None) -> dict:
-    """Merge default skills into the given skills dict. Defaults cannot be overridden."""
+    """Merge default skills into the given skills dict."""
     result = dict(skills or {})
     for k, v in get_default_skills().items():
-        result[k] = v
+        result.setdefault(k, v)
     return result
 
 

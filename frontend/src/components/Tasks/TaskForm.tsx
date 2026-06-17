@@ -51,7 +51,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   const [filePreviews, setFilePreviews] = useState<string[]>([]);
   const [selectedSecretIds, setSelectedSecretIds] = useState<number[]>([]);
   const [dropError, setDropError] = useState('');
-  const [enabledTools, setEnabledTools] = useState<Record<string, boolean>>({ help: true });
+  const [enabledTools, setEnabledTools] = useState<Record<string, boolean>>({});
   const [showToolsDropdown, setShowToolsDropdown] = useState(false);
   const [showConfigPanel, setShowConfigPanel] = useState(false);
   const [starOnCreate, setStarOnCreate] = useState(false);
@@ -93,13 +93,14 @@ export function TaskForm({ onCreated }: TaskFormProps) {
       .catch(() => setContextTasks([]));
   }, [projectId]);
 
-  const AVAILABLE_TOOLS = provider === 'claude'
-    ? [
-        { key: 'help', label: 'Help', description: '$help — list available commands' },
-        { key: 'workflows', label: 'Workflows', description: 'Enable Workflow tool' },
-        { key: 'monitor', label: 'Monitor', description: 'Background monitoring sub-agents' },
-      ]
-    : [];
+  const [availableSkills, setAvailableSkills] = useState<{ key: string; label: string; description: string }[]>([]);
+  useEffect(() => {
+    if (provider !== 'claude') { setAvailableSkills([]); return; }
+    api.listSkills()
+      .then((skills) => setAvailableSkills(skills.map((s) => ({ key: s.key, label: s.label, description: s.description }))))
+      .catch(() => setAvailableSkills([{ key: 'monitor', label: 'Monitor', description: 'Background monitoring sub-agents' }]));
+  }, [provider]);
+  const AVAILABLE_TOOLS = availableSkills;
   const enabledToolCount = Object.values(enabledTools).filter(Boolean).length;
 
   useEffect(() => {
@@ -228,10 +229,9 @@ export function TaskForm({ onCreated }: TaskFormProps) {
         ...(thinkingBudget ? { thinking_budget: parseInt(thinkingBudget) || null } : {}),
         ...(systemPromptMode ? { system_prompt_mode: systemPromptMode } : {}),
         ...(timeoutHours !== '' ? { timeout_hours: Number(timeoutHours) } : {}),
-        enable_workflows: !!enabledTools['workflows'],
         enabled_skills: (() => {
           const skills = Object.entries(enabledTools)
-            .filter(([k, v]) => v && k !== 'workflows')
+            .filter(([, v]) => v)
             .reduce((acc, [k]) => ({ ...acc, [k]: true }), {} as Record<string, boolean>);
           return Object.keys(skills).length > 0 ? skills : undefined;
         })(),
