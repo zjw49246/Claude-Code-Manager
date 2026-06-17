@@ -134,6 +134,84 @@ async def ccm_read_skill(skill_name: str) -> str:
 
 
 @mcp.tool()
+async def ccm_create_skill(
+    name: str,
+    description: str,
+    body: str,
+    tags: str = "",
+    always: bool = False,
+) -> str:
+    """创建一个新的技能（SKILL.md 文件）。
+
+    新技能保存在 CCM 仓库的 skills/ 目录下。
+    创建后立即可用（下次 task 启动时会发现它）。
+
+    Args:
+        name: 技能名称（英文小写+连字符，如 code-review）
+        description: 技能描述（描述"何时使用"而非"做什么"）
+        body: 技能内容（Markdown 格式，包含规则和指南）
+        tags: 标签（逗号分隔，如 "quality,review"）
+        always: 是否始终注入 system prompt
+    """
+    import os
+    import re
+    from pathlib import Path
+
+    # Validate name
+    if not re.match(r'^[a-z0-9][a-z0-9-]*$', name):
+        return json.dumps({"success": False, "error": "名称只能包含小写字母、数字和连字符"}, ensure_ascii=False)
+
+    # Find skills directory
+    ccm_root = Path(__file__).resolve().parents[2]
+    skill_dir = ccm_root / "skills" / name
+    if skill_dir.exists():
+        return json.dumps({"success": False, "error": f"技能 '{name}' 已存在"}, ensure_ascii=False)
+
+    # Build SKILL.md content
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else []
+    frontmatter = {
+        "name": name,
+        "description": description,
+    }
+    ccm_section = {
+        "always": always,
+        "priority": 5,
+        "version": 1,
+        "tags": tag_list,
+    }
+
+    lines = ["---"]
+    lines.append(f"name: {name}")
+    lines.append(f"description: >")
+    for line in description.strip().split("\n"):
+        lines.append(f"  {line}")
+    lines.append("")
+    lines.append("ccm:")
+    lines.append(f"  always: {str(always).lower()}")
+    lines.append(f"  priority: 5")
+    lines.append(f"  version: 1")
+    if tag_list:
+        lines.append(f"  tags: [{', '.join(tag_list)}]")
+    lines.append("---")
+    lines.append("")
+    lines.append(body)
+    lines.append("")
+    lines.append("## Lessons Learned")
+    lines.append("<!-- 自进化系统自动追加 -->")
+
+    try:
+        skill_dir.mkdir(parents=True, exist_ok=True)
+        (skill_dir / "SKILL.md").write_text("\n".join(lines), encoding="utf-8")
+        return json.dumps({
+            "success": True,
+            "message": f"技能 '{name}' 创建成功。下次 task 启动时自动可用。",
+            "path": str(skill_dir / "SKILL.md"),
+        }, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+
+
+@mcp.tool()
 async def ccm_enable_skill(skill_name: str) -> str:
     """为当前 task 启用一个工具/技能（持久生效）。
 
