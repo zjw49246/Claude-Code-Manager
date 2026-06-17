@@ -55,8 +55,38 @@ def ensure_default_skills(skills: dict | None) -> dict:
     return result
 
 
+def register_skill_commands():
+    """Auto-register $commands from SKILL.md ccm.commands definitions.
+
+    Skips commands already registered (built-in commands take precedence).
+    Called once at import time; new skills are picked up on next process restart.
+    """
+    try:
+        from backend.services.skill_loader import discover_skills
+        skills = discover_skills()
+    except Exception:
+        return
+    for skill_name, skill in skills.items():
+        for cmd_def in skill.ccm.commands:
+            cmd_name = cmd_def.get("name", "")
+            if not cmd_name or cmd_name in COMMAND_REGISTRY:
+                continue
+            prompt = (
+                f"用户通过 ${cmd_name} 命令触发了技能 '{skill_name}'。\n"
+                f"请先调用 ccm_read_skill('{skill_name}') 获取完整技能指南，"
+                "然后严格按照指南执行。"
+            )
+            register_command(Command(
+                name=cmd_name,
+                description=cmd_def.get("description", skill.description[:80]),
+                prompt_template=prompt,
+                required_skills={skill_name: True},
+                disallowed_builtins=skill.disallowed_tools,
+            ))
+
+
 # ---------------------------------------------------------------------------
-# Built-in commands
+# Built-in commands (registered first, take precedence over skill commands)
 # ---------------------------------------------------------------------------
 
 register_command(Command(
@@ -67,27 +97,6 @@ register_command(Command(
         "然后向用户展示结果。格式清晰，标注哪些命令当前 task 已启用、哪些需要通过 $command 临时使用。"
     ),
     always_available=True,
-))
-
-register_command(Command(
-    name="monitor",
-    description="创建后台监控子 agent，监控进程、端口、日志等",
-    prompt_template=(
-        "【重要 — 监控规则】你拥有后台监控子 agent 系统（通过 ccm-skills MCP 工具）。\n"
-        "用户通过 $monitor 命令要求你执行监控任务。\n"
-        "你必须调用 create_monitor 工具将监控工作委托给子 agent，"
-        "禁止自己用 Bash/Read 等工具手动执行监控循环。\n"
-        "【禁止】不要使用内置的 Agent 工具或 Monitor 工具来执行监控任务。"
-        "这些内置工具不在 CCM 系统的管理范围内，无法被追踪和记录。"
-        "所有监控必须通过 create_monitor 工具发起，由 CCM 子 agent 系统统一管理。\n"
-        "子 agent 会独立运行并定期汇报状态，你通过 check_monitors 查看进展。\n"
-        "可用工具: create_monitor（创建监控子agent）/ check_monitors（查看状态）/ stop_monitor（停止监控）。"
-    ),
-    required_skills={"monitor": True},
-    # 只禁内置 Monitor（监控必须走 $monitor / CCM 子 agent 体系）；
-    # Agent/Task 保持可用——原生子 agent 由 PTY 层观测并镜像进
-    # sub_agent_sessions（native-agent），不需要一刀切禁掉
-    disallowed_builtins=["Monitor"],
 ))
 
 register_command(Command(
@@ -103,4 +112,7 @@ register_command(Command(
     ),
     always_available=True,
 ))
+
+# Auto-register commands from SKILL.md files (e.g. $monitor from monitor skill)
+register_skill_commands()
 

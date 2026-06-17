@@ -255,10 +255,10 @@ def get_skill_disallowed_tools(
     skills: dict[str, Skill],
     enabled_skills: dict[str, bool] | None = None,
 ) -> list[str]:
-    """Collect disallowed-tools from all enabled skills."""
+    """Collect disallowed-tools from enabled skills only."""
     disallowed: set[str] = set()
     for name, skill in skills.items():
-        if enabled_skills and not enabled_skills.get(name, False):
+        if enabled_skills is not None and not enabled_skills.get(name, False):
             continue
         disallowed.update(skill.disallowed_tools)
     return sorted(disallowed)
