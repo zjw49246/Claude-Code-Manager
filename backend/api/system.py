@@ -53,3 +53,25 @@ async def get_config():
         "effort_options": [e.strip() for e in settings.effort_options.split(",") if e.strip()],
         "codex_effort_options": [e.strip() for e in settings.codex_effort_options.split(",") if e.strip()],
     }
+
+
+@router.get("/skills")
+async def list_skills():
+    """List all available skills (from SKILL.md files)."""
+    from backend.services.skill_loader import discover_skills
+    skills = discover_skills()
+    return [
+        {
+            "key": name,
+            "label": skill.name,
+            "description": skill.description,
+            "always": skill.ccm.always,
+            "priority": skill.ccm.priority,
+            "version": skill.ccm.version,
+            "tags": skill.ccm.tags,
+            "commands": skill.ccm.commands,
+            "scope": skill.scope,
+            "heavy": skill.ccm.heavy,
+        }
+        for name, skill in sorted(skills.items(), key=lambda x: x[1].ccm.priority, reverse=True)
+    ]
