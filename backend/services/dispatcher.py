@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from sqlalchemy import select, update
+from sqlalchemy import select, update, func
 
 from sqlalchemy import select as sa_select
 
@@ -250,6 +250,7 @@ class GlobalDispatcher:
         await self._ensure_instances()
 
         self._dispatch_task = asyncio.create_task(self._dispatch_loop())
+        self._curator_task = asyncio.create_task(self._curator_loop())
         logger.info("GlobalDispatcher started")
 
     async def _cleanup_stale_state(self):
@@ -299,6 +300,13 @@ class GlobalDispatcher:
             self._dispatch_task.cancel()
             try:
                 await self._dispatch_task
+            except asyncio.CancelledError:
+                pass
+        curator = getattr(self, "_curator_task", None)
+        if curator and not curator.done():
+            curator.cancel()
+            try:
+                await curator
             except asyncio.CancelledError:
                 pass
 
@@ -390,6 +398,58 @@ class GlobalDispatcher:
                 await process.wait()
         else:
             await process.wait()
+
+    async def _curator_loop(self):
+        """Background curator: periodic skill lifecycle management.
+
+        Checks every hour; only runs when:
+          - >= 7 days since last run
+          - No executing tasks (system is idle)
+          - Project has enough history
+        Reference: Hermes Curator scheduling + MiMo project age check.
+        """
+        _last_curator_run: datetime | None = None
+        while self._running:
+            try:
+                await asyncio.sleep(3600)  # Check every hour
+                if not self._running:
+                    break
+
+                now = datetime.utcnow()
+
+                # First run: seed timestamp, defer by one full interval (Hermes pattern)
+                if _last_curator_run is None:
+                    _last_curator_run = now
+                    continue
+
+                # Check interval
+                hours_since = (now - _last_curator_run).total_seconds() / 3600
+                if hours_since < 168:  # 7 days
+                    continue
+
+                # Check if system is idle (no executing tasks)
+                async with self.db_factory() as db:
+                    from backend.models.task import Task
+                    executing = (await db.execute(
+                        select(func.count()).select_from(Task)
+                        .where(Task.status.in_(["executing", "in_progress"]))
+                    )).scalar() or 0
+                if executing > 0:
+                    continue
+
+                # Run curator
+                logger.info("curator: starting periodic run")
+                async with self.db_factory() as db:
+                    from backend.services.skill_curator import run_curator
+                    summary = await run_curator(db)
+                    logger.info("curator: checked %d skills, %d stale",
+                                summary["checked"], len(summary["stale"]))
+                _last_curator_run = now
+
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("curator: error in curator loop")
 
     async def _dispatch_loop(self):
         """Poll for idle instances + pending tasks and dispatch."""

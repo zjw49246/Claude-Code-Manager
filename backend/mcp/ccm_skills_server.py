@@ -99,6 +99,15 @@ async def ccm_read_skill(skill_name: str) -> str:
                 "success": False,
                 "error": f"技能 '{skill_name}' 不存在。可用技能: {available}",
             }, ensure_ascii=False)
+        # Log usage
+        try:
+            from backend.services.skill_curator import log_skill_usage
+            from backend.database import async_session
+            async with async_session() as udb:
+                await log_skill_usage(udb, skill_name, "read", task_id=_TASK_ID)
+        except Exception:
+            pass
+
         # Merge DB lessons into skill body
         body_with_lessons = skill.body
         try:

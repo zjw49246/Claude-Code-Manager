@@ -55,6 +55,20 @@ async def get_config():
     }
 
 
+@router.get("/skills/usage")
+async def skill_usage_report(db: AsyncSession = Depends(get_db)):
+    """Get skill usage statistics."""
+    from backend.services.skill_curator import get_usage_report
+    return await get_usage_report(db)
+
+
+@router.post("/skills/curator")
+async def run_skill_curator(db: AsyncSession = Depends(get_db)):
+    """Manually trigger curator lifecycle management."""
+    from backend.services.skill_curator import run_curator
+    return await run_curator(db)
+
+
 @router.get("/skills")
 async def list_skills():
     """List all available skills (from SKILL.md files)."""
