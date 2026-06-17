@@ -212,6 +212,30 @@ async def ccm_create_skill(
 
 
 @mcp.tool()
+async def ccm_distill(days: int = 30) -> str:
+    """分析近期使用模式，发现重复工作流和高错误率工具，提炼新技能建议。
+
+    返回分析报告，包括：
+    - 高频使用的工具
+    - 高错误率的工具（建议创建对应 skill）
+    - 常一起使用的工具组合（建议创建工作流 skill）
+
+    如果有好的建议，可以用 ccm_create_skill 创建新技能。
+
+    Args:
+        days: 分析多少天的历史（默认 30 天）
+    """
+    try:
+        from backend.services.skill_distill import analyze_patterns
+        from backend.database import async_session
+        async with async_session() as db:
+            result = await analyze_patterns(db, days=days)
+        return json.dumps(result, ensure_ascii=False, default=str)
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+
+
+@mcp.tool()
 async def ccm_enable_skill(skill_name: str) -> str:
     """为当前 task 启用一个工具/技能（持久生效）。
 

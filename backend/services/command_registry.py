@@ -90,3 +90,17 @@ register_command(Command(
     disallowed_builtins=["Monitor"],
 ))
 
+register_command(Command(
+    name="distill",
+    description="分析近期使用模式，提炼新技能建议",
+    prompt_template=(
+        "用户请求分析技能提炼。请按以下步骤操作：\n"
+        "1. 调用 ccm_distill 工具分析近期使用模式\n"
+        "2. 解读分析结果，重点关注：\n"
+        "   - 高错误率的工具 → 建议创建对应 skill\n"
+        "   - 常一起使用的工具组合 → 建议创建工作流 skill\n"
+        "3. 向用户展示结果，如果有好的建议，问用户是否要创建（可以用 ccm_create_skill 工具）\n"
+    ),
+    always_available=True,
+))
+
