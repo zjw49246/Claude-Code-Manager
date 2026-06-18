@@ -2335,6 +2335,7 @@ class GlobalDispatcher:
                 })
 
             task.status = "executing"
+            task.completed_at = None
             await db.commit()
 
             await self.instance_manager.launch(**launch_kwargs)
