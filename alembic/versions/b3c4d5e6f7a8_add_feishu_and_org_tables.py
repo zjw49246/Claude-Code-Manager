@@ -1,6 +1,6 @@
 """add feishu_user_binding and org tables
 
-Revision ID: a1b2c3d4e5f6
+Revision ID: b3c4d5e6f7a8
 Revises: 40ffc2e5b916
 Create Date: 2026-06-18 10:00:00.000000
 
@@ -11,7 +11,7 @@ from alembic import op
 import sqlalchemy as sa
 
 
-revision: str = 'a1b2c3d4e5f6'
+revision: str = 'b3c4d5e6f7a8'
 down_revision: Union[str, None] = '40ffc2e5b916'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
