@@ -2002,6 +2002,13 @@ class GlobalDispatcher:
         env = {k: v for k, v in os.environ.items()
                if k.upper() not in ("CLAUDECODE", "CLAUDE_CODE")}
 
+        # Monitor sub-agent needs a logged-in account. Pick one from the pool
+        # (or fall back to default ~/.claude).
+        if self.pool:
+            config_dir = await self._pool_select()
+            if config_dir:
+                env["CLAUDE_CONFIG_DIR"] = config_dir
+
         log_path = Path(f"/tmp/ccm_monitor_{monitor_session_id}.log")
         log_fh = open(log_path, "wb")
         try:
