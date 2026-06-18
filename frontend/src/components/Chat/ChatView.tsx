@@ -419,6 +419,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
     // Show user_message from WS only if not already optimistically added (i.e. injected messages)
     if (eventType === 'user_message') {
       const content = (msg.data.content as string) || '';
+      const source = (msg.data.source as string) || null;
       setMessages((prev) => {
         const last = [...prev].reverse().find((m) => m.role === 'user');
         if (last && last.content === content) return prev;
@@ -426,7 +427,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
           id: Date.now() + Math.random(), role: 'user', event_type: 'user_message',
           content, tool_name: null, tool_input: null, tool_output: null,
           is_error: false, loop_iteration: null, timestamp: new Date().toISOString(),
-          image_urls: null, attachments: null,
+          image_urls: null, attachments: null, source,
         }];
       });
       return;
