@@ -277,11 +277,15 @@ async def get_chat_history(
         conditions.append(LogEntry.id < before_id)
 
     if limit > 0:
+        # Over-fetch to compensate for Python-level filtering (message+user
+        # rows are skipped below). Without this, a page of exactly `limit`
+        # rows can shrink below `limit` after filtering, and the client
+        # interprets that as "no more history" — hiding the Load More button.
         stmt = (
             select(*cols)
             .where(*conditions)
             .order_by(LogEntry.id.desc())
-            .limit(limit)
+            .limit(limit + 20)
         )
         result = await db.execute(stmt)
         rows = list(reversed(result.all()))
@@ -358,6 +362,10 @@ async def get_chat_history(
             "source": msg_source,
         })
 
+    # Trim back to requested limit (we over-fetched to compensate for
+    # Python-level filtering). Keep the newest messages (end of list).
+    if limit > 0 and len(messages) > limit:
+        messages = messages[-limit:]
     return messages
 
 
