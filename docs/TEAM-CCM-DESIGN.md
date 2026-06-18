@@ -206,13 +206,13 @@ CREATE TABLE org_members (
   ├─ 被分享者 CCM 后端代理：
   │   POST {owner_ccm_url}/api/shared-access/{task_id}/chat
   │   headers: { Authorization: Bearer {share_token} }
-  │   body: { message: "[共享成员 李四] 用户消息" }
+  │   body: { message: "[飞书用户 李四] 用户消息" }
   │
   └─ 分享者 CCM 处理消息 → Claude 回复
      → 通过 WebSocket 推送到所有在线的被分享者
 ```
 
-消息前缀 `[共享成员 xxx]` 让分享者和 Claude 能区分消息来源。分享者自己发的消息不加前缀。
+消息前缀 `[飞书用户 xxx]` 让分享者和 Claude 能区分消息来源。分享者自己发的消息不加前缀。
 
 ### 4.4 多人同时对话
 
@@ -538,7 +538,7 @@ DELETE /api/shared/{id}                 主动退出共享
 被分享者发消息
   → POST /api/shared/{id}/chat
     → 被分享者 CCM 代理 → POST 分享者ccm/api/shared-access/{task_id}/chat
-    → 消息前缀 "[共享成员 李四]"
+    → 消息前缀 "[飞书用户 李四]"
     → 分享者 CCM 注入 session → Claude 回复
     → WebSocket 推送到所有在线被分享者
 ```
@@ -612,6 +612,6 @@ ORG_REGISTRY_ENABLED=true  # 仅注册表所有者设 true
 | 被分享者权限 | 查看 + 对话，config 只读 | task 所有权不变，被分享者不能修改 |
 | 实时事件 | 前端直连分享者 WS | 不需要被分享者 CCM 代理 WS，更简单 |
 | 多人消息 | 先发先执行，后发 pending | 和单人逻辑一致，task 不感知多人 |
-| 消息标识 | 前缀 "[共享成员 xxx]" | 分享者和 Claude 能区分消息来源 |
+| 消息标识 | 前缀 "[飞书用户 xxx]" | 分享者和 Claude 能区分消息来源 |
 | 分享者离线 | 文字提示 | 不缓存，简单处理 |
 | 前端入口 | Shares 按钮切换视图 | 不常态显示，点击才切换 |
