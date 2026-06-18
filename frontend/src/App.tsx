@@ -11,6 +11,7 @@ import { FilesPage } from './pages/FilesPage';
 import { DiscussionsPage } from './pages/DiscussionsPage';
 import { PRMonitorPage } from './pages/PRMonitorPage';
 import WorkersPage from './pages/WorkersPage';
+import TeamPage from './pages/TeamPage';
 import { getToken } from './api/client';
 import { isCapacitor, getServerUrl, getApiBase } from './config/server';
 
@@ -41,7 +42,7 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: string |
   }
 }
 
-const VALID_PAGES = new Set(['tasks', 'dashboard', 'projects', 'secrets', 'files', 'discussions', 'pr-monitor', 'workers', 'server']);
+const VALID_PAGES = new Set(['tasks', 'dashboard', 'projects', 'secrets', 'files', 'discussions', 'pr-monitor', 'workers', 'team', 'server']);
 
 function parseHash(): { page: string; chatTaskId: number | null } {
   const hash = window.location.hash.replace(/^#\/?/, '');
@@ -157,6 +158,7 @@ function App() {
           {page === 'discussions' && <DiscussionsPage />}
           {page === 'pr-monitor' && <PRMonitorPage />}
           {page === 'workers' && <WorkersPage />}
+          {page === 'team' && <TeamPage />}
           {page === 'server' && (
             <ServerConfigPage onConfigured={() => window.location.reload()} />
           )}
