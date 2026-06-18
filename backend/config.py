@@ -41,6 +41,12 @@ class Settings(BaseSettings):
     worker_remote_dir: str = "/home/ubuntu/ccm"  # Worker 上 CCM 部署目录
     worker_deploy_source_dir: str = "."          # rsync 部署源（Manager 本地仓库根）
 
+    # --- Team CCM: Feishu + Org Registry ---
+    feishu_app_id: str = ""
+    feishu_app_secret: str = ""
+    org_registry_enabled: bool = False
+    org_registry_url: str = ""
+
     # --- Custom system prompt (appended to Claude's default) ---
     append_system_prompt_file: str = ""  # path to .md file, e.g. system-prompts/fable5.md
 

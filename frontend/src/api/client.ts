@@ -403,7 +403,35 @@ export interface Worker {
   updated_at: string;
 }
 
+export interface OrgMember {
+  feishu_open_id: string;
+  name: string;
+  ccm_url: string;
+  avatar_url?: string;
+}
+
+export interface OrgTeam {
+  id: number;
+  name: string;
+  description?: string;
+  members?: OrgMember[];
+}
+
 export const api = {
+  // Feishu
+  getFeishuAuthUrl: () => request<{ url: string }>('/api/feishu/auth-url'),
+  getFeishuStatus: () => request<{ bound: boolean; name?: string; open_id?: string; avatar_url?: string }>('/api/feishu/status'),
+  unbindFeishu: () => request<{ ok: boolean }>('/api/feishu/unbind', { method: 'DELETE' }),
+
+  // Org
+  getOrgMembers: () => request<OrgMember[]>('/api/org/members'),
+  getOrgTeams: () => request<OrgTeam[]>('/api/org/teams'),
+  createOrgTeam: (name: string, description?: string) => request<OrgTeam>('/api/org/teams', { method: 'POST', body: JSON.stringify({ name, description }) }),
+  updateOrgTeam: (id: number, name: string, description?: string) => request<OrgTeam>(`/api/org/teams/${id}`, { method: 'PUT', body: JSON.stringify({ name, description }) }),
+  deleteOrgTeam: (id: number) => request<{ ok: boolean }>(`/api/org/teams/${id}`, { method: 'DELETE' }),
+  addTeamMember: (teamId: number, openId: string) => request<{ ok: boolean }>(`/api/org/teams/${teamId}/members`, { method: 'POST', body: JSON.stringify({ open_id: openId }) }),
+  removeTeamMember: (teamId: number, openId: string) => request<{ ok: boolean }>(`/api/org/teams/${teamId}/members/${openId}`, { method: 'DELETE' }),
+
   // Projects
   listProjects: () => request<Project[]>('/api/projects'),
   listProjectTags: () => request<string[]>('/api/projects/tags'),
