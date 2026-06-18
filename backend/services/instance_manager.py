@@ -559,7 +559,9 @@ class InstanceManager:
                 await db.commit()
 
             # 原生子 agent（native-monitor 等）生命周期跟 session 走——
-            # session 退出/重建时一律标 completed，否则 UI 上永远显示 running
+            # session 退出/重建时一律标 completed，否则 UI 上永远显示 running。
+            # CCM 自己的 monitor 子 agent（source="ccm"）有独立进程，不跟主
+            # session 走，必须排除，否则 chat turn 结束就误杀 monitor。
             if task_id:
                 from backend.models.sub_agent import SubAgentSession
                 async with self.db_factory() as db:
@@ -567,6 +569,7 @@ class InstanceManager:
                         select(SubAgentSession).where(
                             SubAgentSession.task_id == task_id,
                             SubAgentSession.status == "running",
+                            SubAgentSession.source != "ccm",
                         )
                     )
                     for sa in stale.scalars().all():
