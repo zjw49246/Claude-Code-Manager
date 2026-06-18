@@ -1,616 +1,617 @@
-# Team CCM 设计方案
+# Team CCM 设计方案 v2
 
-> 团队协作版 CCM：支持多人对同一项目/任务协作，通过飞书集成实现消息同步和身份绑定。
+> P2P 任务分享 + 飞书身份绑定，让多人可以对同一个 task 进行协作对话。
 >
-> 基于现有 Worker relay 架构设计，复用已有基础设施。
+> v2 重写：去掉中心 Hub 节点和飞书消息映射，改为轻量的 P2P 任务分享模式。
 
-## 1. 系统概述
+## 1. 核心思路
 
-### 1.1 核心思路
+每个 CCM 都是平等的个人节点，没有中心 Hub。核心功能：
 
-现有 CCM 是单人使用的。Team CCM 在此基础上增加：
+1. **飞书身份绑定**：CCM 绑定飞书账号，发现同一组织内的其他 CCM 用户
+2. **Task 分享**：将自己的 task 分享给组织内其他成员，被分享者可以查看和对话
+3. **代理模式**：被分享的 task 数据始终在分享者机器上，被分享者的 CCM 代理请求
 
-1. **Team CCM (Hub)**：团队中心节点，管理小组、项目、执行 task
-2. **成员 CCM (Member)**：个人节点，接收团队项目/任务，可查看和交互
-3. **飞书集成**：每个 task 可绑定飞书群，实现 CCM ↔ 飞书双向消息同步
+**不做的事情**：
+- 没有中心 Hub 节点
+- 飞书不做消息转发/建群，只做身份绑定 + 分享通知
+- 不同步数据到被分享者的 DB
 
-### 1.2 与 Worker 模式的关系
+## 2. 飞书集成
 
-| | Worker 模式 | Team 模式 |
-|---|---|---|
-| 连接方向 | Manager → Worker | Member → Hub |
-| 执行位置 | Worker 上执行 | Hub（+Hub 的 Worker）上执行 |
-| 远端角色 | 无头执行节点 | 完整 CCM，有独立 UI 和个人 task |
-| 数据同步 | Worker relay（WS）推事件到 Manager | Hub 通过 Member 主动建立的 WS 推事件 |
-| 凭证持有 | Manager 持有 Worker token | Hub 不持有 Member 任何凭证 |
+### 2.1 飞书应用
 
-### 1.3 角色配置
-
-同一套代码，通过配置区分角色：
-
-```bash
-# Team CCM (Hub) 的 .env
-TEAM_MODE=hub
-TEAM_NAME=AI-Lab
-
-# 成员 CCM (Member) 的 .env
-TEAM_MODE=member
-# team_hub_connection 表存储 Hub 地址和 token（注册时自动写入）
-
-# 普通 CCM（不参与团队）
-# 不配置 TEAM_MODE
-```
-
-- `hub`：启用小组管理、项目分发、成员注册 API；前端 Team 页面显示管理视图
-- `member`：连接 Hub 接收团队数据；前端 Team 页面显示团队项目/任务
-- 不配置：无 Team 功能，和现有 CCM 一致
-
-Team CCM 也可以配置自己的 Worker（和现有 Worker 系统完全一致）。
-
-## 2. 团队功能
-
-### 2.1 小组管理（Hub 侧）
-
-- 创建小组、编辑小组信息
-- 生成邀请码供成员加入
-- 查看小组成员列表和在线状态
-- 小组成员通过飞书 OAuth 绑定身份
-
-### 2.2 项目归属
-
-**归属单位是 Project，不是 Task**：
-
-- Hub 管理员创建 Project 时，指定归属小组（`team_id`）
-- 该 Project 及其下所有 Task 自动同步到小组成员的 CCM
-- 成员可以在 Team 页面查看 project 下的 task、发消息、创建新 task
-- 成员**不可以**创建新 project（只有 Hub 管理员有权）
-- 成员**可以**修改 project 配置
-
-### 2.3 Task 执行位置
-
-**所有 task 都在 Hub 本机 + Hub 的 Worker 上执行。** 成员 CCM 只是查看和交互的窗口，不执行 task。成员看到的是 Hub 事件的镜像。
-
-### 2.4 成员权限
-
-| 操作 | 是否允许 |
-|------|---------|
-| 查看团队 project/task | 可以 |
-| 在 task 中发消息 | 可以 |
-| 创建 project 下的新 task | 可以 |
-| 停止/取消执行中的 task | 可以 |
-| 重试失败的 task | 可以 |
-| 修改 project 配置 | 可以 |
-| 看到同组其他成员发的消息 | 可以 |
-| 创建新 project | 不可以 |
-| 删除 project | 不可以 |
-
-### 2.5 前端 Team 页面
-
-新增页面，位于 Workers 和 PR Monitor 旁边。
-
-| 身份 | Team 页面内容 |
-|------|-------------|
-| Hub | 小组管理 + 成员列表 + 团队 Project/Task 全局视图 |
-| Member | 团队分发的 Project 列表 + 其下 Task（类似 Tasks 页面，可发消息、可建 task、不可建 project） |
-
-**前端路由逻辑**：
-- Tasks 页面：`projects WHERE hub_project_id IS NULL`（个人项目）
-- Team 页面：`projects WHERE hub_project_id IS NOT NULL`（团队项目）
-
-两个页面共用同一个 ChatView 组件，发消息的路径不同：
-- 个人 task：`POST /api/tasks/{id}/chat` → 本地 session
-- 团队 task：`POST /api/tasks/{id}/chat` → 检测到 `hub_task_id` → 代理转发到 Hub API
-
-## 3. 通信机制
-
-### 3.1 连接方向
-
-**Member 主动连 Hub**（与 Worker relay 方向相反）：
-
-```
-成员 CCM ──WebSocket──→ Hub CCM     （接收事件推送）
-成员 CCM ──HTTP POST──→ Hub CCM     （发消息/建 task/操作）
-```
-
-Hub **不需要访问成员 CCM**，不持有成员的任何凭证。事件推送通过成员主动建立的 WebSocket 连接完成。
-
-选择此方向的原因：
-- 成员 CCM 是个人服务器，Hub 不应持有其凭证（隐私保护）
-- 成员可能在 NAT 后面（虽然目前都有公网，但不依赖此假设更稳健）
-- Hub 签发 token 给成员（权限可控），而非成员把 token 交给 Hub
-
-### 3.2 事件推送
-
-Hub 通过 WebSocket 推送给 Member 的事件（与 Worker relay 的 `CHAT_EVENT_TYPES` 基本一致）：
-
-| 事件类别 | 事件类型 | 说明 |
-|---------|---------|------|
-| 项目同步 | project_created, project_updated, project_deleted | 团队 project 变更 |
-| Task 同步 | task_created, status_change, context_usage | task 生命周期 |
-| Chat 事件 | message, result, tool_use, tool_result, thinking, system_init | 复用现有 CHAT_EVENT_TYPES |
-| 飞书绑定 | feishu_chat_bound | task 绑定飞书群后通知成员 |
-
-成员 CCM 收到事件后写入本地 `projects`/`tasks`/`log_entries` 表（与 Worker relay 双写 LogEntry 的逻辑一致）。
-
-### 3.3 断线重连与补发
-
-成员 CCM 离线期间，Hub 暂存事件。重连后：
-1. 成员 WebSocket 重新连接（指数退避重试，与 Worker relay `_reconnect` 一致）
-2. Hub 补发缺失的事件（与 Worker relay `_backfill_missing_logs` 一致）
-3. 同步 task 状态（可能在离线期间变更）
-
-### 3.4 成员操作代理
-
-成员在 Team 页面的所有写操作都通过 Member 后端代理到 Hub：
-
-```
-Member 前端 → Member API → Hub API → Hub 执行 → 事件推回 Member WebSocket
-```
-
-Member 后端做代理（前端只和自己的后端通信），避免前端直接暴露 Hub 地址和 token。
-
-代理的操作包括：
-- 发送聊天消息：`POST hub/api/tasks/{hub_task_id}/chat`
-- 创建 task：`POST hub/api/tasks`（带 project_id）
-- 停止 task：`POST hub/api/tasks/{hub_task_id}/stop-session`
-- 取消 task：`POST hub/api/tasks/{hub_task_id}/cancel`
-- 重试 task：`POST hub/api/tasks/{hub_task_id}/retry`
-- 修改 project：`PUT hub/api/projects/{hub_project_id}`
-
-## 4. 成员注册流程
-
-### 4.1 完整流程
-
-```
-1. Hub 管理员在 Team 页面创建小组
-   → Hub 生成邀请码（如 "ABC123"，可设过期时间）
-
-2. 成员在自己 CCM 的设置页面完成飞书 OAuth 绑定
-   → 成员 CCM 本地 feishu_user_binding 表存下 feishu_open_id
-
-3. 成员在 Team 页面点"加入团队"
-   → 输入 Hub 地址 + 邀请码 → 点击"加入"
-
-4. 成员 CCM 后端自动执行：
-   a. 读取本地 feishu_user_binding 拿到 feishu_open_id/feishu_name
-   b. POST hub_url/api/team/register
-      body: { invite_code, feishu_open_id, feishu_name }
-   c. Hub 验证邀请码 → 创建 team_member 记录 → 返回:
-      { member_token, team_name, team_id, member_id }
-   d. 自动写入 team_hub_connection 表
-   e. 自动建立 WebSocket 长连接到 Hub
-   f. Hub 推送该成员所属小组的 project/task 数据
-   g. 自动写入本地 projects/tasks/log_entries
-
-5. 成员 Team 页面立刻显示团队内容
-```
-
-**用户感知**：输入地址和邀请码 → 点加入 → Team 页面出现团队内容。全自动。
-
-### 4.2 邀请码管理
-
-- Hub 管理员可为每个小组生成邀请码
-- 邀请码可设置：过期时间、最大使用次数
-- 已使用的邀请码可查看关联的成员
-- 管理员可随时作废邀请码
-
-## 5. 数据模型
-
-### 5.1 Hub 侧新增表
-
-```sql
--- 小组
-CREATE TABLE teams (
-    id INTEGER PRIMARY KEY,
-    name VARCHAR(100) NOT NULL UNIQUE,
-    description TEXT,
-    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
--- 小组成员
-CREATE TABLE team_members (
-    id INTEGER PRIMARY KEY,
-    team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-    name VARCHAR(100) NOT NULL,
-    feishu_open_id VARCHAR(100),          -- 飞书身份
-    member_token VARCHAR(200) NOT NULL,    -- Hub 签发给成员的 token
-    status VARCHAR(20) NOT NULL DEFAULT 'active',  -- active / inactive
-    last_seen_at DATETIME,                 -- 最后 WebSocket 活跃时间
-    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(team_id, feishu_open_id)
-);
-
--- 邀请码
-CREATE TABLE team_invites (
-    id INTEGER PRIMARY KEY,
-    team_id INTEGER NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-    code VARCHAR(50) NOT NULL UNIQUE,
-    max_uses INTEGER,                      -- NULL = 无限
-    used_count INTEGER NOT NULL DEFAULT 0,
-    expires_at DATETIME,                   -- NULL = 永不过期
-    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-```
-
-Hub 侧现有表扩展：
-
-```sql
--- projects 表新增字段
-ALTER TABLE projects ADD COLUMN team_id INTEGER REFERENCES teams(id);
--- team_id 非空 = 团队项目，NULL = Hub 自己的项目
-```
-
-`tasks` 表不改——task 通过 `project_id → project.team_id` 确定归属小组。
-
-### 5.2 Member 侧新增表
-
-不建平行表，在现有表上加来源标记：
-
-```sql
--- 现有 projects 表新增字段
-ALTER TABLE projects ADD COLUMN hub_project_id INTEGER;
-ALTER TABLE projects ADD COLUMN hub_url VARCHAR(500);
--- hub_project_id 非空 = 从 Hub 同步来的团队项目
-
--- 现有 tasks 表新增字段
-ALTER TABLE tasks ADD COLUMN hub_task_id INTEGER;
--- hub_task_id 非空 = 从 Hub 同步来的团队 task
--- 发消息时不走本地 session，而是代理到 Hub API
-```
-
-`log_entries` 表不改——Hub 通过 WebSocket 推送事件，Member 侧直接写入 `log_entries`（`instance_id=NULL`，与 Worker relay 一致）。
-
-Member 侧新增连接信息表：
-
-```sql
--- Hub 连接信息
-CREATE TABLE team_hub_connection (
-    id INTEGER PRIMARY KEY,
-    hub_url VARCHAR(500) NOT NULL,
-    hub_token VARCHAR(200) NOT NULL,       -- Hub 签发的 member_token
-    member_id INTEGER NOT NULL,            -- 在 Hub 的 team_members.id
-    team_name VARCHAR(100),
-    status VARCHAR(20) NOT NULL DEFAULT 'connected',  -- connected / disconnected
-    last_sync_at DATETIME,
-    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-```
-
-### 5.3 飞书相关表（Hub 和 Member 共用）
-
-```sql
--- Task ↔ 飞书群映射
-CREATE TABLE feishu_chat_bindings (
-    id INTEGER PRIMARY KEY,
-    task_id INTEGER NOT NULL UNIQUE,       -- 一个 task 对应一个群
-    chat_id VARCHAR(100) NOT NULL UNIQUE,  -- 飞书群 ID
-    chat_name VARCHAR(200),
-    status VARCHAR(20) NOT NULL DEFAULT 'active',  -- active / archived
-    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
--- 飞书用户绑定（本 CCM 实例的所有者）
-CREATE TABLE feishu_user_binding (
-    id INTEGER PRIMARY KEY,
-    feishu_open_id VARCHAR(100) NOT NULL UNIQUE,
-    feishu_name VARCHAR(100),
-    bound_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-```
-
-飞书应用凭证走 `.env` 配置：
+整个组织共用**一个飞书企业自建应用**（在飞书开放平台创建一次）：
+- 所有 CCM 实例共用同一个 `app_id` / `app_secret`
+- 每个 CCM 有自己的 `redirect_uri`（飞书应用支持配置多个重定向地址）
+- 凭证通过 `.env` 配置：
 
 ```bash
 FEISHU_APP_ID=cli_xxx
 FEISHU_APP_SECRET=xxx
 ```
 
-每个 CCM 实例（Hub 和 Member）各自创建自己的飞书应用。
+需要的飞书权限：
+- `contact:user.employee_id:readonly`（读取组织成员列表）
+- 网页登录能力（OAuth）
+- 消息发送能力（分享通知用）
 
-### 5.4 数据关系图
-
-```
-Hub 侧:
-  teams ──→ team_members (飞书 open_id + member_token)
-    │
-    └──→ team_invites (邀请码)
-
-  projects (team_id) ──→ tasks ──→ log_entries
-                           │
-                           └── feishu_chat_bindings
-
-Member 侧:
-  team_hub_connection (hub_url + hub_token)
-
-  projects (hub_project_id, hub_url) ──→ tasks (hub_task_id) ──→ log_entries
-                                           │
-                                           └── feishu_chat_bindings
-
-  feishu_user_binding (本机所有者的飞书身份)
-```
-
-## 6. 飞书集成
-
-### 6.1 Bot 配置
-
-- 每个 CCM 实例各自一个飞书应用（一对 app_id/app_secret）
-- 各自通过 WebSocket 长连接接收自己 Bot 的事件（参考 agent-ml-research 的 feishu_webhook.py）
-- **谁的 task，谁的 Bot 管群**
-
-### 6.2 身份绑定
-
-通过飞书 OAuth 完成：
-1. CCM 设置页面提供"绑定飞书"按钮
-2. 跳转飞书 OAuth 授权页面
-3. 回调后获取 open_id 和用户名
-4. 写入 `feishu_user_binding` 表
-
-### 6.3 建群策略
-
-| 场景 | 建群时机 | Bot 归属 |
-|------|---------|---------|
-| 团队 task | task 创建时自动建群，拉入归属小组所有成员 | Team CCM 的 Bot |
-| 个人 task | 用户在 CCM 上点"绑定飞书"按需建群 | 个人 CCM 的 Bot |
-
-### 6.4 消息双向同步
+### 2.2 绑定流程
 
 ```
-飞书 → CCM:
-  用户在飞书群发消息
-  → Bot WebSocket 收到事件（带 chat_id + sender open_id）
-  → 查 feishu_chat_bindings: chat_id → task_id
-  → 注入到对应 task session（复用 pty-bridge 注入机制）
-  → 消息前缀标记发送者: "[飞书用户 张三] 消息内容"
+1. 用户在 CCM 设置页点"绑定飞书"
 
-CCM → 飞书:
-  Claude 回复 → assistant message 事件
-  → 查 feishu_chat_bindings: task_id → chat_id
-  → Bot API 发送到对应飞书群
-  → 支持 Markdown 格式、代码块、长文本自动截断
+2. 前端跳转飞书授权页：
+   https://open.feishu.cn/open-apis/authen/v1/authorize
+     ?app_id=cli_xxx
+     &redirect_uri=https://my-ccm.com/api/feishu/callback
+     &state=random_state
+
+3. 用户在飞书页面登录并授权
+
+4. 飞书回调 CCM：
+   GET /api/feishu/callback?code=xxx&state=random_state
+
+5. CCM 后端用 code 换 user_access_token：
+   POST https://open.feishu.cn/open-apis/authen/v1/oidc/access_token
+
+6. 用 access_token 获取用户信息：
+   GET https://open.feishu.cn/open-apis/authen/v1/user_info
+   → 拿到 open_id、name、email、avatar_url
+
+7. 写入本地 feishu_user_binding 表
+
+8. 向组织注册表上报：
+   POST {ORG_REGISTRY_URL}/api/org/register
+   body: { open_id, name, ccm_url, avatar_url }
 ```
 
-### 6.5 群归档
+### 2.3 飞书的作用范围
 
-task 完成后：
-- 飞书群标记为归档（不解散，保留历史消息）
-- `feishu_chat_bindings.status` 设为 `archived`
-- 归档的群不再接收新消息注入
+| 用途 | 说明 |
+|------|------|
+| 身份绑定 | CCM 用户 ↔ 飞书 open_id |
+| 组织发现 | 通过注册表查看组织内其他 CCM 用户 |
+| 分享通知 | 分享/取消分享 task 时通过飞书 DM 通知对方 |
 
-## 7. 完整数据流
+**不做**：不建群、不转发消息、不做消息双向同步。
 
-### 7.1 Hub 创建团队项目
+## 3. 组织注册表
 
-```
-Hub 管理员创建 Project(team_id=1)
-  │
-  ├─ 查 team_members WHERE team_id=1 → [成员A, 成员B, 成员C]
-  │
-  ├─ 通过各成员的 WebSocket 连接推送 project_created 事件
-  │   payload: { project_id, name, git_url, ... }
-  │
-  └─ 各成员 CCM 收到 → 写入本地 projects(hub_project_id=X, hub_url=...)
-```
+### 3.1 设计
 
-### 7.2 Hub 创建并执行 Task
+P2P 架构没有中心节点，但成员发现需要一个共同的查询点。方案：**指定一个 CCM 兼任注册表**。
 
-```
-Hub 创建 Task(project_id=P, project.team_id=1)
-  │
-  ├─ 飞书自动建群，拉入小组成员
-  │   → 写入 feishu_chat_bindings
-  │
-  ├─ 推送 task_created 事件到成员 WebSocket
-  │   payload: { task_id, project_id, description, feishu_chat_id, ... }
-  │
-  ├─ Hub Dispatcher 执行 task（本机或 Worker）
-  │
-  └─ 执行过程中持续推送 chat 事件到成员 WebSocket
-      → 成员 CCM 写入 log_entries → 前端实时刷新
-      → 同时通过飞书 Bot 发到群里
+```bash
+# 注册表所有者的 .env
+ORG_REGISTRY_ENABLED=true
+
+# 其他成员的 .env
+ORG_REGISTRY_URL=https://youchengsong.claude-code-manager.com
 ```
 
-### 7.3 成员发送消息
+注册表就是两个额外的 API 端点 + 一张表，不需要额外部署服务。
+
+只有注册过 CCM（即绑定飞书并上报了 URL）的成员，在分享时才会被显示出来。
+
+### 3.2 注册表 API
 
 ```
-成员在 Team 页面的 ChatView 输入消息
-  │
-  ├─ 前端 POST /api/tasks/{local_task_id}/chat
-  │
-  ├─ Member 后端检测到 hub_task_id 非空
-  │   → 代理 POST hub_url/api/tasks/{hub_task_id}/chat
-  │     headers: { Authorization: Bearer member_token }
-  │     body: { message, sender_name, sender_feishu_id }
-  │
-  ├─ Hub 收到 → 注入到 task session
-  │   → Claude 回复 → 事件广播
-  │
-  └─ Hub 推送事件到所有小组成员的 WebSocket
-      → 所有成员（包括发送者）看到回复
-      → 飞书群也收到回复
+POST   /api/org/register              注册/更新自己的信息
+GET    /api/org/members               获取组织内所有已注册成员
+DELETE /api/org/members/{open_id}      注销成员
+POST   /api/org/transfer              移交注册表到另一个 CCM
+POST   /api/org/import                接收移交过来的注册表数据
+POST   /api/org/registry-changed      接收注册表地址变更通知
 ```
 
-### 7.4 成员创建 Task
+### 3.3 注册表数据
 
-```
-成员在 Team 页面某 project 下点"新建 Task"
-  │
-  ├─ 前端 POST /api/team/tasks
-  │   body: { hub_project_id, description, ... }
-  │
-  ├─ Member 后端代理到 Hub
-  │   → POST hub_url/api/tasks
-  │     body: { project_id: hub_project_id, description, ... }
-  │
-  ├─ Hub 创建 task → 自动建飞书群 → 开始执行
-  │
-  └─ 事件推送到所有小组成员
+```sql
+-- 仅在注册表所有者的 CCM 上有数据
+CREATE TABLE org_members (
+    id INTEGER PRIMARY KEY,
+    feishu_open_id VARCHAR(100) NOT NULL UNIQUE,
+    name VARCHAR(100) NOT NULL,
+    ccm_url VARCHAR(500) NOT NULL,
+    avatar_url VARCHAR(500),
+    registered_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at DATETIME
+);
 ```
 
-## 8. 后端服务新增
+### 3.4 注册表转移
 
-### 8.1 Hub 侧新增服务
+注册表所有者可以将注册表移交给组织内其他成员：
+
+```
+1. 当前所有者（A）在设置页点"移交注册表" → 选择新所有者（B）
+
+2. A 的 CCM 推送注册表数据到 B：
+   POST B/api/org/import
+   body: { members: [...] }
+
+3. B 的 CCM 存下数据，启用 ORG_REGISTRY_ENABLED
+
+4. A 的 CCM 通知所有其他成员（注册表里有每个人的 ccm_url）：
+   POST 每个成员/api/org/registry-changed
+   body: { new_registry_url: "https://b.xxx.com" }
+
+5. 每个成员的 CCM 自动更新 ORG_REGISTRY_URL
+
+6. A 清除自己的 ORG_REGISTRY_ENABLED，变回普通成员
+```
+
+用户感知：点"移交" → 选人 → 完成。全自动。
+
+## 4. Task 分享
+
+### 4.1 分享流程
+
+```
+1. 分享者在 task 页面点"分享" → 弹出组织成员列表（从注册表获取）
+
+2. 多选要分享的成员 → 点确认
+
+3. 分享者 CCM 为每个被分享者：
+   a. 生成 share_token（限定该 task + 只读+对话权限）
+   b. 在本地 task_shares 表记录分享关系
+   c. 推送分享信息到被分享者 CCM：
+      POST 被分享者/api/shared/receive
+      body: { 
+        owner_ccm_url, task_id, share_token,
+        task_title, task_description,
+        owner_name, owner_feishu_id
+      }
+   d. 通过飞书 DM 通知被分享者：
+      "张三分享了一个 task 给你：{task_title}
+       点击查看：https://被分享者ccm.com/shared/{id}"
+
+4. 被分享者 CCM 收到后：
+   a. 存入本地 shared_tasks_received 表
+   b. 前端 Shares 区域立即显示
+```
+
+### 4.2 被分享者查看 Task
+
+**代理模式**：被分享者 CCM 不存 task 数据，实时从分享者 CCM 拿。
+
+```
+被分享者打开共享 task
+  │
+  ├─ 前端请求 GET /api/shared/{id}/history
+  │
+  ├─ 被分享者 CCM 后端代理：
+  │   GET {owner_ccm_url}/api/shared-access/{task_id}/history
+  │   headers: { Authorization: Bearer {share_token} }
+  │
+  ├─ 返回聊天历史 → 前端渲染
+  │
+  └─ 前端直连分享者 CCM 的 WebSocket 订阅实时事件：
+     WS {owner_ccm_url}/ws/shared?token={share_token}&task_id={task_id}
+     → 实时收到 Claude 回复、工具调用等事件
+     → 关闭页面时断开（不是永久连接）
+```
+
+实时事件采用**前端直连**分享者 CCM 的 WebSocket（不经过被分享者 CCM 代理），更简单高效。share_token 限定只能访问对应 task，安全可控。
+
+### 4.3 被分享者发消息
+
+```
+被分享者在共享 task 的 ChatView 输入消息
+  │
+  ├─ 前端 POST /api/shared/{id}/chat
+  │   body: { message: "用户消息" }
+  │
+  ├─ 被分享者 CCM 后端代理：
+  │   POST {owner_ccm_url}/api/shared-access/{task_id}/chat
+  │   headers: { Authorization: Bearer {share_token} }
+  │   body: { message: "[共享成员 李四] 用户消息" }
+  │
+  └─ 分享者 CCM 处理消息 → Claude 回复
+     → 通过 WebSocket 推送到所有在线的被分享者
+```
+
+消息前缀 `[共享成员 xxx]` 让分享者和 Claude 能区分消息来源。分享者自己发的消息不加前缀。
+
+### 4.4 多人同时对话
+
+多个人同时给同一个 task 发消息时，逻辑和单人使用完全一致：
+- 先发的先执行
+- 后发的进入 pending queue
+- task 本身不感知是多人在操作
+- 分享者 CCM 的现有 `WebSocketBroadcaster` 按 `task:{id}` channel 广播，所有连着的 shared WS 连接都能收到事件
+
+### 4.5 被分享者权限
+
+| 操作 | 是否允许 |
+|------|---------|
+| 查看 task 聊天历史 | 可以 |
+| 发送消息 | 可以 |
+| 查看 config/模式（只读） | 可以 |
+| 修改 task 配置/模式 | 不可以 |
+| 停止/取消/重试 task | 不可以 |
+| 创建新 task | 不可以 |
+| 分享给其他人 | 不可以（只有 task 所有者可以） |
+
+### 4.6 管理分享
+
+**分享者可以随时增删被分享者**：
+
+增加成员：
+```
+分享者点"管理分享" → 添加新成员
+  → 生成 share_token → 写入 task_shares
+  → 推送到新成员 CCM
+  → 飞书 DM 通知新成员
+```
+
+删除成员：
+```
+分享者点"管理分享" → 移除成员
+  → task_shares.status = "revoked"
+  → 通知被分享者 CCM：POST /api/shared/revoke
+  → 飞书 DM 通知被分享者："张三取消了 task 的分享"
+  → 被分享者 CCM 删除 shared_tasks_received 记录
+  → share_token 失效，后续请求被拒
+```
+
+### 4.7 分享者 CCM 离线
+
+被分享者打开共享 task 时，如果分享者 CCM 不可达，显示文字提示："分享者 CCM 不可达，请稍后再试"。不做数据缓存。
+
+## 5. 前端
+
+### 5.1 Shares 按钮
+
+在 Tasks 页面的 Filter / Projects 栏旁边新增 **Shares** 按钮：
+
+```
+┌──────────────────────────────────────────────┐
+│  🔽 Filter    📁 Projects  ▼    🔍   Shares │
+├──────────────────────────────────────────────┤
+│  正常 task 列表...                            │
+└──────────────────────────────────────────────┘
+```
+
+点击 Shares 按钮后，切换到共享 task 视图：
+
+```
+┌──────────────────────────────────────────────┐
+│  🔽 Filter    📁 Projects  ▼    🔍   Shares │
+├──────────────────────────────────────────────┤
+│  📎 调研 VibeThinker        来自 张三         │
+│  📎 部署 NanoChat 环境      来自 李四         │
+│  📎 CI/CD 流水线调试        来自 王五         │
+└──────────────────────────────────────────────┘
+```
+
+再次点击 Shares 按钮回到正常 task 视图。
+
+### 5.2 共享 Task 列表项
+
+和普通 task 显示一样，额外标注：
+- 分享标记图标（📎 或其他）
+- "来自 xxx"（分享者名字）
+
+### 5.3 共享 Task 的 ChatView
+
+和普通 ChatView 布局一致，区别：
+- Config 按钮点开后内容**只读**（显示全部配置，但按钮灰掉/禁用）
+- 没有停止/取消/重试按钮
+- 输入框提示文字："以共享成员身份发送消息"
+- 特殊 URL：`/shared/{shared_task_id}`
+
+### 5.4 分享管理弹窗
+
+Task 详情页新增"分享"按钮（分享者视角）：
+
+```
+┌─ Task: 调研 VibeThinker-3B ──────────────────────┐
+│  [Chat] [Config] [分享 👥2]                       │
+│                                                   │
+│  ChatView 聊天内容...                              │
+└───────────────────────────────────────────────────┘
+
+点击"分享 👥2"弹窗：
+┌─ 分享管理 ────────────────────────────┐
+│  已分享给：                            │
+│    ☑ 李四 (li4@company.com)  [移除]    │
+│    ☑ 王五 (wang5@company.com) [移除]   │
+│                                       │
+│  添加成员：                            │
+│    ☐ 张三 (zhang3@company.com)         │
+│    ☐ 赵六 (zhao6@company.com)          │
+│                                       │
+│  [确认]  [取消]                        │
+└───────────────────────────────────────┘
+```
+
+## 6. 数据模型
+
+### 6.1 所有 CCM 共有
+
+```sql
+-- 飞书用户绑定（本 CCM 的所有者）
+CREATE TABLE feishu_user_binding (
+    id INTEGER PRIMARY KEY,
+    feishu_open_id VARCHAR(100) NOT NULL UNIQUE,
+    feishu_name VARCHAR(100),
+    avatar_url VARCHAR(500),
+    access_token TEXT,               -- 飞书 user_access_token（发消息用）
+    token_expires_at DATETIME,
+    bound_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+### 6.2 注册表所有者额外的表
+
+```sql
+-- 组织成员注册表（仅注册表所有者有数据）
+CREATE TABLE org_members (
+    id INTEGER PRIMARY KEY,
+    feishu_open_id VARCHAR(100) NOT NULL UNIQUE,
+    name VARCHAR(100) NOT NULL,
+    ccm_url VARCHAR(500) NOT NULL,
+    avatar_url VARCHAR(500),
+    registered_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_seen_at DATETIME
+);
+```
+
+### 6.3 分享者侧
+
+```sql
+-- 我分享出去的 task（分享者 CCM 上）
+CREATE TABLE task_shares (
+    id INTEGER PRIMARY KEY,
+    task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    shared_to_open_id VARCHAR(100) NOT NULL,   -- 被分享者飞书 ID
+    shared_to_name VARCHAR(100),
+    shared_to_ccm_url VARCHAR(500) NOT NULL,
+    share_token VARCHAR(200) NOT NULL UNIQUE,   -- 访问令牌
+    status VARCHAR(20) NOT NULL DEFAULT 'active',  -- active / revoked
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(task_id, shared_to_open_id)
+);
+```
+
+### 6.4 被分享者侧
+
+```sql
+-- 别人分享给我的 task（被分享者 CCM 上）
+CREATE TABLE shared_tasks_received (
+    id INTEGER PRIMARY KEY,
+    owner_ccm_url VARCHAR(500) NOT NULL,
+    owner_name VARCHAR(100),
+    owner_feishu_open_id VARCHAR(100),
+    remote_task_id INTEGER NOT NULL,            -- 分享者 CCM 上的 task_id
+    share_token VARCHAR(200) NOT NULL,
+    task_title VARCHAR(200),
+    task_description TEXT,
+    status VARCHAR(20) NOT NULL DEFAULT 'active',  -- active / revoked
+    received_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(owner_ccm_url, remote_task_id)
+);
+```
+
+### 6.5 数据关系图
+
+```
+分享者 CCM:
+  feishu_user_binding (自己的飞书身份)
+  tasks ──→ task_shares (分享给了谁，share_token)
+  org_members (仅注册表所有者)
+
+被分享者 CCM:
+  feishu_user_binding (自己的飞书身份)
+  shared_tasks_received (别人分享给我的，包含 owner_url + token)
+
+请求流:
+  被分享者前端 ─HTTP─→ 被分享者 CCM API ─代理─→ 分享者 CCM API (share_token)
+  被分享者前端 ─WS──→ 分享者 CCM WebSocket (share_token, 直连)
+```
+
+## 7. 认证与安全
+
+### 7.1 share_token 设计
+
+- 分享者为每个 (task_id, 被分享者) 组合生成唯一的 share_token
+- token 是随机字符串（`secrets.token_urlsafe(32)`）
+- 在分享者 CCM 侧验证：收到请求后查 `task_shares` 表，检查 token 有效且 status=active
+- token 权限限定：只能访问对应的 task，只能查看 + 发消息
+
+### 7.2 分享者 CCM 的请求验证
+
+```python
+async def verify_share_token(token: str, task_id: int) -> TaskShare:
+    share = await db.query(TaskShare).filter(
+        TaskShare.share_token == token,
+        TaskShare.task_id == task_id,
+        TaskShare.status == "active",
+    ).first()
+    if not share:
+        raise HTTPException(403, "Invalid or revoked share token")
+    return share
+```
+
+### 7.3 分享者 CCM 新增的访问端点
+
+```
+# 被分享者通过 share_token 访问（不需要 admin auth_token）
+GET    /api/shared-access/{task_id}/history?token={share_token}
+POST   /api/shared-access/{task_id}/chat?token={share_token}
+GET    /api/shared-access/{task_id}/config?token={share_token}
+WS     /ws/shared?token={share_token}&task_id={task_id}
+```
+
+这些端点和现有的 `/api/tasks/{id}/chat` 功能相同，但认证方式不同（share_token 而非 admin auth_token），且权限受限（只读 config、只能发消息）。
+
+## 8. 后端服务
+
+### 8.1 新增服务
 
 | 服务 | 文件 | 说明 |
 |------|------|------|
-| TeamManager | `services/team_manager.py` | 小组 CRUD、成员管理、邀请码 |
-| TeamRelay | `services/team_relay.py` | 管理成员 WebSocket 连接、推送事件 |
-| FeishuBot | `services/feishu_bot.py` | 飞书 Bot：建群、发消息、WebSocket 收消息 |
+| FeishuAuth | `services/feishu_auth.py` | 飞书 OAuth 绑定：授权跳转、回调处理、token 刷新 |
+| OrgRegistry | `services/org_registry.py` | 组织注册表：成员注册/查询/转移 |
+| TaskSharing | `services/task_sharing.py` | Task 分享：创建/撤销分享、token 生成、推送通知 |
+| SharedProxy | `services/shared_proxy.py` | 共享代理：代理被分享者的请求到分享者 CCM |
+| FeishuNotify | `services/feishu_notify.py` | 飞书通知：发送分享/撤销 DM 消息 |
 
-### 8.2 Member 侧新增服务
-
-| 服务 | 文件 | 说明 |
-|------|------|------|
-| TeamHubClient | `services/team_hub_client.py` | 连接 Hub WebSocket、接收事件、写入本地 DB |
-| TeamProxy | `services/team_proxy.py` | 代理成员操作到 Hub API |
-
-### 8.3 共用服务
-
-| 服务 | 文件 | 说明 |
-|------|------|------|
-| FeishuClient | `services/feishu_client.py` | 飞书 SDK 封装：OAuth、建群、发消息、WebSocket 事件 |
-
-## 9. API 端点
-
-### 9.1 Hub 侧 API
+### 8.2 新增 API 端点
 
 ```
-# 小组管理
-POST   /api/teams                          创建小组
-GET    /api/teams                          列出小组
-GET    /api/teams/{id}                     小组详情 + 成员列表
-PUT    /api/teams/{id}                     更新小组
-DELETE /api/teams/{id}                     删除小组
+# 飞书绑定
+GET    /api/feishu/auth-url              获取飞书授权 URL
+GET    /api/feishu/callback              飞书 OAuth 回调
+GET    /api/feishu/status                绑定状态
+DELETE /api/feishu/unbind                解除绑定
 
-# 成员管理
-POST   /api/teams/{id}/invites             生成邀请码
-GET    /api/teams/{id}/invites             列出邀请码
-DELETE /api/teams/{id}/invites/{code}      作废邀请码
+# 组织注册表（注册表所有者的端点）
+POST   /api/org/register                注册/更新自己
+GET    /api/org/members                 获取组织成员列表
+DELETE /api/org/members/{open_id}        注销成员
+POST   /api/org/transfer                移交注册表
+POST   /api/org/import                  接收移交数据
+POST   /api/org/registry-changed        接收注册表地址变更通知
 
-# 成员注册（成员 CCM 调用）
-POST   /api/team/register                  注册成员（验证邀请码，返回 member_token）
+# Task 分享（分享者侧）
+POST   /api/tasks/{id}/share            分享 task 给成员（多选）
+DELETE /api/tasks/{id}/share/{open_id}  取消分享
+GET    /api/tasks/{id}/shares           查看该 task 的分享列表
 
-# WebSocket（成员 CCM 连接）
-WS     /ws/team?token={member_token}       成员事件推送通道
+# 分享者为被分享者提供的访问端点（share_token 认证）
+GET    /api/shared-access/{task_id}/history  聊天历史
+POST   /api/shared-access/{task_id}/chat    发送消息
+GET    /api/shared-access/{task_id}/config  查看配置（只读）
+WS     /ws/shared?token={share_token}&task_id={task_id}  实时事件（前端直连）
+
+# 共享 task（被分享者侧）
+POST   /api/shared/receive              接收分享推送
+POST   /api/shared/revoke               接收撤销通知
+GET    /api/shared/tasks                列出所有共享给我的 task
+GET    /api/shared/{id}/history         代理获取聊天历史
+POST   /api/shared/{id}/chat            代理发送消息
+GET    /api/shared/{id}/config          代理获取配置（只读）
+DELETE /api/shared/{id}                 主动退出共享
 ```
 
-### 9.2 Member 侧 API
+## 9. 完整数据流
+
+### 9.1 飞书绑定 + 注册
 
 ```
-# 加入团队
-POST   /api/team/join                      加入团队（输入 hub_url + invite_code）
-GET    /api/team/status                    连接状态
-DELETE /api/team/leave                     退出团队
-
-# 团队操作代理（前端调用，后端转发到 Hub）
-POST   /api/team/tasks                     创建团队 task
-POST   /api/team/tasks/{id}/chat           发送消息
-POST   /api/team/tasks/{id}/stop           停止 task
-POST   /api/team/tasks/{id}/cancel         取消 task
-POST   /api/team/tasks/{id}/retry          重试 task
-PUT    /api/team/projects/{id}             修改 project 配置
+用户点"绑定飞书"
+  → 浏览器跳转飞书 OAuth → 授权 → 回调
+  → CCM 拿到 open_id + name + avatar
+  → 写入 feishu_user_binding
+  → POST {ORG_REGISTRY_URL}/api/org/register
+  → 注册表记录该用户的 ccm_url
+  → 分享功能解锁
 ```
 
-### 9.3 飞书 API（Hub 和 Member 共用）
+### 9.2 分享 Task
 
 ```
-POST   /api/feishu/bind                    飞书 OAuth 绑定
-DELETE /api/feishu/bind                    解除绑定
-GET    /api/feishu/status                  绑定状态
-POST   /api/tasks/{id}/feishu/bind         为 task 创建飞书群（个人 task 按需）
-DELETE /api/tasks/{id}/feishu/bind         解除 task 飞书群绑定
+分享者点"分享" → 弹窗显示组织成员（GET /api/org/members）
+  → 多选成员 → 确认
+  → 为每个成员：
+     1. 生成 share_token → 写入 task_shares
+     2. POST 被分享者ccm/api/shared/receive（推送分享信息）
+     3. 飞书 DM 通知被分享者（含链接）
+  → 被分享者 CCM 收到 → 写入 shared_tasks_received
+  → 被分享者前端 Shares 区域出现新 task
 ```
 
-## 10. 前端页面
-
-### 10.1 Team 页面 — Hub 视图
+### 9.3 被分享者查看和对话
 
 ```
-┌─────────────────────────────────────────────┐
-│  Team: AI-Lab                               │
-├──────────┬──────────────────────────────────┤
-│ 小组列表  │  小组详情                         │
-│          │                                  │
-│ > 前端组  │  成员：                           │
-│   后端组  │    张三 (在线) feishu: zhang3     │
-│   AI组   │    李四 (离线) feishu: li4        │
-│          │                                  │
-│ [+新建]  │  邀请码：ABC123 (剩余3次)         │
-│          │  [生成新邀请码]                    │
-│          │                                  │
-│          │  项目：                           │
-│          │    web-app (12 tasks)             │
-│          │    api-server (5 tasks)           │
-│          │  [+关联项目到此小组]               │
-├──────────┴──────────────────────────────────┤
-│  团队 Task 全局视图（所有小组的 task）         │
-│  类似现有 Tasks 页面，多显示"归属小组"列       │
-└─────────────────────────────────────────────┘
+被分享者点击共享 task
+  → GET /api/shared/{id}/history
+    → 被分享者 CCM 代理 → GET 分享者ccm/api/shared-access/{task_id}/history
+    → 返回聊天历史
+  → 前端直连分享者 CCM WebSocket
+    → WS 分享者ccm/ws/shared?token=xxx&task_id=xxx
+    → 实时事件推送（关闭页面时断开）
+
+被分享者发消息
+  → POST /api/shared/{id}/chat
+    → 被分享者 CCM 代理 → POST 分享者ccm/api/shared-access/{task_id}/chat
+    → 消息前缀 "[共享成员 李四]"
+    → 分享者 CCM 注入 session → Claude 回复
+    → WebSocket 推送到所有在线被分享者
 ```
 
-### 10.2 Team 页面 — Member 视图
+### 9.4 取消分享
 
 ```
-┌─────────────────────────────────────────────┐
-│  Team: AI-Lab (已连接)                       │
-├──────────┬──────────────────────────────────┤
-│ 团队项目  │  Task 列表 / ChatView            │
-│          │                                  │
-│ web-app  │  和现有 Tasks 页面布局一致         │
-│ api-srv  │  可发消息、创建 task、停止/重试    │
-│          │  不可创建新 project               │
-│          │                                  │
-│          │  多一个飞书群标识（已绑群/未绑群）  │
-└──────────┴──────────────────────────────────┘
+分享者移除成员
+  → task_shares.status = "revoked"
+  → POST 被分享者ccm/api/shared/revoke
+  → 飞书 DM 通知
+  → 被分享者 shared_tasks_received 删除
+  → share_token 失效
+```
+
+## 10. 配置项
+
+```bash
+# 飞书应用（整个组织共用一个应用的凭证）
+FEISHU_APP_ID=cli_xxx
+FEISHU_APP_SECRET=xxx
+
+# 组织注册表
+ORG_REGISTRY_URL=https://youchengsong.claude-code-manager.com  # 指向注册表所有者
+ORG_REGISTRY_ENABLED=true  # 仅注册表所有者设 true
 ```
 
 ## 11. 实施计划
 
-### Phase 1：团队基础（Hub 侧）
-- teams / team_members / team_invites 表 + API
-- projects.team_id 字段
-- Team 页面 Hub 视图（小组管理 + 成员列表）
-- 邀请码生成和验证
+### Phase 1：飞书绑定 + 组织注册表
+- feishu_user_binding 表 + OAuth 绑定流程
+- org_members 表 + 注册/查询 API
+- 注册表转移功能
+- 设置页面飞书绑定 UI
 
-### Phase 2：成员连接
-- 成员注册流程（POST /api/team/register）
-- team_hub_connection 表
-- Hub 侧 TeamRelay：管理成员 WebSocket 连接
-- Member 侧 TeamHubClient：连接 Hub、接收事件、写入本地 DB
-- projects.hub_project_id / tasks.hub_task_id 字段
-- Team 页面 Member 视图（团队项目/任务列表）
+### Phase 2：Task 分享
+- task_shares 表 + shared_tasks_received 表
+- 分享/撤销分享 API
+- 分享者：share_token 生成、分享管理弹窗 UI
+- 被分享者：接收分享、Shares 按钮 + 共享 task 列表 UI
+- 飞书 DM 通知（分享/撤销）
 
-### Phase 3：成员交互
-- Member 侧 TeamProxy：代理操作到 Hub API
-- ChatView 适配团队 task（发消息走 Hub 代理）
-- 成员创建 task、停止/取消/重试
-- 多成员消息可见性（所有成员看到所有人的消息）
+### Phase 3：共享 Task 交互
+- 分享者侧：shared-access API（share_token 认证的聊天历史/发消息/配置）
+- 分享者侧：shared WebSocket 端点（实时事件，前端直连）
+- 被分享者侧：SharedProxy 代理 HTTP 请求
+- 被分享者侧：共享 ChatView（只读 config、无停止按钮、可发消息）
 
-### Phase 4：飞书集成
-- FeishuClient：SDK 封装（OAuth、建群、发消息、WebSocket 事件接收）
-- 飞书 OAuth 绑定流程
-- 团队 task 自动建群 + 拉入小组成员
-- 个人 task 按需建群
-- 消息双向同步（飞书 ↔ CCM）
-- 已完成 task 群归档
+### Phase 4：完善
+- 分享者 CCM 离线提示
+- 分享 task 的状态变更通知（task 完成/失败时飞书通知被分享者）
+- 注册表心跳（定期检测成员 CCM 是否在线）
+- 共享 task 搜索/过滤
 
-### Phase 5：完善
-- 断线重连 + 事件补发
-- 成员在线状态显示
-- 团队 task 全局搜索/过滤
-- 权限细化（只读成员 vs 可操作成员）
-- 飞书消息格式优化（Markdown、代码块、长文本截断）
+### Phase 5：飞书群消息创建 Task（后续）
+- 在飞书群里添加 CCM Bot
+- 用户 @Bot 触发任务创建（从群消息上下文提取内容）
+- 自动分享给群内已注册成员
+- 支持选择 project 归属
 
-## 12. 关键设计决策总结
+## 12. 关键设计决策
 
 | 决策 | 选择 | 理由 |
 |------|------|------|
-| 角色区分 | 同代码 + 配置区分 | 部署简单，不维护多个代码库 |
-| 归属单位 | Project 归属小组 | 比 task 级别更自然，一个项目的所有 task 都归同一组 |
-| 连接方向 | Member 连 Hub | Hub 不持有成员凭证，保护隐私 |
-| Task 执行位置 | Hub + Hub 的 Worker | 成员只查看/交互，不执行 |
-| 数据存储 | 复用现有表 + 加字段 | 复用 ChatView/WebSocket 等基础设施，不维护平行表 |
-| 成员注册 | 邀请码 + 飞书 OAuth | 安全且用户友好 |
-| 飞书 Bot | 每个 CCM 各自一个 | 消息隔离干净，不需要路由分发 |
-| 飞书建群 | 团队 task 自动，个人按需 | 平衡通知及时性和群数量 |
-| 飞书事件接收 | WebSocket 长连接 | 不需要公网回调地址，每个 CCM 独立 |
-| 成员操作 | Member 后端代理 | 前端只和自己后端通信，简单一致 |
+| 架构模式 | P2P 任务分享 | 每个 CCM 平等，无中心节点 |
+| 数据存储 | 代理模式，不同步 | 数据始终在分享者机器上，避免多端同步复杂度 |
+| 飞书用途 | 仅身份绑定 + 通知 | 不建群不转发，大幅降低飞书集成复杂度 |
+| 飞书应用 | 整个组织共用一个 | 一次创建，凭证分发 |
+| 组织注册表 | 指定 CCM 兼任 | 零额外部署，可转移 |
+| 分享粒度 | Task 级别 | 精确控制，按需分享 |
+| 被分享者权限 | 查看 + 对话，config 只读 | task 所有权不变，被分享者不能修改 |
+| 实时事件 | 前端直连分享者 WS | 不需要被分享者 CCM 代理 WS，更简单 |
+| 多人消息 | 先发先执行，后发 pending | 和单人逻辑一致，task 不感知多人 |
+| 消息标识 | 前缀 "[共享成员 xxx]" | 分享者和 Claude 能区分消息来源 |
+| 分享者离线 | 文字提示 | 不缓存，简单处理 |
+| 前端入口 | Shares 按钮切换视图 | 不常态显示，点击才切换 |
