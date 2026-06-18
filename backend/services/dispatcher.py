@@ -222,6 +222,7 @@ class GlobalDispatcher:
         # Per-task message queue for serialized chat/monitor messages
         self._task_queues: dict[int, asyncio.PriorityQueue] = {}
         self._task_queue_workers: dict[int, asyncio.Task] = {}
+        self._task_queue_activity: dict[int, float] = {}
 
         # Pool: initialized lazily on start() if pool_enabled
         self.pool: "ClaudePool | None" = None
@@ -2082,7 +2083,15 @@ class GlobalDispatcher:
     def _ensure_queue_worker(self, task_id: int):
         existing = self._task_queue_workers.get(task_id)
         if existing and not existing.done():
-            return
+            last_activity = self._task_queue_activity.get(task_id, 0)
+            if last_activity and time.monotonic() - last_activity > 120:
+                logger.warning(
+                    f"Task {task_id} queue consumer stuck for >120s, cancelling"
+                )
+                existing.cancel()
+            else:
+                return
+        self._task_queue_activity[task_id] = time.monotonic()
         worker = asyncio.create_task(self._task_queue_consumer(task_id))
         self._task_queue_workers[task_id] = worker
 
@@ -2152,9 +2161,12 @@ class GlobalDispatcher:
                     break
 
                 try:
+                    self._task_queue_activity[task_id] = time.monotonic()
                     await self._process_queued_message(task_id, msg)
+                    self._task_queue_activity[task_id] = time.monotonic()
                 except Exception:
                     logger.exception(f"Error processing queued message for task {task_id}")
+                    self._task_queue_activity[task_id] = time.monotonic()
                 finally:
                     q.task_done()
         finally:
