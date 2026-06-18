@@ -2268,7 +2268,11 @@ class GlobalDispatcher:
             if task.session_id and task.context_window_usage:
                 usage = task.context_window_usage
                 total_input = (usage.get("input_tokens") or 0) + (usage.get("cache_read_input_tokens") or 0) + (usage.get("cache_creation_input_tokens") or 0)
+                # context_window 可能被 CC 低报（1M 模型报 200K），用模型名兜底
                 window = usage.get("context_window") or 200_000
+                model_lower = (task.model or "").lower()
+                if "[1m]" in model_lower or "fable" in model_lower:
+                    window = max(window, 1_000_000)
                 utilization = total_input / window if window else 0
                 if utilization >= 0.90:
                     logger.info(
