@@ -370,3 +370,11 @@
 - **解决**: 转发路径补 target_repo 解析；迁回本机时校验 last_cwd（不存在或不在项目内则清空）
 - **预防**: 「衍生状态写回数据库」（如 last_cwd）的字段在失败路径也会被写——排查这类问题先 dump 原始行而不是只看 API（API/ORM 的 identity map 还会叠加缓存假象）；同一逻辑的双路径（本地/远程 dispatch）要逐字段对照
 - **Commit**: 见 task-elastic-worker 分支 Phase 3 系列
+
+### 「双 session / 会话不回复」真凶之一：第二个 CCM 抢 8000 端口导致 systemd crash-loop（task #722 实录）
+- **现象**: 用户某 session 反复"发消息不回复"，连发 3 次同一指令（task 720/721 failed，722 才接住）。表面像 dispatcher 双调度（参见 496017e 修的 queue-consumer race），实际是基础设施层冲突
+- **原因**: 让某 task「在当前文件夹重启 CCM」时，它额外起了**第二个 uvicorn**（手动/后台），与 systemd 的 `ccm.service` 抢占 0.0.0.0:8000 → `ccm.service` 进入 `[Errno 98] address already in use` + `Failed with result 'exit-code'` 的 8 秒一轮崩溃重启循环（journal 10:30–10:35）。每轮启动的 dispatcher 恢复逻辑把用户在飞的 task 反复 reset（"Resetting stuck task 721 from 'executing' to 'completed'"）→ 用户消息全程无人处理。一方进程在 10:35:15 退出释放端口后才自愈。副作用：一次 alembic batch 迁移被打断，残留孤儿表 `_alembic_tmp_log_entries`（alembic_version 仍在 head，不阻塞启动，但下次动 log_entries 的 batch 迁移会撞名，需先 DROP）
+- **环境真相**: DB 是从 Mac 迁来的，project/task 路径多为 `/Users/matter/...`；靠符号链接 `/Users/matter -> /home/ubuntu` 解析到真实 Linux 目录，所以 Mac 路径**并没坏**（claude_pty 的 `pty_process.spawn` 用 `Popen(cwd=...)` 无 isdir 回退，路径不存在会直接 PTYSpawnError——是符号链接救了场）。session 落盘在 `/tmp/claude-1000/<realpath编码>/` 与各账号 `projects/<realpath编码>/`，编码取 claude 自己的 `os.getcwd()` realpath，故始终是 `-home-ubuntu-...`
+- **解决**: 确认只剩 `ccm.service` 单实例（`ss -ltnp` / `ps`），WorkingDirectory 已是正确的当前文件夹，detached（`systemd-run --on-active` 独立 cgroup）干净重启一次清掉 crash-loop 残留状态
+- **预防**: ①「重启 CCM」永远只用 `systemctl restart ccm`，**绝不手动 `uvicorn`/`nohup` 再起一个**——双实例抢 8000 比任何代码 bug 都隐蔽；②排查"会话不回复"先看 `journalctl -u ccm.service` 有没有 `address already in use` / `Failed with result`，再怀疑 dispatcher 逻辑；③孤儿 `_alembic_tmp_*` 表是迁移被打断的信号，记得清
+- **Commit**: 运维处置（本次无代码变更），文档沉淀于此条
