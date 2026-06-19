@@ -72,7 +72,7 @@ MAILCOM_DOMAINS = {
     "chemist.com", "tvstar.com", "songwriter.net", "mail.com",
     "email.com", "usa.com", "post.com", "europe.com", "asia.com",
     "iname.com", "writeme.com", "dr.com", "cheerful.com",
-    "techie.com", "myself.com",
+    "techie.com", "myself.com", "priest.com",
 }
 
 
