@@ -184,6 +184,183 @@ async def cdp_login(email: str, token: str, config_dir: str, oauth_url: str = ""
                     code = cp.get("code", [""])[0]
                     state = cp.get("state", [""])[0]
 
+            # Fallback: if React fiber extraction failed, try alternative org extraction then click
+            if not org:
+                print("  Fallback: trying alternative org extraction...")
+                # Try getting org UUID from page URL or network requests
+                JS_ALT_ORG = """(function(){
+                    // Try from URL params
+                    var u = new URL(window.location.href);
+                    // Try from any visible org info on page
+                    var text = document.body?.innerText || "";
+                    // Try extracting from React root props
+                    var root = document.getElementById("__next") || document.getElementById("root");
+                    if (root) {
+                        var fk = Object.keys(root).find(k => k.startsWith("__reactFiber") || k.startsWith("__reactContainer"));
+                        if (fk) {
+                            var node = root[fk];
+                            var seen = new Set();
+                            function walk(n, depth) {
+                                if (!n || depth > 50 || seen.has(n)) return null;
+                                seen.add(n);
+                                if (n.memoizedProps) {
+                                    var p = n.memoizedProps;
+                                    if (p.organization && p.organization.uuid) return p.organization.uuid;
+                                    if (p.organizationUuid) return p.organizationUuid;
+                                }
+                                if (n.memoizedState) {
+                                    var s = n.memoizedState;
+                                    for (var i = 0; i < 30 && s; i++) {
+                                        var v = s.memoizedState;
+                                        if (v && typeof v === 'object' && v.uuid && v.name) return v.uuid;
+                                        s = s.next;
+                                    }
+                                }
+                                return walk(n.child, depth+1) || walk(n.sibling, depth+1) || walk(n.return, depth+1);
+                            }
+                            var r = walk(node, 0);
+                            if (r) return r;
+                        }
+                    }
+                    return null;
+                })()"""
+                org = await cdp_eval(ws, JS_ALT_ORG, timeout=10)
+                print(f"  Alt org: {org}")
+
+                if org:
+                    params = {k:v[0] for k,v in parse_qs(urlparse(oauth_url).query).items()}
+                    scope = " ".join(s for s in params.get("scope","").split() if s != "org:create_api_key")
+                    body = json.dumps({"response_type":"code","client_id":params.get("client_id",""),"organization_uuid":org,"redirect_uri":params.get("redirect_uri",""),"scope":scope,"state":params.get("state",""),"code_challenge":params.get("code_challenge",""),"code_challenge_method":"S256"})
+                    js = f"""(async function(){{var r=await fetch("/v1/oauth/{org}/authorize",{{method:"POST",headers:{{"Content-Type":"application/json","Accept":"application/json"}},credentials:"include",body:{json.dumps(body)}}});return r.status+" | "+await r.text()}})()"""
+                    result = await cdp_eval(ws, js, timeout=15)
+                    print(f"  Authorize API: {(result or '')[:120]}")
+                    if result and result.startswith("200"):
+                        _, txt = result.split(" | ", 1)
+                        rd = json.loads(txt).get("redirect_uri","")
+                        cp = parse_qs(urlparse(rd).query)
+                        code = cp.get("code", [""])[0]
+                        state = cp.get("state", [""])[0]
+
+                # Try getting org UUID from API endpoints
+                if not org:
+                    print("  Trying API-based org extraction...")
+                    JS_API_ORG = """(async function(){
+                        try {
+                            var r = await fetch("/api/organizations", {credentials:"include"});
+                            if (r.ok) { var d = await r.json(); return JSON.stringify(d); }
+                        } catch(e) {}
+                        try {
+                            var r2 = await fetch("/api/auth/current_account", {credentials:"include"});
+                            if (r2.ok) { var d2 = await r2.json(); return JSON.stringify(d2); }
+                        } catch(e) {}
+                        try {
+                            var r3 = await fetch("/api/me", {credentials:"include"});
+                            if (r3.ok) { var d3 = await r3.json(); return JSON.stringify(d3); }
+                        } catch(e) {}
+                        return null;
+                    })()"""
+                    api_result = await cdp_eval(ws, JS_API_ORG, timeout=15)
+                    print(f"  API org result: {(api_result or 'null')[:300]}")
+                    if api_result and api_result != "null":
+                        try:
+                            data = json.loads(api_result)
+                            if isinstance(data, list) and len(data) > 0:
+                                org = data[0].get("uuid") or data[0].get("id")
+                            elif isinstance(data, dict):
+                                org = data.get("uuid") or data.get("organization_uuid") or data.get("id")
+                                if not org and "memberships" in data:
+                                    org = data["memberships"][0]["organization"]["uuid"]
+                        except Exception as e:
+                            print(f"  API parse error: {e}")
+                    if org:
+                        print(f"  Got org from API: {org}")
+                        params = {k:v[0] for k,v in parse_qs(urlparse(oauth_url).query).items()}
+                        scope = " ".join(s for s in params.get("scope","").split() if s != "org:create_api_key")
+                        body = json.dumps({"response_type":"code","client_id":params.get("client_id",""),"organization_uuid":org,"redirect_uri":params.get("redirect_uri",""),"scope":scope,"state":params.get("state",""),"code_challenge":params.get("code_challenge",""),"code_challenge_method":"S256"})
+                        js = f"""(async function(){{var r=await fetch("/v1/oauth/{org}/authorize",{{method:"POST",headers:{{"Content-Type":"application/json","Accept":"application/json"}},credentials:"include",body:{json.dumps(body)}}});return r.status+" | "+await r.text()}})()"""
+                        result = await cdp_eval(ws, js, timeout=15)
+                        print(f"  Authorize via API org: {(result or '')[:120]}")
+                        if result and result.startswith("200"):
+                            _, txt = result.split(" | ", 1)
+                            rd = json.loads(txt).get("redirect_uri","")
+                            cp = parse_qs(urlparse(rd).query)
+                            code = cp.get("code", [""])[0]
+                            state = cp.get("state", [""])[0]
+
+                if not code:
+                    # Last resort: click Authorize and watch page navigation + CDP Network events
+                    print("  Fallback: clicking Authorize + watching navigation + network...")
+                    JS_CLICK_AUTH = """(function(){var btn=[...document.querySelectorAll("button")].find(b=>b.textContent.trim()==="Authorize");if(btn){btn.click();return "clicked";}return "no button";})()"""
+                    click_r = await cdp_eval(ws, JS_CLICK_AUTH, timeout=10)
+                    print(f"  Click: {click_r}")
+                    if click_r == "clicked":
+                        auth_req_ids = {}
+                        deadline_net = time.time() + 15
+                        while time.time() < deadline_net:
+                            try:
+                                raw = await asyncio.wait_for(ws.recv(), timeout=1)
+                                msg = json.loads(raw)
+                                method = msg.get("method", "")
+                                if method == "Network.responseReceived":
+                                    resp_url = msg.get("params", {}).get("response", {}).get("url", "")
+                                    status_code = msg.get("params", {}).get("response", {}).get("status", 0)
+                                    print(f"  Network resp: {status_code} {resp_url[:80]}")
+                                    if "authorize" in resp_url or "oauth" in resp_url:
+                                        req_id = msg["params"]["requestId"]
+                                        auth_req_ids[req_id] = resp_url
+                                elif method == "Network.loadingFinished":
+                                    req_id = msg.get("params", {}).get("requestId", "")
+                                    if req_id in auth_req_ids:
+                                        await ws.send(json.dumps({"id": 9999, "method": "Network.getResponseBody", "params": {"requestId": req_id}}))
+                                        for _ in range(10):
+                                            body_raw = await asyncio.wait_for(ws.recv(), timeout=3)
+                                            body_msg = json.loads(body_raw)
+                                            if body_msg.get("id") == 9999:
+                                                body_text = body_msg.get("result", {}).get("body", "")
+                                                print(f"  Body ({auth_req_ids[req_id][:50]}): {body_text[:300]}")
+                                                try:
+                                                    rd = json.loads(body_text).get("redirect_uri", "")
+                                                    if rd:
+                                                        rcp = parse_qs(urlparse(rd).query)
+                                                        code = rcp.get("code", [""])[0]
+                                                        state = rcp.get("state", [""])[0]
+                                                        if code and state:
+                                                            print(f"  Got code/state from CDP network intercept")
+                                                except: pass
+                                                break
+                                        if code and state:
+                                            break
+                                elif method == "Page.frameNavigated":
+                                    nav_url = msg.get("params", {}).get("frame", {}).get("url", "")
+                                    print(f"  Navigation: {nav_url[:120]}")
+                                    if "code=" in nav_url:
+                                        nav_params = parse_qs(urlparse(nav_url).query)
+                                        code = nav_params.get("code", [""])[0]
+                                        state = nav_params.get("state", [""])[0]
+                                        if code and state:
+                                            print(f"  Got code/state from navigation URL")
+                                            break
+                                    if nav_url and "code=" in (urlparse(nav_url).fragment or ""):
+                                        frag_params = parse_qs(urlparse(nav_url).fragment)
+                                        code = frag_params.get("code", [""])[0]
+                                        state = frag_params.get("state", [""])[0]
+                                        if code and state:
+                                            print(f"  Got code/state from navigation fragment")
+                                            break
+                            except asyncio.TimeoutError:
+                                continue
+                            except Exception as e:
+                                print(f"  Network watch error: {e}")
+                                break
+                        # Also check current URL after waiting
+                        if not code:
+                            cur_url = await cdp_eval(ws, "window.location.href", timeout=5)
+                            print(f"  Current URL after click: {cur_url}")
+                            if cur_url and "code=" in cur_url:
+                                cp = parse_qs(urlparse(cur_url).query)
+                                code = cp.get("code", [""])[0]
+                                state = cp.get("state", [""])[0]
+
             if code and state:
                 print(f"  Feeding code#state to CLI stdin...")
                 cli.stdin.write(f"{code}#{state}\n".encode())
@@ -192,6 +369,11 @@ async def cdp_login(email: str, token: str, config_dir: str, oauth_url: str = ""
                 for _ in range(30):
                     if cli.poll() is not None: break
                     await asyncio.sleep(1)
+                try:
+                    cli_out = cli.stdout.read(4096) if cli.stdout else b""
+                    print(f"  CLI output: {cli_out.decode(errors='replace')[:300]}")
+                except: pass
+                print(f"  CLI exit code: {cli.poll()}")
                 cred_path = Path(config_dir) / ".credentials.json"
                 if cred_path.exists():
                     try:
@@ -207,3 +389,23 @@ async def cdp_login(email: str, token: str, config_dir: str, oauth_url: str = ""
             return None
     finally:
         chrome.kill(); chrome.wait()
+
+
+if __name__ == "__main__":
+    if len(sys.argv) < 3:
+        print(f"Usage: {sys.argv[0]} <account_id> <email_token>")
+        sys.exit(1)
+    account_id = sys.argv[1]
+    email_token = sys.argv[2]
+    accounts_file = Path.home() / ".claude-pool" / "accounts.json"
+    accounts = json.loads(accounts_file.read_text())
+    acct = next((a for a in accounts["accounts"] if a["id"] == account_id), None)
+    if not acct:
+        print(f"Account {account_id} not found"); sys.exit(1)
+    result = asyncio.run(cdp_login(
+        email=acct["email"],
+        token=email_token,
+        config_dir=acct["config_dir"],
+    ))
+    print(f"Result: {result}")
+    sys.exit(0 if result and result.get("success") else 1)
