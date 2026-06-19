@@ -32,7 +32,7 @@ async def create_instance(body: InstanceCreate, db: AsyncSession = Depends(get_d
 
 @router.delete("/cleanup")
 async def cleanup_instances(db: AsyncSession = Depends(get_db)):
-    from backend.main import instance_manager
+    from backend.main import dispatcher, instance_manager
     result = await db.execute(
         select(Instance).where(Instance.status.in_(["error", "stopped"]))
     )
@@ -42,6 +42,8 @@ async def cleanup_instances(db: AsyncSession = Depends(get_db)):
             await instance_manager.stop(inst.id)
         await db.delete(inst)
     await db.commit()
+    if dispatcher.status().get("running"):
+        await dispatcher._ensure_instances()
     return {"ok": True, "deleted": len(targets)}
 
 

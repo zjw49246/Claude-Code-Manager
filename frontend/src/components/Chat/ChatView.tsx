@@ -865,21 +865,22 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
         </div>
       )}
 
+      {/* Load older messages banner — fixed above scroll area */}
+      {messages.length > 0 && hasMoreHistory && (
+        <div className="flex justify-center py-1.5 border-b border-gray-800 bg-gray-950/80 shrink-0">
+          <button
+            onClick={loadMoreHistory}
+            disabled={loadingMore}
+            className="text-xs text-gray-400 hover:text-gray-200 px-3 py-1 rounded-full bg-gray-800 hover:bg-gray-700 transition-colors disabled:opacity-50 flex items-center gap-1.5"
+          >
+            {loadingMore ? <Loader2 size={12} className="animate-spin" /> : <ChevronUp size={12} />}
+            {loadingMore ? 'Loading...' : 'Load older messages'}
+          </button>
+        </div>
+      )}
+
       {/* Messages */}
       <div ref={messagesContainerRef} className="flex-1 overflow-y-auto p-4 space-y-3 min-h-0">
-        {/* Load older messages */}
-        {messages.length > 0 && hasMoreHistory && (
-          <div className="flex justify-center py-2">
-            <button
-              onClick={loadMoreHistory}
-              disabled={loadingMore}
-              className="text-xs text-gray-400 hover:text-gray-200 px-3 py-1.5 rounded-full bg-gray-800 hover:bg-gray-700 transition-colors disabled:opacity-50 flex items-center gap-1.5"
-            >
-              {loadingMore ? <Loader2 size={12} className="animate-spin" /> : <ChevronUp size={12} />}
-              {loadingMore ? 'Loading...' : 'Load older messages'}
-            </button>
-          </div>
-        )}
         {messages.length === 0 && historyLoading && (
           <div className="flex items-center justify-center gap-2 text-gray-500 mt-20">
             <Loader2 size={16} className="animate-spin" />

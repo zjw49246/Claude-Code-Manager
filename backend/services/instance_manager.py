@@ -562,8 +562,11 @@ class InstanceManager:
             # session 退出/重建时一律标 completed，否则 UI 上永远显示 running。
             # CCM 自己的 monitor 子 agent（source="ccm"）有独立进程，不跟主
             # session 走，必须排除，否则 chat turn 结束就误杀 monitor。
+            # 但如果有 native-monitor 在 running，说明 monitor 被进程退出打断，
+            # 需要 auto-resume 让主 agent 处理积压的 <task-notification>。
             if task_id:
                 from backend.models.sub_agent import SubAgentSession
+                has_pending_monitors = False
                 async with self.db_factory() as db:
                     stale = await db.execute(
                         select(SubAgentSession).where(
@@ -573,9 +576,36 @@ class InstanceManager:
                         )
                     )
                     for sa in stale.scalars().all():
+                        if sa.agent_type in ("native-monitor", "monitor"):
+                            has_pending_monitors = True
                         sa.status = "completed"
                         sa.completed_at = datetime.utcnow()
                     await db.commit()
+
+                # Auto-resume: native monitor 随进程退出，
+                # resume 让主 agent 拿到 <task-notification> 并做出反应
+                if has_pending_monitors and exit_code == 0 and chat_initiated:
+                    try:
+                        from backend.main import dispatcher
+                        from backend.services.dispatcher import PRIORITY_MONITOR_COMPLETE
+                        await dispatcher.enqueue_message(
+                            task_id=task_id,
+                            prompt=(
+                                "[Monitor 通知] 你之前启动的 Monitor 已有结果。"
+                                "请检查 monitor 的 task-notification 并根据结果决定下一步操作。"
+                            ),
+                            priority=PRIORITY_MONITOR_COMPLETE,
+                            source="monitor:native-exit-resume",
+                            user_message_text="[Monitor] 后台监控已产生通知，自动恢复会话",
+                        )
+                        logger.info(
+                            "Task %d had pending native monitors on exit, enqueued auto-resume",
+                            task_id,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to enqueue monitor auto-resume for task %s", task_id,
+                        )
 
             # Broadcast completion
             exit_event = {
@@ -1083,6 +1113,29 @@ class InstanceManager:
                     "agent_type": existing.agent_type,
                     "status": "completed",
                 })
+
+                # Auto-resume: native monitor 完成后通知主 Agent
+                if existing.agent_type in ("native-monitor",):
+                    try:
+                        from backend.main import dispatcher
+                        from backend.services.dispatcher import PRIORITY_MONITOR_COMPLETE
+                        summary = existing.last_summary or existing.description or "监控完成"
+                        prompt = (
+                            f"[Native Monitor 完成] {summary}\n\n"
+                            "请根据监控结果决定下一步操作。"
+                        )
+                        await dispatcher.enqueue_message(
+                            task_id=task_id,
+                            prompt=prompt,
+                            priority=PRIORITY_MONITOR_COMPLETE,
+                            source="monitor:native-complete",
+                            user_message_text=f"[Monitor] 监控完成: {summary}",
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to enqueue auto-resume for native monitor on task %s",
+                            task_id,
+                        )
 
     # ---------------------------------------------------- PTY 权限透传
 
