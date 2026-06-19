@@ -321,6 +321,14 @@
 - **预防**: 提供回调注册点的库要在集成层 grep 一遍"谁注册了"——长期无人注册的回调点等于功能性静默缺陷；跨线程回调必须显式注入事件循环（lifespan 里给 _loop 赋值），不要在回调里 get_event_loop
 - **Commit**: d0e53d4 + 8b6b496
 
+### 2026-06-19 — task #707 双 session 竞争条件（queue consumer 崩溃恢复误标 pending）
+
+- **问题**: 聊天每发一条消息都会同时起两个 Claude session——一个 resume 回应聊天、一个从头重跑任务描述（task #707 日志中 8 组配对，启动时间差仅 2-5 秒）。表现为"第一遍没反应、第二遍才好"
+- **原因**: `_process_queued_message` 的崩溃恢复分支（task.status=="failed"）在克隆 session JSONL 失败、回退到 compact 摘要后，把 `task.status` 写成 `"pending"` 并 commit。主调度循环 `_dispatch_loop` → `TaskQueue.dequeue()` 只认 `status=="pending"` 的任务，下一次 2 秒轮询就把它当新任务抢走一个空闲 instance 从头执行；同时 queue consumer 自己也继续 resume。同一 task 被两条路径并发启动两个进程
+- **解决**: 崩溃恢复处 `task.status` 改成 `"in_progress"`（dispatcher.py），表示"已被 queue consumer 认领、待 resume"。dequeue 不会再抢；consumer 后续在 launch 前会自行改成 `"executing"`。与 TaskQueue.dequeue 认领时设的 `in_progress` 语义一致
+- **预防**: 任何在 dispatch loop 之外操作 task 状态的路径，绝不能把进行中的 task 落回 `"pending"`——那是主调度循环唯一的"可领取"信号。中间态一律用 `in_progress`/`executing`
+- **Commit**: 本次提交
+
 ## 已知问题
 
 - `total_cost_usd` 仅在 Claude Code stream-json result 事件报告时更新

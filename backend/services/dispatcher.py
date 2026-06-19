@@ -2205,7 +2205,12 @@ class GlobalDispatcher:
                             f"[上下文摘要 — 之前的对话记录（会话异常中断后恢复）]\n{summary}\n\n"
                             f"---\n\n[新消息]\n{msg.prompt}"
                         )
-                task.status = "pending"
+                # 关键：不能设成 "pending"——否则主调度循环 (dequeue) 会把它当作
+                # 新任务抢走一个空闲 instance 从头执行 task 描述，导致同一 task 出现
+                # 两个 Claude session（一个回应聊天、一个重跑任务）。设成 "in_progress"
+                # 表示"已被 queue consumer 认领、待 resume"，dispatch loop 不会重复分配。
+                # 详见 PROGRESS.md task #707 双 session 竞争条件。
+                task.status = "in_progress"
                 task.error_message = None
                 await db.commit()
 
