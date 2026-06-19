@@ -2212,7 +2212,7 @@ class GlobalDispatcher:
             # Wait for main agent to be idle (not executing)
             for attempt in range(60):
                 is_busy = False
-                for iid, proc in self.instance_manager.processes.items():
+                for iid, proc in list(self.instance_manager.processes.items()):
                     if proc.returncode is None:
                         inst = await db.get(Instance, iid)
                         if inst and inst.current_task_id == task_id:
@@ -2289,7 +2289,7 @@ class GlobalDispatcher:
                 total_input = (usage.get("input_tokens") or 0) + (usage.get("cache_read_input_tokens") or 0) + (usage.get("cache_creation_input_tokens") or 0)
                 # context_window 可能被 CC 低报（1M 模型报 200K），用模型名兜底
                 window = usage.get("context_window") or 200_000
-                model_lower = (task.model or "").lower()
+                model_lower = (msg.model_override or task.model or "").lower()
                 if "[1m]" in model_lower or "fable" in model_lower:
                     window = max(window, 1_000_000)
                 utilization = total_input / window if window else 0
