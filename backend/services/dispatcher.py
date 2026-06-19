@@ -2186,10 +2186,24 @@ class GlobalDispatcher:
                 logger.warning(f"Task {task_id} not found or no session, skipping queued message")
                 return
 
-            # Session crashed (task=failed after abnormal exit): clone session JSONL + resume
-            if task.status == "failed" and task.session_id:
-                logger.info("Task %d session crashed, cloning session for recovery...", task_id)
-                from backend.api.tasks import _clone_session
+            # Recover before resuming when the session can't be resumed:
+            #   - task=failed after an abnormal exit (session may still be on disk), OR
+            #   - the session JSONL is gone (resume would die with "No conversation
+            #     found", which non-0 exits and hard-fails the task).
+            # Without the on-disk check the FIRST message after a session vanishes
+            # is always sacrificed to flip the task to "failed"; only the SECOND
+            # message reaches this branch and recovers (prod task #725).
+            from backend.api.tasks import _clone_session, _find_session_jsonl
+            session_gone = bool(task.session_id) and _find_session_jsonl(task.session_id) is None
+            if task.session_id and (task.status == "failed" or session_gone):
+                if task.status == "failed":
+                    logger.info("Task %d session crashed, recovering session...", task_id)
+                else:
+                    logger.warning(
+                        "Task %d session %s not on disk, recovering before resume "
+                        "(would otherwise hard-fail with 'No conversation found')",
+                        task_id, task.session_id,
+                    )
                 cloned = await _clone_session(task_id, db)
                 if cloned:
                     task.session_id = cloned["session_id"]
