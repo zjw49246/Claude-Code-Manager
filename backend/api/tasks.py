@@ -15,17 +15,39 @@ from backend.services.task_queue import TaskQueue
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
 
+def _find_session_jsonl(session_id: str) -> Path | None:
+    """Locate a session JSONL on disk, pool-aware.
+
+    Pool deployments split sessions across multiple ~/.claude-account-N dirs,
+    so a lookup that only checks ~/.claude / CLAUDE_CONFIG_DIR (and only the
+    exact last_cwd-encoded project subdir) misses sessions created under a pool
+    account and silently degrades recovery to a lossy summary (prod task #725).
+    We reuse the pool's own locator (searches every account dir) and glob across
+    all project subdirs so cwd-encoding differences don't hide the file either.
+    """
+    config_dir: str | None = None
+    try:
+        from backend.main import dispatcher
+        if dispatcher and dispatcher.pool:
+            config_dir = dispatcher.pool.locate_session_config_dir(session_id)
+    except Exception:
+        config_dir = None
+    if config_dir is None:
+        config_dir = os.environ.get("CLAUDE_CONFIG_DIR", os.path.expanduser("~/.claude"))
+    try:
+        return next(Path(config_dir).glob(f"projects/*/{session_id}.jsonl"), None)
+    except OSError:
+        return None
+
+
 async def _clone_session(source_task_id: int, db: AsyncSession) -> dict | None:
     """Clone a Claude Code session file from a source task, returning new session_id and last_cwd."""
     source = await db.get(Task, source_task_id)
     if not source or not source.session_id or not source.last_cwd:
         return None
 
-    config_dir = Path(os.environ.get("CLAUDE_CONFIG_DIR", os.path.expanduser("~/.claude")))
-    encoded_cwd = source.last_cwd.replace("/", "-")
-    source_jsonl = config_dir / "projects" / encoded_cwd / f"{source.session_id}.jsonl"
-
-    if not source_jsonl.exists():
+    source_jsonl = _find_session_jsonl(source.session_id)
+    if source_jsonl is None:
         return None
 
     new_session_id = str(uuid.uuid4())

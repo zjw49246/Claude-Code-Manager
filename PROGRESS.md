@@ -329,6 +329,15 @@
 - **预防**: 任何在 dispatch loop 之外操作 task 状态的路径，绝不能把进行中的 task 落回 `"pending"`——那是主调度循环唯一的"可领取"信号。中间态一律用 `in_progress`/`executing`
 - **Commit**: 本次提交
 
+### 2026-06-19 — task #725 resume 找不到 session：第一条消息被牺牲、第二条才恢复
+
+- **现象**: 任务跑完后，用户发第一条 follow-up 消息直接把 task 打成 failed，紧接着发第二条**同样内容**却正常回复。DB 日志铁证：turn 0 建 session `70bcfc88` 成功完成 → 第一条消息 `--resume 70bcfc88` 返回 `error_during_execution: "No conversation found with session ID: 70bcfc88"` → 进程非 0 退出 → `_consume_output` 把 task 标 `failed` → 第二条消息因 `status=="failed"` 命中崩溃恢复分支 → `_clone_session` 也找不到 JSONL → 回退到「摘要 + 全新 session `80319fa2`」→ 成功
+- **原因（两层）**: ① **结构性**：`_process_queued_message` 的恢复逻辑被 `task.status=="failed"` 这个前置条件挡住，意味着 session 在 resume 时丢失时，**第一条消息永远是炮灰**（必须先失败把 task 翻成 failed，下一条才触发恢复）。② **查找太窄**：`_clone_session` 只在 `~/.claude`/`CLAUDE_CONFIG_DIR` 下、按 `last_cwd` **字面编码**找 JSONL，既不搜各 pool 账号目录（`POOL_ENABLED=true` 时 session 落在某账号 `projects/` 下），也踩了 task #722 记录的符号链接坑——`/Users/matter -> /home/ubuntu`，CLI 用 `os.getcwd()` 的 realpath 编码落盘为 `-home-ubuntu-...`，而 DB 里 `last_cwd` 是符号链接路径 `-Users-matter-...`，字面编码对不上 → clone 永远 miss → 退化成有损摘要
+- **解决**: ① `api/tasks.py` 新增 `_find_session_jsonl(session_id)`，pool 在时复用 `pool.locate_session_config_dir`（搜所有账号目录），并统一用 `projects/*/{sid}.jsonl` 通配——对 cwd 编码（符号链接 vs realpath）免疫；`_clone_session` 改用它。② `dispatcher.py` 恢复分支的触发条件从 `status=="failed"` 扩成 `status=="failed" 或 session 不在磁盘上`（resume 前先 `_find_session_jsonl` 探测），让**第一条消息就能自救**。session 真在磁盘上时探测返回非 None，正常 resume，不会误触发恢复
+- **预防**: ①「按数据库里存的路径去拼磁盘路径」必须考虑符号链接/realpath 不一致——能 glob 就别拼字面编码；②pool 部署下任何找 session 文件的逻辑都要搜全部账号目录，别假设在默认 `~/.claude`；③"先失败再靠下一条消息恢复"是反模式——恢复条件应基于"能不能 resume"的事实探测，而不是等 task 被标 failed
+- **测试**: `backend/tests/test_session_recovery.py`（pool 账号目录 + 跨 project 子目录通配 + session 缺失三类），并修正 `test_api_chat_plan.py` 四个 `_process_queued_message` 用例（新增 `fake_session_on_disk` fixture 在磁盘上放真 session，使其走 resume 而非恢复路径）
+- **Commit**: 本次提交
+
 ## 已知问题
 
 - `total_cost_usd` 仅在 Claude Code stream-json result 事件报告时更新

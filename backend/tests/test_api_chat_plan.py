@@ -426,8 +426,26 @@ def _queued(prompt="hi"):
     )
 
 
+@pytest.fixture
+def fake_session_on_disk(tmp_path, monkeypatch):
+    """Make the seeded sess-1 resumable on disk.
+
+    _process_queued_message now checks the session JSONL exists before resuming
+    (recovers if gone — prod task #725). Drop a sess-1 JSONL under a temp
+    CLAUDE_CONFIG_DIR (globbed across project subdirs) so the resume path — not
+    the recovery path — is what these tests exercise.
+    """
+    import backend.main as main_mod
+    monkeypatch.setattr(main_mod, "dispatcher", None, raising=False)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    proj = tmp_path / "projects" / "-tmp"
+    proj.mkdir(parents=True)
+    (proj / "sess-1.jsonl").write_text("{}\n")
+    return tmp_path
+
+
 @pytest.mark.asyncio
-async def test_process_queued_message_uses_task_model(db_factory):
+async def test_process_queued_message_uses_task_model(db_factory, fake_session_on_disk):
     """Queued message launch resumes with task.model (the model that created
     the session), not any instance-level model."""
     dispatcher = _make_dispatcher(db_factory)
@@ -444,7 +462,7 @@ async def test_process_queued_message_uses_task_model(db_factory):
 
 
 @pytest.mark.asyncio
-async def test_process_queued_message_effort_uses_task_effort(db_factory):
+async def test_process_queued_message_effort_uses_task_effort(db_factory, fake_session_on_disk):
     """Queued message launch uses task.effort_level."""
     dispatcher = _make_dispatcher(db_factory)
     task_id = await _seed_task_for_queue(db_factory, effort_level="high", last_cwd="/tmp")
@@ -456,7 +474,7 @@ async def test_process_queued_message_effort_uses_task_effort(db_factory):
 
 
 @pytest.mark.asyncio
-async def test_process_queued_message_cwd_uses_last_cwd(db_factory):
+async def test_process_queued_message_cwd_uses_last_cwd(db_factory, fake_session_on_disk):
     """When last_cwd is set, the launch cwd uses it."""
     dispatcher = _make_dispatcher(db_factory)
     task_id = await _seed_task_for_queue(db_factory, last_cwd="/tmp/somewhere")
@@ -468,7 +486,7 @@ async def test_process_queued_message_cwd_uses_last_cwd(db_factory):
 
 
 @pytest.mark.asyncio
-async def test_process_queued_message_cwd_falls_back_to_target_repo(db_factory):
+async def test_process_queued_message_cwd_falls_back_to_target_repo(db_factory, fake_session_on_disk):
     """Without last_cwd, the launch cwd falls back to task.target_repo
     (the old endpoint-level 400-on-missing-cwd check no longer exists)."""
     dispatcher = _make_dispatcher(db_factory)
