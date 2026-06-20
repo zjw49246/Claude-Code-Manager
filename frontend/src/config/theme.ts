@@ -24,6 +24,6 @@ export function setTheme(theme: Theme) {
 
 export function applyTheme(theme?: Theme) {
   const t = theme || getTheme();
-  document.documentElement.classList.toggle('light', t === 'light');
+  document.documentElement.classList.remove('light');
   document.documentElement.dataset.theme = t;
 }

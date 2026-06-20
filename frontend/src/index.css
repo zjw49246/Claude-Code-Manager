@@ -11,7 +11,7 @@ html {
 }
 
 /* Light theme: reverse the gray scale + flip foreground */
-html.light {
+html[data-theme='light'] {
   background-color: #f9fafb;
 
   --color-foreground: #111827;
