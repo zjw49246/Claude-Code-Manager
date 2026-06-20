@@ -15,7 +15,7 @@ export function ShareModal({ type, itemId, itemTitle, onClose }: ShareModalProps
   const [members, setMembers] = useState<OrgMember[]>([]);
   const [teams, setTeams] = useState<OrgTeam[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [existing, setExisting] = useState<Set<string>>(new Set());
+  const [initial, setInitial] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -40,7 +40,8 @@ export function ShareModal({ type, itemId, itemTitle, onClose }: ShareModalProps
         setMembers(membersData);
         setTeams(teamsData);
         const alreadyShared = new Set(sharesData.shares.map((s: any) => s.shared_to_open_id));
-        setExisting(alreadyShared);
+        setInitial(alreadyShared);
+        setSelected(new Set(alreadyShared));
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
       } finally {
@@ -63,34 +64,36 @@ export function ShareModal({ type, itemId, itemTitle, onClose }: ShareModalProps
 
   const toggleTeam = (team: OrgTeam) => {
     const teamMembers = (team.members || []).filter(m => !isSelf(m.feishu_open_id));
-    const allSelected = teamMembers.length > 0 && teamMembers.every(m => selected.has(m.feishu_open_id));
+    const selectableIds = teamMembers.map(m => m.feishu_open_id);
+    const allSelected = selectableIds.length > 0 && selectableIds.every(id => selected.has(id));
     setSelected(prev => {
       const next = new Set(prev);
-      teamMembers.forEach(m => {
-        if (allSelected) next.delete(m.feishu_open_id);
-        else next.add(m.feishu_open_id);
+      selectableIds.forEach(id => {
+        if (allSelected) next.delete(id);
+        else next.add(id);
       });
       return next;
     });
   };
 
-  const handleShare = async () => {
-    const targets = members
-      .filter(m => selected.has(m.feishu_open_id) && !existing.has(m.feishu_open_id))
-      .map(m => ({ open_id: m.feishu_open_id, name: m.name, ccm_url: m.ccm_url }));
+  const toAdd = members.filter(m => selected.has(m.feishu_open_id) && !initial.has(m.feishu_open_id));
+  const toRevoke = [...initial].filter(id => !selected.has(id));
+  const hasChanges = toAdd.length > 0 || toRevoke.length > 0;
 
-    if (targets.length === 0) {
-      onClose();
-      return;
-    }
-
+  const handleSave = async () => {
     setSubmitting(true);
     setError(null);
     try {
-      if (type === 'task') {
-        await api.shareTask(itemId, targets);
-      } else {
-        await api.shareProject(itemId, targets);
+      // Add new shares
+      if (toAdd.length > 0) {
+        const targets = toAdd.map(m => ({ open_id: m.feishu_open_id, name: m.name, ccm_url: m.ccm_url }));
+        if (type === 'task') await api.shareTask(itemId, targets);
+        else await api.shareProject(itemId, targets);
+      }
+      // Revoke removed shares
+      for (const openId of toRevoke) {
+        if (type === 'task') await api.revokeTaskShare(itemId, openId);
+        else await api.revokeProjectShare(itemId, openId);
       }
       onClose();
     } catch (e) {
@@ -134,8 +137,8 @@ export function ShareModal({ type, itemId, itemTitle, onClose }: ShareModalProps
                   <h4 className="text-sm font-medium text-gray-400 mb-2">Teams</h4>
                   <div className="space-y-1">
                     {teams.map(team => {
-                      const teamMembers = team.members || [];
-                      const allSelected = teamMembers.length > 0 && teamMembers.every(m => selected.has(m.feishu_open_id) || existing.has(m.feishu_open_id));
+                      const teamMembers = (team.members || []).filter(m => !isSelf(m.feishu_open_id));
+                      const allSelected = teamMembers.length > 0 && teamMembers.every(m => selected.has(m.feishu_open_id));
                       return (
                         <button
                           key={team.id}
@@ -160,16 +163,14 @@ export function ShareModal({ type, itemId, itemTitle, onClose }: ShareModalProps
                 <div className="space-y-1">
                   {members.map(m => {
                     const isMe = isSelf(m.feishu_open_id);
-                    const isExisting = existing.has(m.feishu_open_id);
-                    const isDisabled = isMe || isExisting;
                     const isSelected = selected.has(m.feishu_open_id);
                     return (
                       <button
                         key={m.feishu_open_id}
-                        onClick={() => !isDisabled && toggleMember(m.feishu_open_id)}
-                        disabled={isDisabled}
+                        onClick={() => !isMe && toggleMember(m.feishu_open_id)}
+                        disabled={isMe}
                         className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-left transition-colors ${
-                          isDisabled
+                          isMe
                             ? 'bg-gray-700/30 opacity-60 cursor-not-allowed'
                             : isSelected
                             ? 'bg-blue-600/20 border border-blue-500/30'
@@ -182,8 +183,7 @@ export function ShareModal({ type, itemId, itemTitle, onClose }: ShareModalProps
                           <User size={16} className="text-gray-400" />
                         )}
                         <span className="flex-1 text-sm text-foreground">{m.name}</span>
-                        {isExisting && <span className="text-xs text-gray-500">Already shared</span>}
-                        {isSelected && !isDisabled && <Check size={14} className="text-blue-400" />}
+                        {isSelected && !isMe && <Check size={14} className="text-blue-400" />}
                       </button>
                     );
                   })}
@@ -201,11 +201,11 @@ export function ShareModal({ type, itemId, itemTitle, onClose }: ShareModalProps
             Cancel
           </button>
           <button
-            onClick={handleShare}
-            disabled={submitting || selected.size === 0}
+            onClick={handleSave}
+            disabled={submitting || !hasChanges}
             className="px-4 py-2 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            {submitting ? 'Sharing...' : `Share (${selected.size})`}
+            {submitting ? 'Saving...' : hasChanges ? `Save (${toAdd.length > 0 ? `+${toAdd.length}` : ''}${toAdd.length > 0 && toRevoke.length > 0 ? ' ' : ''}${toRevoke.length > 0 ? `-${toRevoke.length}` : ''})` : 'No changes'}
           </button>
         </div>
       </div>
