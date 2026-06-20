@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { api } from '../api/client';
 import type { OrgMember, OrgTeam } from '../api/client';
 import { X, Users, User, Check } from 'lucide-react';
@@ -99,8 +100,8 @@ export function ShareModal({ type, itemId, itemTitle, onClose }: ShareModalProps
     }
   };
 
-  return (
-    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+  return createPortal(
+    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-[9999] p-4">
       <div className="bg-gray-800 rounded-xl shadow-2xl w-full max-w-lg max-h-[80vh] flex flex-col">
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-700">
           <h3 className="text-foreground font-semibold">
@@ -208,6 +209,7 @@ export function ShareModal({ type, itemId, itemTitle, onClose }: ShareModalProps
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }

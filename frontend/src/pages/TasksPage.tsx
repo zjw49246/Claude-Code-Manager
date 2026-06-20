@@ -9,7 +9,7 @@ import { ChatView } from '../components/Chat/ChatView';
 import { LoopChatView } from '../components/Chat/LoopChatView';
 import { ProjectSelect } from '../components/ProjectSelect';
 import { resolveTagColor } from '../components/TagColors';
-import { ChevronLeft, ChevronRight, ChevronDown, Filter, PanelLeftClose, PanelLeftOpen, Search, X, Star, Archive, ArchiveRestore } from 'lucide-react';
+import { ChevronLeft, ChevronRight, ChevronDown, Filter, PanelLeftClose, PanelLeftOpen, Search, X, Star, Archive, ArchiveRestore, Share2 } from 'lucide-react';
 import { ToolsBadge, SubAgentsBadge } from '../components/Tasks/TaskBadges';
 import { TAG_COLOR_OPTIONS } from '../components/TagColors';
 import { useTaskReorder } from '../hooks/useTaskReorder';
@@ -520,6 +520,13 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
                       title={t.starred ? 'Unstar' : 'Star'}
                     >
                       <Star size={13} fill={t.starred ? 'currentColor' : 'none'} />
+                    </button>
+                    <button
+                      onClick={() => setSharingTask(t)}
+                      className="p-1 text-gray-600 hover:text-blue-400 transition-colors"
+                      title="Share"
+                    >
+                      <Share2 size={13} />
                     </button>
                     <button
                       onClick={async () => { await api.archiveTask(t.id); refresh(); }}
