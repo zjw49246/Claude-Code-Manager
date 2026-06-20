@@ -32,12 +32,39 @@ def _find_session_jsonl(session_id: str) -> Path | None:
             config_dir = dispatcher.pool.locate_session_config_dir(session_id)
     except Exception:
         config_dir = None
-    if config_dir is None:
-        config_dir = os.environ.get("CLAUDE_CONFIG_DIR", os.path.expanduser("~/.claude"))
+    # Try pool locator result first, then env CLAUDE_CONFIG_DIR, then default
+    dirs_to_check = []
+    if config_dir:
+        dirs_to_check.append(config_dir)
+    env_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    if env_dir and env_dir not in dirs_to_check:
+        dirs_to_check.append(env_dir)
+    default_dir = os.path.expanduser("~/.claude")
+    if default_dir not in dirs_to_check:
+        dirs_to_check.append(default_dir)
+    for d in dirs_to_check:
+        try:
+            match = next(Path(d).glob(f"projects/*/{session_id}.jsonl"), None)
+            if match:
+                return match
+        except OSError:
+            pass
+    # Fallback: scan all ~/.claude* dirs on disk. Covers accounts that were
+    # removed from the pool but whose config dirs still exist on disk.
+    home = Path.home()
     try:
-        return next(Path(config_dir).glob(f"projects/*/{session_id}.jsonl"), None)
+        for d in sorted(home.iterdir()):
+            if not d.name.startswith(".claude") or not d.is_dir():
+                continue
+            try:
+                match = next(d.glob(f"projects/*/{session_id}.jsonl"), None)
+                if match:
+                    return match
+            except OSError:
+                continue
     except OSError:
-        return None
+        pass
+    return None
 
 
 async def _clone_session(source_task_id: int, db: AsyncSession) -> dict | None:

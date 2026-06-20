@@ -350,6 +350,15 @@ class ClaudePool:
         candidates.append(str(Path.home() / ".claude"))
         if extra_dirs:
             candidates.extend(extra_dirs)
+        # Also scan all ~/.claude* dirs on disk — covers accounts removed
+        # from the pool whose config dirs still exist (e.g. expired accounts).
+        home = Path.home()
+        try:
+            for d in sorted(home.iterdir()):
+                if d.name.startswith(".claude") and d.is_dir() and str(d) not in candidates:
+                    candidates.append(str(d))
+        except OSError:
+            pass
         seen: set[str] = set()
         for d in candidates:
             d = os.path.expanduser(d)
