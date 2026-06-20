@@ -194,7 +194,7 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId,
                 {copiedId === t.id ? <Check size={16} className="text-green-400" /> : <Copy size={16} />}
               </button>
               {/* Overflow menu */}
-              <div className="relative" ref={menuOpenId === t.id ? menuRef : undefined}>
+              <div className="relative">
                 <button
                   ref={menuOpenId === t.id ? menuBtnRef : undefined}
                   onClick={(e) => {

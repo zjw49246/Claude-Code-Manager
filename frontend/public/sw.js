@@ -1,4 +1,4 @@
-const CACHE_NAME = 'cc-manager-v3';
+const CACHE_NAME = 'cc-manager-v4';
 const STATIC_ASSETS = ['/icons/icon.svg'];
 
 self.addEventListener('install', (event) => {
@@ -20,43 +20,22 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
 
-  // The Cache API only supports GET requests. Let POST/PUT/etc. go straight
-  // to the network so API-like form submissions never throw in the worker.
   if (event.request.method !== 'GET') {
     return;
   }
 
-  // Network-first for API and WebSocket — let them fall through to the network.
   if (url.pathname.startsWith('/api') || url.pathname.startsWith('/ws')) {
     return;
   }
 
-  // Network-first for navigation requests and index.html so new deploys are picked up immediately.
-  // Vite-built JS/CSS in /assets have content-hashed filenames, so a fresh index.html guarantees fresh assets.
-  const isNavigation = event.request.mode === 'navigate' || url.pathname === '/' || url.pathname.endsWith('.html');
-  if (isNavigation) {
-    event.respondWith(
-      fetch(event.request).then((response) => {
-        if (response.ok) {
-          const clone = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
-        }
-        return response;
-      }).catch(() => caches.match(event.request).then((cached) => cached || Response.error()))
-    );
-    return;
-  }
-
-  // Cache-first for hashed static assets (safe — filename changes when content changes).
+  // Always network-first for everything — no stale cache issues
   event.respondWith(
-    caches.match(event.request).then((cached) => {
-      return cached || fetch(event.request).then((response) => {
-        if (response.ok) {
-          const clone = response.clone();
-          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
-        }
-        return response;
-      });
-    })
+    fetch(event.request).then((response) => {
+      if (response.ok) {
+        const clone = response.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+      }
+      return response;
+    }).catch(() => caches.match(event.request).then((cached) => cached || Response.error()))
   );
 });
