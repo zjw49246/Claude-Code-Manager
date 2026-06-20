@@ -1,12 +1,14 @@
 import { useState, useEffect, useCallback } from 'react';
 import { api } from '../api/client';
 import type { SharedTaskReceived } from '../api/client';
-import { RefreshCw, ExternalLink, X } from 'lucide-react';
+import { RefreshCw, MessageCircle, X } from 'lucide-react';
+import { SharedChatView } from '../components/Chat/SharedChatView';
 
 export default function SharesPage() {
   const [tasks, setTasks] = useState<SharedTaskReceived[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [openTask, setOpenTask] = useState<SharedTaskReceived | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -28,10 +30,22 @@ export default function SharesPage() {
     try {
       await api.leaveSharedTask(id);
       setTasks(prev => prev.filter(t => t.id !== id));
+      if (openTask?.id === id) setOpenTask(null);
     } catch (e) {
       setError(String(e));
     }
   };
+
+  if (openTask) {
+    return (
+      <div className="h-[calc(100vh-8rem)]">
+        <SharedChatView
+          shared={openTask}
+          onBack={() => setOpenTask(null)}
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -57,9 +71,9 @@ export default function SharesPage() {
 
       <div className="grid gap-3">
         {tasks.map(task => (
-          <div key={task.id} className="bg-gray-800 rounded-xl border border-gray-700 p-4">
+          <div key={task.id} className="bg-gray-800 rounded-xl border border-gray-700 p-4 hover:border-gray-600 transition-colors">
             <div className="flex items-start justify-between">
-              <div className="flex-1 min-w-0">
+              <div className="flex-1 min-w-0 cursor-pointer" onClick={() => setOpenTask(task)}>
                 <div className="flex items-center gap-2 mb-1">
                   <span className="text-xs text-gray-500 bg-gray-700 px-2 py-0.5 rounded">
                     from {task.owner_name || 'Unknown'}
@@ -83,14 +97,12 @@ export default function SharesPage() {
                 )}
               </div>
               <div className="flex items-center gap-2 ml-4 flex-shrink-0">
-                <a
-                  href={`${task.owner_ccm_url}/#/tasks/chat/${task.remote_task_id}`}
-                  target="_blank"
-                  rel="noopener noreferrer"
+                <button
+                  onClick={() => setOpenTask(task)}
                   className="flex items-center gap-1 px-3 py-1.5 text-sm bg-blue-600 hover:bg-blue-500 text-white rounded-lg"
                 >
-                  <ExternalLink size={14} /> View
-                </a>
+                  <MessageCircle size={14} /> Open
+                </button>
                 <button
                   onClick={() => handleLeave(task.id)}
                   className="p-1.5 text-gray-400 hover:text-red-400 rounded-lg hover:bg-gray-700"
