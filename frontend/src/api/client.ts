@@ -476,6 +476,8 @@ export const api = {
     request<{ ok: boolean }>(`/api/shared/${sharedId}/chat`, { method: 'POST', body: JSON.stringify({ message }) }),
   getSharedConfig: (sharedId: number) =>
     request<any>(`/api/shared/${sharedId}/config`),
+  pingSharer: (sharedId: number) =>
+    request<{ online: boolean }>(`/api/shared/${sharedId}/ping`),
 
   // Projects
   listProjects: () => request<Project[]>('/api/projects'),

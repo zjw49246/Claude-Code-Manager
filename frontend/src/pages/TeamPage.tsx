@@ -327,13 +327,18 @@ export default function TeamPage() {
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             {members.map((m) => (
               <div key={m.feishu_open_id} className="flex items-center gap-2 p-2 rounded bg-gray-700/50">
-                {m.avatar_url ? (
-                  <img src={m.avatar_url} className="w-6 h-6 rounded-full" alt="" />
-                ) : (
-                  <div className="w-6 h-6 rounded-full bg-gray-600 flex items-center justify-center text-xs text-gray-300">
-                    {m.name.charAt(0).toUpperCase()}
-                  </div>
-                )}
+                <div className="relative flex-shrink-0">
+                  {m.avatar_url ? (
+                    <img src={m.avatar_url} className="w-6 h-6 rounded-full" alt="" />
+                  ) : (
+                    <div className="w-6 h-6 rounded-full bg-gray-600 flex items-center justify-center text-xs text-gray-300">
+                      {m.name.charAt(0).toUpperCase()}
+                    </div>
+                  )}
+                  {(m as any).is_online !== undefined && (
+                    <span className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-gray-800 ${(m as any).is_online ? 'bg-green-500' : 'bg-gray-500'}`} />
+                  )}
+                </div>
                 <span className="text-sm text-foreground">{m.name}</span>
                 <span className="text-xs text-gray-500 truncate">{m.ccm_url}</span>
               </div>
