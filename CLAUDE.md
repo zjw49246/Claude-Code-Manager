@@ -128,7 +128,7 @@ claude-manager/
 - **认证**: 除 `/api/system/health`、`/api/auth/login`、`/api/github/webhook` 外，所有 API 需要 `Authorization: Bearer <token>`
 - **前端 type 导入**: 用 `import type { X }` 导入类型，`import { api }` 导入值（Vite 会去除 type-only exports）
 - **Tailwind v4**: 用 `@import "tailwindcss"` + `@tailwindcss/vite` 插件，无 tailwind.config
-- **主题**: 深色/浅色切换通过覆盖 `--color-gray-*` CSS 变量实现灰度反转，内容文字用 `text-foreground`（随主题变化），按钮文字保持 `text-white`
+- **主题**: 语义 token 系统（VS Code 风格）。`config/theme.ts` 的 `THEMES` 注册表为每个主题定义 22 个语义角色，`applyTheme` 按 `data-theme` 把它们写成 `--ccm-*` 变量到 `<html>` 上；`index.css` 的 `@theme` 把 Tailwind `--color-*` 别名（`bg-app/surface/chrome/accent`、`text-muted/subtle/success/danger` 等）映射到 `--ccm-*`。已迁移组件用语义类，**未迁移组件仍用 `bg-gray-*` 硬编码类**，靠每个主题的 `html[data-theme=...]` 兼容块覆盖 `--color-gray-*` 兜底跟随主题（组件全迁移后可删）。当前全是深色系主题（深色/海蓝/森林/莓红/One Dark/Dracula/Nord/Tokyo Night）；**light 主题被刻意移除**——反转灰阶会让满屏 `text-white`/`bg-white` 字面量变成白底白字。`:root` 硬编码一份 dark 值作为 JS 加载前 fallback，改 dark 值须与 `THEMES.dark` 同步
 - **Android App**: Capacitor 打包，API/WS 地址通过 `config/server.ts` 动态获取，LoginPage 可展开配置 Server URL
 - **Goal 模式**: `mode="goal"` 任务使用自然语言完成条件（`goal_condition`），每 turn 后由独立评估器（默认 Haiku）判断是否达成。使用 `--resume` 保持同一 session 的连续上下文。评估器通过 `claude -p` 子进程调用，不需要额外 API key
 - **Goal 评估器**: `GoalEvaluator`（`backend/services/goal_evaluator.py`）读取对话日志摘要，发给轻量模型判断条件是否满足。默认模型 `claude-haiku-4-5`，可通过 `goal_evaluator_model` 覆盖

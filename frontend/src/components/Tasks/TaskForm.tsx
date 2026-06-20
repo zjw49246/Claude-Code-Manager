@@ -314,8 +314,8 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   };
 
   return (
-    <form ref={formRef} onSubmit={handleSubmit} className="bg-gray-800 rounded-lg p-4 space-y-3 overflow-visible">
-      <h3 className="text-sm font-semibold text-gray-300">New Task</h3>
+    <form ref={formRef} onSubmit={handleSubmit} className="bg-surface rounded-lg p-4 space-y-3 overflow-visible">
+      <h3 className="text-sm font-semibold text-muted">New Task</h3>
       {dropError && (
         <div className="bg-yellow-900/50 border border-yellow-700 text-yellow-300 text-xs rounded px-3 py-2 flex items-center justify-between">
           <span>{dropError}</span>
@@ -334,7 +334,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
       )}
       <div className="flex gap-2">
         <textarea
-          className="flex-1 bg-gray-700 text-foreground rounded px-3 py-2 text-sm h-24 resize-none focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          className="flex-1 bg-input text-foreground rounded px-3 py-2 text-sm h-24 resize-none focus:outline-none focus:ring-2 focus:ring-focus"
           placeholder={mode === 'loop' ? 'Background / context (optional)' : `Prompt / Description (this will be sent to ${provider === 'codex' ? 'Codex' : 'Claude Code'})`}
           value={description}
           onChange={(e) => setDescription(e.target.value)}
@@ -353,13 +353,13 @@ export function TaskForm({ onCreated }: TaskFormProps) {
         />
         <SecretPicker selectedIds={selectedSecretIds} onChange={setSelectedSecretIds} />
         {fileUpload.uploads.map((upload) => (
-          <div key={upload.id} className="relative rounded overflow-hidden border border-gray-600">
+          <div key={upload.id} className="relative rounded overflow-hidden border border-input-border">
             {upload.preview ? (
               <div className="w-12 h-12">
                 <img src={upload.preview} alt="" className="w-full h-full object-cover" />
               </div>
             ) : (
-              <div className="flex items-center gap-1.5 px-2.5 py-1.5 bg-gray-800 text-xs text-gray-300 max-w-[120px]">
+              <div className="flex items-center gap-1.5 px-2.5 py-1.5 bg-input text-xs text-muted max-w-[120px]">
                 <Paperclip size={12} className="shrink-0" />
                 <span className="truncate">{upload.file.name}</span>
               </div>
@@ -377,7 +377,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
             <button
               type="button"
               onClick={() => fileUpload.removeFile(upload.id)}
-              className="absolute top-0 right-0 bg-gray-900/80 rounded-bl p-0.5 text-gray-300 hover:text-white"
+              className="absolute top-0 right-0 bg-surface-raised/80 rounded-bl p-0.5 text-muted hover:text-foreground"
             >
               <X size={10} />
             </button>
@@ -398,14 +398,14 @@ export function TaskForm({ onCreated }: TaskFormProps) {
         {isNewProject && (
           <div className="flex flex-col sm:flex-row gap-2">
             <input
-              className="flex-1 bg-gray-700 text-foreground rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              className="flex-1 bg-input text-foreground rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-focus"
               placeholder="Project name (required)"
               value={newProjectName}
               onChange={(e) => setNewProjectName(e.target.value)}
               required
             />
             <input
-              className="flex-1 min-w-0 bg-gray-700 text-foreground rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              className="flex-1 min-w-0 bg-input text-foreground rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-focus"
               placeholder="Remote repo URL (optional)"
               value={newProjectUrl}
               onChange={(e) => setNewProjectUrl(e.target.value)}
@@ -415,9 +415,9 @@ export function TaskForm({ onCreated }: TaskFormProps) {
       </div>
       {contextTasks.length > 0 && (
         <div className="flex items-center gap-2 min-w-0">
-          <label className="text-sm text-gray-400 whitespace-nowrap shrink-0">Copy context from:</label>
+          <label className="text-sm text-subtle whitespace-nowrap shrink-0">Copy context from:</label>
           <select
-            className="flex-1 min-w-0 bg-gray-700 text-foreground rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            className="flex-1 min-w-0 bg-input text-foreground rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-focus"
             value={cloneFromTaskId}
             onChange={(e) => setCloneFromTaskId(e.target.value ? Number(e.target.value) : '')}
           >
@@ -435,17 +435,17 @@ export function TaskForm({ onCreated }: TaskFormProps) {
       {mode === 'loop' && (
         <div className="flex items-center gap-2 flex-wrap">
           <input
-            className="flex-1 min-w-0 bg-gray-700 text-foreground rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            className="flex-1 min-w-0 bg-input text-foreground rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-focus"
             placeholder="Todo file path (e.g. TODO.md)"
             value={todoFilePath}
             onChange={(e) => setTodoFilePath(e.target.value)}
             required
           />
-          <label className="text-xs text-gray-400 whitespace-nowrap">Max iter:</label>
+          <label className="text-xs text-subtle whitespace-nowrap">Max iter:</label>
           <input
             type="text"
             inputMode="numeric"
-            className="w-16 bg-gray-700 text-foreground rounded px-2 py-1.5 text-sm"
+            className="w-16 bg-input text-foreground rounded px-2 py-1.5 text-sm"
             value={maxIterations}
             onChange={(e) => setMaxIterations(e.target.value.replace(/[^0-9]/g, ''))}
             onBlur={() => {
@@ -453,12 +453,12 @@ export function TaskForm({ onCreated }: TaskFormProps) {
               setMaxIterations(String((!n || n < 1) ? 1 : n));
             }}
           />
-          <label className="flex items-center gap-1 text-xs text-gray-400 whitespace-nowrap cursor-pointer">
+          <label className="flex items-center gap-1 text-xs text-subtle whitespace-nowrap cursor-pointer">
             <input
               type="checkbox"
               checked={mustComplete}
               onChange={(e) => setMustComplete(e.target.checked)}
-              className="accent-indigo-500"
+              className="accent-accent"
             />
             Must complete
           </label>
@@ -467,17 +467,17 @@ export function TaskForm({ onCreated }: TaskFormProps) {
       {mode === 'goal' && (
         <div className="flex items-center gap-2 flex-wrap">
           <input
-            className="flex-1 min-w-0 bg-gray-700 text-foreground rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            className="flex-1 min-w-0 bg-input text-foreground rounded px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-focus"
             placeholder="Goal condition (e.g. all tests pass and lint is clean)"
             value={goalCondition}
             onChange={(e) => setGoalCondition(e.target.value)}
             required
           />
-          <label className="text-xs text-gray-400 whitespace-nowrap">Max turns:</label>
+          <label className="text-xs text-subtle whitespace-nowrap">Max turns:</label>
           <input
             type="text"
             inputMode="numeric"
-            className="w-16 bg-gray-700 text-foreground rounded px-2 py-1.5 text-sm"
+            className="w-16 bg-input text-foreground rounded px-2 py-1.5 text-sm"
             value={goalMaxTurns}
             onChange={(e) => setGoalMaxTurns(e.target.value.replace(/[^0-9]/g, ''))}
             onBlur={() => {
@@ -494,7 +494,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
           type="button"
           onClick={() => fileInputRef.current?.click()}
           disabled={fileUpload.uploads.length >= 10}
-          className="flex items-center gap-1 text-xs px-2 py-1.5 rounded border transition-colors bg-gray-700 text-gray-400 border-gray-600 hover:bg-gray-600 hover:text-gray-300 disabled:opacity-40"
+          className="flex items-center gap-1 text-xs px-2 py-1.5 rounded border transition-colors bg-input text-subtle border-input-border hover:bg-surface-hover hover:text-muted disabled:opacity-40"
         >
           <Paperclip size={13} />
           <span className="hidden sm:inline">{fileUpload.uploads.length > 0 ? `${fileUpload.uploads.length}/10 files` : 'Attach files'}</span>
@@ -508,18 +508,18 @@ export function TaskForm({ onCreated }: TaskFormProps) {
             className={`flex items-center gap-1 text-xs px-2 py-1.5 rounded border transition-colors ${
               hasNonDefaultConfig
                 ? 'bg-amber-600/30 text-amber-300 border-amber-500/50 hover:bg-amber-600/40'
-                : 'bg-gray-700 text-gray-400 border-gray-600 hover:bg-gray-600 hover:text-gray-300'
+                : 'bg-input text-subtle border-input-border hover:bg-surface-hover hover:text-muted'
             }`}
           >
             <Settings size={13} />
             <span className="hidden sm:inline">Config</span>
           </button>
           {showConfigPanel && (
-            <div className="absolute top-full mt-1 left-0 bg-gray-800 border border-gray-600 rounded shadow-lg z-20 p-3 min-w-[280px]">
+            <div className="absolute top-full mt-1 left-0 bg-surface border border-input-border rounded shadow-lg z-20 p-3 min-w-[280px]">
               <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 items-center text-xs">
-                <span className="text-gray-400">Priority</span>
+                <span className="text-subtle">Priority</span>
                 <select
-                  className="bg-gray-700 text-foreground rounded px-2 py-1 text-xs"
+                  className="bg-input text-foreground rounded px-2 py-1 text-xs"
                   value={priority}
                   onChange={(e) => setPriority(Number(e.target.value))}
                 >
@@ -528,9 +528,9 @@ export function TaskForm({ onCreated }: TaskFormProps) {
                   ))}
                 </select>
 
-                <span className="text-gray-400">Mode</span>
+                <span className="text-subtle">Mode</span>
                 <select
-                  className="bg-gray-700 text-foreground rounded px-2 py-1 text-xs"
+                  className="bg-input text-foreground rounded px-2 py-1 text-xs"
                   value={mode}
                   onChange={(e) => setMode(e.target.value)}
                 >
@@ -540,9 +540,9 @@ export function TaskForm({ onCreated }: TaskFormProps) {
                   <option value="goal">Goal</option>
                 </select>
 
-                <span className="text-gray-400">Run on</span>
+                <span className="text-subtle">Run on</span>
                 <select
-                  className="bg-gray-700 text-foreground rounded px-2 py-1 text-xs"
+                  className="bg-input text-foreground rounded px-2 py-1 text-xs"
                   value={workerId}
                   onChange={(e) => setWorkerId(e.target.value)}
                 >
@@ -554,9 +554,9 @@ export function TaskForm({ onCreated }: TaskFormProps) {
                   ))}
                 </select>
 
-                <span className="text-gray-400">CLI</span>
+                <span className="text-subtle">CLI</span>
                 <select
-                  className="bg-gray-700 text-foreground rounded px-2 py-1 text-xs"
+                  className="bg-input text-foreground rounded px-2 py-1 text-xs"
                   value={provider}
                   onChange={(e) => {
                     setProvider(e.target.value);
@@ -569,9 +569,9 @@ export function TaskForm({ onCreated }: TaskFormProps) {
                   ))}
                 </select>
 
-                <span className="text-gray-400">Model</span>
+                <span className="text-subtle">Model</span>
                 <select
-                  className="bg-gray-700 text-foreground rounded px-2 py-1 text-xs"
+                  className="bg-input text-foreground rounded px-2 py-1 text-xs"
                   value={model}
                   onChange={(e) => setModel(e.target.value)}
                 >
@@ -581,9 +581,9 @@ export function TaskForm({ onCreated }: TaskFormProps) {
                   ))}
                 </select>
 
-                <span className="text-gray-400">Effort</span>
+                <span className="text-subtle">Effort</span>
                 <select
-                  className="bg-gray-700 text-foreground rounded px-2 py-1 text-xs"
+                  className="bg-input text-foreground rounded px-2 py-1 text-xs"
                   value={effort}
                   onChange={(e) => setEffort(e.target.value)}
                 >
@@ -593,9 +593,9 @@ export function TaskForm({ onCreated }: TaskFormProps) {
                   ))}
                 </select>
 
-                <span className="text-gray-400">Thinking</span>
+                <span className="text-subtle">Thinking</span>
                 <select
-                  className="bg-gray-700 text-foreground rounded px-2 py-1 text-xs"
+                  className="bg-input text-foreground rounded px-2 py-1 text-xs"
                   value={thinkingBudget}
                   onChange={(e) => setThinkingBudget(e.target.value)}
                 >
@@ -608,9 +608,9 @@ export function TaskForm({ onCreated }: TaskFormProps) {
                   <option value="131072">128k</option>
                 </select>
 
-                <span className="text-gray-400">Timeout</span>
+                <span className="text-subtle">Timeout</span>
                 <select
-                  className="bg-gray-700 text-foreground rounded px-2 py-1 text-xs"
+                  className="bg-input text-foreground rounded px-2 py-1 text-xs"
                   value={timeoutHours}
                   onChange={(e) => setTimeoutHours(e.target.value)}
                 >
@@ -625,9 +625,9 @@ export function TaskForm({ onCreated }: TaskFormProps) {
                   <option value="0">No limit</option>
                 </select>
 
-                <span className="text-gray-400">System Prompt</span>
+                <span className="text-subtle">System Prompt</span>
                 <select
-                  className="bg-gray-700 text-foreground rounded px-2 py-1 text-xs"
+                  className="bg-input text-foreground rounded px-2 py-1 text-xs"
                   value={systemPromptMode}
                   onChange={(e) => setSystemPromptMode(e.target.value)}
                 >
@@ -664,7 +664,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
           className={`flex items-center gap-1 text-xs px-2 py-1.5 rounded border transition-colors ${
             starOnCreate
               ? 'bg-yellow-600/30 text-yellow-300 border-yellow-500/50 hover:bg-yellow-600/40'
-              : 'bg-gray-700 text-gray-400 border-gray-600 hover:bg-gray-600 hover:text-gray-300'
+              : 'bg-input text-subtle border-input-border hover:bg-surface-hover hover:text-muted'
           }`}
         >
           <Star size={13} fill={starOnCreate ? 'currentColor' : 'none'} />
@@ -677,7 +677,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
               className={`flex items-center gap-1 text-xs px-2 py-1.5 rounded border transition-colors ${
                 enabledUserSkillCount > 0
                   ? 'bg-green-600/30 text-green-300 border-green-500/50 hover:bg-green-600/40'
-                  : 'bg-gray-700 text-gray-400 border-gray-600 hover:bg-gray-600 hover:text-gray-300'
+                  : 'bg-input text-subtle border-input-border hover:bg-surface-hover hover:text-muted'
               }`}
             >
               <span className="text-xs">📝</span>
@@ -685,13 +685,13 @@ export function TaskForm({ onCreated }: TaskFormProps) {
               {enabledUserSkillCount > 0 && <span className="sm:hidden">{enabledUserSkillCount}</span>}
             </button>
             {showSkillsDropdown && (
-              <div className="absolute top-full mt-1 left-0 bg-gray-800 border border-gray-600 rounded shadow-lg z-20 min-w-[180px]">
+              <div className="absolute top-full mt-1 left-0 bg-surface border border-input-border rounded shadow-lg z-20 min-w-[180px]">
                 {userSkills.length === 0 ? (
-                  <div className="px-3 py-2 text-xs text-gray-500">暂无 Skill，去 Skills 页面创建</div>
+                  <div className="px-3 py-2 text-xs text-subtle">暂无 Skill，去 Skills 页面创建</div>
                 ) : userSkills.map((skill) => (
                   <label
                     key={skill.id}
-                    className="flex items-center gap-2 px-3 py-2 text-xs text-gray-300 hover:bg-gray-700 cursor-pointer"
+                    className="flex items-center gap-2 px-3 py-2 text-xs text-muted hover:bg-surface-hover cursor-pointer"
                     title={skill.description}
                   >
                     <input
@@ -714,8 +714,8 @@ export function TaskForm({ onCreated }: TaskFormProps) {
               onClick={() => setShowPluginsDropdown(!showPluginsDropdown)}
               className={`flex items-center gap-1 text-xs px-2 py-1.5 rounded border transition-colors ${
                 enabledPluginCount > 0
-                  ? 'bg-indigo-600/30 text-indigo-300 border-indigo-500/50 hover:bg-indigo-600/40'
-                  : 'bg-gray-700 text-gray-400 border-gray-600 hover:bg-gray-600 hover:text-gray-300'
+                  ? 'bg-accent-muted text-accent-muted-foreground border-focus hover:bg-accent hover:text-accent-foreground'
+                  : 'bg-input text-subtle border-input-border hover:bg-surface-hover hover:text-muted'
               }`}
             >
               <Wrench size={13} />
@@ -723,13 +723,13 @@ export function TaskForm({ onCreated }: TaskFormProps) {
               {enabledPluginCount > 0 && <span className="sm:hidden">{enabledPluginCount}</span>}
             </button>
             {showPluginsDropdown && (
-              <div className="absolute top-full mt-1 left-0 bg-gray-800 border border-gray-600 rounded shadow-lg z-20 min-w-[180px]">
+              <div className="absolute top-full mt-1 left-0 bg-surface border border-input-border rounded shadow-lg z-20 min-w-[180px]">
                 {AVAILABLE_PLUGINS.map((tool) => {
                   const locked = false;
                   return (
                     <label
                       key={tool.key}
-                      className={`flex items-center gap-2 px-3 py-2 text-xs transition-colors ${locked ? 'text-gray-500 cursor-default' : 'text-gray-300 hover:bg-gray-700 cursor-pointer'}`}
+                      className={`flex items-center gap-2 px-3 py-2 text-xs transition-colors ${locked ? 'text-subtle cursor-default' : 'text-muted hover:bg-surface-hover cursor-pointer'}`}
                       title={tool.description}
                     >
                       <input
@@ -737,7 +737,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
                         checked={!!enabledPlugins[tool.key]}
                         onChange={(e) => !locked && setEnabledPlugins((prev) => ({ ...prev, [tool.key]: e.target.checked }))}
                         disabled={locked}
-                        className="accent-indigo-500"
+                        className="accent-accent"
                       />
                       {tool.label}
                     </label>
@@ -751,7 +751,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
         <button
           type="submit"
           disabled={loading || !canSubmit}
-          className="flex items-center gap-1 bg-indigo-600 hover:bg-indigo-700 text-white px-4 py-1.5 rounded text-xs font-medium disabled:opacity-50 ml-auto"
+          className="flex items-center gap-1 bg-accent hover:bg-accent-hover text-accent-foreground px-4 py-1.5 rounded text-xs font-medium disabled:opacity-50 ml-auto"
         >
           <Plus size={14} />
           <span className="hidden sm:inline">{loading ? 'Creating...' : 'Create'}</span>

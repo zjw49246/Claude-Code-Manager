@@ -111,7 +111,7 @@ export function Header({ currentPage, onNavigate }: HeaderProps) {
   }, []);
 
   return (
-    <header className="bg-gray-900 border-b border-gray-700 px-4 py-2 pt-[max(0.5rem,env(safe-area-inset-top))]">
+    <header className="bg-chrome border-b border-chrome-border px-4 py-2 pt-[max(0.5rem,env(safe-area-inset-top))]">
       <div ref={rowRef} className="relative flex items-center gap-3">
         <h1 ref={titleRef} className="text-base font-bold text-foreground whitespace-nowrap shrink-0">Claude Manager</h1>
         {/* 隐藏测量 nav：始终渲染完整按钮以计算所需宽度 */}
@@ -131,8 +131,8 @@ export function Header({ currentPage, onNavigate }: HeaderProps) {
                 onClick={() => onNavigate(p.key)}
                 className={`px-3 py-1.5 min-h-[36px] rounded text-sm font-medium whitespace-nowrap transition-colors ${
                   currentPage === p.key
-                    ? 'bg-indigo-600 text-white'
-                    : 'text-gray-300 hover:bg-gray-800'
+                    ? 'bg-accent text-accent-foreground'
+                    : 'text-muted hover:text-foreground hover:bg-surface-hover'
                 }`}
               >
                 {p.label}
@@ -145,7 +145,7 @@ export function Header({ currentPage, onNavigate }: HeaderProps) {
           <PoolDrawer />
           {runtime && (
             <div
-              className="flex items-center gap-1.5 mr-1 px-2 py-1 rounded bg-gray-800 border border-gray-700"
+              className="flex items-center gap-1.5 mr-1 px-2 py-1 rounded bg-surface border border-border"
               title={
                 !runtime.pty_available
                   ? 'claude_pty 未安装，PTY 模式不可用'
@@ -154,14 +154,14 @@ export function Header({ currentPage, onNavigate }: HeaderProps) {
                     : 'PTY 常驻会话模式：关（使用 claude -p 一次性进程）'
               }
             >
-              <span className={`text-xs font-medium ${runtime.use_pty_mode ? 'text-green-400' : 'text-gray-400'}`}>
+              <span className={`text-xs font-medium ${runtime.use_pty_mode ? 'text-success' : 'text-subtle'}`}>
                 PTY
               </span>
               <button
                 onClick={togglePtyMode}
                 disabled={!runtime.pty_available || switching}
                 className={`relative inline-flex h-4 w-8 items-center rounded-full transition-colors disabled:opacity-50 ${
-                  runtime.use_pty_mode ? 'bg-green-500' : 'bg-gray-600'
+                  runtime.use_pty_mode ? 'bg-success' : 'bg-input-border'
                 }`}
               >
                 <span
@@ -176,19 +176,19 @@ export function Header({ currentPage, onNavigate }: HeaderProps) {
           <div className="relative shrink-0" ref={prefsRef}>
             <button
               onClick={() => setPrefsOpen(!prefsOpen)}
-              className={`p-2 rounded transition-colors ${prefsOpen ? 'text-foreground bg-gray-800' : 'text-gray-400 hover:text-foreground hover:bg-gray-800'}`}
+              className={`p-2 rounded transition-colors ${prefsOpen ? 'text-foreground bg-surface' : 'text-subtle hover:text-foreground hover:bg-surface'}`}
               title="偏好设置（时区 / 主题）"
             >
               <Settings size={18} />
             </button>
             {prefsOpen && (
-              <div className="absolute top-full right-0 mt-1 bg-gray-800 border border-gray-600 rounded-lg shadow-lg z-30 p-3 min-w-[210px] space-y-3">
+              <div className="absolute top-full right-0 mt-1 bg-surface border border-input-border rounded-lg shadow-lg z-30 p-3 min-w-[210px] space-y-3">
                 <div className="flex items-center justify-between gap-3">
-                  <span className="text-xs text-gray-400 flex items-center gap-1.5"><Globe size={13} /> 时区</span>
+                  <span className="text-xs text-subtle flex items-center gap-1.5"><Globe size={13} /> 时区</span>
                   <select
                     value={tz}
                     onChange={(e) => { setTimezone(e.target.value); setTz(e.target.value); }}
-                    className="bg-gray-700 text-gray-200 text-xs rounded px-2 py-1 border border-gray-600 focus:outline-none focus:ring-1 focus:ring-indigo-500 cursor-pointer"
+                    className="bg-input text-muted text-xs rounded px-2 py-1 border border-input-border focus:outline-none focus:ring-1 focus:ring-focus cursor-pointer"
                   >
                     {TIMEZONE_OPTIONS.map((opt) => (
                       <option key={opt.value} value={opt.value}>{opt.label}</option>
@@ -196,11 +196,11 @@ export function Header({ currentPage, onNavigate }: HeaderProps) {
                   </select>
                 </div>
                 <div className="flex items-center justify-between gap-3">
-                  <span className="text-xs text-gray-400 flex items-center gap-1.5"><Palette size={13} /> 主题</span>
+                  <span className="text-xs text-subtle flex items-center gap-1.5"><Palette size={13} /> 主题</span>
                   <select
                     value={theme}
                     onChange={(e) => handleThemeChange(e.target.value as Theme)}
-                    className="bg-gray-700 text-gray-200 text-xs rounded px-2 py-1 border border-gray-600 focus:outline-none focus:ring-1 focus:ring-indigo-500 cursor-pointer"
+                    className="bg-input text-muted text-xs rounded px-2 py-1 border border-input-border focus:outline-none focus:ring-1 focus:ring-focus cursor-pointer"
                   >
                     {THEME_OPTIONS.map((opt) => (
                       <option key={opt.value} value={opt.value}>{opt.label}</option>
@@ -209,12 +209,12 @@ export function Header({ currentPage, onNavigate }: HeaderProps) {
                 </div>
                 {runtime && (
                   <div className="flex items-center justify-between gap-3">
-                    <span className="text-xs text-gray-400">访问置顶</span>
+                    <span className="text-xs text-subtle">访问置顶</span>
                     <button
                       onClick={toggleAutoSort}
                       disabled={switching}
                       className={`relative inline-flex h-4 w-8 items-center rounded-full transition-colors disabled:opacity-50 ${
-                        runtime.auto_sort_on_access ? 'bg-green-500' : 'bg-gray-600'
+                        runtime.auto_sort_on_access ? 'bg-success' : 'bg-input-border'
                       }`}
                       title={runtime.auto_sort_on_access ? '开启：打开聊天自动置顶任务' : '关闭：打开聊天不改变排序'}
                     >
@@ -227,22 +227,22 @@ export function Header({ currentPage, onNavigate }: HeaderProps) {
                   </div>
                 )}
                 {/* Feishu binding */}
-                <div className="border-t border-gray-700 pt-2 mt-1">
+                <div className="border-t border-border pt-2 mt-1">
                   <div className="flex items-center justify-between gap-3">
-                    <span className="text-xs text-gray-400">飞书</span>
+                    <span className="text-xs text-subtle">飞书</span>
                     {feishuStatus?.bound ? (
                       <div className="flex items-center gap-1.5">
                         {feishuStatus.avatar_url && <img src={feishuStatus.avatar_url} className="w-4 h-4 rounded-full" alt="" />}
-                        <span className="text-xs text-gray-300">{feishuStatus.name}</span>
+                        <span className="text-xs text-muted">{feishuStatus.name}</span>
                         <button
                           onClick={async () => { if (confirm('解绑飞书？')) { await api.unbindFeishu(); setFeishuStatus({ bound: false }); }}}
-                          className="text-xs text-red-400 hover:text-red-300 ml-1"
+                          className="text-xs text-danger hover:text-red-300 ml-1"
                         >解绑</button>
                       </div>
                     ) : feishuStatus !== null ? (
                       <button
                         onClick={async () => { const { url } = await api.getFeishuAuthUrl(); window.location.href = url; }}
-                        className="text-xs px-2 py-0.5 rounded bg-blue-600/20 text-blue-300 hover:bg-blue-600/30"
+                        className="text-xs px-2 py-0.5 rounded bg-accent-muted text-accent-muted-foreground hover:bg-accent hover:text-accent-foreground"
                       >绑定</button>
                     ) : null}
                   </div>
@@ -254,7 +254,7 @@ export function Header({ currentPage, onNavigate }: HeaderProps) {
           {collapsed && (
             <button
               onClick={() => setMenuOpen(!menuOpen)}
-              className="shrink-0 p-2 rounded text-gray-400 hover:text-foreground hover:bg-gray-800 transition-colors"
+              className="shrink-0 p-2 rounded text-subtle hover:text-foreground hover:bg-surface transition-colors"
             >
               {menuOpen ? <X size={18} /> : <Menu size={18} />}
             </button>
@@ -270,8 +270,8 @@ export function Header({ currentPage, onNavigate }: HeaderProps) {
               onClick={() => { onNavigate(p.key); setMenuOpen(false); }}
               className={`px-3 py-2 rounded text-sm font-medium text-left transition-colors ${
                 currentPage === p.key
-                  ? 'bg-indigo-600 text-white'
-                  : 'text-gray-300 hover:bg-gray-800'
+                  ? 'bg-accent text-accent-foreground'
+                  : 'text-muted hover:text-foreground hover:bg-surface-hover'
               }`}
             >
               {p.label}
