@@ -443,6 +443,7 @@ export const api = {
   deleteOrgTeam: (id: number) => request<{ ok: boolean }>(`/api/org/teams/${id}`, { method: 'DELETE' }),
   addTeamMember: (teamId: number, openId: string) => request<{ ok: boolean }>(`/api/org/teams/${teamId}/members`, { method: 'POST', body: JSON.stringify({ open_id: openId }) }),
   removeTeamMember: (teamId: number, openId: string) => request<{ ok: boolean }>(`/api/org/teams/${teamId}/members/${openId}`, { method: 'DELETE' }),
+  transferRegistry: (targetCcmUrl: string) => request<{ ok: boolean }>('/api/org/transfer', { method: 'POST', body: JSON.stringify({ target_ccm_url: targetCcmUrl }) }),
 
   // Task sharing
   shareTask: (taskId: number, targets: { open_id: string; name?: string; ccm_url: string }[]) =>
