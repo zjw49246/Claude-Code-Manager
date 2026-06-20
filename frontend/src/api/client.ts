@@ -415,6 +415,7 @@ export interface SharedTaskReceived {
   owner_ccm_url: string;
   owner_name?: string;
   remote_task_id: number;
+  share_token: string;
   task_title?: string;
   task_description?: string;
   project_name?: string;
@@ -464,6 +465,17 @@ export const api = {
     request<{ tasks: SharedTaskReceived[] }>('/api/shared/tasks'),
   leaveSharedTask: (sharedId: number) =>
     request<{ ok: boolean }>(`/api/shared/${sharedId}`, { method: 'DELETE' }),
+  getSharedHistory: (sharedId: number, limit?: number, beforeId?: number) => {
+    const params = new URLSearchParams();
+    if (limit) params.set('limit', String(limit));
+    if (beforeId) params.set('before_id', String(beforeId));
+    const qs = params.toString();
+    return request<any[]>(`/api/shared/${sharedId}/history${qs ? '?' + qs : ''}`);
+  },
+  sendSharedChat: (sharedId: number, message: string) =>
+    request<{ ok: boolean }>(`/api/shared/${sharedId}/chat`, { method: 'POST', body: JSON.stringify({ message }) }),
+  getSharedConfig: (sharedId: number) =>
+    request<any>(`/api/shared/${sharedId}/config`),
 
   // Projects
   listProjects: () => request<Project[]>('/api/projects'),

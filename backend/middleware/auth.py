@@ -27,8 +27,12 @@ class TokenAuthMiddleware(BaseHTTPMiddleware):
         if path in self.PUBLIC_PATHS or not path.startswith("/api") or path.startswith("/api/uploads/"):
             return await call_next(request)
 
+        # shared-access uses share_token auth (not admin auth_token)
+        if path.startswith("/api/shared-access/"):
+            return await call_next(request)
+
         # Skip auth for WebSocket (handled separately)
-        if path == "/ws":
+        if path in ("/ws", "/ws/shared"):
             return await call_next(request)
 
         # Check Authorization header

@@ -1,0 +1,214 @@
+"""Shared-access API — sharer-side endpoints accessed by remote CCMs via share_token.
+
+These endpoints are PUBLIC (no admin auth_token needed). Authentication is
+via the share_token query parameter, validated against the task_shares table.
+"""
+
+import json
+import logging
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
+from sqlalchemy import and_, not_, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from backend.database import get_db
+from backend.models.task import Task
+from backend.models.task_share import TaskShare
+from backend.models.log_entry import LogEntry
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/shared-access", tags=["shared-access"])
+
+
+async def _validate_token(task_id: int, token: str, db: AsyncSession) -> TaskShare:
+    result = await db.execute(
+        select(TaskShare).where(
+            TaskShare.task_id == task_id,
+            TaskShare.share_token == token,
+            TaskShare.status == "active",
+        )
+    )
+    share = result.scalar_one_or_none()
+    if not share:
+        raise HTTPException(403, "Invalid or revoked share token")
+    return share
+
+
+@router.get("/{task_id}/history")
+async def shared_history(
+    task_id: int,
+    token: str = Query(...),
+    limit: int = 0,
+    before_id: int = 0,
+    compact: bool = True,
+    db: AsyncSession = Depends(get_db),
+):
+    """Chat history for a shared task — same format as /api/tasks/{id}/chat/history."""
+    await _validate_token(task_id, token, db)
+
+    task = await db.get(Task, task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+
+    allowed = ["user_message", "message", "result", "tool_use", "tool_result", "system_init", "system_event", "thinking", "process_exit"]
+    noisy_system = ["task_progress", "thinking_tokens", "token_usage", "api_request", "api_response"]
+    cols = [
+        LogEntry.id, LogEntry.role, LogEntry.event_type, LogEntry.content,
+        LogEntry.tool_name, LogEntry.tool_input, LogEntry.tool_output,
+        LogEntry.is_error, LogEntry.loop_iteration, LogEntry.timestamp,
+        LogEntry.raw_json,
+    ]
+    conditions = [
+        LogEntry.task_id == task_id,
+        LogEntry.event_type.in_(allowed),
+        not_(and_(
+            LogEntry.event_type == "system_event",
+            LogEntry.content.in_(noisy_system),
+        )),
+    ]
+    if before_id > 0:
+        conditions.append(LogEntry.id < before_id)
+
+    if limit > 0:
+        stmt = (
+            select(*cols)
+            .where(*conditions)
+            .order_by(LogEntry.id.desc())
+            .limit(limit + 20)
+        )
+        result = await db.execute(stmt)
+        rows = list(reversed(result.all()))
+    else:
+        stmt = (
+            select(*cols)
+            .where(*conditions)
+            .order_by(LogEntry.id.asc())
+        )
+        result = await db.execute(stmt)
+        rows = result.all()
+
+    _TRUNCATE = 20_000
+
+    messages = []
+    for row in rows:
+        tool_input = row.tool_input
+        tool_output = row.tool_output
+        if compact and row.event_type in ("tool_use", "tool_result"):
+            if tool_input and len(tool_input) > 300:
+                tool_input = tool_input[:300] + "..."
+            if tool_output and len(tool_output) > 300:
+                tool_output = tool_output[:300] + "..."
+        else:
+            if tool_input and len(tool_input) > _TRUNCATE:
+                tool_input = tool_input[:_TRUNCATE] + f"\n... (truncated from {len(row.tool_input)} chars)"
+            if tool_output and len(tool_output) > _TRUNCATE:
+                tool_output = tool_output[:_TRUNCATE] + f"\n... (truncated from {len(row.tool_output)} chars)"
+
+        msg: dict = {
+            "id": row.id,
+            "role": row.role,
+            "event_type": row.event_type,
+            "content": row.content,
+            "tool_name": row.tool_name,
+            "tool_input": tool_input,
+            "tool_output": tool_output,
+            "is_error": row.is_error,
+            "loop_iteration": row.loop_iteration,
+            "timestamp": row.timestamp.isoformat() if row.timestamp else None,
+        }
+        if row.raw_json:
+            try:
+                raw = json.loads(row.raw_json)
+                if raw.get("attachments"):
+                    msg["attachments"] = raw["attachments"]
+            except (json.JSONDecodeError, TypeError):
+                pass
+        messages.append(msg)
+
+    return messages
+
+
+class SharedChatMessage(BaseModel):
+    message: str
+    sender_name: str | None = None
+
+
+@router.post("/{task_id}/chat")
+async def shared_chat(
+    task_id: int,
+    body: SharedChatMessage,
+    token: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Send a message to a shared task — injected via the dispatcher queue."""
+    share = await _validate_token(task_id, token, db)
+
+    task = await db.get(Task, task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    if not task.session_id:
+        raise HTTPException(400, "Task has no active session")
+
+    # Prefix message with sender name
+    sender = body.sender_name or share.shared_to_name or "Anonymous"
+    prefixed = f"[{sender}] {body.message}"
+
+    # Store user message
+    user_log = LogEntry(
+        instance_id=1,
+        task_id=task_id,
+        event_type="user_message",
+        role="user",
+        content=prefixed,
+        is_error=False,
+    )
+    db.add(user_log)
+    await db.commit()
+
+    # Broadcast
+    from backend.main import broadcaster
+    await broadcaster.broadcast(f"task:{task_id}", {
+        "event_type": "user_message",
+        "role": "user",
+        "content": prefixed,
+    })
+
+    # Enqueue
+    from backend.main import dispatcher
+    from backend.services.dispatcher import PRIORITY_USER
+    await dispatcher.enqueue_message(
+        task_id=task_id,
+        prompt=prefixed,
+        priority=PRIORITY_USER,
+        source="shared",
+    )
+
+    return {"ok": True, "queued": True}
+
+
+@router.get("/{task_id}/config")
+async def shared_config(
+    task_id: int,
+    token: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Read-only task config for a shared task."""
+    await _validate_token(task_id, token, db)
+
+    task = await db.get(Task, task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+
+    return {
+        "id": task.id,
+        "title": task.title,
+        "description": task.description,
+        "status": task.status,
+        "mode": task.mode,
+        "model": task.model,
+        "project_id": task.project_id,
+        "session_id": task.session_id,
+        "created_at": task.created_at.isoformat() if task.created_at else None,
+    }

@@ -88,6 +88,7 @@ async def list_shared_tasks(db: AsyncSession = Depends(get_db)):
                 "owner_ccm_url": t.owner_ccm_url,
                 "owner_name": t.owner_name,
                 "remote_task_id": t.remote_task_id,
+                "share_token": t.share_token,
                 "task_title": t.task_title,
                 "task_description": t.task_description,
                 "project_name": t.project_name,
@@ -107,3 +108,80 @@ async def leave_shared_task(shared_id: int, db: AsyncSession = Depends(get_db)):
     await db.delete(record)
     await db.commit()
     return {"ok": True}
+
+
+# ---------- Proxy endpoints: forward requests to the sharer's CCM ----------
+
+async def _get_shared_record(shared_id: int, db: AsyncSession) -> SharedTaskReceived:
+    record = await db.get(SharedTaskReceived, shared_id)
+    if not record or record.status != "active":
+        raise HTTPException(404, "Shared task not found")
+    return record
+
+
+@router.get("/{shared_id}/history")
+async def proxy_history(
+    shared_id: int,
+    limit: int = 0,
+    before_id: int = 0,
+    compact: bool = True,
+    db: AsyncSession = Depends(get_db),
+):
+    """Proxy chat history from the sharer's CCM."""
+    record = await _get_shared_record(shared_id, db)
+    from backend.services.shared_proxy import proxy_history as _proxy
+    try:
+        return await _proxy(
+            record.owner_ccm_url, record.remote_task_id, record.share_token,
+            limit=limit, before_id=before_id, compact=compact,
+        )
+    except Exception as e:
+        logger.warning("proxy_history failed for shared %d: %s", shared_id, e)
+        raise HTTPException(502, f"Cannot reach sharer CCM: {e}")
+
+
+class SharedChatBody(BaseModel):
+    message: str
+
+
+@router.post("/{shared_id}/chat")
+async def proxy_chat(
+    shared_id: int,
+    body: SharedChatBody,
+    db: AsyncSession = Depends(get_db),
+):
+    """Proxy a chat message to the sharer's CCM."""
+    record = await _get_shared_record(shared_id, db)
+
+    # Get my feishu name for the [sender] prefix
+    from backend.models.feishu_binding import FeishuUserBinding
+    binding_result = await db.execute(select(FeishuUserBinding).limit(1))
+    binding = binding_result.scalar_one_or_none()
+    sender_name = binding.feishu_name if binding else None
+
+    from backend.services.shared_proxy import proxy_chat as _proxy
+    try:
+        return await _proxy(
+            record.owner_ccm_url, record.remote_task_id, record.share_token,
+            message=body.message, sender_name=sender_name,
+        )
+    except Exception as e:
+        logger.warning("proxy_chat failed for shared %d: %s", shared_id, e)
+        raise HTTPException(502, f"Cannot reach sharer CCM: {e}")
+
+
+@router.get("/{shared_id}/config")
+async def proxy_config(
+    shared_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """Proxy task config from the sharer's CCM."""
+    record = await _get_shared_record(shared_id, db)
+    from backend.services.shared_proxy import proxy_config as _proxy
+    try:
+        return await _proxy(
+            record.owner_ccm_url, record.remote_task_id, record.share_token,
+        )
+    except Exception as e:
+        logger.warning("proxy_config failed for shared %d: %s", shared_id, e)
+        raise HTTPException(502, f"Cannot reach sharer CCM: {e}")
