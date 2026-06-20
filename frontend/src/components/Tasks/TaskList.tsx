@@ -14,7 +14,6 @@ interface TaskListProps {
   projects: Project[];
   onRefresh: () => void;
   onOpenChat: (task: Task) => void;
-  onShare?: (task: Task) => void;
   activeTaskId?: number | null;
   autoSortOnAccess?: boolean;
 }
@@ -29,7 +28,7 @@ const statusColors: Record<string, string> = {
   cancelled: 'bg-gray-500',
 };
 
-export function TaskList({ tasks, projects, onRefresh, onOpenChat, onShare, activeTaskId, autoSortOnAccess }: TaskListProps) {
+export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId, autoSortOnAccess }: TaskListProps) {
   const projectMap = useMemo(() => {
     const map: Record<number, { name: string; color: string | null }> = {};
     for (const p of projects) map[p.id] = { name: p.name, color: p.badge_color };
@@ -217,14 +216,16 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, onShare, acti
                     >
                       <Pencil size={14} /> Edit title
                     </button>
-                    {onShare && (
                     <button
-                      onClick={(e) => { e.stopPropagation(); const task = t; setMenuOpenId(null); setTimeout(() => onShare(task), 0); }}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setMenuOpenId(null);
+                        window.dispatchEvent(new CustomEvent('ccm-share-task', { detail: { task: t } }));
+                      }}
                       className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-gray-300 hover:bg-gray-800 text-left"
                     >
                       <Share2 size={14} /> Share
                     </button>
-                    )}
                     {['in_progress', 'executing'].includes(t.status) && (
                       <button
                         onClick={() => { handleCancel(t.id); setMenuOpenId(null); }}
