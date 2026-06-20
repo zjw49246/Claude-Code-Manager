@@ -44,14 +44,14 @@ async def share_task(task_id: int, req: ShareRequest, db: AsyncSession = Depends
     task = await db.get(Task, task_id)
     task_title = task.title if task else f"Task #{task_id}"
 
+    from backend.config import settings
     for share in created:
-        if share.get("pushed"):
-            await feishu_notify.send_share_notification(
-                recipient_open_id=share["shared_to_open_id"],
-                sharer_name=sharer_name,
-                task_title=task_title,
-                ccm_url=binding.avatar_url if binding else "",
-            )
+        await feishu_notify.send_share_notification(
+            recipient_open_id=share["shared_to_open_id"],
+            sharer_name=sharer_name,
+            task_title=task_title,
+            ccm_url=settings.public_base_url,
+        )
 
     return {"shares": created}
 
