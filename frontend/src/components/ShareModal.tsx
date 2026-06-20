@@ -41,7 +41,7 @@ export function ShareModal({ type, itemId, itemTitle, onClose }: ShareModalProps
         const alreadyShared = new Set(sharesData.shares.map((s: any) => s.shared_to_open_id));
         setExisting(alreadyShared);
       } catch (e) {
-        setError(String(e));
+        setError(e instanceof Error ? e.message : String(e));
       } finally {
         setLoading(false);
       }
@@ -93,7 +93,7 @@ export function ShareModal({ type, itemId, itemTitle, onClose }: ShareModalProps
       }
       onClose();
     } catch (e) {
-      setError(String(e));
+      setError(e instanceof Error ? e.message : String(e));
     } finally {
       setSubmitting(false);
     }
