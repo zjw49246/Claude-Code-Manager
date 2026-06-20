@@ -432,7 +432,7 @@ export interface OrgTeam {
 export const api = {
   // Feishu
   getFeishuAuthUrl: () => request<{ url: string }>('/api/feishu/auth-url'),
-  getFeishuStatus: () => request<{ bound: boolean; name?: string; open_id?: string; avatar_url?: string }>('/api/feishu/status'),
+  getFeishuStatus: () => request<{ bound: boolean; name?: string; open_id?: string; avatar_url?: string; is_registry?: boolean }>('/api/feishu/status'),
   unbindFeishu: () => request<{ ok: boolean }>('/api/feishu/unbind', { method: 'DELETE' }),
 
   // Org

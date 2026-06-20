@@ -145,6 +145,89 @@ function AddMemberModal({
   );
 }
 
+/* ── Transfer Registry Modal ──────────────────────────────────── */
+function TransferModal({
+  members,
+  onClose,
+  onTransferred,
+}: {
+  members: OrgMember[];
+  onClose: () => void;
+  onTransferred: () => void;
+}) {
+  const [selected, setSelected] = useState<OrgMember | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleTransfer = async () => {
+    if (!selected) return;
+    if (!confirm(`Transfer org registry to ${selected.name} (${selected.ccm_url})? This action cannot be undone.`)) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      await api.transferRegistry(selected.ccm_url);
+      onTransferred();
+      onClose();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4">
+      <div className="bg-gray-800 rounded-xl shadow-2xl w-full max-w-md max-h-[70vh] flex flex-col">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-700">
+          <h3 className="text-foreground font-semibold">Transfer Registry</h3>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-200"><X size={18} /></button>
+        </div>
+        <div className="p-5 space-y-3 overflow-y-auto flex-1">
+          {error && <p className="text-red-400 text-sm">{error}</p>}
+          <p className="text-sm text-gray-400">Select a member to transfer the org registry ownership to:</p>
+          {members.length === 0 ? (
+            <p className="text-gray-500 text-sm">No other members available.</p>
+          ) : (
+            members.map(m => (
+              <button
+                key={m.feishu_open_id}
+                onClick={() => setSelected(m)}
+                className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-left transition-colors ${
+                  selected?.feishu_open_id === m.feishu_open_id
+                    ? 'bg-blue-600/20 border border-blue-500/30'
+                    : 'bg-gray-700/50 hover:bg-gray-700 border border-transparent'
+                }`}
+              >
+                {m.avatar_url ? (
+                  <img src={m.avatar_url} className="w-7 h-7 rounded-full" alt="" />
+                ) : (
+                  <div className="w-7 h-7 rounded-full bg-gray-600 flex items-center justify-center text-xs text-gray-300">
+                    {m.name.charAt(0).toUpperCase()}
+                  </div>
+                )}
+                <div className="flex-1 min-w-0">
+                  <div className="text-sm text-foreground">{m.name}</div>
+                  <div className="text-xs text-gray-500 truncate">{m.ccm_url}</div>
+                </div>
+              </button>
+            ))
+          )}
+        </div>
+        <div className="flex justify-end gap-2 px-5 py-4 border-t border-gray-700">
+          <button onClick={onClose} className="px-4 py-2 text-sm text-gray-400 hover:text-gray-200">Cancel</button>
+          <button
+            onClick={handleTransfer}
+            disabled={!selected || submitting}
+            className="px-4 py-2 text-sm bg-red-600 text-white rounded hover:bg-red-500 disabled:opacity-50"
+          >
+            {submitting ? 'Transferring...' : 'Transfer'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ── Team Page ────────────────────────────────────────────────── */
 export default function TeamPage() {
   const [members, setMembers] = useState<OrgMember[]>([]);
@@ -154,6 +237,9 @@ export default function TeamPage() {
   const [editingTeam, setEditingTeam] = useState<OrgTeam | null>(null);
   const [showAddMember, setShowAddMember] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [isRegistry, setIsRegistry] = useState(false);
+  const [myOpenId, setMyOpenId] = useState('');
+  const [showTransfer, setShowTransfer] = useState(false);
 
   // Shared tasks state
   const [sharedTasks, setSharedTasks] = useState<SharedTaskReceived[]>([]);
@@ -163,14 +249,17 @@ export default function TeamPage() {
 
   const fetchAll = useCallback(async () => {
     try {
-      const [m, t, s] = await Promise.all([
+      const [m, t, s, fs] = await Promise.all([
         api.getOrgMembers(),
         api.getOrgTeams(),
         api.getSharedTasks(),
+        api.getFeishuStatus(),
       ]);
       setMembers(m);
       setTeams(t);
       setSharedTasks(s.tasks);
+      setIsRegistry(fs.is_registry || false);
+      setMyOpenId(fs.open_id || '');
     } catch {
       // ignore
     } finally {
@@ -255,20 +344,14 @@ export default function TeamPage() {
             <Users size={20} /> Groups
           </h2>
           <div className="flex items-center gap-2">
-            <button
-              onClick={async () => {
-                const url = prompt('Transfer registry to CCM URL:');
-                if (!url) return;
-                if (!confirm(`Transfer org registry to ${url}? This cannot be undone.`)) return;
-                try {
-                  await api.transferRegistry(url);
-                  alert('Registry transferred successfully.');
-                } catch (e) { alert('Transfer failed: ' + e); }
-              }}
-              className="flex items-center gap-1 px-3 py-1.5 text-sm text-gray-400 hover:text-gray-200 border border-gray-600 rounded hover:bg-gray-700"
-            >
-              Transfer Registry
-            </button>
+            {isRegistry && (
+              <button
+                onClick={() => setShowTransfer(true)}
+                className="flex items-center gap-1 px-3 py-1.5 text-sm text-gray-400 hover:text-gray-200 border border-gray-600 rounded hover:bg-gray-700"
+              >
+                Transfer Registry
+              </button>
+            )}
             <button
               onClick={() => { setEditingTeam(null); setShowTeamModal(true); }}
               className="flex items-center gap-1 px-3 py-1.5 text-sm bg-indigo-600 text-white rounded hover:bg-indigo-500"
@@ -484,6 +567,13 @@ export default function TeamPage() {
           existingIds={new Set((selectedTeam?.members ?? []).map((m) => m.feishu_open_id))}
           onClose={() => setShowAddMember(false)}
           onSaved={fetchAll}
+        />
+      )}
+      {showTransfer && (
+        <TransferModal
+          members={members.filter(m => m.feishu_open_id !== myOpenId)}
+          onClose={() => setShowTransfer(false)}
+          onTransferred={fetchAll}
         />
       )}
     </div>
