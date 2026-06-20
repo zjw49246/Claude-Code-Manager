@@ -94,7 +94,7 @@ async def list_members(db: AsyncSession = Depends(get_db)):
         online_threshold = now - timedelta(minutes=10)
         return [
             {
-                "open_id": m.feishu_open_id,
+                "feishu_open_id": m.feishu_open_id,
                 "name": m.name,
                 "ccm_url": m.ccm_url,
                 "avatar_url": m.avatar_url,
@@ -321,7 +321,7 @@ async def list_teams(db: AsyncSession = Depends(get_db)):
             "name": t.name,
             "description": t.description,
             "created_at": t.created_at.isoformat() if t.created_at else None,
-            "members": [{"open_id": m.feishu_open_id} for m in members],
+            "members": [{"feishu_open_id": m.feishu_open_id} for m in members],
         })
     return out
 
