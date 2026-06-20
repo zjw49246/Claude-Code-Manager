@@ -3,7 +3,6 @@ import { createPortal } from 'react-dom';
 import { api } from '../../api/client';
 import type { Task, Project } from '../../api/client';
 import { Trash2, RotateCcw, XCircle, MessageCircle, Archive, ArchiveRestore, Star, Copy, Check, MoreVertical, Pencil, Mail, MailOpen, Clock, GripVertical, Share2 } from 'lucide-react';
-import { ShareModal } from '../ShareModal';
 import { ToolsBadge, SubAgentsBadge, TaskConfigBadge } from './TaskBadges';
 import { TAG_COLOR_OPTIONS } from '../TagColors';
 import { ExpandableText } from '../ExpandableText';
@@ -15,6 +14,7 @@ interface TaskListProps {
   projects: Project[];
   onRefresh: () => void;
   onOpenChat: (task: Task) => void;
+  onShare?: (task: Task) => void;
   activeTaskId?: number | null;
   autoSortOnAccess?: boolean;
 }
@@ -29,7 +29,7 @@ const statusColors: Record<string, string> = {
   cancelled: 'bg-gray-500',
 };
 
-export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId, autoSortOnAccess }: TaskListProps) {
+export function TaskList({ tasks, projects, onRefresh, onOpenChat, onShare, activeTaskId, autoSortOnAccess }: TaskListProps) {
   const projectMap = useMemo(() => {
     const map: Record<number, { name: string; color: string | null }> = {};
     for (const p of projects) map[p.id] = { name: p.name, color: p.badge_color };
@@ -41,7 +41,6 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId,
   const [menuPos, setMenuPos] = useState<{ top: number; right: number }>({ top: 0, right: 0 });
   const [editingTitleId, setEditingTitleId] = useState<number | null>(null);
   const [titleDraft, setTitleDraft] = useState('');
-  const [sharingTask, setSharingTask] = useState<Task | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const menuBtnRef = useRef<HTMLButtonElement>(null);
   const titleInputRef = useRef<HTMLInputElement>(null);
@@ -218,12 +217,14 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId,
                     >
                       <Pencil size={14} /> Edit title
                     </button>
+                    {onShare && (
                     <button
-                      onClick={() => { setSharingTask(t); setMenuOpenId(null); }}
+                      onClick={() => { setMenuOpenId(null); onShare(t); }}
                       className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-gray-300 hover:bg-gray-800 text-left"
                     >
                       <Share2 size={14} /> Share
                     </button>
+                    )}
                     {['in_progress', 'executing'].includes(t.status) && (
                       <button
                         onClick={() => { handleCancel(t.id); setMenuOpenId(null); }}
@@ -320,14 +321,6 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId,
         </div>
       ))}
     </div>
-    {sharingTask && (
-      <ShareModal
-        type="task"
-        itemId={sharingTask.id}
-        itemTitle={sharingTask.title || `Task #${sharingTask.id}`}
-        onClose={() => setSharingTask(null)}
-      />
-    )}
     </>
   );
 }

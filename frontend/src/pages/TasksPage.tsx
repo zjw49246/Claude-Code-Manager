@@ -13,6 +13,7 @@ import { ChevronLeft, ChevronRight, ChevronDown, Filter, PanelLeftClose, PanelLe
 import { ToolsBadge, SubAgentsBadge } from '../components/Tasks/TaskBadges';
 import { TAG_COLOR_OPTIONS } from '../components/TagColors';
 import { useTaskReorder } from '../hooks/useTaskReorder';
+import { ShareModal } from '../components/ShareModal';
 
 const PAGE_SIZE = 20;
 
@@ -35,6 +36,7 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
   const [showArchived, setShowArchived] = useState(false);
   const [tagItems, setTagItems] = useState<TagItem[]>([]);
   const [chatTask, setChatTask] = useState<Task | null>(null);
+  const [sharingTask, setSharingTask] = useState<Task | null>(null);
   const chatTaskRef = useRef<Task | null>(null);
   chatTaskRef.current = chatTask;
 
@@ -409,6 +411,7 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
         projects={projects}
         onRefresh={refresh}
         onOpenChat={handleOpenChat}
+        onShare={setSharingTask}
         activeTaskId={chatTask?.id ?? null}
         autoSortOnAccess={autoSortOnAccess}
       />
@@ -572,6 +575,14 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
     <div className="space-y-4">
       {taskListContent}
       {chatPanel}
+      {sharingTask && (
+        <ShareModal
+          type="task"
+          itemId={sharingTask.id}
+          itemTitle={sharingTask.title || `Task #${sharingTask.id}`}
+          onClose={() => setSharingTask(null)}
+        />
+      )}
     </div>
   );
 }
