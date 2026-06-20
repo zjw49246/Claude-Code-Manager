@@ -78,12 +78,13 @@ async def get_feishu_status(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(FeishuUserBinding).limit(1))
     binding = result.scalar_one_or_none()
     if not binding:
-        return {"bound": False, "name": None, "open_id": None, "avatar_url": None}
+        return {"bound": False, "name": None, "open_id": None, "avatar_url": None, "is_registry": settings.org_registry_enabled}
     return {
         "bound": True,
         "name": binding.feishu_name,
         "open_id": binding.feishu_open_id,
         "avatar_url": binding.avatar_url,
+        "is_registry": settings.org_registry_enabled,
     }
 
 

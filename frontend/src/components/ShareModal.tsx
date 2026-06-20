@@ -181,8 +181,7 @@ export function ShareModal({ type, itemId, itemTitle, onClose }: ShareModalProps
                           <User size={16} className="text-gray-400" />
                         )}
                         <span className="flex-1 text-sm text-foreground">{m.name}</span>
-                        {isMe && <span className="text-xs text-gray-500">You</span>}
-                        {isExisting && !isMe && <span className="text-xs text-gray-500">Already shared</span>}
+                        {isExisting && <span className="text-xs text-gray-500">Already shared</span>}
                         {isSelected && !isDisabled && <Check size={14} className="text-blue-400" />}
                       </button>
                     );
