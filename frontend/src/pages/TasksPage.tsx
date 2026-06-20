@@ -567,6 +567,14 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
         <div className="flex-1 min-w-0">
           {chatPanel}
         </div>
+        {sharingTask && (
+          <ShareModal
+            type="task"
+            itemId={sharingTask.id}
+            itemTitle={sharingTask.title || `Task #${sharingTask.id}`}
+            onClose={() => setSharingTask(null)}
+          />
+        )}
       </div>
     );
   }
