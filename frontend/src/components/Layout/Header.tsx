@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { Sun, Moon, Globe, Menu, X, Settings } from 'lucide-react';
+import { Palette, Globe, Menu, X, Settings } from 'lucide-react';
 import { api } from '../../api/client';
 import type { RuntimeSettings } from '../../api/client';
 import { isCapacitor } from '../../config/server';
-import { getTheme, toggleTheme } from '../../config/theme';
+import { getTheme, setTheme as persistTheme, THEME_OPTIONS, type Theme } from '../../config/theme';
 import { getTimezone, setTimezone, TIMEZONE_OPTIONS } from '../../config/timezone';
 import { PoolDrawer } from './PoolDrawer';
 
@@ -91,8 +91,8 @@ export function Header({ currentPage, onNavigate }: HeaderProps) {
     ...(isCapacitor() ? [{ key: 'server', label: 'Server' }] : []),
   ];
 
-  const handleToggleTheme = () => {
-    const next = toggleTheme();
+  const handleThemeChange = (next: Theme) => {
+    persistTheme(next);
     setTheme(next);
   };
 
@@ -220,15 +220,16 @@ export function Header({ currentPage, onNavigate }: HeaderProps) {
                   </select>
                 </div>
                 <div className="flex items-center justify-between gap-3">
-                  <span className="text-xs text-gray-400 flex items-center gap-1.5">
-                    {theme === 'dark' ? <Moon size={13} /> : <Sun size={13} />} 主题
-                  </span>
-                  <button
-                    onClick={handleToggleTheme}
-                    className="text-xs px-2 py-1 rounded bg-gray-700 text-gray-200 border border-gray-600 hover:bg-gray-600"
+                  <span className="text-xs text-gray-400 flex items-center gap-1.5"><Palette size={13} /> 主题</span>
+                  <select
+                    value={theme}
+                    onChange={(e) => handleThemeChange(e.target.value as Theme)}
+                    className="bg-gray-700 text-gray-200 text-xs rounded px-2 py-1 border border-gray-600 focus:outline-none focus:ring-1 focus:ring-indigo-500 cursor-pointer"
                   >
-                    {theme === 'dark' ? '切换到浅色' : '切换到深色'}
-                  </button>
+                    {THEME_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>{opt.label}</option>
+                    ))}
+                  </select>
                 </div>
                 {runtime && (
                   <div className="flex items-center justify-between gap-3">
