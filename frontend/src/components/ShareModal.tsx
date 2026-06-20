@@ -34,7 +34,9 @@ export function ShareModal({ type, itemId, itemTitle, onClose }: ShareModalProps
           api.getOrgTeams(),
           type === 'task' ? api.getTaskShares(itemId) : api.getProjectShares(itemId),
         ]);
-        setMembers(membersData);
+        // Filter out self
+        const myOpenId = feishuStatus.open_id;
+        setMembers(membersData.filter((m: OrgMember) => m.feishu_open_id !== myOpenId));
         setTeams(teamsData);
         const alreadyShared = new Set(sharesData.shares.map((s: any) => s.shared_to_open_id));
         setExisting(alreadyShared);
@@ -112,14 +114,19 @@ export function ShareModal({ type, itemId, itemTitle, onClose }: ShareModalProps
             <div className="text-center py-8">
               <p className="text-gray-400 mb-3">Please bind your Feishu account first to use sharing.</p>
               <button
-                onClick={() => { onClose(); window.location.hash = '#/team'; }}
+                onClick={async () => {
+                  try {
+                    const { url } = await api.getFeishuAuthUrl();
+                    window.location.href = url;
+                  } catch { /* ignore */ }
+                }}
                 className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-500"
-              >Go to Settings</button>
+              >Bind Feishu</button>
             </div>
           ) : members.length === 0 ? (
             <div className="text-center py-8 text-gray-500">
-              <p>No organization members found.</p>
-              <p className="text-xs mt-1">Other team members need to bind Feishu first.</p>
+              <p>No other organization members found.</p>
+              <p className="text-xs mt-1">Other team members need to bind their Feishu accounts first.</p>
             </div>
           ) : (
             <>
