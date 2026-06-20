@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '../api/client';
 import type { Project, GlobalSettings, TagItem } from '../api/client';
-import { Trash2, RotateCcw, FolderGit2, Globe, HardDrive, Plus, Settings, X, ChevronDown, ChevronUp, GripVertical, Tag, FileKey, Palette , Server } from 'lucide-react';
+import { Trash2, RotateCcw, FolderGit2, Globe, HardDrive, Plus, Settings, X, ChevronDown, ChevronUp, GripVertical, Tag, FileKey, Palette, Server, Share2 } from 'lucide-react';
+import { ShareModal } from '../components/ShareModal';
 import { resolveTagColor, TAG_COLOR_OPTIONS } from '../components/TagColors';
 import { TagManager } from '../components/TagManager';
 import { EnvFilesEditor } from '../components/EnvFilesEditor';
@@ -661,6 +662,7 @@ export function ProjectsPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [editingGit, setEditingGit] = useState<Project | null>(null);
   const [editingEnvFiles, setEditingEnvFiles] = useState<Project | null>(null);
+  const [sharingProject, setSharingProject] = useState<Project | null>(null);
   const [showGlobalGit, setShowGlobalGit] = useState(false);
   const [showTagManager, setShowTagManager] = useState(false);
   const [tagItems, setTagItems] = useState<TagItem[]>([]);
@@ -1096,6 +1098,13 @@ export function ProjectsPage() {
                 )}
 
                 <button
+                  onClick={() => setSharingProject(p)}
+                  className="min-w-[44px] min-h-[44px] flex items-center justify-center text-gray-400 hover:text-blue-400 hover:bg-gray-700 rounded transition-colors"
+                  title="Share project"
+                >
+                  <Share2 size={16} />
+                </button>
+                <button
                   onClick={() => handleDelete(p.id)}
                   className="min-w-[44px] min-h-[44px] flex items-center justify-center text-gray-400 hover:text-red-400 hover:bg-gray-700 rounded transition-colors"
                   title="Delete project"
@@ -1133,6 +1142,14 @@ export function ProjectsPage() {
       )}
       {showGlobalGit && <GlobalGitConfigModal onClose={() => setShowGlobalGit(false)} />}
       {showTagManager && <TagManager onClose={() => setShowTagManager(false)} onChanged={refresh} />}
+      {sharingProject && (
+        <ShareModal
+          type="project"
+          itemId={sharingProject.id}
+          itemTitle={sharingProject.name}
+          onClose={() => setSharingProject(null)}
+        />
+      )}
     </div>
   );
 }

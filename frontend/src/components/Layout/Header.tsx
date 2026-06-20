@@ -37,18 +37,6 @@ export function Header({ currentPage, onNavigate }: HeaderProps) {
     api.getFeishuStatus().then(setFeishuStatus).catch(() => {});
   }, []);
 
-  const handleBindFeishu = async () => {
-    const { url } = await api.getFeishuAuthUrl();
-    window.open(url, '_blank');
-  };
-
-  const handleUnbindFeishu = async () => {
-    if (confirm('Unbind Feishu?')) {
-      await api.unbindFeishu();
-      setFeishuStatus({ bound: false });
-    }
-  };
-
   const togglePtyMode = useCallback(async () => {
     if (!runtime || switching || !runtime.pty_available) return;
     if (runtime.use_pty_mode) {
@@ -87,7 +75,6 @@ export function Header({ currentPage, onNavigate }: HeaderProps) {
     { key: 'pr-monitor', label: 'PR Monitor' },
     { key: 'workers', label: 'Workers' },
     { key: 'team', label: 'Team' },
-    { key: 'shares', label: 'Shares' },
     ...(isCapacitor() ? [{ key: 'server', label: 'Server' }] : []),
   ];
 
@@ -182,20 +169,6 @@ export function Header({ currentPage, onNavigate }: HeaderProps) {
               </button>
             </div>
           )}
-          {/* Feishu binding */}
-          <div className="flex items-center gap-1.5">
-            {feishuStatus?.bound ? (
-              <>
-                {feishuStatus.avatar_url && <img src={feishuStatus.avatar_url} className="w-5 h-5 rounded-full" alt="" />}
-                <span className="text-xs text-gray-400">{feishuStatus.name}</span>
-                <button onClick={handleUnbindFeishu} className="text-xs text-red-400 hover:text-red-300 ml-1">Unbind</button>
-              </>
-            ) : feishuStatus !== null ? (
-              <button onClick={handleBindFeishu} className="text-xs px-2 py-1 rounded bg-blue-600/20 text-blue-300 hover:bg-blue-600/30">
-                Bind Feishu
-              </button>
-            ) : null}
-          </div>
           {/* 偏好下拉：时区 + 主题（低频设置收进齿轮，顶栏保持精简） */}
           <div className="relative shrink-0" ref={prefsRef}>
             <button
@@ -250,6 +223,27 @@ export function Header({ currentPage, onNavigate }: HeaderProps) {
                     </button>
                   </div>
                 )}
+                {/* Feishu binding */}
+                <div className="border-t border-gray-700 pt-2 mt-1">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-xs text-gray-400">飞书</span>
+                    {feishuStatus?.bound ? (
+                      <div className="flex items-center gap-1.5">
+                        {feishuStatus.avatar_url && <img src={feishuStatus.avatar_url} className="w-4 h-4 rounded-full" alt="" />}
+                        <span className="text-xs text-gray-300">{feishuStatus.name}</span>
+                        <button
+                          onClick={async () => { if (confirm('解绑飞书？')) { await api.unbindFeishu(); setFeishuStatus({ bound: false }); }}}
+                          className="text-xs text-red-400 hover:text-red-300 ml-1"
+                        >解绑</button>
+                      </div>
+                    ) : feishuStatus !== null ? (
+                      <button
+                        onClick={async () => { const { url } = await api.getFeishuAuthUrl(); window.location.href = url; }}
+                        className="text-xs px-2 py-0.5 rounded bg-blue-600/20 text-blue-300 hover:bg-blue-600/30"
+                      >绑定</button>
+                    ) : null}
+                  </div>
+                </div>
               </div>
             )}
           </div>

@@ -18,10 +18,17 @@ export function ShareModal({ type, itemId, itemTitle, onClose }: ShareModalProps
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [feishuBound, setFeishuBound] = useState<boolean | null>(null);
 
   useEffect(() => {
     (async () => {
       try {
+        const feishuStatus = await api.getFeishuStatus();
+        setFeishuBound(feishuStatus.bound);
+        if (!feishuStatus.bound) {
+          setLoading(false);
+          return;
+        }
         const [membersData, teamsData, sharesData] = await Promise.all([
           api.getOrgMembers(),
           api.getOrgTeams(),
@@ -101,6 +108,19 @@ export function ShareModal({ type, itemId, itemTitle, onClose }: ShareModalProps
           {error && <p className="text-red-400 text-sm">{error}</p>}
           {loading ? (
             <p className="text-gray-400 text-sm">Loading members...</p>
+          ) : feishuBound === false ? (
+            <div className="text-center py-8">
+              <p className="text-gray-400 mb-3">Please bind your Feishu account first to use sharing.</p>
+              <button
+                onClick={() => { onClose(); window.location.hash = '#/team'; }}
+                className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-500"
+              >Go to Settings</button>
+            </div>
+          ) : members.length === 0 ? (
+            <div className="text-center py-8 text-gray-500">
+              <p>No organization members found.</p>
+              <p className="text-xs mt-1">Other team members need to bind Feishu first.</p>
+            </div>
           ) : (
             <>
               {teams.length > 0 && (
