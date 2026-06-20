@@ -66,11 +66,12 @@ function updateHash(page: string, chatTaskId: number | null) {
 
 function App() {
   const initial = parseHash();
+  const initialNeedsServerConfig = isCapacitor() && !getServerUrl();
   const [page, setPage] = useState(initial.page);
   const [chatTaskId, setChatTaskId] = useState<number | null>(initial.chatTaskId);
   const [authenticated, setAuthenticated] = useState(false);
-  const [checking, setChecking] = useState(true);
-  const [needsServerConfig, setNeedsServerConfig] = useState(false);
+  const [checking, setChecking] = useState(!initialNeedsServerConfig);
+  const [needsServerConfig, setNeedsServerConfig] = useState(initialNeedsServerConfig);
 
   useEffect(() => {
     updateHash(page, chatTaskId);
@@ -92,12 +93,7 @@ function App() {
   };
 
   useEffect(() => {
-    // In Capacitor, require server URL to be configured first
-    if (isCapacitor() && !getServerUrl()) {
-      setNeedsServerConfig(true);
-      setChecking(false);
-      return;
-    }
+    if (needsServerConfig) return;
 
     const base = getApiBase();
     // Check if auth is required
@@ -122,7 +118,7 @@ function App() {
         // Server down, show login anyway
       })
       .finally(() => setChecking(false));
-  }, []);
+  }, [needsServerConfig]);
 
   if (needsServerConfig) {
     return (
@@ -135,8 +131,8 @@ function App() {
 
   if (checking) {
     return (
-      <div className="min-h-screen bg-gray-950 flex items-center justify-center">
-        <p className="text-gray-400">Connecting...</p>
+      <div className="min-h-screen bg-app flex items-center justify-center">
+        <p className="text-subtle">Connecting...</p>
       </div>
     );
   }
@@ -147,7 +143,7 @@ function App() {
 
   return (
     <ErrorBoundary>
-      <div className="min-h-screen bg-gray-900 text-foreground flex flex-col overflow-x-clip">
+      <div className="min-h-screen bg-app text-foreground flex flex-col overflow-x-clip">
         <Header currentPage={page} onNavigate={handleNavigate} />
         <main className={`flex-1 mx-auto w-full p-4 ${page === 'tasks' && chatTaskId ? 'max-w-[1400px]' : 'max-w-6xl'}`}>
           {page === 'dashboard' && <Dashboard />}
