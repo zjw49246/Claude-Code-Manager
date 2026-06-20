@@ -2,7 +2,8 @@ import { useState, useMemo, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import { api } from '../../api/client';
 import type { Task, Project } from '../../api/client';
-import { Trash2, RotateCcw, XCircle, MessageCircle, Archive, ArchiveRestore, Star, Copy, Check, MoreVertical, Pencil, Mail, MailOpen, Clock, GripVertical } from 'lucide-react';
+import { Trash2, RotateCcw, XCircle, MessageCircle, Archive, ArchiveRestore, Star, Copy, Check, MoreVertical, Pencil, Mail, MailOpen, Clock, GripVertical, Share2 } from 'lucide-react';
+import { ShareModal } from '../ShareModal';
 import { ToolsBadge, SubAgentsBadge, TaskConfigBadge } from './TaskBadges';
 import { TAG_COLOR_OPTIONS } from '../TagColors';
 import { ExpandableText } from '../ExpandableText';
@@ -40,6 +41,7 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId,
   const [menuPos, setMenuPos] = useState<{ top: number; right: number }>({ top: 0, right: 0 });
   const [editingTitleId, setEditingTitleId] = useState<number | null>(null);
   const [titleDraft, setTitleDraft] = useState('');
+  const [sharingTask, setSharingTask] = useState<Task | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const menuBtnRef = useRef<HTMLButtonElement>(null);
   const titleInputRef = useRef<HTMLInputElement>(null);
@@ -116,6 +118,7 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId,
   }
 
   return (
+    <>
     <div className="space-y-2">
       {ghost}
       {tasks.map((t, idx) => (
@@ -215,6 +218,12 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId,
                     >
                       <Pencil size={14} /> Edit title
                     </button>
+                    <button
+                      onClick={() => { setSharingTask(t); setMenuOpenId(null); }}
+                      className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-gray-300 hover:bg-gray-800 text-left"
+                    >
+                      <Share2 size={14} /> Share
+                    </button>
                     {['in_progress', 'executing'].includes(t.status) && (
                       <button
                         onClick={() => { handleCancel(t.id); setMenuOpenId(null); }}
@@ -311,5 +320,14 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId,
         </div>
       ))}
     </div>
+    {sharingTask && (
+      <ShareModal
+        type="task"
+        itemId={sharingTask.id}
+        itemTitle={sharingTask.title || `Task #${sharingTask.id}`}
+        onClose={() => setSharingTask(null)}
+      />
+    )}
+    </>
   );
 }

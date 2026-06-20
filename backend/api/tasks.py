@@ -139,7 +139,17 @@ async def create_task(body: TaskCreate, queue: TaskQueue = Depends(_get_queue), 
     if not data.get("effort_level"):
         data["effort_level"] = app_settings.default_effort
 
-    return await queue.create(**data)
+    task = await queue.create(**data)
+
+    # Auto-share if project has active project-level shares
+    if task.project_id:
+        try:
+            from backend.services.task_sharing import auto_share_new_task
+            await auto_share_new_task(db, task.id, task.project_id)
+        except Exception:
+            pass  # best-effort
+
+    return task
 
 
 @router.get("/{task_id}", response_model=TaskResponse)

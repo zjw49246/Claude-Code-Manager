@@ -9,7 +9,12 @@ class TokenAuthMiddleware(BaseHTTPMiddleware):
     """Simple bearer token authentication middleware."""
 
     # Paths that don't require authentication
-    PUBLIC_PATHS = {"/api/system/health", "/api/auth/login", "/api/github/webhook", "/api/feishu/callback"}
+    PUBLIC_PATHS = {
+        "/api/system/health", "/api/auth/login", "/api/github/webhook",
+        "/api/feishu/callback",
+        "/api/shared/receive", "/api/shared/revoke",
+        "/api/org/register",
+    }
 
     async def dispatch(self, request: Request, call_next):
         # Skip auth if no token is configured
