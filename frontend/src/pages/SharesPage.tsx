@@ -1,7 +1,7 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { api } from '../api/client';
 import type { SharedTaskReceived } from '../api/client';
-import { RefreshCw, MessageCircle, X } from 'lucide-react';
+import { RefreshCw, MessageCircle, X, Search } from 'lucide-react';
 import { SharedChatView } from '../components/Chat/SharedChatView';
 
 export default function SharesPage() {
@@ -9,6 +9,8 @@ export default function SharesPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [openTask, setOpenTask] = useState<SharedTaskReceived | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [ownerFilter, setOwnerFilter] = useState('');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -36,13 +38,32 @@ export default function SharesPage() {
     }
   };
 
+  const owners = useMemo(() => {
+    const set = new Set<string>();
+    tasks.forEach(t => { if (t.owner_name) set.add(t.owner_name); });
+    return Array.from(set).sort();
+  }, [tasks]);
+
+  const filtered = useMemo(() => {
+    let result = tasks;
+    if (searchQuery.trim()) {
+      const q = searchQuery.toLowerCase();
+      result = result.filter(t =>
+        (t.task_title || '').toLowerCase().includes(q) ||
+        (t.task_description || '').toLowerCase().includes(q) ||
+        (t.project_name || '').toLowerCase().includes(q)
+      );
+    }
+    if (ownerFilter) {
+      result = result.filter(t => t.owner_name === ownerFilter);
+    }
+    return result;
+  }, [tasks, searchQuery, ownerFilter]);
+
   if (openTask) {
     return (
       <div className="h-[calc(100vh-8rem)]">
-        <SharedChatView
-          shared={openTask}
-          onBack={() => setOpenTask(null)}
-        />
+        <SharedChatView shared={openTask} onBack={() => setOpenTask(null)} />
       </div>
     );
   }
@@ -60,6 +81,30 @@ export default function SharesPage() {
         </button>
       </div>
 
+      {tasks.length > 0 && (
+        <div className="flex items-center gap-3">
+          <div className="relative flex-1">
+            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
+            <input
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search tasks..."
+              className="w-full bg-gray-800 text-foreground rounded-lg pl-9 pr-3 py-2 text-sm border border-gray-700 focus:outline-none focus:border-blue-500"
+            />
+          </div>
+          {owners.length > 1 && (
+            <select
+              value={ownerFilter}
+              onChange={(e) => setOwnerFilter(e.target.value)}
+              className="bg-gray-800 text-foreground rounded-lg px-3 py-2 text-sm border border-gray-700 focus:outline-none focus:border-blue-500"
+            >
+              <option value="">All owners</option>
+              {owners.map(o => <option key={o} value={o}>{o}</option>)}
+            </select>
+          )}
+        </div>
+      )}
+
       {error && <p className="text-red-400 text-sm">{error}</p>}
 
       {!loading && tasks.length === 0 && (
@@ -69,8 +114,12 @@ export default function SharesPage() {
         </div>
       )}
 
+      {tasks.length > 0 && filtered.length === 0 && (
+        <p className="text-gray-500 text-sm text-center py-8">No tasks match your search.</p>
+      )}
+
       <div className="grid gap-3">
-        {tasks.map(task => (
+        {filtered.map(task => (
           <div key={task.id} className="bg-gray-800 rounded-xl border border-gray-700 p-4 hover:border-gray-600 transition-colors">
             <div className="flex items-start justify-between">
               <div className="flex-1 min-w-0 cursor-pointer" onClick={() => setOpenTask(task)}>
@@ -106,7 +155,6 @@ export default function SharesPage() {
                 <button
                   onClick={() => handleLeave(task.id)}
                   className="p-1.5 text-gray-400 hover:text-red-400 rounded-lg hover:bg-gray-700"
-                  title="Leave this shared task"
                 >
                   <X size={16} />
                 </button>

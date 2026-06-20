@@ -55,6 +55,7 @@ logging.basicConfig(
 # Global singletons
 logger = logging.getLogger(__name__)
 broadcaster = WebSocketBroadcaster()
+broadcaster.db_factory = async_session
 instance_manager = InstanceManager(db_factory=async_session, broadcaster=broadcaster)
 ralph_loop = RalphLoop(
     db_factory=async_session,
@@ -149,6 +150,29 @@ async def _recover_worker_relays():
         logger.exception("worker relay recovery failed")
 
 
+async def _org_heartbeat_loop():
+    """Periodically re-register with the org registry to update last_seen_at."""
+    await asyncio.sleep(30)  # initial delay
+    while True:
+        try:
+            from backend.models.feishu_binding import FeishuUserBinding
+            async with async_session() as db:
+                result = await db.execute(select(FeishuUserBinding).limit(1))
+                binding = result.scalar_one_or_none()
+            if binding:
+                from backend.services.feishu_auth import register_with_org_registry
+                await register_with_org_registry(
+                    binding.feishu_open_id,
+                    binding.feishu_name or "",
+                    binding.avatar_url or "",
+                )
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.debug("org heartbeat failed")
+        await asyncio.sleep(300)  # every 5 minutes
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
@@ -197,7 +221,15 @@ async def lifespan(app: FastAPI):
     from backend.api.uploads import start_upload_cleanup_loop
     upload_cleanup_task = await start_upload_cleanup_loop()
 
+    # Org registry heartbeat — periodically re-register with the registry
+    heartbeat_task = None
+    if settings.org_registry_url or settings.org_registry_enabled:
+        heartbeat_task = asyncio.create_task(_org_heartbeat_loop())
+
     yield
+
+    if heartbeat_task is not None:
+        heartbeat_task.cancel()
 
     # Stop all PTY sessions on shutdown — orphaned CC processes keep holding
     # their session files and break cold resume after restart.

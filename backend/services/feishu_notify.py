@@ -96,3 +96,39 @@ async def send_revoke_notification(
     except Exception:
         logger.exception("Failed to send Feishu revoke notification to %s", recipient_open_id)
         return False
+
+
+async def send_status_notification(
+    recipient_open_id: str,
+    sharer_name: str,
+    task_title: str,
+    new_status: str,
+) -> bool:
+    """Send a Feishu DM when a shared task reaches a terminal status."""
+    if not settings.feishu_app_id or not settings.feishu_app_secret:
+        return False
+
+    try:
+        token = await _get_app_access_token()
+        content = {
+            "text": f"Task \"{task_title}\" (shared by {sharer_name}) is now {new_status}"
+        }
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                f"{_FEISHU_BASE}/im/v1/messages",
+                params={"receive_id_type": "open_id"},
+                headers={"Authorization": f"Bearer {token}"},
+                json={
+                    "receive_id": recipient_open_id,
+                    "msg_type": "text",
+                    "content": str(content).replace("'", '"'),
+                },
+            )
+            data = resp.json()
+            if data.get("code") != 0:
+                logger.warning("Feishu send_message error: %s", data)
+                return False
+        return True
+    except Exception:
+        logger.exception("Failed to send Feishu status notification to %s", recipient_open_id)
+        return False

@@ -185,3 +185,17 @@ async def proxy_config(
     except Exception as e:
         logger.warning("proxy_config failed for shared %d: %s", shared_id, e)
         raise HTTPException(502, f"Cannot reach sharer CCM: {e}")
+
+
+@router.get("/{shared_id}/ping")
+async def ping_sharer(shared_id: int, db: AsyncSession = Depends(get_db)):
+    """Check if the sharer's CCM is online."""
+    record = await _get_shared_record(shared_id, db)
+    import httpx
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            resp = await client.get(f"{record.owner_ccm_url}/api/system/health")
+            resp.raise_for_status()
+        return {"online": True}
+    except Exception:
+        return {"online": False}

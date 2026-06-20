@@ -1,7 +1,7 @@
 """Organization registry & team management endpoints."""
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -90,6 +90,8 @@ async def list_members(db: AsyncSession = Depends(get_db)):
     if settings.org_registry_enabled:
         result = await db.execute(select(OrgMember).order_by(OrgMember.name))
         members = result.scalars().all()
+        now = datetime.utcnow()
+        online_threshold = now - timedelta(minutes=10)
         return [
             {
                 "open_id": m.feishu_open_id,
@@ -98,6 +100,7 @@ async def list_members(db: AsyncSession = Depends(get_db)):
                 "avatar_url": m.avatar_url,
                 "registered_at": m.registered_at.isoformat() if m.registered_at else None,
                 "last_seen_at": m.last_seen_at.isoformat() if m.last_seen_at else None,
+                "is_online": m.last_seen_at is not None and m.last_seen_at >= online_threshold,
             }
             for m in members
         ]
