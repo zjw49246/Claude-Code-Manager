@@ -410,6 +410,17 @@ export interface OrgMember {
   avatar_url?: string;
 }
 
+export interface SharedTaskReceived {
+  id: number;
+  owner_ccm_url: string;
+  owner_name?: string;
+  remote_task_id: number;
+  task_title?: string;
+  task_description?: string;
+  project_name?: string;
+  received_at?: string;
+}
+
 export interface OrgTeam {
   id: number;
   name: string;
@@ -431,6 +442,28 @@ export const api = {
   deleteOrgTeam: (id: number) => request<{ ok: boolean }>(`/api/org/teams/${id}`, { method: 'DELETE' }),
   addTeamMember: (teamId: number, openId: string) => request<{ ok: boolean }>(`/api/org/teams/${teamId}/members`, { method: 'POST', body: JSON.stringify({ open_id: openId }) }),
   removeTeamMember: (teamId: number, openId: string) => request<{ ok: boolean }>(`/api/org/teams/${teamId}/members/${openId}`, { method: 'DELETE' }),
+
+  // Task sharing
+  shareTask: (taskId: number, targets: { open_id: string; name?: string; ccm_url: string }[]) =>
+    request<{ shares: any[] }>(`/api/tasks/${taskId}/share`, { method: 'POST', body: JSON.stringify({ targets }) }),
+  revokeTaskShare: (taskId: number, openId: string) =>
+    request<{ ok: boolean }>(`/api/tasks/${taskId}/share/${openId}`, { method: 'DELETE' }),
+  getTaskShares: (taskId: number) =>
+    request<{ shares: any[] }>(`/api/tasks/${taskId}/shares`),
+
+  // Project sharing
+  shareProject: (projectId: number, targets: { open_id: string; name?: string; ccm_url: string }[]) =>
+    request<{ shares: any[] }>(`/api/projects/${projectId}/share`, { method: 'POST', body: JSON.stringify({ targets }) }),
+  revokeProjectShare: (projectId: number, openId: string) =>
+    request<{ ok: boolean }>(`/api/projects/${projectId}/share/${openId}`, { method: 'DELETE' }),
+  getProjectShares: (projectId: number) =>
+    request<{ shares: any[] }>(`/api/projects/${projectId}/shares`),
+
+  // Shared tasks (received from others)
+  getSharedTasks: () =>
+    request<{ tasks: SharedTaskReceived[] }>('/api/shared/tasks'),
+  leaveSharedTask: (sharedId: number) =>
+    request<{ ok: boolean }>(`/api/shared/${sharedId}`, { method: 'DELETE' }),
 
   // Projects
   listProjects: () => request<Project[]>('/api/projects'),

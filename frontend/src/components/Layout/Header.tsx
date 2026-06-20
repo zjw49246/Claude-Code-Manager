@@ -87,6 +87,7 @@ export function Header({ currentPage, onNavigate }: HeaderProps) {
     { key: 'pr-monitor', label: 'PR Monitor' },
     { key: 'workers', label: 'Workers' },
     { key: 'team', label: 'Team' },
+    { key: 'shares', label: 'Shares' },
     ...(isCapacitor() ? [{ key: 'server', label: 'Server' }] : []),
   ];
 
