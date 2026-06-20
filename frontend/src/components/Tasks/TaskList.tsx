@@ -219,7 +219,7 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, onShare, acti
                     </button>
                     {onShare && (
                     <button
-                      onClick={() => { setMenuOpenId(null); onShare(t); }}
+                      onClick={(e) => { e.stopPropagation(); const task = t; setMenuOpenId(null); setTimeout(() => onShare(task), 0); }}
                       className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-gray-300 hover:bg-gray-800 text-left"
                     >
                       <Share2 size={14} /> Share
