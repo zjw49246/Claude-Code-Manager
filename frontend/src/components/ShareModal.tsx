@@ -19,6 +19,7 @@ export function ShareModal({ type, itemId, itemTitle, onClose }: ShareModalProps
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [feishuBound, setFeishuBound] = useState<boolean | null>(null);
+  const [myOpenId, setMyOpenId] = useState('');
 
   useEffect(() => {
     (async () => {
@@ -34,9 +35,8 @@ export function ShareModal({ type, itemId, itemTitle, onClose }: ShareModalProps
           api.getOrgTeams(),
           type === 'task' ? api.getTaskShares(itemId) : api.getProjectShares(itemId),
         ]);
-        // Filter out self
-        const myOpenId = feishuStatus.open_id;
-        setMembers(membersData.filter((m: OrgMember) => m.feishu_open_id !== myOpenId));
+        setMyOpenId(feishuStatus.open_id || '');
+        setMembers(membersData);
         setTeams(teamsData);
         const alreadyShared = new Set(sharesData.shares.map((s: any) => s.shared_to_open_id));
         setExisting(alreadyShared);
@@ -48,7 +48,10 @@ export function ShareModal({ type, itemId, itemTitle, onClose }: ShareModalProps
     })();
   }, [type, itemId]);
 
+  const isSelf = (openId: string) => openId === myOpenId;
+
   const toggleMember = (openId: string) => {
+    if (isSelf(openId)) return;
     setSelected(prev => {
       const next = new Set(prev);
       if (next.has(openId)) next.delete(openId);
@@ -58,8 +61,8 @@ export function ShareModal({ type, itemId, itemTitle, onClose }: ShareModalProps
   };
 
   const toggleTeam = (team: OrgTeam) => {
-    const teamMembers = team.members || [];
-    const allSelected = teamMembers.every(m => selected.has(m.feishu_open_id));
+    const teamMembers = (team.members || []).filter(m => !isSelf(m.feishu_open_id));
+    const allSelected = teamMembers.length > 0 && teamMembers.every(m => selected.has(m.feishu_open_id));
     setSelected(prev => {
       const next = new Set(prev);
       teamMembers.forEach(m => {
@@ -123,11 +126,6 @@ export function ShareModal({ type, itemId, itemTitle, onClose }: ShareModalProps
                 className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-500"
               >Bind Feishu</button>
             </div>
-          ) : members.length === 0 ? (
-            <div className="text-center py-8 text-gray-500">
-              <p>No other organization members found.</p>
-              <p className="text-xs mt-1">Other team members need to bind their Feishu accounts first.</p>
-            </div>
           ) : (
             <>
               {teams.length > 0 && (
@@ -160,15 +158,17 @@ export function ShareModal({ type, itemId, itemTitle, onClose }: ShareModalProps
                 <h4 className="text-sm font-medium text-gray-400 mb-2">Members</h4>
                 <div className="space-y-1">
                   {members.map(m => {
+                    const isMe = isSelf(m.feishu_open_id);
                     const isExisting = existing.has(m.feishu_open_id);
+                    const isDisabled = isMe || isExisting;
                     const isSelected = selected.has(m.feishu_open_id);
                     return (
                       <button
                         key={m.feishu_open_id}
-                        onClick={() => !isExisting && toggleMember(m.feishu_open_id)}
-                        disabled={isExisting}
+                        onClick={() => !isDisabled && toggleMember(m.feishu_open_id)}
+                        disabled={isDisabled}
                         className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-left transition-colors ${
-                          isExisting
+                          isDisabled
                             ? 'bg-gray-700/30 opacity-60 cursor-not-allowed'
                             : isSelected
                             ? 'bg-blue-600/20 border border-blue-500/30'
@@ -181,8 +181,9 @@ export function ShareModal({ type, itemId, itemTitle, onClose }: ShareModalProps
                           <User size={16} className="text-gray-400" />
                         )}
                         <span className="flex-1 text-sm text-foreground">{m.name}</span>
-                        {isExisting && <span className="text-xs text-gray-500">Already shared</span>}
-                        {isSelected && !isExisting && <Check size={14} className="text-blue-400" />}
+                        {isMe && <span className="text-xs text-gray-500">You</span>}
+                        {isExisting && !isMe && <span className="text-xs text-gray-500">Already shared</span>}
+                        {isSelected && !isDisabled && <Check size={14} className="text-blue-400" />}
                       </button>
                     );
                   })}

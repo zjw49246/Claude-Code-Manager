@@ -254,12 +254,28 @@ export default function TeamPage() {
           <h2 className="text-lg font-semibold text-foreground flex items-center gap-2">
             <Users size={20} /> Groups
           </h2>
-          <button
-            onClick={() => { setEditingTeam(null); setShowTeamModal(true); }}
-            className="flex items-center gap-1 px-3 py-1.5 text-sm bg-indigo-600 text-white rounded hover:bg-indigo-500"
-          >
-            <Plus size={14} /> New Group
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={async () => {
+                const url = prompt('Transfer registry to CCM URL:');
+                if (!url) return;
+                if (!confirm(`Transfer org registry to ${url}? This cannot be undone.`)) return;
+                try {
+                  await api.transferRegistry(url);
+                  alert('Registry transferred successfully.');
+                } catch (e) { alert('Transfer failed: ' + e); }
+              }}
+              className="flex items-center gap-1 px-3 py-1.5 text-sm text-gray-400 hover:text-gray-200 border border-gray-600 rounded hover:bg-gray-700"
+            >
+              Transfer Registry
+            </button>
+            <button
+              onClick={() => { setEditingTeam(null); setShowTeamModal(true); }}
+              className="flex items-center gap-1 px-3 py-1.5 text-sm bg-indigo-600 text-white rounded hover:bg-indigo-500"
+            >
+              <Plus size={14} /> New Group
+            </button>
+          </div>
         </div>
 
         {teams.length === 0 ? (
