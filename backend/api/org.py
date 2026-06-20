@@ -12,10 +12,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.config import settings
 from backend.database import get_db
 from backend.models.org import OrgMember, OrgTeam, OrgTeamMember
+from backend.models.global_settings import GlobalSettings
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/org", tags=["org"])
+
+
+async def _get_registry_url(db: AsyncSession) -> str:
+    """Get effective org registry URL: DB override > env config."""
+    gs = await db.get(GlobalSettings, 1)
+    if gs and gs.org_registry_url:
+        return gs.org_registry_url
+    return settings.org_registry_url
 
 
 # ---------- Pydantic schemas ----------
@@ -105,10 +114,11 @@ async def list_members(db: AsyncSession = Depends(get_db)):
             for m in members
         ]
 
-    if settings.org_registry_url:
+    registry_url = await _get_registry_url(db)
+    if registry_url:
         try:
             async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.get(f"{settings.org_registry_url}/api/org/members")
+                resp = await client.get(f"{registry_url}/api/org/members")
                 resp.raise_for_status()
                 return resp.json()
         except Exception:
@@ -252,13 +262,15 @@ async def import_registry(body: ImportBody, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/registry-changed")
-async def registry_changed(body: RegistryChangedBody):
-    """Notification that the org registry has moved to a new URL.
-
-    This is informational — the actual ORG_REGISTRY_URL is an env var.
-    The frontend can use this to prompt the user to update their .env.
-    """
+async def registry_changed(body: RegistryChangedBody, db: AsyncSession = Depends(get_db)):
+    """Notification that the org registry has moved — persist to DB so no restart needed."""
     logger.info("Org registry moved to %s", body.new_registry_url)
+    gs = await db.get(GlobalSettings, 1)
+    if gs:
+        gs.org_registry_url = body.new_registry_url
+    else:
+        db.add(GlobalSettings(id=1, org_registry_url=body.new_registry_url))
+    await db.commit()
     return {"ok": True, "new_registry_url": body.new_registry_url}
 
 
@@ -268,12 +280,13 @@ async def _proxy_or_local(method: str, path: str, db: AsyncSession, json_body=No
     """If registry, use local DB. If not, proxy to registry."""
     if settings.org_registry_enabled:
         return None  # Caller handles local DB
-    if settings.org_registry_url:
+    registry_url = await _get_registry_url(db)
+    if registry_url:
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.request(
                     method,
-                    f"{settings.org_registry_url}{path}",
+                    f"{registry_url}{path}",
                     json=json_body,
                 )
                 resp.raise_for_status()
@@ -302,7 +315,8 @@ async def create_team(body: TeamCreate, db: AsyncSession = Depends(get_db)):
 async def list_teams(db: AsyncSession = Depends(get_db)):
     """List all teams."""
     if not settings.org_registry_enabled:
-        if settings.org_registry_url:
+        registry_url = await _get_registry_url(db)
+        if registry_url:
             proxy = await _proxy_or_local("GET", "/api/org/teams", db)
             return proxy
         return []
