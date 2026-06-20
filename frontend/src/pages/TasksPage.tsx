@@ -45,6 +45,16 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
     onChatTaskChange(t?.id ?? null);
   }, [onChatTaskChange]);
 
+  // Listen for share-task events from TaskList menu
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const task = (e as CustomEvent).detail?.task;
+      if (task) setSharingTask(task);
+    };
+    window.addEventListener('ccm-share-task', handler);
+    return () => window.removeEventListener('ccm-share-task', handler);
+  }, []);
+
   const [autoSortOnAccess, setAutoSortOnAccess] = useState(true);
   useEffect(() => {
     api.getRuntimeSettings().then((s) => setAutoSortOnAccess(s.auto_sort_on_access)).catch(() => {});
@@ -411,7 +421,6 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
         projects={projects}
         onRefresh={refresh}
         onOpenChat={handleOpenChat}
-        onShare={setSharingTask}
         activeTaskId={chatTask?.id ?? null}
         autoSortOnAccess={autoSortOnAccess}
       />
@@ -522,7 +531,7 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
                       <Star size={13} fill={t.starred ? 'currentColor' : 'none'} />
                     </button>
                     <button
-                      onClick={() => setSharingTask(t)}
+                      onClick={() => window.dispatchEvent(new CustomEvent('ccm-share-task', { detail: { task: t } }))}
                       className="p-1 text-gray-600 hover:text-blue-400 transition-colors"
                       title="Share"
                     >
