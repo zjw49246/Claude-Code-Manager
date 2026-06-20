@@ -114,12 +114,23 @@ async def register_with_org_registry(open_id: str, name: str, avatar_url: str) -
             logger.exception("Failed to register locally in org registry")
             return False
 
-    if settings.org_registry_url:
-        # Remote registry — POST to it.
+    # Check DB override first, then env
+    from backend.database import async_session as _session
+    from backend.models.global_settings import GlobalSettings
+    registry_url = settings.org_registry_url
+    try:
+        async with _session() as db:
+            gs = await db.get(GlobalSettings, 1)
+            if gs and gs.org_registry_url:
+                registry_url = gs.org_registry_url
+    except Exception:
+        pass
+
+    if registry_url:
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.post(
-                    f"{settings.org_registry_url}/api/org/register",
+                    f"{registry_url}/api/org/register",
                     json=payload,
                 )
                 resp.raise_for_status()
@@ -153,11 +164,22 @@ async def unregister_from_org_registry(open_id: str) -> bool:
             logger.exception("Failed to unregister locally from org registry")
             return False
 
-    if settings.org_registry_url:
+    from backend.database import async_session as _session
+    from backend.models.global_settings import GlobalSettings
+    registry_url = settings.org_registry_url
+    try:
+        async with _session() as db:
+            gs = await db.get(GlobalSettings, 1)
+            if gs and gs.org_registry_url:
+                registry_url = gs.org_registry_url
+    except Exception:
+        pass
+
+    if registry_url:
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 resp = await client.delete(
-                    f"{settings.org_registry_url}/api/org/members/{open_id}",
+                    f"{registry_url}/api/org/members/{open_id}",
                 )
                 resp.raise_for_status()
             return True

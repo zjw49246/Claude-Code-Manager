@@ -21,3 +21,5 @@ class GlobalSettings(Base):
     use_pty_mode: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     # Task sort: auto-move accessed task to top of its group (None = True)
     auto_sort_on_access: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # Org registry URL override (set via registry-changed callback, takes precedence over env)
+    org_registry_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
