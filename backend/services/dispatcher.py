@@ -37,6 +37,20 @@ PRIORITY_USER = 0
 PRIORITY_MONITOR_COMPLETE = 1
 PRIORITY_MONITOR_IMPORTANT = 2
 
+# Per-task queue consumer tuning (module-level so tests can patch them).
+# QUEUE_CONSUMER_IDLE_TIMEOUT: stop a consumer after this many idle seconds.
+# QUEUE_HEARTBEAT_INTERVAL: how often the consumer marks itself alive.
+# QUEUE_STUCK_THRESHOLD: _ensure_queue_worker treats a consumer whose heartbeat
+#   is older than this as wedged and respawns it. It MUST be comfortably larger
+#   than the heartbeat interval — a heartbeat now runs for the consumer's whole
+#   lifetime (incl. a multi-minute turn or an idle wait), so a fresh heartbeat
+#   means "alive" and only a truly wedged event loop trips the watchdog. See
+#   prod task #728: a 14-min turn used to look "stuck", got respawned, and
+#   produced concurrent `claude --resume` on one session.
+QUEUE_CONSUMER_IDLE_TIMEOUT = 300
+QUEUE_HEARTBEAT_INTERVAL = 30
+QUEUE_STUCK_THRESHOLD = 120
+
 
 @dataclass(order=True)
 class QueuedMessage:
@@ -2084,9 +2098,10 @@ class GlobalDispatcher:
         existing = self._task_queue_workers.get(task_id)
         if existing and not existing.done():
             last_activity = self._task_queue_activity.get(task_id, 0)
-            if last_activity and time.monotonic() - last_activity > 120:
+            if last_activity and time.monotonic() - last_activity > QUEUE_STUCK_THRESHOLD:
                 logger.warning(
-                    f"Task {task_id} queue consumer stuck for >120s, cancelling"
+                    f"Task {task_id} queue consumer stuck for >{QUEUE_STUCK_THRESHOLD}s, "
+                    f"cancelling and respawning"
                 )
                 existing.cancel()
             else:
@@ -2147,30 +2162,59 @@ class GlobalDispatcher:
             logger.info(f"Cleared {cleared} pending queued message(s) for task {task_id} on interrupt")
         return cleared
 
+    async def _queue_heartbeat(self, task_id: int):
+        """Continuously mark a task's queue consumer as alive.
+
+        Runs for the consumer's entire lifetime — including a long turn blocked
+        in `_wait_process` and an idle wait on `q.get()` — so neither looks
+        "stuck" to `_ensure_queue_worker`. Previously the activity timestamp was
+        only bumped around each `_process_queued_message` call, so any turn
+        longer than QUEUE_STUCK_THRESHOLD froze the heartbeat, the watchdog
+        respawned the consumer, and the orphaned `claude` subprocess kept
+        running — yielding concurrent `--resume` on one session (prod task #728).
+        """
+        try:
+            while True:
+                self._task_queue_activity[task_id] = time.monotonic()
+                await asyncio.sleep(QUEUE_HEARTBEAT_INTERVAL)
+        except asyncio.CancelledError:
+            pass
+
     async def _task_queue_consumer(self, task_id: int):
         """Serial consumer: process queued messages one at a time for a task."""
         q = self._get_task_queue(task_id)
-        idle_timeout = 300  # stop consumer after 5 min idle
+        # Lifetime heartbeat: keeps the watchdog from respawning us during a
+        # long-running turn or an idle wait (see _queue_heartbeat / task #728).
+        hb_task = asyncio.create_task(self._queue_heartbeat(task_id))
 
         try:
             while True:
                 try:
-                    msg: QueuedMessage = await asyncio.wait_for(q.get(), timeout=idle_timeout)
+                    msg: QueuedMessage = await asyncio.wait_for(
+                        q.get(), timeout=QUEUE_CONSUMER_IDLE_TIMEOUT
+                    )
                 except asyncio.TimeoutError:
-                    logger.info(f"Task {task_id} queue consumer idle for {idle_timeout}s, stopping")
+                    logger.info(
+                        f"Task {task_id} queue consumer idle for "
+                        f"{QUEUE_CONSUMER_IDLE_TIMEOUT}s, stopping"
+                    )
                     break
 
                 try:
-                    self._task_queue_activity[task_id] = time.monotonic()
                     await self._process_queued_message(task_id, msg)
-                    self._task_queue_activity[task_id] = time.monotonic()
                 except Exception:
                     logger.exception(f"Error processing queued message for task {task_id}")
-                    self._task_queue_activity[task_id] = time.monotonic()
                 finally:
                     q.task_done()
         finally:
-            self._task_queue_workers.pop(task_id, None)
+            hb_task.cancel()
+            # Only deregister if THIS task is still the registered worker. The
+            # watchdog (_ensure_queue_worker) may have already cancelled us and
+            # registered a fresh consumer; popping unconditionally would erase
+            # the live worker's registration, so the next enqueue would spawn a
+            # *second* live consumer → two concurrent `--resume` (task #728).
+            if self._task_queue_workers.get(task_id) is asyncio.current_task():
+                self._task_queue_workers.pop(task_id, None)
             if q.empty():
                 self._task_queues.pop(task_id, None)
 

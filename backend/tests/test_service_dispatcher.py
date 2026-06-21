@@ -2645,3 +2645,108 @@ async def test_create_task_fills_default_model_and_effort(client):
     data = resp.json()
     assert data["model"] == settings.default_model
     assert data["effort_level"] == settings.default_effort
+
+
+# === Per-task queue consumer: no concurrent `--resume` on one session (task #728) ===
+
+
+@pytest.mark.asyncio
+async def test_long_turn_does_not_respawn_consumer(db_factory, monkeypatch):
+    """A turn longer than the stuck-threshold must NOT trip the watchdog into
+    respawning the consumer.
+
+    Regression for prod task #728: an ~14-min turn froze the activity heartbeat,
+    the >120s watchdog cancelled+respawned the consumer (without killing the
+    running `claude` subprocess), and the backlog got flushed as concurrent
+    `claude --resume <same session>` processes. The lifetime heartbeat keeps the
+    consumer marked alive so the watchdog stays quiet and processing stays serial.
+    """
+    import backend.services.dispatcher as disp_mod
+    monkeypatch.setattr(disp_mod, "QUEUE_STUCK_THRESHOLD", 0.2)
+    monkeypatch.setattr(disp_mod, "QUEUE_HEARTBEAT_INTERVAL", 0.02)
+
+    d = _make_dispatcher(db_factory)
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+    active = 0
+    max_active = 0
+
+    async def fake_process(task_id, msg):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        started.set()
+        await release.wait()  # hold the "turn" open past the stuck-threshold
+        active -= 1
+
+    d._process_queued_message = fake_process
+
+    await d.enqueue_message(1, "first")
+    await asyncio.wait_for(started.wait(), 1)
+    worker1 = d._task_queue_workers[1]
+
+    # Hold the turn open well past QUEUE_STUCK_THRESHOLD, then enqueue more work.
+    await asyncio.sleep(0.4)
+    await d.enqueue_message(1, "second")
+    await asyncio.sleep(0.1)
+
+    # Same consumer (not cancelled/respawned), and "second" did not start a
+    # concurrent turn while "first" was still running.
+    assert d._task_queue_workers[1] is worker1
+    assert max_active == 1
+
+    # Drain and clean up.
+    release.set()
+    await asyncio.sleep(0.1)
+    assert max_active == 1
+    worker1.cancel()
+
+
+@pytest.mark.asyncio
+async def test_watchdog_respawn_keeps_live_worker(db_factory, monkeypatch):
+    """When the watchdog DOES respawn the consumer, the cancelled consumer's
+    cleanup must not evict the freshly-registered worker.
+
+    Regression for prod task #728: the old `finally` popped
+    `_task_queue_workers[task_id]` unconditionally, erasing the new consumer's
+    registration so a later enqueue spawned a *second* live consumer → two
+    concurrent `--resume`. The guard only deregisters when the dict still points
+    at the exiting task.
+    """
+    import backend.services.dispatcher as disp_mod
+    # Negative threshold → any _ensure_queue_worker on an existing worker treats
+    # it as stuck and respawns, deterministically forcing the race.
+    monkeypatch.setattr(disp_mod, "QUEUE_STUCK_THRESHOLD", -1)
+    monkeypatch.setattr(disp_mod, "QUEUE_HEARTBEAT_INTERVAL", 0.02)
+
+    d = _make_dispatcher(db_factory)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_process(task_id, msg):
+        started.set()
+        await release.wait()
+
+    d._process_queued_message = fake_process
+
+    await d.enqueue_message(1, "first")
+    await asyncio.wait_for(started.wait(), 1)
+    c1 = d._task_queue_workers[1]
+
+    started.clear()
+    # Forces watchdog: cancels c1, spawns c2, registers c2.
+    await d.enqueue_message(1, "second")
+    c2 = d._task_queue_workers[1]
+    assert c2 is not c1
+
+    # Let c1's cancellation + finally run and c2 begin processing "second".
+    release.set()
+    await asyncio.wait_for(started.wait(), 1)
+    await asyncio.sleep(0.05)
+
+    # The live worker registration must survive c1's cleanup.
+    assert d._task_queue_workers.get(1) is c2
+    assert not c2.done()
+
+    c2.cancel()
