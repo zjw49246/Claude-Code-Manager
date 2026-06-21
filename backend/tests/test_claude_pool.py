@@ -12,6 +12,8 @@ from backend.services.claude_pool import (
     is_rate_limited,
     is_auth_failure,
     is_pool_rotatable,
+    is_transient_overload,
+    transient_retry_delay,
     migrate_session,
     collect_process_output_for_detection,
 )
@@ -91,6 +93,81 @@ class TestPoolRotatable:
 
     def test_normal_error(self):
         assert not is_pool_rotatable("SyntaxError: unexpected token")
+
+
+class TestTransientOverloadDetection:
+    """Server-side transient 429/overload — wait-and-retry the same account."""
+
+    def test_the_actual_cli_message(self):
+        # The exact wording the Claude Code CLI prints for an HTTP 429
+        # rate_limit that is NOT the account usage limit.
+        msg = ("API Error: Server is temporarily limiting requests "
+               "(not your usage limit) · Rate limited")
+        assert is_transient_overload(msg)
+
+    def test_not_your_usage_limit_phrase(self):
+        assert is_transient_overload("the server is busy (not your usage limit)")
+
+    def test_overloaded_error_type(self):
+        assert is_transient_overload('{"type":"error","error":{"type":"overloaded_error"}}')
+
+    def test_api_overloaded(self):
+        assert is_transient_overload("API overloaded — wait and retry")
+
+    def test_case_insensitive(self):
+        assert is_transient_overload("SERVER IS TEMPORARILY LIMITING REQUESTS")
+
+    # --- precedence: account usage-limit / auth-failure must rotate, not wait ---
+    def test_usage_limit_takes_precedence(self):
+        # A genuine usage-limit banner must NOT be treated as transient.
+        assert not is_transient_overload("You've hit your limit · resets 5pm (UTC)")
+
+    def test_usage_limit_reached_not_transient(self):
+        assert not is_transient_overload("Claude AI usage limit reached")
+
+    def test_auth_failure_not_transient(self):
+        assert not is_transient_overload("Not logged in. Please run /login")
+
+    # --- no false positives ---
+    def test_no_false_positive_generic_429(self):
+        assert not is_transient_overload("The API returned a 429 rate limit error")
+
+    def test_no_false_positive_normal_output(self):
+        assert not is_transient_overload("Task completed successfully. All tests pass.")
+
+    def test_no_false_positive_tool_discussion(self):
+        assert not is_transient_overload("I implemented the request throttling middleware")
+
+    def test_empty(self):
+        assert not is_transient_overload("")
+
+    def test_none(self):
+        assert not is_transient_overload(None)
+
+
+class TestTransientRetryDelay:
+    def test_first_attempt_near_base(self):
+        # attempt 1 => base ± 20% jitter
+        d = transient_retry_delay(1, base=10.0, cap=120.0)
+        assert 8.0 <= d <= 12.0
+
+    def test_exponential_growth(self):
+        # attempt 3 => base * 4 = 40 ± 20% => [32, 48]
+        d = transient_retry_delay(3, base=10.0, cap=120.0)
+        assert 32.0 <= d <= 48.0
+
+    def test_capped(self):
+        # huge attempt clamps to cap (then ± jitter on the cap)
+        d = transient_retry_delay(20, base=10.0, cap=120.0)
+        assert d <= 120.0 * 1.2
+
+    def test_minimum_one_second(self):
+        d = transient_retry_delay(1, base=0.0, cap=120.0)
+        assert d >= 1.0
+
+    def test_attempt_floor(self):
+        # attempt < 1 is treated as 1, never negative/zero delay
+        assert transient_retry_delay(0, base=10.0, cap=120.0) >= 1.0
 
 
 # ---------------------------------------------------------------------------

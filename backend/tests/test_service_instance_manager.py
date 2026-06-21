@@ -1570,3 +1570,113 @@ async def test_release_pty_session():
     assert FakePool.removed == ["sid-x"]
     await im.release_pty_session("")  # empty -> no-op
     assert FakePool.removed == ["sid-x"]
+
+
+# ---------------------------------------------------------------------------
+# Transient-overload turn-scoped flag (auto wait + retry on transient 429)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_process_event_sets_transient_flag_on_overload_error(db_factory):
+    """An is_error event with the transient-429 wording flips the turn flag."""
+    async with db_factory() as db:
+        inst = Instance(name="transient-inst")
+        db.add(inst)
+        task = Task(title="t", description="d")
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id, task_id = inst.id, task.id
+
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    im = InstanceManager(db_factory, broadcaster)
+
+    assert im.transient_error_seen(inst_id) is False
+    await im._process_event(inst_id, task_id, {
+        "event_type": "result",
+        "role": "assistant",
+        "content": ("API Error: Server is temporarily limiting requests "
+                    "(not your usage limit) · Rate limited"),
+        "is_error": True,
+        "raw_json": "{}",
+    })
+    assert im.transient_error_seen(inst_id) is True
+
+
+@pytest.mark.asyncio
+async def test_process_event_usage_limit_does_not_set_transient_flag(db_factory):
+    """A genuine usage-limit banner must rotate, not set the transient flag."""
+    async with db_factory() as db:
+        inst = Instance(name="usage-inst")
+        db.add(inst)
+        task = Task(title="t", description="d")
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id, task_id = inst.id, task.id
+
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    im = InstanceManager(db_factory, broadcaster)
+
+    await im._process_event(inst_id, task_id, {
+        "event_type": "result",
+        "role": "assistant",
+        "content": "You've hit your limit · resets 5pm (UTC)",
+        "is_error": True,
+        "raw_json": "{}",
+    })
+    assert im.transient_error_seen(inst_id) is False
+
+
+@pytest.mark.asyncio
+async def test_process_event_clean_event_leaves_flag_unset(db_factory):
+    async with db_factory() as db:
+        inst = Instance(name="clean-inst")
+        db.add(inst)
+        task = Task(title="t", description="d")
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id, task_id = inst.id, task.id
+
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    im = InstanceManager(db_factory, broadcaster)
+
+    await im._process_event(inst_id, task_id, {
+        "event_type": "message",
+        "role": "assistant",
+        "content": "All done, tests pass.",
+        "is_error": False,
+        "raw_json": "{}",
+    })
+    assert im.transient_error_seen(inst_id) is False
+
+
+@pytest.mark.asyncio
+async def test_launch_resets_transient_flag(db_factory):
+    """A new launch() clears the previous turn's transient flag."""
+    async with db_factory() as db:
+        inst = Instance(name="reset-inst")
+        db.add(inst)
+        await db.commit()
+        await db.refresh(inst)
+        inst_id = inst.id
+
+    mock_proc = _make_mock_process()
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    im = InstanceManager(db_factory, broadcaster)
+    im._transient_seen.add(inst_id)  # pretend prior turn hit overload
+
+    with patch("backend.services.instance_manager.asyncio.create_subprocess_exec",
+               new_callable=AsyncMock, return_value=mock_proc):
+        await im.launch(instance_id=inst_id, prompt="hi", cwd="/tmp")
+
+    assert im.transient_error_seen(inst_id) is False
+    await asyncio.sleep(0.1)

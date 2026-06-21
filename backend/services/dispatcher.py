@@ -618,16 +618,31 @@ class GlobalDispatcher:
         # each) — must run off the event loop
         return await self.pool.select_async(exclude=exclude, validate=True)
 
+    async def _collect_failure_output(self, instance_id: int, task_id: int) -> str:
+        """Gather stderr + recent log text once for failure classification.
+
+        ``get_last_stderr()`` is destructive (it pops), so a caller that needs
+        to test for BOTH transient overload and account rotation must collect
+        once and pass the combined text into both detectors.
+        """
+        from backend.services.claude_pool import collect_process_output_for_detection
+        stderr = self.instance_manager.get_last_stderr(instance_id)
+        log_contents = await self.instance_manager.get_recent_log_contents(task_id, limit=10)
+        return collect_process_output_for_detection(stderr, log_contents)
+
     async def _check_rate_limit_and_rotate(
         self,
         instance_id: int,
         task_id: int,
         exit_code: int,
+        combined: str | None = None,
     ) -> dict | None:
         """After a failed process, check if it was a rate limit and attempt rotation.
 
         Returns a dict with {config_dir, session_id, excluded} if rotation is
-        possible, or None if this is not a pool-rotatable failure.
+        possible, or None if this is not a pool-rotatable failure. ``combined``
+        may be pre-collected by the caller (see _collect_failure_output) to
+        avoid double-popping stderr.
         """
         if not self.pool or exit_code == 0 or exit_code in (-2, 130):
             return None
@@ -635,9 +650,10 @@ class GlobalDispatcher:
         from backend.services.claude_pool import is_pool_rotatable, is_auth_failure, is_rate_limited
         from backend.services.claude_pool import migrate_session, collect_process_output_for_detection
 
-        stderr = self.instance_manager.get_last_stderr(instance_id)
-        log_contents = await self.instance_manager.get_recent_log_contents(task_id, limit=10)
-        combined = collect_process_output_for_detection(stderr, log_contents)
+        if combined is None:
+            stderr = self.instance_manager.get_last_stderr(instance_id)
+            log_contents = await self.instance_manager.get_recent_log_contents(task_id, limit=10)
+            combined = collect_process_output_for_detection(stderr, log_contents)
 
         if not is_pool_rotatable(combined):
             return None
@@ -700,6 +716,223 @@ class GlobalDispatcher:
             "excluded": excluded,
         }
 
+    async def _build_task_prompt(self, task: Task) -> str:
+        """Reconstruct a task's initial prompt (CLAUDE.md preamble + secrets +
+        images + enabled-skill templates + description). Shared by the first
+        launch and every fresh re-launch (rotation / transient retry)."""
+        metadata = task.metadata_ or {}
+        image_paths = metadata.get("image_paths") or []
+        secret_ids = metadata.get("secret_ids") or []
+        secrets_block = await _build_secrets_block(self.db_factory, secret_ids)
+        parts = ["请阅读项目根目录的 CLAUDE.md 了解项目规范和任务完成后的 git 流程。"]
+        if secrets_block:
+            parts.append(secrets_block)
+        if image_paths:
+            image_list = "\n".join(f"- {p}" for p in image_paths)
+            parts.append(f"用户提供了以下参考图片，请先用 Read 工具查看：\n{image_list}")
+        if task.enabled_skills:
+            from backend.services.command_registry import COMMAND_REGISTRY
+            for skill_name, enabled in task.enabled_skills.items():
+                if enabled and skill_name in COMMAND_REGISTRY:
+                    cmd = COMMAND_REGISTRY[skill_name]
+                    if not cmd.always_available:
+                        parts.append(cmd.prompt_template)
+        parts.append(f"任务:\n{task.description}")
+        return "\n\n".join(parts)
+
+    async def _relaunch_and_wait(
+        self,
+        instance_id: int,
+        task: Task,
+        cwd: str,
+        git_env: dict | None,
+        config_dir: str | None,
+        session_id: str | None,
+        *,
+        thinking_budget: int | None,
+        effort_level: str | None,
+        label: str,
+    ) -> int:
+        """Resume (or fresh-launch) a task on a specific account, wait for the
+        process + output consumer, and return its exit code."""
+        if session_id:
+            await self.instance_manager.launch(
+                instance_id=instance_id,
+                prompt="请继续之前的工作。",
+                task_id=task.id,
+                cwd=cwd,
+                model=task.model,
+                resume_session_id=session_id,
+                git_env=git_env or {},
+                thinking_budget=thinking_budget,
+                effort_level=effort_level,
+                provider=task.provider,
+                config_dir=config_dir,
+                enable_workflows=task.enable_workflows,
+                enabled_skills=task.enabled_skills,
+            )
+        else:
+            full_prompt = await self._build_task_prompt(task)
+            await self.instance_manager.launch(
+                instance_id=instance_id,
+                prompt=full_prompt,
+                task_id=task.id,
+                cwd=cwd,
+                model=task.model,
+                git_env=git_env or {},
+                thinking_budget=thinking_budget,
+                effort_level=effort_level,
+                provider=task.provider,
+                config_dir=config_dir,
+                enable_workflows=task.enable_workflows,
+                enabled_skills=task.enabled_skills,
+            )
+
+        process = self.instance_manager.processes.get(instance_id)
+        if process:
+            await self._wait_process(process, task, label)
+        consumer = self.instance_manager._tasks.get(instance_id)
+        if consumer:
+            try:
+                await asyncio.wait_for(consumer, timeout=30)
+            except asyncio.TimeoutError:
+                pass
+        return process.returncode if process else -1
+
+    async def _run_transient_retry(
+        self,
+        instance_id: int,
+        task: Task,
+        cwd: str,
+        git_env: dict | None,
+        *,
+        thinking_budget: int | None = None,
+        effort_level: str | None = None,
+        attempt: int = 1,
+    ):
+        """Wait out a transient server-side 429/overload and retry the SAME account.
+
+        Anthropic infra throttling/overload ("Server is temporarily limiting
+        requests (not your usage limit)" / overloaded) is NOT an account usage
+        limit — rotating accounts wouldn't help — so we back off and --resume
+        the same session, up to settings.transient_retry_max times. Once the
+        failure is no longer transient (or the budget is exhausted) we hand off
+        to account rotation, then to the normal retry/fail path.
+        """
+        from backend.services.claude_pool import is_transient_overload, transient_retry_delay
+
+        delay = transient_retry_delay(
+            attempt,
+            settings.transient_retry_base_delay,
+            settings.transient_retry_max_delay,
+        )
+        logger.info(
+            "Task %d transient 429/overload — waiting %.0fs before retry #%d/%d",
+            task.id, delay, attempt, settings.transient_retry_max,
+        )
+        await self.broadcaster.broadcast(f"task:{task.id}", {
+            "event_type": "transient_retry",
+            "task_id": task.id,
+            "attempt": attempt,
+            "max_attempts": settings.transient_retry_max,
+            "delay": round(delay, 1),
+        })
+        await asyncio.sleep(delay)
+
+        config_dir = self.instance_manager.get_config_dir(instance_id)
+        async with self.db_factory() as db:
+            t = await db.get(Task, task.id)
+            session_id = t.session_id if t else task.session_id
+
+        exit_code = await self._relaunch_and_wait(
+            instance_id, task, cwd, git_env, config_dir, session_id,
+            thinking_budget=thinking_budget, effort_level=effort_level,
+            label=f"Transient retry #{attempt}",
+        )
+
+        # PTY mode: another transient overload also aborts with exit_code 0, so
+        # the flag — not the exit code — tells us whether it recovered.
+        still_transient = (
+            settings.transient_retry_enabled
+            and self.instance_manager.transient_error_seen(instance_id)
+        )
+
+        if exit_code in (0, -2, 130) and not still_transient:
+            if exit_code == 0:
+                async with self.db_factory() as db:
+                    queue = TaskQueue(db)
+                    await queue.mark_completed(task.id)
+                    await db.execute(
+                        update(Instance)
+                        .where(Instance.id == instance_id)
+                        .values(total_tasks_completed=Instance.total_tasks_completed + 1)
+                    )
+                    await db.commit()
+            else:
+                async with self.db_factory() as db:
+                    await db.execute(
+                        update(Task).where(Task.id == task.id).values(status="completed", error_message=None)
+                    )
+                    await db.commit()
+            await self.broadcaster.broadcast("tasks", {
+                "event": "status_change",
+                "task_id": task.id,
+                "new_status": "completed",
+                "instance_id": instance_id,
+            })
+            logger.info("Task %d recovered after %d transient retry(ies)", task.id, attempt)
+            return
+
+        # Still failing — keep backing off while it's transient and budget
+        # remains (flag covers PTY's exit_code-0 repeat; text covers stderr).
+        combined = await self._collect_failure_output(instance_id, task.id)
+        if (
+            settings.transient_retry_enabled
+            and attempt < settings.transient_retry_max
+            and (still_transient or is_transient_overload(combined))
+        ):
+            await self._run_transient_retry(
+                instance_id, task, cwd, git_env,
+                thinking_budget=thinking_budget,
+                effort_level=effort_level,
+                attempt=attempt + 1,
+            )
+            return
+
+        # No longer transient, or budget exhausted → account rotation, then
+        # normal retry/fail. (Rotation never re-enters the transient path, so
+        # there is no ping-pong between the two.)
+        rotation = await self._check_rate_limit_and_rotate(
+            instance_id, task.id, exit_code, combined=combined
+        )
+        if rotation:
+            await self._run_pool_retry(
+                instance_id, task, cwd, git_env,
+                rotation["config_dir"], rotation["session_id"], rotation["excluded"],
+                thinking_budget=thinking_budget, effort_level=effort_level,
+            )
+            return
+
+        async with self.db_factory() as db:
+            queue = TaskQueue(db)
+            t = await queue.get(task.id)
+            if t and t.retry_count < t.max_retries:
+                await queue.retry(task.id)
+                status = "pending"
+            else:
+                if still_transient:
+                    reason = f"Transient server overload persisted after {attempt} retries"
+                else:
+                    reason = f"Exit code: {exit_code} after {attempt} transient retry(ies)"
+                await queue.mark_failed(task.id, reason)
+                status = "failed"
+        await self.broadcaster.broadcast("tasks", {
+            "event": "status_change",
+            "task_id": task.id,
+            "new_status": status,
+            "instance_id": instance_id,
+        })
+
     async def _run_task_lifecycle(self, instance_id: int, task: Task, git_env: dict | None = None):
         """Execute the task lifecycle: assign → Claude Code → judge result.
 
@@ -751,26 +984,7 @@ class GlobalDispatcher:
                 return
 
             # === Step 4: Launch Claude Code ===
-            metadata = task.metadata_ or {}
-            image_paths = metadata.get("image_paths") or []
-            secret_ids = metadata.get("secret_ids") or []
-            secrets_block = await _build_secrets_block(self.db_factory, secret_ids)
-
-            parts = ["请阅读项目根目录的 CLAUDE.md 了解项目规范和任务完成后的 git 流程。"]
-            if secrets_block:
-                parts.append(secrets_block)
-            if image_paths:
-                image_list = "\n".join(f"- {p}" for p in image_paths)
-                parts.append(f"用户提供了以下参考图片，请先用 Read 工具查看：\n{image_list}")
-            if task.enabled_skills:
-                from backend.services.command_registry import COMMAND_REGISTRY
-                for skill_name, enabled in task.enabled_skills.items():
-                    if enabled and skill_name in COMMAND_REGISTRY:
-                        cmd = COMMAND_REGISTRY[skill_name]
-                        if not cmd.always_available:
-                            parts.append(cmd.prompt_template)
-            parts.append(f"任务:\n{task.description}")
-            full_prompt = "\n\n".join(parts)
+            full_prompt = await self._build_task_prompt(task)
 
             # Pool: select an account for the initial launch
             pool_config_dir = await self._pool_select()
@@ -829,9 +1043,36 @@ class GlobalDispatcher:
                 })
                 return
 
+            # PTY mode aborts a transient-429/overload turn but keeps the
+            # persistent session alive, so it reports exit_code 0. The per-turn
+            # flag (set in _process_event) is the reliable cross-mode signal →
+            # wait + retry the same account before judging success/failure.
+            if settings.transient_retry_enabled and self.instance_manager.transient_error_seen(instance_id):
+                await self._run_transient_retry(
+                    instance_id, task, cwd, git_env,
+                    thinking_budget=thinking_budget,
+                    effort_level=effort_level,
+                )
+                return
+
             if exit_code != 0:
-                # Pool rotation: if rate-limited, switch account and resume
-                rotation = await self._check_rate_limit_and_rotate(instance_id, task.id, exit_code)
+                from backend.services.claude_pool import is_transient_overload
+                combined = await self._collect_failure_output(instance_id, task.id)
+
+                # Transient overload that only surfaced on stderr (subprocess
+                # mode) — the flag above may miss it, so re-check the text.
+                if settings.transient_retry_enabled and is_transient_overload(combined):
+                    await self._run_transient_retry(
+                        instance_id, task, cwd, git_env,
+                        thinking_budget=thinking_budget,
+                        effort_level=effort_level,
+                    )
+                    return
+
+                # Account usage-limit / auth-failure → rotate account and resume
+                rotation = await self._check_rate_limit_and_rotate(
+                    instance_id, task.id, exit_code, combined=combined
+                )
                 if rotation:
                     await self._run_pool_retry(
                         instance_id, task, cwd, git_env,
@@ -993,73 +1234,11 @@ class GlobalDispatcher:
             _rotation_count, task.id, config_dir, session_id,
         )
 
-        if session_id:
-            # Resume the same session on the new account
-            await self.instance_manager.launch(
-                instance_id=instance_id,
-                prompt="请继续之前的工作。",
-                task_id=task.id,
-                cwd=cwd,
-                model=task.model,
-                resume_session_id=session_id,
-                git_env=git_env or {},
-                thinking_budget=thinking_budget,
-                effort_level=effort_level,
-                provider=task.provider,
-                config_dir=config_dir,
-                enable_workflows=task.enable_workflows,
-                enabled_skills=task.enabled_skills,
-            )
-        else:
-            # No session to resume — re-launch from scratch
-            metadata = task.metadata_ or {}
-            image_paths = metadata.get("image_paths") or []
-            secret_ids = metadata.get("secret_ids") or []
-            secrets_block = await _build_secrets_block(self.db_factory, secret_ids)
-            parts = ["请阅读项目根目录的 CLAUDE.md 了解项目规范和任务完成后的 git 流程。"]
-            if secrets_block:
-                parts.append(secrets_block)
-            if image_paths:
-                image_list = "\n".join(f"- {p}" for p in image_paths)
-                parts.append(f"用户提供了以下参考图片，请先用 Read 工具查看：\n{image_list}")
-            if task.enabled_skills:
-                from backend.services.command_registry import COMMAND_REGISTRY
-                for skill_name, enabled in task.enabled_skills.items():
-                    if enabled and skill_name in COMMAND_REGISTRY:
-                        cmd = COMMAND_REGISTRY[skill_name]
-                        if not cmd.always_available:
-                            parts.append(cmd.prompt_template)
-            parts.append(f"任务:\n{task.description}")
-            full_prompt = "\n\n".join(parts)
-
-            await self.instance_manager.launch(
-                instance_id=instance_id,
-                prompt=full_prompt,
-                task_id=task.id,
-                cwd=cwd,
-                model=task.model,
-                git_env=git_env or {},
-                thinking_budget=thinking_budget,
-                effort_level=effort_level,
-                provider=task.provider,
-                config_dir=config_dir,
-                enable_workflows=task.enable_workflows,
-                enabled_skills=task.enabled_skills,
-            )
-
-        # Wait for process
-        process = self.instance_manager.processes.get(instance_id)
-        if process:
-            await self._wait_process(process, task, "Pool retry run")
-
-        consumer = self.instance_manager._tasks.get(instance_id)
-        if consumer:
-            try:
-                await asyncio.wait_for(consumer, timeout=30)
-            except asyncio.TimeoutError:
-                pass
-
-        exit_code = process.returncode if process else -1
+        exit_code = await self._relaunch_and_wait(
+            instance_id, task, cwd, git_env, config_dir, session_id,
+            thinking_budget=thinking_budget, effort_level=effort_level,
+            label="Pool retry run",
+        )
 
         if exit_code in (0, -2, 130):
             # Success or user interrupt
@@ -2437,6 +2616,31 @@ class GlobalDispatcher:
                 # Chat 路径同样遵守任务级超时（此前 chat 无超时，可无限占住 instance）
                 await self._wait_process(process, task, "Chat run")
             # Status management is handled by _consume_output (chat_initiated=True)
+            #
+            # PTY mode: a transient 429/overload aborts the turn but the
+            # persistent session stays alive, so on_exit reports exit_code 0 and
+            # never enters the failure path. The per-turn flag set in
+            # _process_event is the only reliable signal here. We drive the
+            # wait+retry loop from this consumer (heartbeat-covered, so the
+            # watchdog won't respawn us): each retry relaunches the same account
+            # and we re-check the flag after it finishes. Subprocess mode is
+            # handled via exit_code in _consume_output, so restrict to PTY to
+            # avoid double-firing.
+            if (
+                settings.transient_retry_enabled
+                and inst_id is not None
+                and self.instance_manager.pty_mode_enabled
+            ):
+                while self.instance_manager.transient_error_seen(inst_id):
+                    launched = await self.instance_manager._try_chat_transient_retry(
+                        inst_id, task_id, 1, ""
+                    )
+                    if not launched:
+                        break  # budget exhausted / no longer transient
+                    process = self.instance_manager.processes.get(inst_id)
+                    if process:
+                        await self._wait_process(process, task, "Chat transient retry")
+                self.instance_manager._transient_attempts.pop(inst_id, None)
         finally:
             # Phase 3: remove temporarily added skills (must run even on crash)
             if has_temp_skills:
