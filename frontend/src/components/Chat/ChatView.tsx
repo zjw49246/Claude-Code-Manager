@@ -393,6 +393,33 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
       return;
     }
 
+    // Anthropic 基础设施侧临时限流/过载（非额度用尽）：后端正在退避后用同一
+    // 账号自动重试。提示用户并保持"处理中"指示（PTY 下这是 exit_code=0 的
+    // 中止 turn，process_exit 可能先到、会熄灭 spinner，这里重新点亮）。
+    if (eventType === 'transient_retry') {
+      const attempt = (msg.data.attempt as number) || 1;
+      const maxAttempts = (msg.data.max_attempts as number) || 0;
+      const delay = (msg.data.delay as number) || 0;
+      setSending(true);
+      const entry: ChatMessage = {
+        id: Date.now() + Math.random(),
+        role: 'system',
+        event_type: 'transient_retry',
+        content: `服务端临时限流（非额度用尽）· 第 ${attempt}${maxAttempts ? `/${maxAttempts}` : ''} 次自动重试，约 ${delay}s 后继续…`,
+        tool_name: null,
+        tool_input: null,
+        tool_output: null,
+        is_error: false,
+        loop_iteration: null,
+        timestamp: new Date().toISOString(),
+        image_urls: null,
+        attachments: null,
+        source: 'transient_retry',
+      };
+      setMessages((prev) => [...prev, entry]);
+      return;
+    }
+
     if (eventType === 'process_exit') {
       // Small delay so any final output messages queued just before
       // process_exit are rendered before the "thinking" indicator hides.
@@ -1655,6 +1682,22 @@ const MessageBubble = memo(function MessageBubble({ message, taskId }: { message
             </span>
           )}
         </div>
+      </div>
+    );
+  }
+
+  if (message.event_type === 'transient_retry') {
+    return (
+      <div className="mx-4">
+        <div className="px-3 py-2 bg-amber-500/10 border border-amber-500/30 rounded text-sm text-amber-500 flex items-center gap-2">
+          <Loader2 className="w-3.5 h-3.5 shrink-0 animate-spin" />
+          <span>{message.content}</span>
+        </div>
+        {message.timestamp && (
+          <div className="mt-0.5 px-1">
+            <MessageTimestamp timestamp={message.timestamp} />
+          </div>
+        )}
       </div>
     );
   }
