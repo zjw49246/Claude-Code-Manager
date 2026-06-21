@@ -1659,6 +1659,57 @@ async def test_process_event_clean_event_leaves_flag_unset(db_factory):
 
 
 @pytest.mark.asyncio
+async def test_process_event_orphan_overload_does_not_set_transient_flag(db_factory):
+    """A REPLAYED transient-429 error (orphan / autonomous) must NOT re-flag.
+
+    On resume PTY re-reads the JSONL and yields the previous turn's own
+    api_error as an `orphan` event. If that re-set the turn flag,
+    transient_error_seen() would stay True across a clean resume, so the host
+    keeps "retrying" a turn that already succeeded and finally marks the task
+    failed (the recover-then-failed bug). Only the CURRENT turn's live events
+    count.
+    """
+    async with db_factory() as db:
+        inst = Instance(name="orphan-inst")
+        db.add(inst)
+        task = Task(title="t", description="d")
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id, task_id = inst.id, task.id
+
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    im = InstanceManager(db_factory, broadcaster)
+
+    overload = ("API Error: Server is temporarily limiting requests "
+                "(not your usage limit) · Rate limited")
+
+    # Stale backlog from the previous turn, replayed on resume → must be ignored.
+    await im._process_event(inst_id, task_id, {
+        "event_type": "result",
+        "role": "assistant",
+        "content": overload,
+        "is_error": True,
+        "orphan": True,
+        "raw_json": "{}",
+    })
+    assert im.transient_error_seen(inst_id) is False
+
+    # A background sub-agent turn's error is likewise not this turn's signal.
+    await im._process_event(inst_id, task_id, {
+        "event_type": "result",
+        "role": "assistant",
+        "content": overload,
+        "is_error": True,
+        "autonomous": True,
+        "raw_json": "{}",
+    })
+    assert im.transient_error_seen(inst_id) is False
+
+
+@pytest.mark.asyncio
 async def test_launch_resets_transient_flag(db_factory):
     """A new launch() clears the previous turn's transient flag."""
     async with db_factory() as db:

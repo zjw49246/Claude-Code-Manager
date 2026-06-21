@@ -405,4 +405,12 @@
 - **测试坑**: 新检测在 `exit_code!=0` 时**总会**先取 log（不再被 pool=None 短路），且 PTY 标记/`pty_mode_enabled` 在 MagicMock 上默认 truthy → 8 个老 dispatcher/chat 测试因 mock 不符真实接口而 red。修法是让 `_make_dispatcher` 的 mock 建模真实接口（`pty_mode_enabled=False`、`transient_error_seen→False`、`get_recent_log_contents→AsyncMock([])`、`get_last_stderr→""`），非改产品逻辑
 - **测试**: `test_claude_pool.py::TestTransientOverloadDetection`（含官方原文案命中、额度/认证优先级互斥、无误报）+ `::TestTransientRetryDelay`（退避边界）+ `test_service_instance_manager.py` 的 4 个 turn-scoped 标记测试（命中置位/额度不置位/干净不置位/`launch` 重置）。全量 924 passed
 - **预防**: ①判断一条 LLM 报错是「我方还是 Anthropic 官方」先全仓 grep 文案，再 `strings` CLI 二进制定位；②PTY 持久 session 下"turn 失败"**不等于**"进程退出"，凡依赖 exit_code 的判定都要另想 turn-scoped 信号；③任何"重试/轮换"的计数器若relaunch 走 `launch()`，别存会被 `launch()` 重置的结构里；④给 dispatcher 加新的 instance_manager 调用后，先扫各测试的 mock helper 是否建模了该接口
+- **Commit**: c5fc96a
+
+### 2026-06-21 — task #729 瞬时 429 重试成功后任务被误判 failed（recover-then-failed）
+- **问题**: 上面的瞬时 429 自动退避重试上线后，用户反馈：退避 + `--resume` 之后 session 明明已经成功续上、活儿也干完了，**任务最终却被标成 failed**——"resume 之后状态没及时改过来"
+- **根因**: `_transient_seen` 是 **turn-scoped** 标记，本意只反映「当前前台 turn」是否撞了瞬时 429。但 `_process_event` 打标时只看 `is_error + is_transient_overload`，**没排除 `orphan`/`autonomous` 事件**。PTY 在 resume 时（尤其冷 resume：transient 把 CC 进程打挂后 `on_exit` 已把 session 从 `_sessions` pop、池里只剩尸体 → 下次 `get_or_create` 起全新 `JSONLReader`，offset=0 从头重读整份 JSONL）会把**上一 turn 那条触发了本次重试的旧 api_error 当 backlog 回放**，`send_prompt` 标它 `orphan=True` 仍 yield 给 host。于是成功的 resume turn 里这条旧错误把标记**重新置位** → autonomous 路径 `_run_transient_retry` 的 `still_transient` 永真 → 成功分支（`exit_code in (0,…) and not still_transient`）走不到 → 反复重试到预算耗尽 → `mark_failed("Transient server overload persisted…")`。chat PTY 路径同理：`_process_queued_message` 的 `while transient_error_seen()` 死循环到预算耗尽
+- **修复**: `_process_event` 打 `_transient_seen` 前加守卫 `not event.get("orphan") and not event.get("autonomous")`——只认当前前台 turn 的活事件。orphan 是上一 turn 的陈旧回放、autonomous 是后台子 agent turn 的报错，都不该驱动前台 turn 的重试。合法的当前 turn api_error（`turn_started=True` 后 normalize 出来的）`orphan=False`，不受影响
+- **测试**: `test_service_instance_manager.py::test_process_event_orphan_overload_does_not_set_transient_flag`（orphan + autonomous 两种回放都不置位）。全量 925 passed
+- **预防**: turn-scoped 信号**必须**显式区分「当前 turn 的活事件」与「回放/后台事件」——claude_pty 已用 `orphan`/`autonomous` 两个 flag 标好了边界（见 task-87 turn 对齐），任何按事件流推断 turn 内状态的逻辑都要先过滤这两类
 - **Commit**: 本次提交
