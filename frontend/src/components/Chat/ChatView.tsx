@@ -364,6 +364,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
     // ask_user：CC 调用内置 AskUserQuestion 被 hook 拦截 → 可选卡片；用户选完回包
     if (eventType === 'ask_user_question') {
       const rid = (msg.data.request_id as string) || null;
+      const questions = (msg.data.questions as AskUserQuestion[]) || [];
       setMessages((prev) => {
         if (rid && prev.some((m) => m.event_type === 'ask_user_question' && m.request_id === rid)) {
           return prev; // 去重（重连回填可能与 WS 撞车）
@@ -382,7 +383,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
           image_urls: null,
           attachments: null,
           request_id: rid,
-          ask_questions: (msg.data.questions as AskUserQuestion[]) || [],
+          ask_questions: questions,
           ask_status: 'pending',
         };
         return [...prev, entry];
