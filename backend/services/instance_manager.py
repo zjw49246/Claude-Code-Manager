@@ -472,7 +472,22 @@ class InstanceManager:
                         try:
                             await self._process_event(instance_id, task_id, event, loop_iteration)
                             if event.get("event_type") == "rate_limit_event":
-                                _saw_rate_limit = True
+                                # Only a genuine near-limit/blocked event should
+                                # rotate+cooldown this account. The CLI emits an
+                                # "allowed" ping almost every turn; treating those
+                                # as rate limits benches healthy accounts and
+                                # starves the pool (prod #734/#740).
+                                from backend.services.claude_pool import rate_limit_event_is_actionable
+                                info = event.get("rate_limit_info")
+                                if info is None:
+                                    raw = event.get("raw_json")
+                                    if raw:
+                                        try:
+                                            info = json.loads(raw).get("rate_limit_info")
+                                        except (ValueError, TypeError):
+                                            info = None
+                                if rate_limit_event_is_actionable(info):
+                                    _saw_rate_limit = True
                             if event.get("event_type") in ("message", "result") and event.get("role") == "assistant":
                                 c = event.get("content") or ""
                                 if c:

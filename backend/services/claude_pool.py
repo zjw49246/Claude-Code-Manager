@@ -65,6 +65,50 @@ def is_pool_rotatable(text: str) -> bool:
     return is_rate_limited(text) or is_auth_failure(text)
 
 
+def rate_limit_event_is_actionable(
+    rate_limit_info: dict | None, *, warn_threshold: float = 0.9
+) -> bool:
+    """Whether a CLI ``rate_limit_event`` warrants rotating off + cooling down
+    the current account.
+
+    The Claude CLI emits a ``rate_limit_event`` on almost every turn as a
+    routine quota-status ping; its ``status`` field is the real signal:
+
+    - ``allowed``          → account fully healthy. **Never** actionable. Cooling
+                             it down here benches a perfectly usable account for
+                             ``pool_cooldown_seconds`` every turn, so the pool
+                             starves and resumes hit "no available accounts"
+                             (prod #734/#740 — a 37%-of-7-day *warning* was
+                             benching accounts for 5 min).
+    - ``allowed_warning``  → approaching a threshold. Only actionable for the
+                             **short** (``five_hour``) window AND when utilization
+                             is genuinely high (``>= warn_threshold``). A
+                             ``seven_day`` warning is never actionable: a 5-min
+                             cooldown can't change a 7-day window, it just churns.
+    - anything else (``rejected``/``blocked``/…) → actionable.
+
+    Note the reactive rotation path (on an actual failure with a usage-limit
+    banner) is separate and unaffected; this only gates the *proactive* switch.
+    """
+    if not isinstance(rate_limit_info, dict):
+        return False
+    status = str(rate_limit_info.get("status") or "").lower()
+    if status == "allowed":
+        return False
+    if status == "allowed_warning":
+        if rate_limit_info.get("rateLimitType") != "five_hour":
+            return False
+        util = rate_limit_info.get("utilization")
+        if util is None:
+            util = rate_limit_info.get("surpassedThreshold")
+        try:
+            return float(util) >= warn_threshold
+        except (TypeError, ValueError):
+            return False
+    # rejected / blocked / unknown non-"allowed" status → be safe, rotate.
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Transient server-side 429 / overload (NOT an account usage limit)
 # ---------------------------------------------------------------------------

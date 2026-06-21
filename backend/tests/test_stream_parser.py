@@ -35,6 +35,27 @@ def test_system_init(parser):
     assert result["session_id"] == "abc-123"
 
 
+def test_rate_limit_event_surfaces_info(parser):
+    line = json.dumps({
+        "type": "rate_limit_event",
+        "rate_limit_info": {
+            "status": "allowed_warning",
+            "rateLimitType": "seven_day",
+            "utilization": 0.37,
+        },
+    })
+    result = parser.parse_line(line)[0]
+    assert result["event_type"] == "rate_limit_event"
+    assert result["rate_limit_info"]["status"] == "allowed_warning"
+    assert result["rate_limit_info"]["rateLimitType"] == "seven_day"
+
+
+def test_rate_limit_event_missing_info(parser):
+    result = parser.parse_line(json.dumps({"type": "rate_limit_event"}))[0]
+    assert result["event_type"] == "rate_limit_event"
+    assert result["rate_limit_info"] is None
+
+
 def test_assistant_message(parser):
     line = json.dumps({
         "type": "assistant",

@@ -16,6 +16,7 @@ from backend.services.claude_pool import (
     transient_retry_delay,
     migrate_session,
     collect_process_output_for_detection,
+    rate_limit_event_is_actionable,
 )
 
 
@@ -713,3 +714,58 @@ class TestLastSelected:
 
     def test_no_selection_yet(self, pool):
         assert pool.status()["last_selected"] is None
+
+
+class TestRateLimitEventActionable:
+    """Only a genuine near-limit/blocked rate_limit_event may bench an account.
+
+    Routine "allowed" pings (emitted almost every turn) and low-utilization or
+    seven_day warnings must NOT — that was starving the 3-account pool and
+    making resumes hit "no available accounts" (prod #734/#740).
+    """
+
+    def test_allowed_is_not_actionable(self):
+        assert rate_limit_event_is_actionable(
+            {"status": "allowed", "rateLimitType": "five_hour"}
+        ) is False
+
+    def test_seven_day_warning_never_actionable(self):
+        # The actual prod trigger: 37% of the 7-day quota benched an account 5 min.
+        assert rate_limit_event_is_actionable(
+            {"status": "allowed_warning", "rateLimitType": "seven_day", "utilization": 0.37}
+        ) is False
+
+    def test_seven_day_warning_high_util_still_not_actionable(self):
+        # A 5-min cooldown can't change a 7-day window — never rotate on it.
+        assert rate_limit_event_is_actionable(
+            {"status": "allowed_warning", "rateLimitType": "seven_day", "utilization": 0.99}
+        ) is False
+
+    def test_five_hour_low_warning_not_actionable(self):
+        assert rate_limit_event_is_actionable(
+            {"status": "allowed_warning", "rateLimitType": "five_hour", "utilization": 0.5}
+        ) is False
+
+    def test_five_hour_high_warning_actionable(self):
+        assert rate_limit_event_is_actionable(
+            {"status": "allowed_warning", "rateLimitType": "five_hour", "utilization": 0.9}
+        ) is True
+
+    def test_five_hour_warning_uses_surpassed_threshold_fallback(self):
+        assert rate_limit_event_is_actionable(
+            {"status": "allowed_warning", "rateLimitType": "five_hour", "surpassedThreshold": 0.95}
+        ) is True
+
+    def test_rejected_is_actionable(self):
+        assert rate_limit_event_is_actionable(
+            {"status": "rejected", "rateLimitType": "five_hour"}
+        ) is True
+
+    def test_none_and_non_dict_not_actionable(self):
+        assert rate_limit_event_is_actionable(None) is False
+        assert rate_limit_event_is_actionable("nope") is False
+
+    def test_warning_with_unparseable_util_not_actionable(self):
+        assert rate_limit_event_is_actionable(
+            {"status": "allowed_warning", "rateLimitType": "five_hour", "utilization": None}
+        ) is False
