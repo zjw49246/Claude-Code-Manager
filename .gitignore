@@ -22,3 +22,6 @@ ccm.db
 claude_manager_dev.db
 *.db-shm
 *.db-wal
+# Claude Code CLI project MCP config — auto-written per machine/session
+# (absolute venv path, ephemeral port, session-id). Not read by CCM itself.
+.mcp.json
