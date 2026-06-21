@@ -70,6 +70,10 @@ class Settings(BaseSettings):
     transient_retry_base_delay: float = 10.0  # 首次退避秒数（指数递增）
     transient_retry_max_delay: float = 120.0  # 退避上限秒数
 
+    # --- ask_user：拦截内置 AskUserQuestion，转前端卡片 ---
+    ask_user_enabled: bool = True       # 关闭则不注入 hook，AskUserQuestion 回到原生行为
+    ask_user_timeout: int = 1800        # hook 阻塞等待用户回答的上限秒数（超时放行原生工具）
+
     # --- Backup service (auto-backup) ---
     backup_enabled: bool = False        # Set true to enable periodic DB backups
     backup_type: str = "local"          # local | s3 | oss

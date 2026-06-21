@@ -179,6 +179,26 @@ export interface ChatMessage {
   // 权限透传卡片（event_type === 'permission_request' 时存在）
   request_id?: string | null;
   permission_status?: 'pending' | 'allow' | 'deny' | 'expired' | null;
+  // ask_user 卡片（event_type === 'ask_user_question' 时存在）
+  ask_questions?: AskUserQuestion[] | null;
+  ask_status?: 'pending' | 'answered' | 'timed_out' | 'expired' | null;
+}
+
+export interface AskUserOption {
+  label: string;
+  description?: string;
+}
+
+export interface AskUserQuestion {
+  question: string;
+  header?: string;
+  options: AskUserOption[];
+  multiSelect?: boolean;
+}
+
+export interface AskUserAnswer {
+  labels: string[];
+  text?: string;
 }
 
 export interface LogEntry {
@@ -746,6 +766,16 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ behavior }),
     }),
+  // ask_user 卡片回包 / 重连回填
+  submitAskUser: (taskId: number, requestId: string, answers: AskUserAnswer[]) =>
+    request<{ ok: boolean }>(`/api/tasks/${taskId}/ask-user/${requestId}`, {
+      method: 'POST',
+      body: JSON.stringify({ answers }),
+    }),
+  getAskUserPending: (taskId: number) =>
+    request<{ pending: { request_id: string; questions: AskUserQuestion[] }[] }>(
+      `/api/tasks/${taskId}/ask-user/pending`,
+    ),
   getSubAgentSummary: (taskId: number) =>
     request<SubAgentSummary>(`/api/tasks/${taskId}/sub-agents/summary`),
 

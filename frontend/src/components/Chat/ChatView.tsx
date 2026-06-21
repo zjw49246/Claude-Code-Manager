@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useMemo, useCallback, memo } from 'react';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { api } from '../../api/client';
-import type { ChatMessage, FileAttachment, Task, Project, UploadResult, MonitorSession } from '../../api/client';
+import type { ChatMessage, FileAttachment, Task, Project, UploadResult, MonitorSession, AskUserQuestion, AskUserAnswer } from '../../api/client';
 import { useWebSocket } from '../../hooks/useWebSocket';
 import { Send, ArrowLeft, Loader2, ChevronDown, ChevronRight, ChevronUp, Copy, Check, Paperclip, X, StopCircle, Pencil, ArrowDown, Star, ListPlus, Trash2 } from 'lucide-react';
 import { SecretPicker } from '../Secrets/SecretPicker';
@@ -361,6 +361,45 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
       return;
     }
 
+    // ask_user：CC 调用内置 AskUserQuestion 被 hook 拦截 → 可选卡片；用户选完回包
+    if (eventType === 'ask_user_question') {
+      const rid = (msg.data.request_id as string) || null;
+      setMessages((prev) => {
+        if (rid && prev.some((m) => m.event_type === 'ask_user_question' && m.request_id === rid)) {
+          return prev; // 去重（重连回填可能与 WS 撞车）
+        }
+        const entry: ChatMessage = {
+          id: Date.now() + Math.random(),
+          role: 'system',
+          event_type: 'ask_user_question',
+          content: null,
+          tool_name: 'AskUserQuestion',
+          tool_input: null,
+          tool_output: null,
+          is_error: false,
+          loop_iteration: null,
+          timestamp: new Date().toISOString(),
+          image_urls: null,
+          attachments: null,
+          request_id: rid,
+          ask_questions: (msg.data.questions as AskUserQuestion[]) || [],
+          ask_status: 'pending',
+        };
+        return [...prev, entry];
+      });
+      return;
+    }
+    if (eventType === 'ask_user_resolved') {
+      const rid = msg.data.request_id as string;
+      const timedOut = !!msg.data.timed_out;
+      setMessages((prev) => prev.map((m) =>
+        m.event_type === 'ask_user_question' && m.request_id === rid
+          ? { ...m, ask_status: timedOut ? 'timed_out' : 'answered' }
+          : m
+      ));
+      return;
+    }
+
     // 模型原生子 agent 的进度（PTY 观测，经 sub_agent_sessions 镜像）
     if (eventType === 'sub_agent_report') {
       api.listMonitorSessions(task.id).then(setMonitorSessions).catch(() => {});
@@ -558,6 +597,38 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
   // Always load monitor sessions (commands can create monitors even without permanent skill)
   useEffect(() => {
     api.listMonitorSessions(task.id).then(setMonitorSessions).catch(() => {});
+  }, [task.id]);
+
+  // 重连/切换 task 时回填仍在等待回答的 ask_user 卡片（WS 卡片是 live-only）
+  useEffect(() => {
+    api.getAskUserPending(task.id).then(({ pending }) => {
+      if (!pending.length) return;
+      setMessages((prev) => {
+        const existing = new Set(
+          prev.filter((m) => m.event_type === 'ask_user_question').map((m) => m.request_id)
+        );
+        const cards: ChatMessage[] = pending
+          .filter((p) => !existing.has(p.request_id))
+          .map((p) => ({
+            id: Date.now() + Math.random(),
+            role: 'system',
+            event_type: 'ask_user_question',
+            content: null,
+            tool_name: 'AskUserQuestion',
+            tool_input: null,
+            tool_output: null,
+            is_error: false,
+            loop_iteration: null,
+            timestamp: new Date().toISOString(),
+            image_urls: null,
+            attachments: null,
+            request_id: p.request_id,
+            ask_questions: p.questions,
+            ask_status: 'pending',
+          }));
+        return cards.length ? [...prev, ...cards] : prev;
+      });
+    }).catch(() => {});
   }, [task.id]);
 
   const monitorCount = useMemo(
@@ -1652,11 +1723,135 @@ function PermissionCard({ message, taskId }: { message: ChatMessage; taskId?: nu
   );
 }
 
+function AskUserCard({ message, taskId }: { message: ChatMessage; taskId?: number }) {
+  const questions = message.ask_questions || [];
+  const [submitting, setSubmitting] = useState(false);
+  const [localStatus, setLocalStatus] = useState<string | null>(null);
+  // 每个问题的选中 label 集合 + 自定义文本
+  const [selected, setSelected] = useState<Record<number, Set<string>>>({});
+  const [custom, setCustom] = useState<Record<number, string>>({});
+
+  const status = localStatus || message.ask_status || (message.request_id ? 'pending' : 'expired');
+  const actionable = status === 'pending' && !!message.request_id && taskId !== undefined;
+
+  const toggle = (qi: number, label: string, multi: boolean) => {
+    setSelected((prev) => {
+      const cur = new Set(prev[qi] || []);
+      if (multi) {
+        cur.has(label) ? cur.delete(label) : cur.add(label);
+      } else {
+        cur.clear();
+        cur.add(label);
+      }
+      return { ...prev, [qi]: cur };
+    });
+  };
+
+  const submit = async () => {
+    if (!actionable || submitting) return;
+    const answers: AskUserAnswer[] = questions.map((_, qi) => ({
+      labels: Array.from(selected[qi] || []),
+      text: (custom[qi] || '').trim() || undefined,
+    }));
+    // 至少一个问题要有答案（label 或自定义文本）
+    if (!answers.some((a) => a.labels.length || a.text)) return;
+    setSubmitting(true);
+    try {
+      await api.submitAskUser(taskId!, message.request_id!, answers);
+      setLocalStatus('answered');
+    } catch {
+      setLocalStatus('expired');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const statusBadge: Record<string, { text: string; cls: string }> = {
+    answered: { text: '✓ 已回答', cls: 'text-emerald-400' },
+    timed_out: { text: '⏱ 已超时（已放行原生工具）', cls: 'text-gray-500' },
+    expired: { text: '⏱ 已过期', cls: 'text-gray-500' },
+  };
+
+  return (
+    <div className="mx-4">
+      <div className="px-3 py-2.5 bg-sky-500/10 border border-sky-500/40 rounded-lg text-sm">
+        <div className="flex items-center gap-2 text-sky-300 font-medium">
+          <span>💬</span>
+          <span>需要你的选择</span>
+          {message.timestamp && (
+            <MessageTimestamp timestamp={message.timestamp} className="ml-auto" />
+          )}
+        </div>
+        {questions.map((q, qi) => {
+          const multi = !!q.multiSelect;
+          const sel = selected[qi] || new Set<string>();
+          return (
+            <div key={qi} className="mt-2">
+              <div className="text-gray-200">{q.question}</div>
+              <div className="mt-1.5 flex flex-col gap-1">
+                {q.options.map((opt) => {
+                  const checked = sel.has(opt.label);
+                  return (
+                    <button
+                      key={opt.label}
+                      onClick={() => actionable && toggle(qi, opt.label, multi)}
+                      disabled={!actionable}
+                      className={`text-left px-2.5 py-1.5 rounded border text-xs transition-colors disabled:opacity-60 ${
+                        checked
+                          ? 'bg-sky-600/30 border-sky-500 text-sky-100'
+                          : 'bg-gray-900/40 border-gray-700 text-gray-300 hover:border-sky-600/60'
+                      }`}
+                    >
+                      <span className="font-medium">{multi ? (checked ? '☑' : '☐') : (checked ? '◉' : '○')} {opt.label}</span>
+                      {opt.description && <span className="text-gray-500"> — {opt.description}</span>}
+                    </button>
+                  );
+                })}
+              </div>
+              {actionable && (
+                <input
+                  type="text"
+                  value={custom[qi] || ''}
+                  onChange={(e) => setCustom((p) => ({ ...p, [qi]: e.target.value }))}
+                  placeholder="或自定义回答…"
+                  className="mt-1 w-full px-2 py-1 text-xs bg-gray-900/60 border border-gray-700 rounded text-gray-200 placeholder-gray-600 focus:border-sky-600 outline-none"
+                />
+              )}
+            </div>
+          );
+        })}
+        <div className="mt-2.5 flex items-center gap-2">
+          {actionable ? (
+            <>
+              <button
+                onClick={submit}
+                disabled={submitting}
+                className="px-3 py-1 text-xs rounded bg-sky-600 hover:bg-sky-500 text-white disabled:opacity-50"
+              >
+                提交
+              </button>
+              <span className="text-xs text-gray-500">提交后回答会喂回给模型继续</span>
+            </>
+          ) : (
+            <span className={`text-xs ${statusBadge[status]?.cls || 'text-gray-500'}`}>
+              {statusBadge[status]?.text || status}
+            </span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 const MessageBubble = memo(function MessageBubble({ message, taskId }: { message: ChatMessage; taskId?: number }) {
   const isUser = message.role === 'user';
 
   if (message.event_type === 'permission_request') {
     return <PermissionCard message={message} taskId={taskId} />;
+  }
+
+  if (message.event_type === 'ask_user_question') {
+    return <AskUserCard message={message} taskId={taskId} />;
   }
 
   if (message.event_type === 'thinking') {
