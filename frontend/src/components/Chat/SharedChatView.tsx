@@ -96,6 +96,18 @@ export function SharedChatView({ shared, onBack }: SharedChatViewProps) {
     };
   }, [shared.owner_ccm_url, shared.remote_task_id]);
 
+  // Fallback polling when WS is not connected
+  useEffect(() => {
+    if (wsConnected) return;
+    const interval = setInterval(async () => {
+      try {
+        const history = await api.getSharedHistory(shared.id);
+        setMessages(history);
+      } catch { /* ignore */ }
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [wsConnected, shared.id]);
+
   useEffect(() => {
     scrollToBottom();
   }, [messages, scrollToBottom]);
