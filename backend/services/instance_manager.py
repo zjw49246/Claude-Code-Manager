@@ -165,6 +165,12 @@ class InstanceManager:
             from backend.services.mcp_config import generate_mcp_config
             mcp_config_path = generate_mcp_config(task_id, enabled_skills or {})
 
+        # ask_user：把 AskUserQuestion 拦截 hook 注入本次使用的 config_dir（-p 与 PTY 统一）。
+        # config_dir 为空时落到默认 ~/.claude。失败不阻断 launch。
+        if provider == "claude":
+            from backend.services.ask_user_settings import ensure_ask_user_hook
+            ensure_ask_user_hook(config_dir or os.path.expanduser("~/.claude"))
+
         if provider == "claude" and self.pty_mode_enabled:
             return await self._launch_pty(
                 instance_id=instance_id,
