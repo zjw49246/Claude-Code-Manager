@@ -248,23 +248,20 @@ export default function TeamPage() {
   const [ownerFilter, setOwnerFilter] = useState('');
 
   const fetchAll = useCallback(async () => {
-    try {
-      const [m, t, s, fs] = await Promise.all([
-        api.getOrgMembers(),
-        api.getOrgTeams(),
-        api.getSharedTasks(),
-        api.getFeishuStatus(),
-      ]);
-      setMembers(m);
-      setTeams(t);
-      setSharedTasks(s.tasks);
-      setIsRegistry(fs.is_registry || false);
-      setMyOpenId(fs.open_id || '');
-    } catch {
-      // ignore
-    } finally {
-      setLoading(false);
+    const results = await Promise.allSettled([
+      api.getOrgMembers(),
+      api.getOrgTeams(),
+      api.getSharedTasks(),
+      api.getFeishuStatus(),
+    ]);
+    if (results[0].status === 'fulfilled') setMembers(results[0].value);
+    if (results[1].status === 'fulfilled') setTeams(results[1].value);
+    if (results[2].status === 'fulfilled') setSharedTasks(results[2].value.tasks);
+    if (results[3].status === 'fulfilled') {
+      setIsRegistry(results[3].value.is_registry || false);
+      setMyOpenId(results[3].value.open_id || '');
     }
+    setLoading(false);
   }, []);
 
   useEffect(() => { fetchAll(); }, [fetchAll]);
