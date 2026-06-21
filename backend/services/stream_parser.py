@@ -151,6 +151,14 @@ class StreamParser:
             if isinstance(event["tool_output"], str) and "error" in event["tool_output"].lower():
                 event["is_error"] = True
             return [event]
+        elif event_type == "rate_limit_event":
+            # Routine quota-status ping. Surface rate_limit_info so the pool can
+            # tell a benign "allowed" ping from a genuine near-limit warning and
+            # avoid benching healthy accounts (see rate_limit_event_is_actionable).
+            event = _base_event()
+            info = data.get("rate_limit_info")
+            event["rate_limit_info"] = info if isinstance(info, dict) else None
+            return [event]
         elif event_type == "result":
             event = _base_event()
             event["content"] = self._extract_content(data)
