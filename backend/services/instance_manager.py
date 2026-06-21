@@ -199,6 +199,9 @@ class InstanceManager:
             env["CLAUDE_CONFIG_DIR"] = config_dir
             self._config_dirs[instance_id] = config_dir
 
+        # Disable CC's auto-compact — CCM manages context/compaction itself
+        env["DISABLE_AUTO_COMPACT"] = "true"
+
         # Forward Extended Thinking budget (Claude-specific env var)
         if thinking_budget and thinking_budget > 0 and provider == "claude":
             env["MAX_THINKING_TOKENS"] = str(thinking_budget)
