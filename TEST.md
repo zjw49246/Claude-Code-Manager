@@ -195,6 +195,21 @@ cd frontend && npx tsc --noEmit
 | `test_resolve_unknown_or_expired` | 未知/过期 request 返回 False |
 | `test_permission_endpoint_*` | API：200 / 410 过期 / 400 非法 behavior / 404 任务不存在 |
 
+#### `test_ask_user.py` — 拦截内置 AskUserQuestion → 前端卡片
+
+| 测试 | 验证内容 |
+|------|---------|
+| `test_registry_create_resolve_roundtrip` | registry 登记 future → resolve set 答案 → await 拿到；list_for_task 过滤 task |
+| `test_registry_resolve_unknown_and_double` | 未知 request_id / 已完成 future 二次 resolve 均返回 False |
+| `test_registry_discard_and_list_excludes_done` | discard 移除；已 resolve（future done）的从 pending 列表排除 |
+| `test_format_answer_reason_*` | 喂回模型的 deny reason 文案：单选 / 多选 / 自定义文本 / 缺答兜底 |
+| `test_inject_adds_hook_and_is_idempotent` | hook 合并进 settings.json，保留既有 key 与他人 hook，重复注入不重复 |
+| `test_disable_removes_our_hook_only` | `ask_user_enabled=False` 时只移除我们的项，不动他人 hook |
+| `test_inject_handles_corrupt_settings` | 损坏 JSON 的 settings.json 不报错、照常注入 |
+| `test_inject_creates_missing_dir` | config_dir 不存在时自动建目录 + 写入 |
+
+> 完整 HTTP+claude 回环（模型调用 AskUserQuestion → hook 阻塞 → 提交答案 → 模型续答）由真实环境集成测试验证，见 PROGRESS.md「ask_user」条目。
+
 #### `test_api_monitor.py` — Monitor API 端点
 
 | 测试 | 验证内容 |

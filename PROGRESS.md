@@ -414,3 +414,16 @@
 - **测试**: `test_service_instance_manager.py::test_process_event_orphan_overload_does_not_set_transient_flag`（orphan + autonomous 两种回放都不置位）。全量 925 passed
 - **预防**: turn-scoped 信号**必须**显式区分「当前 turn 的活事件」与「回放/后台事件」——claude_pty 已用 `orphan`/`autonomous` 两个 flag 标好了边界（见 task-87 turn 对齐），任何按事件流推断 turn 内状态的逻辑都要先过滤这两类
 - **Commit**: 本次提交
+
+### 2026-06-21 — ask_user：拦截内置 AskUserQuestion，转前端可选卡片再喂回模型（方案②）
+- **需求**: 模型调用内置 `AskUserQuestion`（多选/澄清提问）在 CCM 的 headless（`-p`）/PTY 模式下**无人应答会卡住**（工具等交互式 UI，CCM 这边没有原生选项 UI）。要让它弹成 CCM 聊天里的可选卡片，用户点选后把答案喂回模型继续
+- **选型**: 评估过「MCP `ask_user` 工具 + disallow 内置」与「PreToolUse hook 拦截」两条路。用户拍板**方案②（hook 拦截）**——优点是模型**自然地用它本就想用的 `AskUserQuestion`**，无需 disallow、无需引导改用别的工具，hook 透明拦截
+- **坑1（注入通道）**: hook 要在 `-p` 和 PTY **两条链路都注入**。`-p` 路 `_build_command` 能加 `--settings`，但 **PTY 路不行**：`claude_pty` 的 `pty_process` 命令构建是**固定字段**（`PTYConfig` 无 `settings`/`extra_args`），只认 `--mcp-config`/`--disallowedTools`；且本仓库对 `Claude-Code-PTY` 只有 **READ 权限**（`gh repo view ... viewerPermission=READ`）无法 bump 依赖加 flag。**解法**：两条链路都靠 `CLAUDE_CONFIG_DIR` 指定账号目录，而 Claude 在 `--dangerously-skip-permissions` 下会**自动加载 `{CLAUDE_CONFIG_DIR}/settings.json` 里的 hook**（实测无审批弹窗）。于是把 hook **幂等合并进 `{config_dir}/settings.json`**，注入点选在 `instance_manager.launch()`——它是 `-p` 与 PTY 的**统一入口**（PTY 分流 `_launch_pty` 之前），一处注入两路统吃，零依赖改动
+- **坑2（答案怎么"喂回"模型）**: PreToolUse hook 返回 `permissionDecision="deny"` + `permissionDecisionReason=<答案>`——**实测**：deny 的 reason 会作为 `tool_result`（`is_error=true`）**原样**喂回模型，模型会读它并照做（冒烟测试：deny reason 写"回 PINEAPPLE"，haiku 就回 PINEAPPLE）。所以把用户选择格式化进 reason 即可，无需任何"合成 tool result"的特殊机制。用户曾担心 deny→reason 语义不确定，实测打消
+- **阻塞实现**: hook 脚本 `backend/hooks/ask_user_hook.py`（**纯 stdlib urllib**，任何 python3 都能跑、不依赖 httpx）阻塞式 `POST /api/ask-user/wait` → 后端 `ask_user_registry` 登记 `asyncio.Future`、广播 `ask_user_question` 卡片、`await asyncio.wait_for(future, ask_user_timeout)`；前端卡片选完 `POST /api/tasks/{id}/ask-user/{request_id}` → `registry.resolve` set future → `/wait` 拼 `format_answer_reason` 返回 → hook 打印 deny+reason。**阻塞期间不持有 DB 连接**（用独立短 `async_session()` 做查 task/落库，await 时零连接占用）
+- **fail-open 原则**: hook 任何异常（CCM 不可达 / 非 CCM 托管 session（`/wait` 返回 `no_session`）/ 超时）都 **exit 0、不输出决策** → 放行原生 `AskUserQuestion`，**绝不因辅助设施挂掉而打断会话**。注意：默认 `config_dir=None` 时 hook 会写进用户全局 `~/.claude/settings.json`，对用户自己跑的 `claude` 也生效，但 `no_session` 即时放行，最多一次 localhost 往返延迟
+- **复用**: 整套照搬 PTY 权限透传范式（`session_id→task` 查找、卡片 live-only 经 WS、`system_event` 落库进 chat 历史、`/ask-user/pending` 重连回填活跃卡片、前端 `AskUserCard` 仿 `PermissionCard`）
+- **实测（端到端，真实 claude）**: 起测试后端 + 建带 `session_id` 的 task + 注入真 hook → `claude -p` 强制调用 `AskUserQuestion` → hook 阻塞 → 脚本提交 `{labels:["Spaces"]}` → 模型收到 `tool_result` 后输出 `FINAL=Spaces`。答案完整回流
+- **预防**: ①给「无 UI 的 headless/PTY agent」接交互式工具，**PreToolUse hook 拦截 + 异步回包**是通用解；②**deny→reason 是给模型"喂结果"的可靠通道**（实测），不必发明合成机制；③当依赖的 CLI 不可加 flag / 依赖仓库只读时，`{config_dir}/settings.json` 是 hook/permission 的**注入后门**，且 `-p` 与 PTY 都吃 `CLAUDE_CONFIG_DIR` → 一处统吃；④辅助拦截器**必须 fail-open**；⑤注入点优先选「两路统一入口」（`launch()`）而非各自分支，避免双份维护与漏注入
+- **测试**: `backend/tests/test_ask_user.py`（registry roundtrip/重复 resolve/list 排除已完成、`format_answer_reason` 单选/多选/自定义文本/缺答、settings 注入幂等/保留既有 key 与他人 hook/disable 移除/损坏 JSON/建目录），10 passed；全量 935 passed；`frontend tsc --noEmit` 通过
+- **Commit**: fcc0b6d（feat）+ 892cb3c（test）+ 本次（docs）
