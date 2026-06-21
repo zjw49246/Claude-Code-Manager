@@ -443,6 +443,7 @@ class InstanceManager:
         a single bad line or transient DB error never kills the whole consumer.
         """
         _assistant_texts: list[str] = []
+        _saw_rate_limit = False
         try:
             while True:
                 try:
@@ -464,6 +465,8 @@ class InstanceManager:
                     for event in events:
                         try:
                             await self._process_event(instance_id, task_id, event, loop_iteration)
+                            if event.get("event_type") == "rate_limit_event":
+                                _saw_rate_limit = True
                             if event.get("event_type") in ("message", "result") and event.get("role") == "assistant":
                                 c = event.get("content") or ""
                                 if c:
@@ -523,6 +526,11 @@ class InstanceManager:
                     )
                     # Still clean up instance below so it's available for the retry
                     # fall through to normal cleanup
+
+            # Proactive pool switch: turn completed OK but rate limit warning was seen
+            if task_id and chat_initiated and exit_code == 0 and _saw_rate_limit:
+                if await self._try_proactive_pool_switch(instance_id, task_id):
+                    pass  # switched — fall through to normal cleanup
 
             if task_id and chat_initiated and exit_code not in (0, -2, 130):
                 # Transient server-side 429/overload: wait + retry same account
@@ -838,6 +846,62 @@ class InstanceManager:
 
         except Exception:
             logger.exception("Chat pool rotation failed for task %d", task_id)
+            return False
+
+    async def _try_proactive_pool_switch(self, instance_id: int, task_id: int) -> bool:
+        """Switch pool account after a successful turn that saw rate_limit_event.
+
+        Does NOT re-launch — just migrates the session to a new account so the
+        next turn uses a fresh account. Returns True if switched.
+        """
+        try:
+            from backend.main import dispatcher
+            if not dispatcher or not dispatcher.pool or not dispatcher.pool.enabled:
+                return False
+
+            from backend.services.claude_pool import migrate_session
+
+            old_config_dir = self._config_dirs.get(instance_id)
+            if not old_config_dir:
+                old_config_dir = os.path.expanduser("~/.claude")
+
+            dispatcher.pool.mark_rate_limited(old_config_dir)
+
+            old_account_id = dispatcher.pool.account_id_from_config_dir(old_config_dir)
+            excluded = {old_account_id} if old_account_id else set()
+            new_config_dir = dispatcher.pool.select(exclude=excluded)
+
+            if not new_config_dir:
+                logger.info("Proactive pool switch: no alternative account for task %d", task_id)
+                return False
+
+            async with self.db_factory() as db:
+                task = await db.get(Task, task_id)
+                if not task or not task.session_id:
+                    return False
+                session_id = task.session_id
+
+            source_dir = dispatcher.pool.locate_session_config_dir(session_id) or old_config_dir
+            migrate_session(
+                old_config_dir=source_dir,
+                new_config_dir=new_config_dir,
+                session_id=session_id,
+            )
+
+            new_account_id = dispatcher.pool.account_id_from_config_dir(new_config_dir)
+            logger.info("Proactive pool switch: task %d migrated %s -> %s (rate limit warning)",
+                        task_id, old_account_id, new_account_id)
+
+            await self.broadcaster.broadcast(f"task:{task_id}", {
+                "event_type": "pool_rotation",
+                "old_account": old_account_id,
+                "new_account": new_account_id,
+                "reason": "proactive_rate_limit",
+            })
+            return True
+
+        except Exception:
+            logger.exception("Proactive pool switch failed for task %d", task_id)
             return False
 
     def _parse_codex_line(self, line: str) -> dict | None:
