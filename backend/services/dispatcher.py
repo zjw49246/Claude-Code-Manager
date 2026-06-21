@@ -618,6 +618,54 @@ class GlobalDispatcher:
         # each) — must run off the event loop
         return await self.pool.select_async(exclude=exclude, validate=True)
 
+    async def _resolve_resume_config_dir(self, session_id: str | None) -> str | None:
+        """Resolve the CLAUDE_CONFIG_DIR for a (possibly resuming) launch.
+
+        Prefers a fresh, validated pool account and migrates the session JSONL
+        into it. The critical case is when the pool can hand out **no** healthy
+        account (every account rate-limited): we must NOT let the launch fall
+        through to an arbitrary inherited ``CLAUDE_CONFIG_DIR`` — that account
+        won't hold the session JSONL and ``claude --resume`` dies with
+        "No conversation found with session ID", which hard-fails the task and
+        loses the session (prod tasks #734/#740). Instead anchor the resume to
+        whichever account dir actually holds the session; if that account is
+        rate-limited it surfaces as a recoverable rate-limit/transient event the
+        existing retry paths handle, rather than a fatal lookup miss.
+
+        Returns a config_dir, or None when there is no pool (default account)
+        or no session to anchor a fallback to.
+        """
+        if not (self.pool and self.pool.enabled):
+            return None
+        config_dir = await self.pool.select_async(validate=True)
+        if config_dir:
+            if session_id:
+                from backend.services.claude_pool import migrate_session
+                # The session may live under any account dir (whichever ran the
+                # previous turn), not necessarily env CLAUDE_CONFIG_DIR.
+                old_config_dir = self.pool.locate_session_config_dir(session_id)
+                if old_config_dir and old_config_dir != config_dir:
+                    migrate_session(
+                        old_config_dir=old_config_dir,
+                        new_config_dir=config_dir,
+                        session_id=session_id,
+                    )
+            return config_dir
+        # Pool exhausted: anchor to where the session actually lives so
+        # --resume finds the conversation instead of hard-failing on a wrong
+        # (inherited) account dir.
+        if session_id:
+            located = self.pool.locate_session_config_dir(session_id)
+            if located:
+                logger.warning(
+                    "Pool exhausted; resuming session %s on its resident account "
+                    "dir %s (account may be rate-limited, but --resume can still "
+                    "find the conversation)",
+                    session_id, located,
+                )
+            return located
+        return None
+
     async def _collect_failure_output(self, instance_id: int, task_id: int) -> str:
         """Gather stderr + recent log text once for failure classification.
 
@@ -986,8 +1034,11 @@ class GlobalDispatcher:
             # === Step 4: Launch Claude Code ===
             full_prompt = await self._build_task_prompt(task)
 
-            # Pool: select an account for the initial launch
-            pool_config_dir = await self._pool_select()
+            # Pool: select an account for this launch. For a resume (retry of a
+            # task that already has a session) this also anchors to the session's
+            # resident dir when the pool is exhausted, so --resume doesn't miss
+            # the JSONL and hard-fail with "No conversation found" (prod #734/#740).
+            pool_config_dir = await self._resolve_resume_config_dir(task.session_id)
 
             await self.instance_manager.launch(
                 instance_id=instance_id,
@@ -2493,21 +2544,12 @@ class GlobalDispatcher:
 
             effort_level = task.effort_level or settings.default_effort
 
-            # Pool
-            config_dir = None
-            if self.pool and self.pool.enabled:
-                config_dir = await self.pool.select_async(validate=True)
-                if config_dir and task.session_id:
-                    from backend.services.claude_pool import migrate_session
-                    # The session may live under any pool account dir (whichever
-                    # ran the previous turn), not necessarily env CLAUDE_CONFIG_DIR
-                    old_config_dir = self.pool.locate_session_config_dir(task.session_id)
-                    if old_config_dir and old_config_dir != config_dir:
-                        migrate_session(
-                            old_config_dir=old_config_dir,
-                            new_config_dir=config_dir,
-                            session_id=task.session_id,
-                        )
+            # Pool: pick the account for this resume. Resolves a fresh validated
+            # account (migrating the session into it) when one is available, and
+            # — crucially — when the pool is exhausted still anchors --resume to
+            # the session's resident dir instead of letting it fall through to an
+            # inherited CLAUDE_CONFIG_DIR that lacks the JSONL (prod #734/#740).
+            config_dir = await self._resolve_resume_config_dir(task.session_id)
 
             logger.info(
                 f"Processing queued message for task {task_id}: source={msg.source} "
