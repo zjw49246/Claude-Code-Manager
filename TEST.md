@@ -322,6 +322,7 @@ cd frontend && npx tsc --noEmit
 | `test_process_event_sets_transient_flag_on_overload_error` | 带 `is_error` 的瞬时 429/过载事件置 turn-scoped 标记（PTY 下 exit_code=0 仍可重试的关键信号） |
 | `test_process_event_usage_limit_does_not_set_transient_flag` | 额度横幅**不**置标记（应走换号而非同号重试） |
 | `test_process_event_clean_event_leaves_flag_unset` / `test_launch_resets_transient_flag` | 干净事件不置位 / 新 `launch()` 重置标记 |
+| `test_process_event_orphan_overload_does_not_set_transient_flag` | resume 回放的旧 api_error（`orphan`）与后台子 agent 报错（`autonomous`）**不**置标记——否则成功 resume 被误判 failed（task #729 recover-then-failed） |
 
 ##### `test_service_worktree_manager.py` — Worktree 管理器
 

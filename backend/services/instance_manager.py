@@ -1064,7 +1064,19 @@ class InstanceManager:
         # requests (not your usage limit)" / overloaded). Flag it so the host
         # can wait + retry even in PTY mode (where the aborted turn still
         # reports exit_code 0).
-        if event.get("is_error"):
+        #
+        # Only the CURRENT foreground turn's own events count. `orphan` events
+        # are stale backlog from a previous turn — on resume PTY re-reads the
+        # JSONL and replays the very api_error that triggered THIS retry — and
+        # `autonomous` events belong to background sub-agent turns. Flagging
+        # either keeps transient_error_seen() True across a clean resume, so the
+        # host "retries" a turn that already succeeded and finally marks the
+        # task failed (the recover-then-failed bug). See PROGRESS.md.
+        if (
+            event.get("is_error")
+            and not event.get("orphan")
+            and not event.get("autonomous")
+        ):
             from backend.services.claude_pool import is_transient_overload
             if is_transient_overload(event.get("content") or ""):
                 self._transient_seen.add(instance_id)
