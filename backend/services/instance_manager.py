@@ -34,6 +34,15 @@ class InstanceManager:
         self._config_dirs: dict[int, str] = {}  # instance_id -> CLAUDE_CONFIG_DIR used
         self._last_stderr: dict[int, str] = {}  # instance_id -> stderr from last run
         self._launch_params: dict[int, dict] = {}  # instance_id -> params for re-launch on rotation
+        # instance_id -> consecutive transient-overload retry count. Survives
+        # the in-place relaunch (launch() resets _launch_params, so this can't
+        # live there); cleared on success / give-up / stop.
+        self._transient_attempts: dict[int, int] = {}
+        # instance_ids whose CURRENT turn emitted a transient server-side
+        # 429/overload error event. Turn-scoped: reset at launch(), set in
+        # _process_event. The reliable signal in PTY mode, where the aborted
+        # turn still reports exit_code 0.
+        self._transient_seen: set[int] = set()
         # PTY 权限透传：request_id -> {session_id, task_id, tool_name, expires_at}
         # bridge HTTP 线程收到 CC 的权限请求后经 _loop 调度进事件循环
         self._pty_permissions: dict[str, dict] = {}
@@ -147,6 +156,9 @@ class InstanceManager:
         that loop-task chat history can be grouped by iteration in the frontend.
         """
         provider = (provider or "claude").lower()
+
+        # New turn → clear the per-turn transient-overload flag.
+        self._transient_seen.discard(instance_id)
 
         mcp_config_path = None
         if provider == "claude" and task_id:
@@ -512,10 +524,17 @@ class InstanceManager:
                     # Still clean up instance below so it's available for the retry
                     # fall through to normal cleanup
 
-            # Pool rotation for chat-initiated rate limit failures
             if task_id and chat_initiated and exit_code not in (0, -2, 130):
+                # Transient server-side 429/overload: wait + retry same account
+                # (checked before rotation; the two failures are exclusive).
+                if await self._try_chat_transient_retry(instance_id, task_id, exit_code, stderr_text):
+                    return
+                # Pool rotation for chat-initiated rate limit failures
                 if await self._try_chat_pool_rotation(instance_id, task_id, exit_code, stderr_text):
                     return
+            elif task_id and chat_initiated:
+                # Clean turn — drop any transient-retry tally for this instance.
+                self._transient_attempts.pop(instance_id, None)
 
             # Update instance status
             # SIGINT (exit code -2 or 130) = user interrupt, treat as idle not error
@@ -629,6 +648,98 @@ class InstanceManager:
             self.processes.pop(instance_id, None)
             self._tasks.pop(instance_id, None)
             self._launch_params.pop(instance_id, None)
+
+    async def _try_chat_transient_retry(
+        self, instance_id: int, task_id: int, exit_code: int, stderr_text: str,
+    ) -> bool:
+        """Wait out a transient server-side 429/overload for a chat turn and
+        relaunch the SAME account (no rotation — Anthropic infra throttling, not
+        this account's usage limit). Returns True if a retry was launched.
+
+        The attempt tally lives in self._transient_attempts (not _launch_params,
+        which launch() overwrites) so it survives the relaunch; it is cleared on
+        a non-transient failure, on exhaustion, and on a clean turn.
+        """
+        try:
+            from backend.config import settings as _settings
+            if not getattr(_settings, "transient_retry_enabled", True):
+                return False
+
+            from backend.services.claude_pool import (
+                is_transient_overload, transient_retry_delay,
+                collect_process_output_for_detection,
+            )
+
+            log_contents = await self.get_recent_log_contents(task_id, limit=10)
+            combined = collect_process_output_for_detection(stderr_text, log_contents)
+            if not is_transient_overload(combined):
+                # Non-transient failure — reset tally so the next genuine
+                # overload chain starts fresh.
+                self._transient_attempts.pop(instance_id, None)
+                return False
+
+            attempt = self._transient_attempts.get(instance_id, 0) + 1
+            if attempt > _settings.transient_retry_max:
+                logger.warning(
+                    "Chat task %d transient retries exhausted (%d) — failing turn",
+                    task_id, _settings.transient_retry_max,
+                )
+                self._transient_attempts.pop(instance_id, None)
+                return False
+
+            params = self._launch_params.get(instance_id)
+            if not params:
+                return False
+
+            async with self.db_factory() as db:
+                task = await db.get(Task, task_id)
+                if not task or not task.session_id:
+                    return False
+                session_id = task.session_id
+                cwd = task.last_cwd or task.target_repo
+
+            config_dir = self._config_dirs.get(instance_id)
+            delay = transient_retry_delay(
+                attempt,
+                _settings.transient_retry_base_delay,
+                _settings.transient_retry_max_delay,
+            )
+            self._transient_attempts[instance_id] = attempt
+
+            logger.info(
+                "Chat task %d transient 429/overload — waiting %.0fs before retry #%d/%d",
+                task_id, delay, attempt, _settings.transient_retry_max,
+            )
+            await self.broadcaster.broadcast(f"task:{task_id}", {
+                "event_type": "transient_retry",
+                "task_id": task_id,
+                "attempt": attempt,
+                "max_attempts": _settings.transient_retry_max,
+                "delay": round(delay, 1),
+            })
+            await asyncio.sleep(delay)
+
+            await self.launch(
+                instance_id=instance_id,
+                prompt=params.get("prompt", "请继续之前的工作。"),
+                task_id=task_id,
+                cwd=cwd,
+                model=params.get("model"),
+                resume_session_id=session_id,
+                git_env=params.get("git_env"),
+                thinking_budget=params.get("thinking_budget"),
+                effort_level=params.get("effort_level"),
+                chat_initiated=True,
+                config_dir=config_dir,
+                enable_workflows=params.get("enable_workflows", False),
+                enabled_skills=params.get("enabled_skills"),
+            )
+            return True
+
+        except Exception:
+            logger.exception("Chat transient retry failed for task %d", task_id)
+            self._transient_attempts.pop(instance_id, None)
+            return False
 
     async def _try_chat_pool_rotation(
         self, instance_id: int, task_id: int, exit_code: int, stderr_text: str,
@@ -947,6 +1058,16 @@ class InstanceManager:
                 .values(last_heartbeat=datetime.utcnow())
             )
             await db.commit()
+
+        # Per-turn transient-overload detection: a server-side 429/overload
+        # surfaces as an is_error message ("Server is temporarily limiting
+        # requests (not your usage limit)" / overloaded). Flag it so the host
+        # can wait + retry even in PTY mode (where the aborted turn still
+        # reports exit_code 0).
+        if event.get("is_error"):
+            from backend.services.claude_pool import is_transient_overload
+            if is_transient_overload(event.get("content") or ""):
+                self._transient_seen.add(instance_id)
 
         # Mark task as unread when assistant produces a message or result
         if task_id and event.get("role") == "assistant" and event["event_type"] in ("message", "result"):
@@ -1337,6 +1458,7 @@ class InstanceManager:
             })
 
         self.processes.pop(instance_id, None)
+        self._transient_attempts.pop(instance_id, None)
         self._stopping.discard(instance_id)
         return True
 
@@ -1349,6 +1471,11 @@ class InstanceManager:
 
     def get_config_dir(self, instance_id: int) -> str | None:
         return self._config_dirs.get(instance_id)
+
+    def transient_error_seen(self, instance_id: int) -> bool:
+        """True if the instance's most recent turn emitted a transient
+        server-side 429/overload error (turn-scoped; reset at next launch)."""
+        return instance_id in self._transient_seen
 
     async def get_recent_log_contents(self, task_id: int, limit: int = 10) -> list[str]:
         """Fetch recent log entry contents for a task (for rate-limit detection)."""

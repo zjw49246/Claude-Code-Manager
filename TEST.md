@@ -319,6 +319,9 @@ cd frontend && npx tsc --noEmit
 | `test_launch_with_zero_thinking_budget_omits_env` | `thinking_budget=0` 视为无预算 |
 | `test_stop_terminates` / `test_stop_kills_on_timeout` | 正常停止/超时 kill |
 | `test_is_running` | 运行状态检测 |
+| `test_process_event_sets_transient_flag_on_overload_error` | 带 `is_error` 的瞬时 429/过载事件置 turn-scoped 标记（PTY 下 exit_code=0 仍可重试的关键信号） |
+| `test_process_event_usage_limit_does_not_set_transient_flag` | 额度横幅**不**置标记（应走换号而非同号重试） |
+| `test_process_event_clean_event_leaves_flag_unset` / `test_launch_resets_transient_flag` | 干净事件不置位 / 新 `launch()` 重置标记 |
 
 ##### `test_service_worktree_manager.py` — Worktree 管理器
 
@@ -468,6 +471,8 @@ cd frontend && npx tsc --noEmit
 | 测试用例 | 说明 |
 |---------|------|
 | `TestRateLimitDetection` / `TestAuthFailureDetection` / `TestPoolRotatable` | 限速/认证失败文案检测（窄正则，含中英文与各时区变体） |
+| `TestTransientOverloadDetection` | **瞬时 429/过载检测**：命中 Anthropic 官方文案 `Server is temporarily limiting requests (not your usage limit)` / overloaded；与「额度用尽/认证失败」互斥（那些走换号）；无误报 |
+| `TestTransientRetryDelay` | 退避计算：首次≈base、指数增长、封顶 cap、最小 1s |
 | `TestClaudePool` | 账号加载、select 轮转、冷却标记/过期/清除、status 汇总 |
 | `TestSessionMigration` | session JSONL 硬链接迁移（成功/已链接/缺文件/inode 冲突） |
 | `TestChatPoolRotationRegression` | **回归**：chat 路径切号必须成功并迁移 session（曾因位置参数调用 keyword-only 的 `migrate_session` 静默失败） |

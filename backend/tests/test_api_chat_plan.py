@@ -399,6 +399,8 @@ def _make_dispatcher(db_factory):
     mock_im = MagicMock()
     mock_im.processes = {}
     mock_im.launch = AsyncMock()
+    mock_im.pty_mode_enabled = False
+    mock_im.transient_error_seen = MagicMock(return_value=False)
     mock_broadcaster = MagicMock()
     mock_broadcaster.broadcast = AsyncMock()
     return GlobalDispatcher(db_factory, mock_im, mock_broadcaster)

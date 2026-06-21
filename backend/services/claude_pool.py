@@ -12,6 +12,7 @@ to hardlink the session JSONL so ``--resume`` works transparently.
 import json
 import logging
 import os
+import random
 import re
 import subprocess
 import time
@@ -62,6 +63,53 @@ def is_auth_failure(text: str) -> bool:
 def is_pool_rotatable(text: str) -> bool:
     """Return True if the output warrants trying another pool account."""
     return is_rate_limited(text) or is_auth_failure(text)
+
+
+# ---------------------------------------------------------------------------
+# Transient server-side 429 / overload (NOT an account usage limit)
+# ---------------------------------------------------------------------------
+# Anthropic 官方 CLI 对 HTTP 429(rate_limit) / 529(overloaded) 的人类可读文案：
+#   "API Error: Server is temporarily limiting requests (not your usage
+#    limit) · Rate limited"  /  "API overloaded — wait and retry"
+# 这是 Anthropic 基础设施侧的临时限流/过载，换账号无济于事——应当退避后用
+# 同一账号 --resume 重试。必须与「账号额度用尽 / 认证失败」(那些要轮换号)
+# 互斥：故先排除 is_rate_limited / is_auth_failure，让额度横幅永远走轮换、
+# 绝不误入同号重试死循环。
+_TRANSIENT_OVERLOAD_RE = re.compile(
+    r"temporarily limiting requests"
+    r"|not your usage limit"
+    r"|overloaded_error"
+    r"|api overloaded",
+    re.IGNORECASE,
+)
+
+
+def is_transient_overload(text: str) -> bool:
+    """Server-side transient 429/overload — wait-and-retry the SAME account.
+
+    Distinct from account usage-limit / auth-failure (which rotate accounts);
+    those take precedence so a usage-limit banner never triggers a same-account
+    retry loop.
+    """
+    if not text:
+        return False
+    if is_rate_limited(text) or is_auth_failure(text):
+        return False
+    return bool(_TRANSIENT_OVERLOAD_RE.search(text))
+
+
+def transient_retry_delay(attempt: int, base: float, cap: float) -> float:
+    """Exponential backoff (with jitter) for transient-overload retries.
+
+    ``attempt`` is 1-based: delay = min(base * 2**(attempt-1), cap), then ±20%
+    jitter so concurrent tasks don't retry in lockstep against the same
+    overloaded backend. Always >= 1s.
+    """
+    attempt = max(1, attempt)
+    raw = base * (2 ** (attempt - 1))
+    delay = min(raw, cap)
+    jitter = delay * 0.2
+    return max(1.0, delay + random.uniform(-jitter, jitter))
 
 
 # ---------------------------------------------------------------------------

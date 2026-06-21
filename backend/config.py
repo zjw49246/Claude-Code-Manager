@@ -61,6 +61,15 @@ class Settings(BaseSettings):
     pool_config_path: str = "~/.claude-pool/accounts.json"
     pool_cooldown_seconds: int = 300  # per-account cooldown after rate limit
 
+    # --- Transient server-side 429 / overload auto-retry ---
+    # Anthropic 基础设施侧的临时限流/过载（"Server is temporarily limiting
+    # requests (not your usage limit)" / overloaded）——退避后用同一账号
+    # --resume 重试，区别于「额度用尽」的换号轮换（见 claude_pool）。
+    transient_retry_enabled: bool = True
+    transient_retry_max: int = 5            # 最多自动重试次数
+    transient_retry_base_delay: float = 10.0  # 首次退避秒数（指数递增）
+    transient_retry_max_delay: float = 120.0  # 退避上限秒数
+
     # --- Backup service (auto-backup) ---
     backup_enabled: bool = False        # Set true to enable periodic DB backups
     backup_type: str = "local"          # local | s3 | oss

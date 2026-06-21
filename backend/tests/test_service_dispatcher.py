@@ -14,6 +14,11 @@ def _make_dispatcher(db_factory):
     instance_manager.launch = AsyncMock(return_value=12345)
     instance_manager.processes = {}
     instance_manager._tasks = {}
+    # Model the real InstanceManager interface used by failure classification.
+    instance_manager.pty_mode_enabled = False
+    instance_manager.transient_error_seen = MagicMock(return_value=False)
+    instance_manager.get_last_stderr = MagicMock(return_value="")
+    instance_manager.get_recent_log_contents = AsyncMock(return_value=[])
 
     broadcaster = MagicMock()
     broadcaster.broadcast = AsyncMock()
