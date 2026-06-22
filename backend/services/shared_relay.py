@@ -204,6 +204,9 @@ class SharedRelay:
         # Relay messages from sharer or other shared users (different prefix or no prefix).
         if event_type == "user_message":
             content = data.get("content") or ""
+            logger.info("shared relay user_msg shared=%d my_name=%s content=%s skip=%s",
+                        shared.id, self._my_name, content[:40],
+                        bool(self._my_name and content.startswith(f"[{self._my_name}]")))
             if self._my_name and content.startswith(f"[{self._my_name}]"):
                 return  # self-sent, already stored locally
 
