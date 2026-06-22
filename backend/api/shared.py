@@ -108,6 +108,7 @@ async def _start_relay_and_backfill(relay, shared: SharedTaskReceived):
                 shadow.description = config.get("description") or shadow.description
                 shadow.model = config.get("model")
                 shadow.provider = config.get("provider", "claude")
+                shadow.session_id = config.get("session_id") or shadow.session_id
                 shadow.target_repo = config.get("target_repo")
                 shadow.error_message = config.get("error_message")
                 await db.commit()

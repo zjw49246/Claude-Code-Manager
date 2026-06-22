@@ -550,7 +550,7 @@ export default function TeamPage() {
                             setChatTask(t);
                           } catch { /* ignore */ }
                         }}
-                        className="flex items-center gap-1 px-2 py-1 text-xs bg-gray-700 hover:bg-gray-600 text-gray-200 rounded border border-gray-600"
+                        className="flex items-center gap-1 px-2 py-1 text-xs bg-indigo-600/80 hover:bg-indigo-500 text-white rounded"
                       >
                         <MessageCircle size={14} /> Chat
                       </button>
