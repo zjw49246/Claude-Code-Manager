@@ -1922,11 +1922,25 @@ const MessageBubble = memo(function MessageBubble({ message, taskId }: { message
   }
 
   if (message.event_type === 'system_init' || message.event_type === 'process_exit' || message.event_type === 'system_event') {
+    const content = message.content || 'system';
+    const isMonitor = content.startsWith('[Monitor');
+    if (isMonitor) {
+      return (
+        <div className="bg-gray-800/50 border border-gray-700 rounded-lg px-3 py-2 my-1 text-xs text-gray-400">
+          <div className="markdown-body text-xs">
+            <ReactMarkdown remarkPlugins={remarkPlugins} components={markdownComponents}>
+              {content}
+            </ReactMarkdown>
+          </div>
+          {message.timestamp && <MessageTimestamp timestamp={message.timestamp} className="mt-1" />}
+        </div>
+      );
+    }
     const label = message.event_type === 'system_init'
       ? '— Session started —'
       : message.event_type === 'process_exit'
         ? '— Done —'
-        : `— ${message.content || 'system'} —`;
+        : `— ${content} —`;
     return (
       <div className="text-center text-xs text-gray-600 py-1">
         {label}
