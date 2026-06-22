@@ -142,30 +142,31 @@ async def _send_shared_chat(task: Task, body: ChatMessage, db: AsyncSession):
     if not shared:
         raise HTTPException(400, "Shared task record not found")
 
-    # Store user message locally
-    user_log = LogEntry(
-        instance_id=None,
-        task_id=task.id,
-        event_type="user_message",
-        role="user",
-        content=body.message,
-        is_error=False,
-    )
-    db.add(user_log)
-    await db.commit()
-
-    # Broadcast to local frontend
-    await broadcaster.broadcast(f"task:{task.id}", {
-        "event_type": "user_message",
-        "role": "user",
-        "content": body.message,
-    })
-
     # Get sender name for prefix
     from backend.models.feishu_binding import FeishuUserBinding
     binding_result = await db.execute(select(FeishuUserBinding).limit(1))
     binding = binding_result.scalar_one_or_none()
     sender_name = binding.feishu_name if binding else None
+    prefixed = f"[{sender_name}] {body.message}" if sender_name else body.message
+
+    # Store user message locally WITH prefix (same as what sharer sees)
+    user_log = LogEntry(
+        instance_id=None,
+        task_id=task.id,
+        event_type="user_message",
+        role="user",
+        content=prefixed,
+        is_error=False,
+    )
+    db.add(user_log)
+    await db.commit()
+
+    # Broadcast to local frontend WITH prefix
+    await broadcaster.broadcast(f"task:{task.id}", {
+        "event_type": "user_message",
+        "role": "user",
+        "content": prefixed,
+    })
 
     # Proxy to sharer
     try:
