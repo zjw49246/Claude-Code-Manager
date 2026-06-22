@@ -151,19 +151,24 @@ class SharedRelay:
                     self._connections[shared.id] = ws
                     logger.info("shared relay connected: shared=%d remote_task=%d url=%s", shared.id, shared.remote_task_id, ws_url[:80])
                     try:
-                        # websockets v16: async for doesn't yield server-push frames
-                        # reliably — use explicit recv() loop instead.
                         while True:
                             raw = await ws.recv()
                             try:
                                 parsed = json.loads(raw)
                                 if parsed.get("action") == "subscribed":
+                                    logger.info("shared relay subscribed shared=%d", shared.id)
                                     continue
+                                et = (parsed.get("data") or parsed).get("event_type") or (parsed.get("data") or parsed).get("event") or "?"
+                                logger.info("shared relay recv shared=%d event=%s", shared.id, et)
                                 await self._handle(parsed, shared)
                             except Exception:
-                                logger.debug("shared relay handle error shared=%d", shared.id)
-                    except (websockets.ConnectionClosed, OSError):
-                        pass
+                                logger.exception("shared relay handle error shared=%d", shared.id)
+                    except websockets.ConnectionClosed as e:
+                        logger.warning("shared relay closed shared=%d: %s", shared.id, e)
+                    except OSError as e:
+                        logger.warning("shared relay OS error shared=%d: %s", shared.id, e)
+                    except Exception as e:
+                        logger.exception("shared relay unexpected error shared=%d", shared.id)
             except asyncio.CancelledError:
                 return
             except Exception:
