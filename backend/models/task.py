@@ -61,6 +61,8 @@ class Task(Base):
     starred: Mapped[bool] = mapped_column(default=False, server_default="0", index=True)
     archived: Mapped[bool] = mapped_column(default=False, server_default="0", index=True)
     has_unread: Mapped[bool] = mapped_column(default=False, server_default="0")
+    # Non-NULL = shadow task from a shared remote task
+    shared_from_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

@@ -2,7 +2,6 @@ import { useState, useEffect, useCallback, useMemo } from 'react';
 import { api } from '../api/client';
 import type { OrgMember, OrgTeam, SharedTaskReceived } from '../api/client';
 import { Plus, X, Trash2, UserPlus, Users, MessageCircle, Search, RefreshCw } from 'lucide-react';
-import { SharedChatView } from '../components/Chat/SharedChatView';
 
 /* ── Create / Edit Team Modal ─────────────────────────────────── */
 function TeamModal({
@@ -243,7 +242,6 @@ export default function TeamPage() {
 
   // Shared tasks state
   const [sharedTasks, setSharedTasks] = useState<SharedTaskReceived[]>([]);
-  const [openSharedTask, setOpenSharedTask] = useState<SharedTaskReceived | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [ownerFilter, setOwnerFilter] = useState('');
   const [refreshing, setRefreshing] = useState(false);
@@ -291,7 +289,6 @@ export default function TeamPage() {
     try {
       await api.leaveSharedTask(id);
       setSharedTasks(prev => prev.filter(t => t.id !== id));
-      if (openSharedTask?.id === id) setOpenSharedTask(null);
     } catch { /* ignore */ }
   };
 
@@ -317,13 +314,6 @@ export default function TeamPage() {
     return result;
   }, [sharedTasks, searchQuery, ownerFilter]);
 
-  if (openSharedTask) {
-    return (
-      <div className="h-[calc(100vh-8rem)]">
-        <SharedChatView shared={openSharedTask} onBack={() => setOpenSharedTask(null)} />
-      </div>
-    );
-  }
 
   if (loading) {
     return (
@@ -536,7 +526,11 @@ export default function TeamPage() {
                     </div>
                     <div className="flex gap-1 shrink-0 items-center">
                       <button
-                        onClick={() => setOpenSharedTask(task)}
+                        onClick={() => {
+                          if (task.local_task_id) {
+                            window.location.hash = `#/tasks/chat/${task.local_task_id}`;
+                          }
+                        }}
                         className="flex items-center gap-1 px-2 py-1 text-xs bg-gray-700 hover:bg-gray-600 text-gray-200 rounded border border-gray-600"
                       >
                         <MessageCircle size={14} /> Chat

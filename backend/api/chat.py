@@ -32,6 +32,8 @@ async def send_chat_message(
     task = await db.get(Task, task_id)
     if not task:
         raise HTTPException(404, "Task not found")
+    if task.shared_from_id is not None:
+        return await _send_shared_chat(task, body, db)
     if task.worker_id is not None:
         # Worker task：代理到 Worker CCM（session 在 worker 上，由 worker 校验）
         return await _send_worker_chat(task, body, db)
@@ -124,6 +126,57 @@ async def send_chat_message(
     )
 
     return {"ok": True, "queued": True, "session_id": task.session_id}
+
+
+async def _send_shared_chat(task: Task, body: ChatMessage, db: AsyncSession):
+    """Shared (shadow) task: store locally, broadcast, proxy to sharer CCM."""
+    from backend.main import broadcaster
+    from backend.models.task_share import SharedTaskReceived
+    from backend.services.shared_proxy import proxy_chat
+
+    # Find the shared record
+    result = await db.execute(
+        select(SharedTaskReceived).where(SharedTaskReceived.id == task.shared_from_id)
+    )
+    shared = result.scalar_one_or_none()
+    if not shared:
+        raise HTTPException(400, "Shared task record not found")
+
+    # Store user message locally
+    user_log = LogEntry(
+        instance_id=None,
+        task_id=task.id,
+        event_type="user_message",
+        role="user",
+        content=body.message,
+        is_error=False,
+    )
+    db.add(user_log)
+    await db.commit()
+
+    # Broadcast to local frontend
+    await broadcaster.broadcast(f"task:{task.id}", {
+        "event_type": "user_message",
+        "role": "user",
+        "content": body.message,
+    })
+
+    # Get sender name for prefix
+    from backend.models.feishu_binding import FeishuUserBinding
+    binding_result = await db.execute(select(FeishuUserBinding).limit(1))
+    binding = binding_result.scalar_one_or_none()
+    sender_name = binding.feishu_name if binding else None
+
+    # Proxy to sharer
+    try:
+        await proxy_chat(
+            shared.owner_ccm_url, shared.remote_task_id, shared.share_token,
+            message=body.message, sender_name=sender_name,
+        )
+    except Exception as e:
+        raise HTTPException(502, f"Cannot reach sharer CCM: {e}")
+
+    return {"ok": True, "queued": True}
 
 
 async def _send_worker_chat(task: Task, body: ChatMessage, db: AsyncSession):

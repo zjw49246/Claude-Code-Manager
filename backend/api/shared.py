@@ -34,7 +34,8 @@ class RevokeSharePayload(BaseModel):
 @router.post("/receive")
 async def receive_share(payload: ReceiveSharePayload, db: AsyncSession = Depends(get_db)):
     """Called by the sharer's CCM to push a share notification."""
-    # Upsert
+    from backend.models.task import Task
+
     result = await db.execute(
         select(SharedTaskReceived).where(
             SharedTaskReceived.owner_ccm_url == payload.owner_ccm_url,
@@ -50,10 +51,78 @@ async def receive_share(payload: ReceiveSharePayload, db: AsyncSession = Depends
         existing.owner_name = payload.owner_name
         existing.owner_feishu_open_id = payload.owner_feishu_open_id
         existing.status = "active"
-    else:
-        db.add(SharedTaskReceived(**payload.model_dump()))
+        await db.commit()
+        await db.refresh(existing)
+        # Start relay if shadow task exists
+        if existing.local_task_id:
+            try:
+                from backend.main import shared_relay
+                if shared_relay:
+                    await shared_relay.start_relay(existing)
+            except Exception:
+                pass
+        return {"ok": True}
+
+    # New share: create shared_tasks_received + shadow task
+    shared = SharedTaskReceived(**payload.model_dump())
+    db.add(shared)
+    await db.flush()
+
+    # Create shadow task
+    shadow = Task(
+        title=payload.task_title or "",
+        description=payload.task_description,
+        status="pending",
+        shared_from_id=shared.id,
+    )
+    db.add(shadow)
+    await db.flush()
+    shared.local_task_id = shadow.id
     await db.commit()
+    await db.refresh(shared)
+
+    # Start relay + backfill in background
+    try:
+        from backend.main import shared_relay
+        if shared_relay:
+            asyncio.create_task(_start_relay_and_backfill(shared_relay, shared))
+    except Exception:
+        pass
+
     return {"ok": True}
+
+
+async def _start_relay_and_backfill(relay, shared: SharedTaskReceived):
+    """Background: fetch initial state, backfill history, start relay."""
+    try:
+        # Fetch live task config to update shadow
+        from backend.services.shared_proxy import proxy_config
+        from backend.database import async_session
+        config = await proxy_config(shared.owner_ccm_url, shared.remote_task_id, shared.share_token)
+        async with async_session() as db:
+            from backend.models.task import Task
+            shadow = await db.get(Task, shared.local_task_id)
+            if shadow and config:
+                shadow.status = config.get("status", "pending")
+                shadow.title = config.get("title") or shadow.title
+                shadow.description = config.get("description") or shadow.description
+                shadow.model = config.get("model")
+                shadow.provider = config.get("provider", "claude")
+                shadow.target_repo = config.get("target_repo")
+                shadow.error_message = config.get("error_message")
+                await db.commit()
+    except Exception:
+        logger.debug("failed to fetch initial config for shared %d", shared.id)
+
+    try:
+        await relay.backfill_history(shared)
+    except Exception:
+        logger.debug("backfill failed for shared %d", shared.id)
+
+    try:
+        await relay.start_relay(shared)
+    except Exception:
+        logger.debug("start relay failed for shared %d", shared.id)
 
 
 @router.post("/revoke")
@@ -67,8 +136,7 @@ async def receive_revoke(payload: RevokeSharePayload, db: AsyncSession = Depends
     )
     record = result.scalar_one_or_none()
     if record:
-        await db.delete(record)
-        await db.commit()
+        await _cleanup_shared(record, db)
     return {"ok": True}
 
 
@@ -94,6 +162,7 @@ async def list_shared_tasks(enrich: bool = False, db: AsyncSession = Depends(get
                     "owner_name": t.owner_name,
                     "remote_task_id": t.remote_task_id,
                     "share_token": t.share_token,
+                    "local_task_id": t.local_task_id,
                     "task_title": t.task_title,
                     "task_description": t.task_description,
                     "project_name": t.project_name,
@@ -114,6 +183,7 @@ async def list_shared_tasks(enrich: bool = False, db: AsyncSession = Depends(get
             "owner_name": t.owner_name,
             "remote_task_id": t.remote_task_id,
             "share_token": t.share_token,
+            "local_task_id": t.local_task_id,
             "received_at": t.received_at.isoformat() if t.received_at else None,
         }
         try:
@@ -139,9 +209,26 @@ async def leave_shared_task(shared_id: int, db: AsyncSession = Depends(get_db)):
     record = await db.get(SharedTaskReceived, shared_id)
     if not record:
         raise HTTPException(404, "Shared task not found")
+    await _cleanup_shared(record, db)
+    return {"ok": True}
+
+
+async def _cleanup_shared(record: SharedTaskReceived, db: AsyncSession):
+    """Stop relay, cancel shadow task, delete shared record."""
+    try:
+        from backend.main import shared_relay
+        if shared_relay:
+            await shared_relay.stop_relay(record.id)
+    except Exception:
+        pass
+    if record.local_task_id:
+        from backend.models.task import Task
+        shadow = await db.get(Task, record.local_task_id)
+        if shadow:
+            shadow.status = "cancelled"
+            shadow.error_message = "Share revoked"
     await db.delete(record)
     await db.commit()
-    return {"ok": True}
 
 
 # ---------- Proxy endpoints: forward requests to the sharer's CCM ----------
