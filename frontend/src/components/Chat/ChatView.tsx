@@ -679,7 +679,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
     pendingFiles,
     setPendingFiles,
     setFilePreviews,
-    disabled: !task.session_id,
+    disabled: !task.session_id && !task.shared_from_id,
     onError: (msg) => setDropError(msg),
   });
 
@@ -1278,7 +1278,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder={
-                !task.session_id
+                !task.session_id && !task.shared_from_id
                   ? 'Run the task first to start a session...'
                   : injectMode && ptyMode
                     ? '注入模式：消息将直接注入运行中的 turn...'
@@ -1286,7 +1286,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
                       ? 'Type next message to queue...'
                       : 'Type a follow-up message...'
               }
-              disabled={!task.session_id}
+              disabled={!task.session_id && !task.shared_from_id}
               rows={1}
               className="flex-1 bg-gray-800 text-foreground rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-none disabled:opacity-50 max-h-48 overflow-y-auto"
               style={{ minHeight: '40px' }}
