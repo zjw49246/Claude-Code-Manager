@@ -684,7 +684,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
   });
 
   useEffect(() => {
-    if (!task.session_id) return;
+    if (!task.session_id && !task.shared_from_id) return;
     const handlePaste = (e: ClipboardEvent) => {
       const items = e.clipboardData?.items;
       if (!items) return;
@@ -1194,7 +1194,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
               <button
                 type="button"
                 onClick={() => setShowModelMenu((v) => !v)}
-                disabled={!task.session_id}
+                disabled={!task.session_id && !task.shared_from_id}
                 className={`p-2 rounded-lg transition-colors disabled:opacity-40 ${
                   modelOverride ? 'text-indigo-300 bg-indigo-600/20' : 'text-gray-500 hover:text-gray-300'
                 }`}
@@ -1234,7 +1234,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
               <button
                 type="button"
                 onClick={() => setInjectMode((v) => !v)}
-                disabled={!task.session_id}
+                disabled={!task.session_id && !task.shared_from_id}
                 className={`p-2 rounded-lg transition-colors disabled:opacity-40 ${
                   injectMode ? 'text-teal-300 bg-teal-600/20' : 'text-gray-500 hover:text-teal-300'
                 }`}
@@ -1293,7 +1293,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
             />
             <button
               onClick={() => handleSend()}
-              disabled={(!input.trim() && pendingFiles.length === 0) || !task.session_id || (injectMode && ptyMode && !isProcessing)}
+              disabled={(!input.trim() && pendingFiles.length === 0) || (!task.session_id && !task.shared_from_id) || (injectMode && ptyMode && !isProcessing)}
               title={injectMode && ptyMode
                 ? (isProcessing ? '注入到运行中的 turn (Ctrl+Enter)' : '注入模式：仅在 turn 运行中可用，空闲时请关闭注入模式')
                 : isProcessing ? 'Add to queue (Ctrl+Enter)' : 'Send (Ctrl+Enter)'}
