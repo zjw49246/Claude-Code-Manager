@@ -511,7 +511,7 @@ dev = [
 [[package]]
 name = "claude-pty"
 version = "0.1.0"
-source = { git = "https://github.com/zjw49246/Claude-Code-PTY#412d9117b5711df75c88cacbc5415114d4c61b7c" }
+source = { git = "https://github.com/zjw49246/Claude-Code-PTY#0295c832ac7f993924cfb5c7101c00ae67a1fe80" }
 
 [[package]]
 name = "click"
