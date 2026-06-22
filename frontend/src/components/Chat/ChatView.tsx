@@ -1181,14 +1181,14 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              disabled={!task.session_id || pendingFiles.length >= 10}
+              disabled={(!task.session_id && !task.shared_from_id) || pendingFiles.length >= 10}
               className="p-2 text-gray-500 hover:text-gray-300 disabled:opacity-40 disabled:cursor-not-allowed"
               title="Attach files"
             >
               <Paperclip size={18} />
             </button>
-            <SecretPicker selectedIds={selectedSecretIds} onChange={setSelectedSecretIds} disabled={!task.session_id} />
-            <QuickPhraseDropdown onSelect={(text) => handleSend(text)} disabled={!task.session_id} />
+            <SecretPicker selectedIds={selectedSecretIds} onChange={setSelectedSecretIds} disabled={!task.session_id && !task.shared_from_id} />
+            <QuickPhraseDropdown onSelect={(text) => handleSend(text)} disabled={!task.session_id && !task.shared_from_id} />
             {/* Temp model override (one-shot) */}
             <div className="relative" data-temp-model>
               <button
