@@ -136,6 +136,26 @@ async def _reset_stale_discussion_agents():
             logger.info("Reset %d stale discussion agents to idle", len(stale))
 
 
+async def _cleanup_stale_sub_agents():
+    """Mark running sub-agents as completed if their parent task is already done."""
+    from backend.models.sub_agent import SubAgentSession
+    from datetime import datetime
+    async with async_session() as db:
+        result = await db.execute(
+            select(SubAgentSession).where(SubAgentSession.status == "running")
+        )
+        stale = []
+        for sa in result.scalars().all():
+            task = await db.get(Task, sa.task_id)
+            if task and task.status in ("completed", "failed", "cancelled"):
+                sa.status = "completed"
+                sa.completed_at = datetime.utcnow()
+                stale.append(sa)
+        if stale:
+            await db.commit()
+            logger.info("Cleaned up %d stale sub-agents from completed tasks", len(stale))
+
+
 async def _recover_worker_relays():
     """Manager 重启后为 ready worker 上的活跃 task 重建中继 + 补缺失日志。"""
     from backend.models.worker import Worker
@@ -189,6 +209,7 @@ async def lifespan(app: FastAPI):
         if row is not None and row.use_pty_mode is not None:
             instance_manager.set_pty_mode(row.use_pty_mode)
     await _reset_stale_discussion_agents()
+    await _cleanup_stale_sub_agents()
     await _sync_tags()
     if settings.auto_start_dispatcher:
         await dispatcher.start()
