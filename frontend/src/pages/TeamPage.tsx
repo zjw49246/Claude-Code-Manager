@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { api } from '../api/client';
-import type { OrgMember, OrgTeam, SharedTaskReceived } from '../api/client';
+import type { OrgMember, OrgTeam, SharedTaskReceived, Task } from '../api/client';
 import { Plus, X, Trash2, UserPlus, Users, MessageCircle, Search, RefreshCw } from 'lucide-react';
+import { ChatView } from '../components/Chat/ChatView';
 
 /* ── Create / Edit Team Modal ─────────────────────────────────── */
 function TeamModal({
@@ -245,6 +246,7 @@ export default function TeamPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [ownerFilter, setOwnerFilter] = useState('');
   const [refreshing, setRefreshing] = useState(false);
+  const [chatTask, setChatTask] = useState<Task | null>(null);
 
   const fetchAll = useCallback(async () => {
     const results = await Promise.allSettled([
@@ -314,6 +316,21 @@ export default function TeamPage() {
     return result;
   }, [sharedTasks, searchQuery, ownerFilter]);
 
+
+  if (chatTask) {
+    return (
+      <div className="h-[calc(100vh-8rem)]">
+        <ChatView
+          task={chatTask}
+          projects={[]}
+          onBack={() => setChatTask(null)}
+          onTaskUpdated={() => {
+            api.getTask(chatTask.id).then(setChatTask).catch(() => {});
+          }}
+        />
+      </div>
+    );
+  }
 
   if (loading) {
     return (
@@ -526,10 +543,12 @@ export default function TeamPage() {
                     </div>
                     <div className="flex gap-1 shrink-0 items-center">
                       <button
-                        onClick={() => {
-                          if (task.local_task_id) {
-                            window.location.hash = `#/tasks/chat/${task.local_task_id}`;
-                          }
+                        onClick={async () => {
+                          if (!task.local_task_id) return;
+                          try {
+                            const t = await api.getTask(task.local_task_id);
+                            setChatTask(t);
+                          } catch { /* ignore */ }
                         }}
                         className="flex items-center gap-1 px-2 py-1 text-xs bg-gray-700 hover:bg-gray-600 text-gray-200 rounded border border-gray-600"
                       >
