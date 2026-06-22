@@ -118,6 +118,7 @@ export interface Task {
   sort_order?: number | null;
   enable_workflows: boolean;
   enabled_skills: Record<string, boolean> | null;
+  shared_from_id: number | null;
   active_sub_agents: number;
   tags: string[] | null;
   metadata_: {
@@ -436,6 +437,7 @@ export interface SharedTaskReceived {
   owner_name?: string;
   remote_task_id: number;
   share_token: string;
+  local_task_id?: number;
   task_title?: string;
   task_description?: string;
   project_name?: string;

@@ -61,6 +61,7 @@ class SharedTaskReceived(Base):
     task_title: Mapped[str | None] = mapped_column(String(200))
     task_description: Mapped[str | None] = mapped_column(Text)
     project_name: Mapped[str | None] = mapped_column(String(100))
+    local_task_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="active")
     received_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now()

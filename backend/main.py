@@ -58,6 +58,9 @@ logger = logging.getLogger(__name__)
 broadcaster = WebSocketBroadcaster()
 broadcaster.db_factory = async_session
 instance_manager = InstanceManager(db_factory=async_session, broadcaster=broadcaster)
+
+from backend.services.shared_relay import SharedRelay
+shared_relay = SharedRelay(db_factory=async_session, broadcaster=broadcaster)
 ralph_loop = RalphLoop(
     db_factory=async_session,
     instance_manager=instance_manager,
@@ -196,6 +199,9 @@ async def lifespan(app: FastAPI):
         import asyncio as _asyncio
         worker_health_task = _asyncio.create_task(worker_provisioner.health_check_loop())
         _asyncio.create_task(_recover_worker_relays())
+
+    # Recover shared task relays
+    asyncio.create_task(shared_relay.recover_all())
 
     # Start periodic database backup (optional — requires BACKUP_ENABLED=true in .env)
     backup_svc = None

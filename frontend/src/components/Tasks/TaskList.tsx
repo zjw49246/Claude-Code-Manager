@@ -143,6 +143,9 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId,
             <span className={`w-2.5 h-2.5 rounded-full shrink-0 self-start mt-[9px] ${statusColors[t.status] || 'bg-gray-500'}`} />
             <div className="flex items-center gap-2 flex-wrap flex-1 min-w-0 min-h-[28px]">
               <span className="text-xs text-gray-500">#{t.id}</span>
+              {t.shared_from_id && (
+                <span className="text-xs bg-orange-600/30 text-orange-300 px-1.5 rounded font-medium">Shared</span>
+              )}
               {t.project_id && projectMap[t.project_id] && (() => {
                 const proj = projectMap[t.project_id!];
                 const colorDef = TAG_COLOR_OPTIONS.find((c) => c.key === proj.color);
