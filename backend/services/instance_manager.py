@@ -1320,6 +1320,21 @@ class InstanceManager:
                     "check_number": existing.checks_done,
                     "summary": existing.last_summary,
                 })
+                # Write progress as system_event in chat (like monitor checks)
+                summary_text = (existing.last_summary or "working...")[:300]
+                log_content = f"[Agent #{existing.id}] {existing.description}: {summary_text}"
+                db.add(LogEntry(
+                    instance_id=None,
+                    task_id=task_id,
+                    event_type="system_event",
+                    content=log_content,
+                    is_error=False,
+                ))
+                await db.commit()
+                await self.broadcaster.broadcast(f"task:{task_id}", {
+                    "event_type": "system_event",
+                    "content": log_content,
+                })
             elif event_type == "subagent_done":
                 existing.status = "completed"
                 existing.completed_at = datetime.utcnow()
