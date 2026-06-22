@@ -33,6 +33,7 @@ class SharedRelay:
         self._connections: dict[int, object] = {}  # shared_received.id -> ws
         self._loops: dict[int, asyncio.Task] = {}  # shared_received.id -> relay task
         self._closing: set[int] = set()
+        self._my_name: str | None = None
 
     async def start_relay(self, shared: SharedTaskReceived):
         """Start relay for a shared task. Idempotent."""
@@ -61,6 +62,16 @@ class SharedRelay:
         Also backfills shadow tasks for legacy shared records that predate
         the relay feature (local_task_id is NULL).
         """
+        # Load my feishu name for self-message dedup
+        try:
+            from backend.models.feishu_binding import FeishuUserBinding
+            async with self.db_factory() as db:
+                binding = (await db.execute(select(FeishuUserBinding).limit(1))).scalar_one_or_none()
+                if binding:
+                    self._my_name = binding.feishu_name
+        except Exception:
+            pass
+
         async with self.db_factory() as db:
             result = await db.execute(
                 select(SharedTaskReceived).where(
@@ -178,11 +189,12 @@ class SharedRelay:
         if not local_task_id:
             return
 
-        # user_message from self (shared chat proxy) is already stored locally.
-        # But user_message from the sharer (or other sharers) needs to be relayed.
-        # We can't easily distinguish, so relay all and let the DB unique constraint
-        # or frontend dedup handle it. The small cost of an occasional duplicate
-        # log entry is better than missing messages from the sharer.
+        # user_message: skip self-sent (already stored locally with prefix by _send_shared_chat).
+        # Relay messages from sharer or other shared users (different prefix or no prefix).
+        if event_type == "user_message":
+            content = data.get("content") or ""
+            if self._my_name and content.startswith(f"[{self._my_name}]"):
+                return  # self-sent, already stored locally
 
         # Write chat events to local log_entries
         if event_type in CHAT_EVENT_TYPES:
