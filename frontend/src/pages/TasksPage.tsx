@@ -93,15 +93,20 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
       setAllTasks(all);
       setProjects(projs);
       setTagItems(tags);
-      // Resolve chatTaskId from URL on first load, or update open chatTask
-      const currentId = chatTaskRef.current?.id ?? chatTaskId;
-      if (currentId) {
+      // Resolve chatTaskId from URL on first load, or update open chatTask.
+      // chatTaskId comes from URL hash — null after onBack.
+      // chatTaskRef tracks the currently open chat — used to refresh its data.
+      if (chatTaskId) {
         const pool = [...filtered, ...all];
-        let found = pool.find((t) => t.id === currentId);
-        if (!found && !chatTaskRef.current) {
-          try { found = await api.getTask(currentId); } catch { /* task may not exist */ }
+        let found = pool.find((t) => t.id === chatTaskId);
+        if (!found) {
+          try { found = await api.getTask(chatTaskId); } catch { /* task may not exist */ }
         }
         if (found) setChatTaskWrapped(found);
+      } else if (chatTaskRef.current) {
+        // Chat is open but not from URL (e.g. clicked from list) — refresh its data
+        const found = [...filtered, ...all].find((t) => t.id === chatTaskRef.current!.id);
+        if (found) setChatTask(found);
       }
     } catch (e) {
       console.error('Failed to load tasks:', e);
