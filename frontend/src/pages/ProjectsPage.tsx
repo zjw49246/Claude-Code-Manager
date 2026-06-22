@@ -6,6 +6,7 @@ import { ShareModal } from '../components/ShareModal';
 import { resolveTagColor, TAG_COLOR_OPTIONS } from '../components/TagColors';
 import { TagManager } from '../components/TagManager';
 import { EnvFilesEditor } from '../components/EnvFilesEditor';
+import { ProjectTodoList } from '../components/Projects/ProjectTodoList';
 
 // ── Shared: identity warning ──────────────────────────────────────────────────
 
@@ -1038,6 +1039,8 @@ export function ProjectsPage() {
                       tagColorMap={tagColorMap}
                     />
                   </div>
+
+                  <ProjectTodoList projectId={p.id} />
                 </div>
               </div>
 

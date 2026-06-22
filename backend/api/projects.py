@@ -5,12 +5,13 @@ import pathlib
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config import settings
 from backend.database import get_db, async_session
 from backend.models.project import Project
+from backend.models.project_todo import ProjectTodo
 from backend.models.tag import Tag
 from backend.models.global_settings import GlobalSettings
 from backend.schemas.project import ProjectCreate, ProjectUpdate, ProjectResponse, ProjectReorderItem
@@ -155,6 +156,7 @@ async def delete_project(project_id: int, db: AsyncSession = Depends(get_db)):
     project = await db.get(Project, project_id)
     if not project:
         raise HTTPException(404, "Project not found")
+    await db.execute(delete(ProjectTodo).where(ProjectTodo.project_id == project_id))
     await db.delete(project)
     await db.commit()
     return {"ok": True}
