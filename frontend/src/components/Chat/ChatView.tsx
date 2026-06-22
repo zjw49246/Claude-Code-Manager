@@ -319,6 +319,16 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
       setPtyMode(Boolean(msg.data.use_pty_mode));
       return;
     }
+    // Tasks channel: update local task status for "thinking" indicator
+    if (msg.channel === 'tasks' && msg.data?.event === 'status_change' && msg.data.task_id === task.id) {
+      const newStatus = msg.data.new_status as string;
+      if (newStatus && newStatus !== task.status) {
+        // Trigger parent to re-fetch task (status is in props)
+        onTaskUpdated?.();
+      }
+      return;
+    }
+
     if (msg.channel !== `task:${task.id}` || !msg.data) return;
 
     const eventType = msg.data.event_type as string || (msg.data.event as string);
@@ -578,7 +588,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
     fetchHistory();
   }, [fetchHistory]);
 
-  useWebSocket([`task:${task.id}`, 'system'], handleWsMessage, handleReconnect);
+  useWebSocket([`task:${task.id}`, 'system', 'tasks'], handleWsMessage, handleReconnect);
 
   // Reset sending state when task reaches a terminal status
   // (catches cases where process_exit WebSocket event is missed — e.g. WS disconnect)
