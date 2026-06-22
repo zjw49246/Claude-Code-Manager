@@ -41,6 +41,19 @@ class WebSocketBroadcaster:
         for ws in dead:
             await self.unsubscribe(ws)
 
+        # Mirror status_change to per-task channel so /ws/shared subscribers see it
+        if channel == "tasks" and data.get("event") == "status_change" and data.get("task_id"):
+            task_channel = f"task:{data['task_id']}"
+            task_msg = json.dumps({"channel": task_channel, "data": data})
+            task_dead = []
+            for ws in self.subscriptions.get(task_channel, set()):
+                try:
+                    await ws.send_text(task_msg)
+                except Exception:
+                    task_dead.append(ws)
+            for ws in task_dead:
+                await self.unsubscribe(ws)
+
         # Fire-and-forget share notifications on terminal status changes
         if (
             channel == "tasks"

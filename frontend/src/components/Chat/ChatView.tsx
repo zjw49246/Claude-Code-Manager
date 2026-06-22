@@ -493,13 +493,21 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
       return;
     }
 
-    // Show user_message from WS only if not already optimistically added (i.e. injected messages)
+    // Show user_message from WS only if not already optimistically added.
+    // Dedup: compare content after stripping [name] prefix (sharer adds prefix but optimistic doesn't have it).
     if (eventType === 'user_message') {
       const content = (msg.data.content as string) || '';
       const source = (msg.data.source as string) || null;
+      const stripPrefix = (s: string) => s.replace(/^\[[^\]]+\]\s*/, '');
       setMessages((prev) => {
         const last = [...prev].reverse().find((m) => m.role === 'user');
-        if (last && last.content === content) return prev;
+        if (last && (last.content === content || stripPrefix(last.content || '') === stripPrefix(content))) {
+          // Replace optimistic message with the authoritative one (may have prefix)
+          if (last.content !== content) {
+            return prev.map(m => m === last ? { ...m, content } : m);
+          }
+          return prev;
+        }
         return [...prev, {
           id: Date.now() + Math.random(), role: 'user', event_type: 'user_message',
           content, tool_name: null, tool_input: null, tool_output: null,
