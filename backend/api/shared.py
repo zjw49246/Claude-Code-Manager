@@ -73,30 +73,64 @@ async def receive_revoke(payload: RevokeSharePayload, db: AsyncSession = Depends
 
 
 @router.get("/tasks")
-async def list_shared_tasks(db: AsyncSession = Depends(get_db)):
-    """List all tasks shared to this CCM."""
+async def list_shared_tasks(enrich: bool = False, db: AsyncSession = Depends(get_db)):
+    """List all tasks shared to this CCM.
+
+    enrich=true: fetch live task info from each sharer's CCM (slower but complete).
+    """
     result = await db.execute(
         select(SharedTaskReceived).where(
             SharedTaskReceived.status == "active"
         ).order_by(SharedTaskReceived.received_at.desc())
     )
     tasks = result.scalars().all()
-    return {
-        "tasks": [
-            {
-                "id": t.id,
-                "owner_ccm_url": t.owner_ccm_url,
-                "owner_name": t.owner_name,
-                "remote_task_id": t.remote_task_id,
-                "share_token": t.share_token,
-                "task_title": t.task_title,
-                "task_description": t.task_description,
+
+    if not enrich:
+        return {
+            "tasks": [
+                {
+                    "id": t.id,
+                    "owner_ccm_url": t.owner_ccm_url,
+                    "owner_name": t.owner_name,
+                    "remote_task_id": t.remote_task_id,
+                    "share_token": t.share_token,
+                    "task_title": t.task_title,
+                    "task_description": t.task_description,
+                    "project_name": t.project_name,
+                    "received_at": t.received_at.isoformat() if t.received_at else None,
+                }
+                for t in tasks
+            ]
+        }
+
+    # Enrich: fetch live config from each sharer in parallel
+    import asyncio as _aio
+    from backend.services.shared_proxy import proxy_config
+
+    async def _enrich_one(t: SharedTaskReceived) -> dict:
+        base = {
+            "id": t.id,
+            "owner_ccm_url": t.owner_ccm_url,
+            "owner_name": t.owner_name,
+            "remote_task_id": t.remote_task_id,
+            "share_token": t.share_token,
+            "received_at": t.received_at.isoformat() if t.received_at else None,
+        }
+        try:
+            config = await proxy_config(t.owner_ccm_url, t.remote_task_id, t.share_token)
+            base["remote_task"] = config
+        except Exception:
+            base["remote_task"] = {
+                "id": t.remote_task_id,
+                "title": t.task_title,
+                "description": t.task_description,
+                "status": "unknown",
                 "project_name": t.project_name,
-                "received_at": t.received_at.isoformat() if t.received_at else None,
             }
-            for t in tasks
-        ]
-    }
+        return base
+
+    enriched = await _aio.gather(*[_enrich_one(t) for t in tasks])
+    return {"tasks": list(enriched)}
 
 
 @router.delete("/{shared_id}")
