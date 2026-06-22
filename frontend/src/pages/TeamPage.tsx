@@ -246,12 +246,13 @@ export default function TeamPage() {
   const [openSharedTask, setOpenSharedTask] = useState<SharedTaskReceived | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [ownerFilter, setOwnerFilter] = useState('');
+  const [refreshing, setRefreshing] = useState(false);
 
   const fetchAll = useCallback(async () => {
     const results = await Promise.allSettled([
       api.getOrgMembers(),
       api.getOrgTeams(),
-      api.getSharedTasks(),
+      api.getSharedTasks(true),
       api.getFeishuStatus(),
     ]);
     if (results[0].status === 'fulfilled') setMembers(results[0].value);
@@ -462,11 +463,11 @@ export default function TeamPage() {
         <div className="flex items-center justify-between mb-3">
           <h2 className="text-lg font-semibold text-foreground">Shared with me</h2>
           <button
-            onClick={fetchAll}
-            disabled={loading}
+            onClick={() => { setRefreshing(true); fetchAll().finally(() => setRefreshing(false)); }}
+            disabled={refreshing}
             className="flex items-center gap-2 px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 text-gray-200 rounded-lg disabled:opacity-50"
           >
-            <RefreshCw size={14} /> Refresh
+            <RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} /> Refresh
           </button>
         </div>
 
@@ -501,50 +502,64 @@ export default function TeamPage() {
         ) : filteredShared.length === 0 ? (
           <p className="text-gray-500 text-sm text-center py-8">No tasks match your search.</p>
         ) : (
-          <div className="grid gap-3">
-            {filteredShared.map(task => (
-              <div key={task.id} className="bg-gray-800 rounded-xl border border-gray-700 p-4 hover:border-gray-600 transition-colors">
-                <div className="flex items-start justify-between">
-                  <div className="flex-1 min-w-0 cursor-pointer" onClick={() => setOpenSharedTask(task)}>
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className="text-xs text-gray-500 bg-gray-700 px-2 py-0.5 rounded">
-                        from {task.owner_name || 'Unknown'}
-                      </span>
-                      {task.project_name && (
-                        <span className="text-xs text-blue-400 bg-blue-900/30 px-2 py-0.5 rounded">
-                          {task.project_name}
+          <div className="space-y-2">
+            {filteredShared.map(task => {
+              const rt = task.remote_task;
+              const status = rt?.status || 'unknown';
+              const statusColor: Record<string, string> = {
+                pending: 'bg-yellow-500', in_progress: 'bg-blue-500', executing: 'bg-blue-400 animate-pulse',
+                plan_review: 'bg-purple-500', completed: 'bg-green-500', failed: 'bg-red-500', cancelled: 'bg-gray-500',
+              };
+              const title = rt?.title || task.task_title || '';
+              const desc = rt?.description || task.task_description || '';
+              const projectName = rt?.project_name || task.project_name;
+              return (
+                <div key={task.id} className="relative rounded-lg p-3 bg-gray-800">
+                  {/* Row 1: status + badges + actions */}
+                  <div className="flex items-center gap-2">
+                    <span className={`w-2.5 h-2.5 rounded-full shrink-0 self-start mt-[9px] ${statusColor[status] || 'bg-gray-500'}`} />
+                    <div className="flex items-center gap-2 flex-wrap flex-1 min-w-0 min-h-[28px]">
+                      <span className="text-xs text-orange-400 bg-orange-900/30 px-1.5 rounded font-medium">from {task.owner_name || '?'}</span>
+                      <span className="text-xs text-gray-500">#{task.remote_task_id}</span>
+                      {projectName && (
+                        <span className="text-xs bg-emerald-600/30 text-emerald-300 px-1.5 rounded font-medium">{projectName}</span>
+                      )}
+                      <span className="hidden sm:inline text-xs text-gray-500 capitalize">{status.replace('_', ' ')}</span>
+                      {rt?.provider && (
+                        <span className={`hidden sm:inline text-xs px-1.5 rounded font-medium ${rt.provider === 'codex' ? 'bg-green-600/30 text-green-300' : 'bg-blue-600/30 text-blue-300'}`}>
+                          {rt.provider === 'codex' ? 'Codex' : 'Claude'}
                         </span>
                       )}
+                      {rt?.model && (
+                        <span className="hidden sm:inline text-xs text-gray-600">{rt.model.split('-').slice(-2).join('-')}</span>
+                      )}
                     </div>
-                    <h3 className="text-foreground font-medium truncate">
-                      {task.task_title || `Task #${task.remote_task_id}`}
-                    </h3>
-                    {task.task_description && (
-                      <p className="text-gray-400 text-sm mt-1 line-clamp-2">{task.task_description}</p>
-                    )}
-                    {task.received_at && (
-                      <p className="text-gray-500 text-xs mt-2">
-                        Received {new Date(task.received_at).toLocaleString()}
-                      </p>
-                    )}
+                    <div className="flex gap-1 shrink-0 items-center">
+                      <button
+                        onClick={() => setOpenSharedTask(task)}
+                        className="flex items-center gap-1 px-2 py-1 text-xs bg-gray-700 hover:bg-gray-600 text-gray-200 rounded border border-gray-600"
+                      >
+                        <MessageCircle size={14} /> Chat
+                      </button>
+                      <button
+                        onClick={() => handleLeaveShared(task.id)}
+                        className="p-1.5 text-gray-600 hover:text-red-400 transition-colors"
+                        title="Leave shared task"
+                      >
+                        <X size={14} />
+                      </button>
+                    </div>
                   </div>
-                  <div className="flex items-center gap-2 ml-4 flex-shrink-0">
-                    <button
-                      onClick={() => setOpenSharedTask(task)}
-                      className="flex items-center gap-1 px-3 py-1.5 text-sm bg-blue-600 hover:bg-blue-500 text-white rounded-lg"
-                    >
-                      <MessageCircle size={14} /> Open
-                    </button>
-                    <button
-                      onClick={() => handleLeaveShared(task.id)}
-                      className="p-1.5 text-gray-400 hover:text-red-400 rounded-lg hover:bg-gray-700"
-                    >
-                      <X size={16} />
-                    </button>
+                  {/* Row 2: title + description */}
+                  <div className="mt-1 pl-[1.125rem]">
+                    <p className="text-sm text-foreground font-medium truncate">{title || `Task #${task.remote_task_id}`}</p>
+                    {desc && <p className="text-xs text-gray-400 mt-0.5 line-clamp-2">{desc}</p>}
+                    {rt?.target_repo && <p className="text-xs text-gray-600 mt-0.5">{rt.target_repo}</p>}
+                    {rt?.error_message && <p className="text-red-400 text-xs mt-1">{rt.error_message}</p>}
                   </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>

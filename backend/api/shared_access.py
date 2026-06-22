@@ -201,14 +201,33 @@ async def shared_config(
     if not task:
         raise HTTPException(404, "Task not found")
 
+    project_name = None
+    if task.project_id:
+        from backend.models.project import Project
+        project = await db.get(Project, task.project_id)
+        if project:
+            project_name = project.name
+
     return {
         "id": task.id,
         "title": task.title,
         "description": task.description,
         "status": task.status,
+        "priority": task.priority,
         "mode": task.mode,
         "model": task.model,
+        "provider": task.provider,
+        "effort_level": task.effort_level,
         "project_id": task.project_id,
+        "project_name": project_name,
         "session_id": task.session_id,
+        "target_repo": task.target_repo,
+        "target_branch": task.target_branch,
+        "error_message": task.error_message,
+        "loop_progress": task.loop_progress,
+        "plan_content": task.plan_content,
+        "plan_approved": task.plan_approved,
         "created_at": task.created_at.isoformat() if task.created_at else None,
+        "started_at": task.started_at.isoformat() if task.started_at else None,
+        "completed_at": task.completed_at.isoformat() if task.completed_at else None,
     }

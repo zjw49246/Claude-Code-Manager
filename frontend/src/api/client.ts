@@ -440,6 +440,26 @@ export interface SharedTaskReceived {
   task_description?: string;
   project_name?: string;
   received_at?: string;
+  remote_task?: {
+    id: number;
+    title?: string;
+    description?: string;
+    status: string;
+    priority?: number;
+    mode?: string;
+    model?: string;
+    provider?: string;
+    effort_level?: string;
+    project_id?: number;
+    project_name?: string;
+    session_id?: string;
+    target_repo?: string;
+    error_message?: string;
+    loop_progress?: string;
+    created_at?: string;
+    started_at?: string;
+    completed_at?: string;
+  };
 }
 
 export interface OrgTeam {
@@ -482,8 +502,8 @@ export const api = {
     request<{ shares: any[] }>(`/api/projects/${projectId}/shares`),
 
   // Shared tasks (received from others)
-  getSharedTasks: () =>
-    request<{ tasks: SharedTaskReceived[] }>('/api/shared/tasks'),
+  getSharedTasks: (enrich = false) =>
+    request<{ tasks: SharedTaskReceived[] }>(`/api/shared/tasks${enrich ? '?enrich=true' : ''}`),
   leaveSharedTask: (sharedId: number) =>
     request<{ ok: boolean }>(`/api/shared/${sharedId}`, { method: 'DELETE' }),
   getSharedHistory: (sharedId: number, limit?: number, beforeId?: number) => {
