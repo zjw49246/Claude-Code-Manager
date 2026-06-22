@@ -178,9 +178,11 @@ class SharedRelay:
         if not local_task_id:
             return
 
-        # Skip user_message — the chat proxy already stored it locally
-        if event_type == "user_message":
-            return
+        # user_message from self (shared chat proxy) is already stored locally.
+        # But user_message from the sharer (or other sharers) needs to be relayed.
+        # We can't easily distinguish, so relay all and let the DB unique constraint
+        # or frontend dedup handle it. The small cost of an occasional duplicate
+        # log entry is better than missing messages from the sharer.
 
         # Write chat events to local log_entries
         if event_type in CHAT_EVENT_TYPES:
