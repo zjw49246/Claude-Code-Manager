@@ -10,6 +10,7 @@ Web 端调度和管理多个 Claude Code 实例并行工作。灵感来自胡渊
 - **Claude Code 完全自主** — Claude Code 自主完成 worktree 创建、commit、fetch、merge、push、冲突解决和清理，Dispatcher 只负责分配任务和判断成败
 - **9 步任务生命周期** — 领取 → 创建工作区 → 实现 → 提交 → merge + 测试 → 合并到 main → 标记完成 → 清理 → 经验沉淀
 - **项目管理** — 支持 clone 已有仓库（有 remote）和本地 git init（无 remote），创建任务时可直接新建项目
+- **项目 Todo 清单** — 每个项目维护一个可折叠的待办清单（prompt 模板），一键「▶ Run」直接创建 Task 并跳转 Chat；创建后 Todo 自动标记完成并记录派生的 task。支持归档/恢复/永久删除
 - **任务队列** — 创建任务，按优先级自动调度（数字越小优先级越高）
 - **多实例并行** — 同时运行多个 Claude Code 实例，各自处理不同任务
 - **Git Worktree** — 每个实例在独立的 worktree 中工作，互不干扰
@@ -218,6 +219,9 @@ PR Monitor 的审核流程会在后端 shell out 调用 `gh pr view` / `gh pr re
 | Projects | `GET/POST /api/projects` | 项目列表/创建 |
 | | `GET/PUT/DELETE /api/projects/{id}` | 项目详情/更新/删除 |
 | | `POST /api/projects/{id}/reclone` | 重新 clone |
+| Project Todos | `GET/POST /api/projects/{id}/todos` | 项目待办列表/创建 |
+| | `PATCH /api/projects/{id}/todos/{todo_id}` | 更新（含归档/恢复/排序） |
+| | `DELETE /api/projects/{id}/todos/{todo_id}` | 永久删除 |
 | Tasks | `GET/POST /api/tasks` | 任务列表/创建 |
 | | `GET/PUT/DELETE /api/tasks/{id}` | 任务详情/更新/删除 |
 | | `POST /api/tasks/{id}/cancel` | 取消任务 |
