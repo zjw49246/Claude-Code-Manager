@@ -12,6 +12,7 @@ if config.config_file_name is not None:
 # New models must be imported here for autogenerate to work.
 from backend.models.instance import Instance   # noqa: F401
 from backend.models.project import Project     # noqa: F401
+from backend.models.project_todo import ProjectTodo  # noqa: F401
 from backend.models.task import Task           # noqa: F401
 from backend.models.log_entry import LogEntry  # noqa: F401
 from backend.models.worktree import Worktree   # noqa: F401
