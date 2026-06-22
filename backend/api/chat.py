@@ -91,13 +91,25 @@ async def send_chat_message(
             "is_image": ext in _IMAGE_EXTS,
         })
 
+    # If this task has active shares, prefix message with sender name
+    display_content = body.message
+    from backend.models.task_share import TaskShare
+    share_check = await db.execute(
+        select(TaskShare.id).where(TaskShare.task_id == task_id, TaskShare.status == "active").limit(1)
+    )
+    if share_check.scalar_one_or_none() is not None:
+        from backend.models.feishu_binding import FeishuUserBinding
+        binding = (await db.execute(select(FeishuUserBinding).limit(1))).scalar_one_or_none()
+        if binding and binding.feishu_name:
+            display_content = f"[{binding.feishu_name}] {body.message}"
+
     # Store user message as a log entry (use instance_id=1 as placeholder)
     user_log = LogEntry(
         instance_id=1,
         task_id=task_id,
         event_type="user_message",
         role="user",
-        content=body.message,
+        content=display_content,
         raw_json=json.dumps({"attachments": attachments}) if attachments else None,
         is_error=False,
     )
@@ -109,7 +121,7 @@ async def send_chat_message(
     await broadcaster.broadcast(f"task:{task_id}", {
         "event_type": "user_message",
         "role": "user",
-        "content": body.message,
+        "content": display_content,
         "image_paths": body.image_paths or [],
     })
 

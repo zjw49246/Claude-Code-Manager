@@ -3,6 +3,7 @@ import { api } from '../api/client';
 import type { OrgMember, OrgTeam, SharedTaskReceived, Task } from '../api/client';
 import { Plus, X, Trash2, UserPlus, Users, MessageCircle, Search, RefreshCw } from 'lucide-react';
 import { ChatView } from '../components/Chat/ChatView';
+import { useWebSocket } from '../hooks/useWebSocket';
 
 /* ── Create / Edit Team Modal ─────────────────────────────────── */
 function TeamModal({
@@ -247,6 +248,19 @@ export default function TeamPage() {
   const [ownerFilter, setOwnerFilter] = useState('');
   const [refreshing, setRefreshing] = useState(false);
   const [chatTask, setChatTask] = useState<Task | null>(null);
+
+  // Update chatTask status from WS events (for thinking indicator)
+  const handleWs = useCallback((raw: Record<string, unknown>) => {
+    const data = (raw as any).data;
+    if (!data || !chatTask) return;
+    const channel = (raw as any).channel;
+    if (channel !== `task:${chatTask.id}`) return;
+    const event = data.event_type || data.event;
+    if (event === 'status_change' && data.new_status) {
+      setChatTask(prev => prev ? { ...prev, status: data.new_status as string } : prev);
+    }
+  }, [chatTask]);
+  useWebSocket(chatTask ? [`task:${chatTask.id}`] : [], handleWs);
 
   const fetchAll = useCallback(async () => {
     const results = await Promise.allSettled([
