@@ -797,21 +797,26 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
       }
       snapshotPreviews.forEach((url) => { if (url) URL.revokeObjectURL(url); });
 
-      const userMsg: ChatMessage = {
-        id: Date.now(),
-        role: 'user',
-        event_type: 'user_message',
-        content: text || '(files attached)',
-        tool_name: null,
-        tool_input: null,
-        tool_output: null,
-        is_error: false,
-        loop_iteration: null,
-        timestamp: new Date().toISOString(),
-        image_urls: attachments?.filter((a) => a.is_image).map((a) => a.url) || null,
-        attachments: attachments || null,
-      };
-      setMessages((prev) => [...prev, userMsg]);
+      // For shared tasks, skip optimistic local message — backend stores with
+      // [sender] prefix and broadcasts via WS, which adds it to the list.
+      // Optimistic add would create a duplicate (without prefix).
+      if (!task.shared_from_id) {
+        const userMsg: ChatMessage = {
+          id: Date.now(),
+          role: 'user',
+          event_type: 'user_message',
+          content: text || '(files attached)',
+          tool_name: null,
+          tool_input: null,
+          tool_output: null,
+          is_error: false,
+          loop_iteration: null,
+          timestamp: new Date().toISOString(),
+          image_urls: attachments?.filter((a) => a.is_image).map((a) => a.url) || null,
+          attachments: attachments || null,
+        };
+        setMessages((prev) => [...prev, userMsg]);
+      }
 
       await api.sendTaskChat(task.id, text || '(files attached)', uploadedPaths, selectedSecretIds.length > 0 ? selectedSecretIds : undefined, modelOverride);
       setModelOverride(null);
