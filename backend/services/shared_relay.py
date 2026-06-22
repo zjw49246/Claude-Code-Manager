@@ -56,20 +56,74 @@ class SharedRelay:
             loop_task.cancel()
 
     async def recover_all(self):
-        """Restart relays for all active shared tasks (called on startup)."""
+        """Restart relays for all active shared tasks (called on startup).
+
+        Also backfills shadow tasks for legacy shared records that predate
+        the relay feature (local_task_id is NULL).
+        """
         async with self.db_factory() as db:
             result = await db.execute(
                 select(SharedTaskReceived).where(
                     SharedTaskReceived.status == "active",
-                    SharedTaskReceived.local_task_id.isnot(None),
                 )
             )
-            active = result.scalars().all()
-        for shared in active:
+            all_active = result.scalars().all()
+
+        for shared in all_active:
+            # Backfill shadow task for legacy records
+            if not shared.local_task_id:
+                try:
+                    await self._create_shadow_task(shared)
+                except Exception:
+                    logger.debug("failed to create shadow task for shared %d", shared.id)
+                    continue
+
             try:
                 await self.start_relay(shared)
             except Exception:
                 logger.debug("recover relay for shared %d failed", shared.id)
+
+    async def _create_shadow_task(self, shared: SharedTaskReceived):
+        """Create a local shadow task for a shared record that doesn't have one."""
+        from backend.models.task import Task
+        async with self.db_factory() as db:
+            shadow = Task(
+                title=shared.task_title or "",
+                description=shared.task_description,
+                status="pending",
+                shared_from_id=shared.id,
+            )
+            db.add(shadow)
+            await db.flush()
+            shared_record = await db.get(SharedTaskReceived, shared.id)
+            if shared_record:
+                shared_record.local_task_id = shadow.id
+            await db.commit()
+            shared.local_task_id = shadow.id
+            logger.info("created shadow task %d for shared %d", shadow.id, shared.id)
+
+        # Fetch live config and backfill
+        try:
+            from backend.services.shared_proxy import proxy_config
+            config = await proxy_config(shared.owner_ccm_url, shared.remote_task_id, shared.share_token)
+            async with self.db_factory() as db:
+                shadow = await db.get(Task, shared.local_task_id)
+                if shadow and config:
+                    shadow.status = config.get("status", "pending")
+                    shadow.title = config.get("title") or shadow.title
+                    shadow.description = config.get("description") or shadow.description
+                    shadow.model = config.get("model")
+                    shadow.provider = config.get("provider", "claude")
+                    shadow.target_repo = config.get("target_repo")
+                    shadow.error_message = config.get("error_message")
+                    await db.commit()
+        except Exception:
+            logger.debug("failed to fetch config for shadow task shared=%d", shared.id)
+
+        try:
+            await self.backfill_history(shared)
+        except Exception:
+            logger.debug("backfill failed for shared %d", shared.id)
 
     async def _connect_and_relay(self, shared: SharedTaskReceived):
         """Connect to sharer's WS and relay events. Auto-reconnects."""
