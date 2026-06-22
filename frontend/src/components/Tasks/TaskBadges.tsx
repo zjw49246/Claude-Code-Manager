@@ -262,7 +262,9 @@ export function TaskConfigBadge({ task, onRefresh, openUp, align }: { task: Task
     return () => document.removeEventListener('mousedown', handle);
   }, [open]);
 
+  const isShared = !!task.shared_from_id;
   const update = async (data: Parameters<typeof api.updateTask>[1]) => {
+    if (isShared) return;
     try {
       await api.updateTask(task.id, data);
       onRefresh();
@@ -307,7 +309,8 @@ export function TaskConfigBadge({ task, onRefresh, openUp, align }: { task: Task
           }}
           onClick={(e) => e.stopPropagation()}
         >
-          <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 items-center text-xs">
+          {isShared && <p className="text-xs text-orange-400 mb-2">Shared task — read only</p>}
+          <div className={`grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 items-center text-xs ${isShared ? 'pointer-events-none opacity-60' : ''}`}>
             <span className="text-gray-400">Run on</span>
             <select
               className="bg-gray-700 text-foreground rounded px-2 py-1 text-xs disabled:opacity-50"

@@ -50,7 +50,7 @@ class TaskQueue:
     ) -> list[Task]:
         auto_sort = await self._auto_sort_enabled()
         effective_key = _effective_key_expr(auto_sort)
-        stmt = select(Task).order_by(Task.starred.desc(), effective_key.desc(), Task.id.desc())
+        stmt = select(Task).where(Task.shared_from_id.is_(None)).order_by(Task.starred.desc(), effective_key.desc(), Task.id.desc())
         if archived_only:
             stmt = stmt.where(Task.archived == True)
         elif not include_archived:
@@ -74,7 +74,7 @@ class TaskQueue:
         project_id: int | None = None, starred: bool | None = None,
         has_unread: bool | None = None,
     ) -> int:
-        stmt = select(func.count(Task.id))
+        stmt = select(func.count(Task.id)).where(Task.shared_from_id.is_(None))
         if archived_only:
             stmt = stmt.where(Task.archived == True)
         elif not include_archived:
