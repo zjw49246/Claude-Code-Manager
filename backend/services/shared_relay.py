@@ -149,11 +149,17 @@ class SharedRelay:
             try:
                 async with websockets.connect(ws_url, open_timeout=15) as ws:
                     self._connections[shared.id] = ws
-                    logger.info("shared relay connected: shared=%d remote_task=%d", shared.id, shared.remote_task_id)
+                    logger.info("shared relay connected: shared=%d remote_task=%d url=%s", shared.id, shared.remote_task_id, ws_url[:80])
                     try:
-                        async for raw in ws:
+                        # websockets v16: async for doesn't yield server-push frames
+                        # reliably — use explicit recv() loop instead.
+                        while True:
+                            raw = await ws.recv()
                             try:
-                                await self._handle(json.loads(raw), shared)
+                                parsed = json.loads(raw)
+                                if parsed.get("action") == "subscribed":
+                                    continue
+                                await self._handle(parsed, shared)
                             except Exception:
                                 logger.debug("shared relay handle error shared=%d", shared.id)
                     except (websockets.ConnectionClosed, OSError):

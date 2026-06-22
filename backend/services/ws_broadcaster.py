@@ -30,11 +30,13 @@ class WebSocketBroadcaster:
 
     async def broadcast(self, channel: str, data: dict):
         message = json.dumps({"channel": channel, "data": data})
+        subs = self.subscriptions.get(channel, set())
         dead = []
-        for ws in self.subscriptions.get(channel, set()):
+        for ws in subs:
             try:
                 await ws.send_text(message)
-            except Exception:
+            except Exception as e:
+                logger.debug("broadcast send failed on %s: %s", channel, e)
                 dead.append(ws)
         for ws in dead:
             await self.unsubscribe(ws)
