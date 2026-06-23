@@ -119,6 +119,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
     try { return localStorage.getItem(`ccm-chat-draft-${task.id}`) || ''; } catch { return ''; }
   });
   const [sending, setSending] = useState(false);
+  const [localStatus, setLocalStatus] = useState(task.status);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [interrupting, setInterrupting] = useState(false);
   const [stillRunning, setStillRunning] = useState(false);
@@ -190,7 +191,8 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
   }, [input, task.id]);
   const [monitorSessions, setMonitorSessions] = useState<MonitorSession[]>([]);
   const [showMonitorPanel, setShowMonitorPanel] = useState(false);
-  const isProcessing = sending || ['in_progress', 'executing'].includes(task.status);
+  const effectiveStatus = localStatus || task.status;
+  const isProcessing = sending || ['in_progress', 'executing'].includes(effectiveStatus);
   const [hasMoreHistory, setHasMoreHistory] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const HISTORY_PAGE_SIZE = 200;
@@ -319,12 +321,16 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
       setPtyMode(Boolean(msg.data.use_pty_mode));
       return;
     }
-    // Tasks channel: update local task status for "thinking" indicator
-    if (msg.channel === 'tasks' && msg.data?.event === 'status_change' && msg.data.task_id === task.id) {
-      const newStatus = msg.data.new_status as string;
-      if (newStatus && newStatus !== task.status) {
-        // Trigger parent to re-fetch task (status is in props)
-        onTaskUpdated?.();
+    // Status change: update local override for "thinking" indicator.
+    // Handles both "tasks" global channel and "task:{id}" channel (from SharedRelay mirror).
+    const isStatusChange = (
+      (msg.channel === 'tasks' && msg.data?.event === 'status_change' && msg.data.task_id === task.id) ||
+      (msg.channel === `task:${task.id}` && (msg.data?.event === 'status_change' || msg.data?.event_type === 'status_change'))
+    );
+    if (isStatusChange) {
+      const newStatus = (msg.data!.new_status as string) || '';
+      if (newStatus) {
+        setLocalStatus(newStatus);
       }
       return;
     }
@@ -493,28 +499,18 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
       return;
     }
 
-    // Show user_message from WS only if not already optimistically added.
-    // Dedup: compare content after stripping [name] prefix (sharer adds prefix but optimistic doesn't have it).
+    // WS user_message: always append. No dedup — every message is unique.
+    // Optimistic messages are no longer added in handleSend, so WS is the
+    // single source of truth for user messages.
     if (eventType === 'user_message') {
       const content = (msg.data.content as string) || '';
       const source = (msg.data.source as string) || null;
-      const stripPrefix = (s: string) => s.replace(/^\[[^\]]+\]\s*/, '');
-      setMessages((prev) => {
-        const last = [...prev].reverse().find((m) => m.role === 'user');
-        if (last && (last.content === content || stripPrefix(last.content || '') === stripPrefix(content))) {
-          // Replace optimistic message with the authoritative one (may have prefix)
-          if (last.content !== content) {
-            return prev.map(m => m === last ? { ...m, content } : m);
-          }
-          return prev;
-        }
-        return [...prev, {
-          id: Date.now() + Math.random(), role: 'user', event_type: 'user_message',
-          content, tool_name: null, tool_input: null, tool_output: null,
-          is_error: false, loop_iteration: null, timestamp: new Date().toISOString(),
-          image_urls: null, attachments: null, source,
-        }];
-      });
+      setMessages((prev) => [...prev, {
+        id: Date.now() + Math.random(), role: 'user', event_type: 'user_message',
+        content, tool_name: null, tool_input: null, tool_output: null,
+        is_error: false, loop_iteration: null, timestamp: new Date().toISOString(),
+        image_urls: null, attachments: null, source,
+      }]);
       return;
     }
 
@@ -602,11 +598,11 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
   // (catches cases where process_exit WebSocket event is missed — e.g. WS disconnect)
   // Also trigger auto-dequeue so pending box messages get sent.
   useEffect(() => {
-    if (['completed', 'failed', 'cancelled', 'pending'].includes(task.status)) {
+    if (['completed', 'failed', 'cancelled', 'pending'].includes(effectiveStatus)) {
       setSending(false);
       setAutoDequeueFlag(f => f + 1);
     }
-  }, [task.status]);
+  }, [effectiveStatus]);
 
   // Load chat history
   useEffect(() => {
@@ -803,38 +799,19 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
 
     try {
       let uploadedPaths: string[] | undefined;
-      let attachments: FileAttachment[] | undefined;
 
       if (preUploadedResults && preUploadedResults.length > 0) {
         uploadedPaths = preUploadedResults.map((r) => r.path);
-        attachments = preUploadedResults.map((r) => ({ url: r.url, name: r.filename || r.url.split('/').pop() || 'file', is_image: r.is_image }));
       } else if (snapshotFiles.length > 0) {
         const results: UploadResult[] = await api.uploadImages(snapshotFiles);
         uploadedPaths = results.map((r) => r.path);
-        attachments = results.map((r) => ({ url: r.url, name: r.filename || r.url.split('/').pop() || 'file', is_image: r.is_image }));
       }
       snapshotPreviews.forEach((url) => { if (url) URL.revokeObjectURL(url); });
 
-      // For shared tasks, skip optimistic local message — backend stores with
-      // [sender] prefix and broadcasts via WS, which adds it to the list.
-      // Optimistic add would create a duplicate (without prefix).
-      if (!task.shared_from_id) {
-        const userMsg: ChatMessage = {
-          id: Date.now(),
-          role: 'user',
-          event_type: 'user_message',
-          content: text || '(files attached)',
-          tool_name: null,
-          tool_input: null,
-          tool_output: null,
-          is_error: false,
-          loop_iteration: null,
-          timestamp: new Date().toISOString(),
-          image_urls: attachments?.filter((a) => a.is_image).map((a) => a.url) || null,
-          attachments: attachments || null,
-        };
-        setMessages((prev) => [...prev, userMsg]);
-      }
+      // No optimistic message add — WS broadcast is the single source of truth.
+      // Backend stores the message and broadcasts it via WS in the same API call.
+      // The WS event arrives within milliseconds, so the user sees their message
+      // almost instantly without any dedup complexity.
 
       await api.sendTaskChat(task.id, text || '(files attached)', uploadedPaths, selectedSecretIds.length > 0 ? selectedSecretIds : undefined, modelOverride);
       setModelOverride(null);
@@ -896,7 +873,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
             >
               <Star size={18} fill={starred ? 'currentColor' : 'none'} />
             </button>
-            {(sending || stillRunning || ['in_progress', 'executing'].includes(task.status)) && (
+            {(sending || stillRunning || ['in_progress', 'executing'].includes(effectiveStatus)) && (
               <button
                 onClick={async () => {
                   setInterrupting(true);
