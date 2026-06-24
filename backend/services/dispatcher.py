@@ -228,6 +228,12 @@ class GlobalDispatcher:
         self.broadcaster = broadcaster
         self._dispatch_task: asyncio.Task | None = None
         self._running_tasks: dict[int, asyncio.Task] = {}  # instance_id -> lifecycle task
+        # Instances mid-launch by the queued-message path. Their DB status is
+        # still "idle" until launch() flips it to "running", so without an
+        # in-memory claim the dispatch loop (and other queued-message launches)
+        # could grab the same instance and clobber the half-started PTY session
+        # (prod task #676).
+        self._launching_instances: set[int] = set()
         self._running = False
         self._monitor_tasks: dict[int, asyncio.Task] = {}           # monitor_session_id -> asyncio task
         self._monitor_processes: dict[int, asyncio.subprocess.Process] = {}  # monitor_session_id -> subprocess
@@ -498,6 +504,10 @@ class GlobalDispatcher:
                 for instance in idle_instances:
                     # Skip if already running a lifecycle
                     if instance.id in self._running_tasks and not self._running_tasks[instance.id].done():
+                        continue
+                    # Skip if the queued-message path is mid-launching on it
+                    # (DB status not yet flipped to "running" — prod task #676)
+                    if instance.id in self._launching_instances:
                         continue
 
                     async with self.db_factory() as db:
@@ -2547,10 +2557,19 @@ class GlobalDispatcher:
                 await asyncio.sleep(5)
                 return
 
-            # Find idle instance
-            result = await db.execute(
-                select(Instance).where(Instance.status == "idle").order_by(Instance.id).limit(1)
-            )
+            # Find idle instance — exclude instances the dispatch loop has
+            # claimed for an in-flight lifecycle, or that another queued-message
+            # launch is mid-launching. Their DB status is still "idle" until
+            # launch() flips it, so selecting one here would let two paths grab
+            # the same instance and the second launch would kill the first's
+            # half-started PTY session (prod task #676).
+            busy_iids = {
+                iid for iid, t in self._running_tasks.items() if not t.done()
+            } | self._launching_instances
+            stmt = select(Instance).where(Instance.status == "idle")
+            if busy_iids:
+                stmt = stmt.where(Instance.id.notin_(busy_iids))
+            result = await db.execute(stmt.order_by(Instance.id).limit(1))
             inst = result.scalar_one_or_none()
             if not inst:
                 logger.warning(f"No idle instance for task {task_id}, re-queueing message")
@@ -2667,7 +2686,17 @@ class GlobalDispatcher:
             task.completed_at = None
             await db.commit()
 
-            await self.instance_manager.launch(**launch_kwargs)
+            # Claim the instance across the launch window: launch() only flips
+            # its DB status to "running" once the PTY session is fully spawned,
+            # so until then both the dispatch loop and other queued-message
+            # launches must treat it as taken (prod task #676). Released in
+            # finally so a failed launch can't leak the claim and wedge the
+            # instance out of the dispatch pool forever.
+            self._launching_instances.add(inst_id)
+            try:
+                await self.instance_manager.launch(**launch_kwargs)
+            finally:
+                self._launching_instances.discard(inst_id)
 
             await self.broadcaster.broadcast("tasks", {
                 "event": "status_change",
