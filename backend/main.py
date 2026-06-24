@@ -139,6 +139,7 @@ async def _reset_stale_discussion_agents():
 async def _cleanup_stale_sub_agents():
     """Mark running sub-agents as completed if their parent task is already done."""
     from backend.models.sub_agent import SubAgentSession
+    from backend.models.task import Task
     from datetime import datetime
     async with async_session() as db:
         result = await db.execute(
