@@ -450,6 +450,7 @@ class InstanceManager:
         """
         _assistant_texts: list[str] = []
         _saw_rate_limit = False
+        _saw_error = False
         try:
             while True:
                 try:
@@ -488,6 +489,8 @@ class InstanceManager:
                                             info = None
                                 if rate_limit_event_is_actionable(info):
                                     _saw_rate_limit = True
+                            if event.get("is_error"):
+                                _saw_error = True
                             if event.get("event_type") in ("message", "result") and event.get("role") == "assistant":
                                 c = event.get("content") or ""
                                 if c:
@@ -526,6 +529,7 @@ class InstanceManager:
                 task_id
                 and chat_initiated
                 and exit_code == 0
+                and not _saw_error
                 and instance_id in self._launch_params
                 and not self._launch_params[instance_id].get("_retried")
             ):
