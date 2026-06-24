@@ -501,11 +501,12 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
     }
 
     // WS user_message: always append. No dedup — every message is unique.
-    // Optimistic messages are no longer added in handleSend, so WS is the
-    // single source of truth for user messages.
+    // Also trigger "thinking" indicator — the message is queued and CC will
+    // start processing it, regardless of who sent it.
     if (eventType === 'user_message') {
       const content = (msg.data.content as string) || '';
       const source = (msg.data.source as string) || null;
+      setSending(true);
       setMessages((prev) => [...prev, {
         id: Date.now() + Math.random(), role: 'user', event_type: 'user_message',
         content, tool_name: null, tool_input: null, tool_output: null,
