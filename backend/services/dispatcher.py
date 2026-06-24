@@ -1134,6 +1134,32 @@ class GlobalDispatcher:
                     )
                     return
 
+                # "Prompt is too long" — compact and retry instead of failing
+                log_contents = await self.instance_manager.get_recent_log_contents(task.id, limit=5)
+                log_text = " ".join(log_contents) if isinstance(log_contents, list) else str(log_contents)
+                if "prompt is too long" in log_text.lower():
+                    try:
+                        async with self.db_factory() as db:
+                            t = await db.get(Task, task.id)
+                            if t and t.session_id:
+                                logger.warning("Task %d hit 'Prompt is too long', compacting session", task.id)
+                                summary = await self._compact_session(task.id, t.session_id, db)
+                                if summary:
+                                    t.session_id = None
+                                    t.context_window_usage = None
+                                    t.status = "pending"
+                                    t.description = f"[Context compacted]\n{summary}\n\n---\n\n{t.description or ''}"
+                                    await db.commit()
+                                    await self.broadcaster.broadcast("tasks", {
+                                        "event": "status_change",
+                                        "task_id": task.id,
+                                        "new_status": "pending",
+                                        "instance_id": instance_id,
+                                    })
+                                    return
+                    except Exception:
+                        logger.exception("Prompt-too-long compact failed for task %d", task.id)
+
                 async with self.db_factory() as db:
                     queue = TaskQueue(db)
                     t = await queue.get(task.id)
