@@ -443,3 +443,10 @@
 - **测试**: `test_claude_pool.py::TestRateLimitEventActionable`（9 例，含 37% 真实坑）+ `test_stream_parser.py`（surface info / 缺失），全量 951 passed
 - **预防**: ①「状态 ping」≠「事件发生」——CLI 的 `rate_limit_event` 是**周期性遥测**，必须看 `status`/`utilization` 再决定动作，绝不能见 event 就当限速；②**冷却时长要匹配窗口**：5min 冷却只对 `five_hour` 有意义，对 `seven_day` 是空转churn；③主动优化（proactive rotate）若带副作用（冷却=减少可用号），触发条件必须**保守**，否则会把优化变成自伤；④另注意运维：本机磁盘有 13 个 `.claude-account-*` 目录但 `accounts.json` 只挂了 3 个——「可用账号」要真在 pool 配置里才会被 `select` 看见
 - **Commit**: 本次提交
+
+### 2026-06-24 — task #676 卡 executing、无 chat 按钮：两条取实例路径抢同一 idle instance
+- **现象**: 用户报 task #676「一直在执行、没有 chat 按钮」。DB：`status=executing`、`session_id=None`、`instance_id=124`；instance 124（worker-9）却是 `status=idle`、`current_task_id=None`、`pid=None`，且无任何 `claude --task-id 676` 进程。
+- **根因（journal 实锤）**: instance 的 DB 状态要等 `instance_manager.launch()` 内 PTY 会话**完全 spawn 完**才从 idle 翻成 running，中间约 10s 窗口仍是 idle。两条取实例路径互不知情：`_dispatch_loop` 13:32:32 认领 124 给 676（登记进 `_running_tasks`）并开始 launch；`_process_queued_message` 13:32:47 处理 task 675 的用户消息时，只按 DB `status=='idle'` 选实例，又选中正在 launch 的 124 → `launch_for_ccm` "Stopping stale PTY session for instance 124 before launch" 把 676 半启动的会话杀掉。676 成孤儿：状态卡 executing、无 session、无进程、worker 空闲 → 前端无 chat 按钮、永不完成。
+- **修复（commit b40d2b4）**: 让 `_running_tasks` + 新增 `_launching_instances` 成为两条路径共用的内存认领表。queued-message 选实例时排除「in-flight lifecycle」和「另一个 mid-launch」的实例；dispatch loop 跳过 `_launching_instances`；queued-message 的 launch 用 `try/finally` 持有/释放认领，失败也不泄漏（否则该 instance 会被永久挤出调度池）。新增双向排除回归测试 2 例，`test_service_dispatcher.py` 88 passed。
+- **预防**: ①「DB 状态」作为并发仲裁有滞后窗口（异步 spawn 期间状态没翻），跨协程抢资源不能只信 DB 行；要么选取时**原子**标占，要么用内存认领表且**两条路径都遵守**；②任何"选 idle 资源后再慢慢 launch"的模式都要问：launch 期间别的路径会不会也选到它？③内存认领必须 `try/finally` 释放，否则异常会把资源永久 wedge 出池。
+- **运维**: 该机（ccm-zhoujunwei, ap-northeast-1, i-03e9984e1c983a1a0）跑两套 CCM：`code/`(ccm-backend,8000) 与 `cyf/`(ccm-backend-cyf,8002)，DB 分别在仓库内 `./claude_manager.db` 与 `/home/ubuntu/cyf/claude_manager.db`；#676 在 `code/`。
