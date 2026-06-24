@@ -112,7 +112,7 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId,
   const { draggingId, overIndex, targetProps, pointerHandleProps, ghost } = useTaskReorder(tasks, onRefresh, autoSortOnAccess);
 
   if (tasks.length === 0) {
-    return <p className="text-gray-500 text-sm text-center py-8">No tasks yet</p>;
+    return <p className="text-subtle text-sm text-center py-8">No tasks yet</p>;
   }
 
   return (
@@ -125,15 +125,15 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId,
           {...targetProps(t, idx)}
           className={`relative rounded-lg p-3 transition-opacity ${
             draggingId === t.id ? 'opacity-40' : ''
-          } ${overIndex === idx && draggingId !== null && draggingId !== t.id ? 'ring-2 ring-indigo-400' : ''} ${
-            activeTaskId === t.id ? 'bg-indigo-900/60 ring-1 ring-indigo-400/60' : t.has_unread ? 'bg-indigo-900/50 ring-1 ring-indigo-500/50' : 'bg-gray-800'
+          } ${overIndex === idx && draggingId !== null && draggingId !== t.id ? 'ring-2 ring-focus' : ''} ${
+            activeTaskId === t.id ? 'bg-accent-muted ring-1 ring-focus' : t.has_unread ? 'bg-accent-muted ring-1 ring-focus' : 'bg-surface'
           }`}
         >
           {/* 拖拽手柄（右下角，空间更宽裕）：卡片正文是可选中文字，整卡
               draggable 会被文本选择手势抢走，必须用显式手柄拖动 */}
           <span
             {...pointerHandleProps(t, idx)}
-            className="absolute bottom-1.5 right-1.5 p-1 cursor-grab active:cursor-grabbing text-gray-600 hover:text-gray-400 select-none"
+            className="absolute bottom-1.5 right-1.5 p-1 cursor-grab active:cursor-grabbing text-subtle hover:text-muted select-none"
             title="按住拖动排序"
           >
             <GripVertical size={16} />
@@ -142,7 +142,7 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId,
           <div className="flex items-center gap-2">
             <span className={`w-2.5 h-2.5 rounded-full shrink-0 self-start mt-[9px] ${statusColors[t.status] || 'bg-gray-500'}`} />
             <div className="flex items-center gap-2 flex-wrap flex-1 min-w-0 min-h-[28px]">
-              <span className="text-xs text-gray-500">#{t.id}</span>
+              <span className="text-xs text-subtle">#{t.id}</span>
               {t.shared_from_id && (
                 <span className="text-xs bg-orange-600/30 text-orange-300 px-1.5 rounded font-medium">Shared</span>
               )}
@@ -154,9 +154,9 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId,
                 return <span className={`text-xs ${bg} ${text} px-1.5 rounded font-medium whitespace-nowrap`}>{proj.name}</span>;
               })()}
               {t.priority > 0 && (
-                <span className="text-xs bg-indigo-600/30 text-indigo-300 px-1.5 rounded">P{t.priority}</span>
+                <span className="text-xs bg-accent-muted text-accent-muted-foreground px-1.5 rounded">P{t.priority}</span>
               )}
-              <span className="hidden sm:inline text-xs text-gray-500 capitalize">{t.status.replace('_', ' ')}</span>
+              <span className="hidden sm:inline text-xs text-subtle capitalize">{t.status.replace('_', ' ')}</span>
               <span className={`hidden sm:inline text-xs px-1.5 rounded font-medium ${t.provider === 'codex' ? 'bg-green-600/30 text-green-300' : 'bg-blue-600/30 text-blue-300'}`}>
                 {t.provider === 'codex' ? 'Codex' : 'Claude'}
               </span>
@@ -168,14 +168,14 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId,
             <div className="flex gap-1 shrink-0 items-center">
               <button
                 onClick={() => handleStar(t.id)}
-                className={`p-1.5 transition-colors ${t.starred ? 'text-yellow-400 hover:text-yellow-300' : 'text-gray-600 hover:text-yellow-400'}`}
+                className={`p-1.5 transition-colors ${t.starred ? 'text-warning hover:text-yellow-300' : 'text-subtle hover:text-warning'}`}
                 title={t.starred ? "Unstar" : "Star"}
               >
                 <Star size={16} fill={t.starred ? 'currentColor' : 'none'} />
               </button>
               <button
                 onClick={() => handleToggleUnread(t.id, t.has_unread)}
-                className={`p-1.5 transition-colors ${t.has_unread ? 'text-indigo-400 hover:text-indigo-300' : 'text-gray-600 hover:text-indigo-400'}`}
+                className={`p-1.5 transition-colors ${t.has_unread ? 'text-accent-muted-foreground hover:text-foreground' : 'text-subtle hover:text-accent-muted-foreground'}`}
                 title={t.has_unread ? "Mark as read" : "Mark as unread"}
               >
                 {t.has_unread ? <MailOpen size={16} /> : <Mail size={16} />}
@@ -183,7 +183,7 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId,
               {t.session_id && (
                 <button
                   onClick={() => onOpenChat(t)}
-                  className="flex items-center gap-1 px-2 py-1 rounded text-xs font-medium bg-indigo-600/20 text-indigo-400 hover:bg-indigo-600/30"
+                  className="flex items-center gap-1 px-2 py-1 rounded text-xs font-medium bg-accent-muted text-accent-muted-foreground hover:bg-accent hover:text-accent-foreground"
                   title="Chat"
                 >
                   <MessageCircle size={14} /><span className="hidden sm:inline"> Chat</span>
@@ -191,10 +191,10 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId,
               )}
               <button
                 onClick={() => handleCopy(t)}
-                className="p-1.5 text-gray-600 hover:text-gray-300 transition-colors"
+                className="p-1.5 text-subtle hover:text-muted transition-colors"
                 title="Copy prompt"
               >
-                {copiedId === t.id ? <Check size={16} className="text-green-400" /> : <Copy size={16} />}
+                {copiedId === t.id ? <Check size={16} className="text-success" /> : <Copy size={16} />}
               </button>
               {/* Overflow menu */}
               <div className="relative">
@@ -206,16 +206,16 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId,
                     setMenuPos({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
                     setMenuOpenId(t.id);
                   }}
-                  className="p-1.5 text-gray-600 hover:text-gray-300 transition-colors"
+                  className="p-1.5 text-subtle hover:text-muted transition-colors"
                   title="More actions"
                 >
                   <MoreVertical size={16} />
                 </button>
                 {menuOpenId === t.id && createPortal(
-                  <div ref={menuRef} className="fixed z-[9999] bg-gray-900 border border-gray-700 rounded-lg shadow-xl py-1 min-w-[140px]" style={{ top: menuPos.top, right: menuPos.right }}>
+                  <div ref={menuRef} className="fixed z-[9999] bg-surface-raised border border-border rounded-lg shadow-xl py-1 min-w-[140px]" style={{ top: menuPos.top, right: menuPos.right }}>
                     <button
                       onClick={() => { setTitleDraft(t.title || ''); setEditingTitleId(t.id); setMenuOpenId(null); }}
-                      className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-gray-300 hover:bg-gray-800 text-left"
+                      className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-muted hover:bg-surface-hover text-left"
                     >
                       <Pencil size={14} /> Edit title
                     </button>
@@ -225,14 +225,14 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId,
                         setMenuOpenId(null);
                         window.dispatchEvent(new CustomEvent('ccm-share-task', { detail: { task: t } }));
                       }}
-                      className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-gray-300 hover:bg-gray-800 text-left"
+                      className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-muted hover:bg-surface-hover text-left"
                     >
                       <Share2 size={14} /> Share
                     </button>
                     {['in_progress', 'executing'].includes(t.status) && (
                       <button
                         onClick={() => { handleCancel(t.id); setMenuOpenId(null); }}
-                        className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-yellow-400 hover:bg-gray-800 text-left"
+                        className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-warning hover:bg-surface-hover text-left"
                       >
                         <XCircle size={14} /> Cancel
                       </button>
@@ -240,14 +240,14 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId,
                     {t.status === 'failed' && (
                       <button
                         onClick={() => { handleRetry(t.id); setMenuOpenId(null); }}
-                        className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-blue-400 hover:bg-gray-800 text-left"
+                        className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-info hover:bg-surface-hover text-left"
                       >
                         <RotateCcw size={14} /> Retry
                       </button>
                     )}
                     <button
                       onClick={() => { handleArchive(t.id); setMenuOpenId(null); }}
-                      className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-amber-400 hover:bg-gray-800 text-left"
+                      className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-warning hover:bg-surface-hover text-left"
                     >
                       {t.archived ? <ArchiveRestore size={14} /> : <Archive size={14} />}
                       {t.archived ? 'Unarchive' : 'Archive'}
@@ -255,7 +255,7 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId,
                     {['pending', 'failed', 'cancelled', 'completed'].includes(t.status) && (
                       <button
                         onClick={() => { handleDelete(t.id); setMenuOpenId(null); }}
-                        className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-red-400 hover:bg-gray-800 text-left"
+                        className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-danger hover:bg-surface-hover text-left"
                       >
                         <Trash2 size={14} /> Delete
                       </button>
@@ -279,7 +279,7 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId,
                   if (e.key === 'Enter') handleTitleSave(t);
                   if (e.key === 'Escape') setEditingTitleId(null);
                 }}
-                className="w-full bg-gray-700 text-foreground text-sm rounded px-2 py-0.5 mt-0.5 focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                className="w-full bg-input text-foreground text-sm rounded px-2 py-0.5 mt-0.5 focus:outline-none focus:ring-1 focus:ring-focus"
                 placeholder="Enter title..."
               />
             ) : (
@@ -289,37 +289,37 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId,
             )}
             {/* Description (expandable) */}
             {t.mode === 'loop' && !t.description ? (
-              <p className="text-sm mt-0.5 text-gray-500 italic">{t.todo_file_path}</p>
+              <p className="text-sm mt-0.5 text-subtle italic">{t.todo_file_path}</p>
             ) : t.description ? (
               <ExpandableText
                 text={t.description}
                 collapsedLines={2}
-                className={`text-sm mt-0.5 ${t.title ? 'text-gray-400' : 'text-foreground'}`}
+                className={`text-sm mt-0.5 ${t.title ? 'text-muted' : 'text-foreground'}`}
               />
             ) : null}
             {t.mode === 'goal' && t.goal_condition && (
-              <p className="text-emerald-500/70 text-xs mt-0.5 line-clamp-1">Goal: {t.goal_condition}</p>
+              <p className="text-success text-xs mt-0.5 line-clamp-1">Goal: {t.goal_condition}</p>
             )}
             {t.mode === 'loop' && t.loop_progress && (
-              <p className="text-indigo-400 text-xs mt-0.5">⟳ {t.loop_progress}</p>
+              <p className="text-accent-muted-foreground text-xs mt-0.5">⟳ {t.loop_progress}</p>
             )}
             {t.mode === 'goal' && t.goal_turns_used > 0 && (
-              <p className="text-emerald-400 text-xs mt-0.5">
+              <p className="text-success text-xs mt-0.5">
                 ◎ Turn {t.goal_turns_used}/{t.goal_max_turns}
-                {t.goal_last_reason && <span className="text-gray-500 ml-1">— {t.goal_last_reason}</span>}
+                {t.goal_last_reason && <span className="text-subtle ml-1">— {t.goal_last_reason}</span>}
               </p>
             )}
             {t.target_repo && (
-              <p className="text-gray-600 text-xs mt-0.5 truncate">{t.target_repo}</p>
+              <p className="text-subtle text-xs mt-0.5 truncate">{t.target_repo}</p>
             )}
             {t.created_at && (
-              <p className="text-gray-600 text-xs mt-0.5 flex items-center gap-1">
+              <p className="text-subtle text-xs mt-0.5 flex items-center gap-1">
                 <Clock size={10} className="shrink-0" />
                 {formatDateTime(t.created_at)}
               </p>
             )}
             {t.error_message && (
-              <p className="text-red-400 text-xs mt-1">{t.error_message}</p>
+              <p className="text-danger text-xs mt-1">{t.error_message}</p>
             )}
           </div>
         </div>
