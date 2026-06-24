@@ -119,7 +119,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
     try { return localStorage.getItem(`ccm-chat-draft-${task.id}`) || ''; } catch { return ''; }
   });
   const [sending, setSending] = useState(false);
-  const [localStatus, setLocalStatus] = useState(task.status);
+  const [localStatus, setLocalStatus] = useState<string | null>(task.status);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [interrupting, setInterrupting] = useState(false);
   const [stillRunning, setStillRunning] = useState(false);
@@ -481,6 +481,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
       // process_exit are rendered before the "thinking" indicator hides.
       setTimeout(() => {
         setSending(false);
+        setLocalStatus(null);  // Reset — status_change WS may have been missed
         setAutoDequeueFlag(f => f + 1);
       }, 500);
       return;
