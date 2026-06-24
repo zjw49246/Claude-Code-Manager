@@ -2755,3 +2755,86 @@ async def test_watchdog_respawn_keeps_live_worker(db_factory, monkeypatch):
     assert not c2.done()
 
     c2.cancel()
+
+
+# === Instance contention: queued-message must not steal a claimed instance (task #676) ===
+
+
+async def _setup_queued_msg_two_idle(db_factory, monkeypatch):
+    """Two idle instances + a resumable task; returns (d, id1, id2, task_id, msg)."""
+    import time
+    import backend.api.tasks as tasks_mod
+    from backend.services.dispatcher import QueuedMessage, PRIORITY_USER
+
+    # Session JSONL "present" → skip the failed/session-gone recovery branch.
+    monkeypatch.setattr(tasks_mod, "_find_session_jsonl", lambda sid: "/tmp/fake.jsonl")
+
+    d = _make_dispatcher(db_factory)
+    d._resolve_resume_config_dir = AsyncMock(return_value=None)
+
+    async with db_factory() as db:
+        inst1 = Instance(name="worker-1", status="idle")
+        inst2 = Instance(name="worker-2", status="idle")
+        db.add(inst1)
+        db.add(inst2)
+        task = Task(
+            title="t", description="d", target_repo="/repo",
+            status="executing", session_id="sess-1",
+        )
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst1)
+        await db.refresh(inst2)
+        await db.refresh(task)
+        id1, id2, task_id = inst1.id, inst2.id, task.id
+
+    msg = QueuedMessage(
+        priority=PRIORITY_USER, timestamp=time.monotonic(),
+        prompt="hi", source="user",
+    )
+    return d, id1, id2, task_id, msg
+
+
+@pytest.mark.asyncio
+async def test_queued_message_skips_dispatch_claimed_instance(db_factory, monkeypatch):
+    """Regression for prod task #676.
+
+    The dispatch loop claims an idle instance for a freshly-dispatched task and
+    registers it in _running_tasks, but the instance's DB status only flips to
+    "running" once launch() finishes spawning the PTY session. During that
+    window the queued-message path used to select the same instance purely by
+    DB status=='idle', then its launch killed the dispatch loop's half-started
+    session — orphaning the first task in 'executing' with no session (no chat
+    button). The queued-message selection must exclude _running_tasks instances.
+    """
+    d, id1, id2, task_id, msg = await _setup_queued_msg_two_idle(db_factory, monkeypatch)
+
+    # Dispatch loop has claimed inst1 (not-done lifecycle).
+    claimed = asyncio.get_event_loop().create_future()
+    d._running_tasks[id1] = claimed
+    try:
+        await d._process_queued_message(task_id, msg)
+
+        assert d.instance_manager.launch.await_count == 1
+        assert d.instance_manager.launch.call_args.kwargs["instance_id"] == id2
+        # Transient launch claim released after launch.
+        assert id2 not in d._launching_instances
+    finally:
+        claimed.cancel()
+
+
+@pytest.mark.asyncio
+async def test_queued_message_skips_launching_instance(db_factory, monkeypatch):
+    """A concurrent queued-message launch marks its instance in
+    _launching_instances; another queued-message must skip it (task #676)."""
+    d, id1, id2, task_id, msg = await _setup_queued_msg_two_idle(db_factory, monkeypatch)
+
+    d._launching_instances.add(id1)
+
+    await d._process_queued_message(task_id, msg)
+
+    assert d.instance_manager.launch.await_count == 1
+    assert d.instance_manager.launch.call_args.kwargs["instance_id"] == id2
+    # The pre-existing claim on id1 is untouched; id2's transient claim is freed.
+    assert id1 in d._launching_instances
+    assert id2 not in d._launching_instances
