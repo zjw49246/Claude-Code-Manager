@@ -554,12 +554,37 @@ class InstanceManager:
                     pass  # switched — fall through to normal cleanup
 
             if task_id and chat_initiated and exit_code not in (0, -2, 130):
+                # "Prompt is too long" — session context exceeded window.
+                # Compact the session and retry with summary.
+                _prompt_too_long = _assistant_texts and any("prompt is too long" in t.lower() for t in _assistant_texts)
+                if _prompt_too_long:
+                    try:
+                        from backend.main import dispatcher
+                        async with self.db_factory() as db:
+                            from backend.models.task import Task as _Task
+                            task = await db.get(_Task, task_id)
+                            if task and task.session_id:
+                                logger.warning("Task %d hit 'Prompt is too long', compacting session", task_id)
+                                summary = await dispatcher._compact_session(task_id, task.session_id, db)
+                                if summary:
+                                    task.session_id = None
+                                    task.context_window_usage = None
+                                    await db.commit()
+                                    from backend.services.dispatcher import PRIORITY_USER
+                                    params = self._launch_params.get(instance_id, {})
+                                    await dispatcher.enqueue_message(
+                                        task_id=task_id,
+                                        prompt=f"[Context compacted — previous conversation summary]\n{summary}\n\n---\n\n[Message]\n{params.get('prompt', 'continue')}",
+                                        priority=PRIORITY_USER,
+                                        source="compact_retry",
+                                    )
+                    except Exception:
+                        logger.exception("Prompt-too-long compact failed for task %d", task_id)
                 # Transient server-side 429/overload: wait + retry same account
-                # (checked before rotation; the two failures are exclusive).
-                if await self._try_chat_transient_retry(instance_id, task_id, exit_code, stderr_text):
+                elif await self._try_chat_transient_retry(instance_id, task_id, exit_code, stderr_text):
                     return
                 # Pool rotation for chat-initiated rate limit failures
-                if await self._try_chat_pool_rotation(instance_id, task_id, exit_code, stderr_text):
+                elif await self._try_chat_pool_rotation(instance_id, task_id, exit_code, stderr_text):
                     return
             elif task_id and chat_initiated:
                 # Clean turn — drop any transient-retry tally for this instance.
