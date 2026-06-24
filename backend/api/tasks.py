@@ -130,6 +130,7 @@ async def list_tasks(
 
 @router.post("", response_model=TaskResponse, status_code=201)
 async def create_task(body: TaskCreate, queue: TaskQueue = Depends(_get_queue), db: AsyncSession = Depends(get_db)):
+    explicit_provider = "provider" in body.model_fields_set
     data = body.model_dump()
     if data.get("id") is None:
         data.pop("id", None)  # 未指定 → 正常自增；指定 → 用 Manager 分配的全局 ID
@@ -157,6 +158,8 @@ async def create_task(body: TaskCreate, queue: TaskQueue = Depends(_get_queue), 
 
     # 设置归 Task：创建时填入全局默认值，后续不再依赖 instance fallback
     from backend.config import settings as app_settings
+    if not explicit_provider:
+        data["provider"] = app_settings.default_provider
     if not data.get("model"):
         data["model"] = (
             app_settings.default_codex_model

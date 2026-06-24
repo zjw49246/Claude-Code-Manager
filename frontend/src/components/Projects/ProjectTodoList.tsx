@@ -1,0 +1,385 @@
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import type { FormEvent } from 'react';
+import {
+  Archive,
+  CheckCircle2,
+  ChevronDown,
+  ChevronRight,
+  Circle,
+  Pencil,
+  Play,
+  Plus,
+  Save,
+  X,
+} from 'lucide-react';
+import { api } from '../../api/client';
+import type { ProjectTodo } from '../../api/client';
+
+interface ProjectTodoListProps {
+  projectId: number;
+}
+
+interface TodoDraft {
+  title: string;
+  prompt: string;
+}
+
+const emptyDraft: TodoDraft = { title: '', prompt: '' };
+
+export function ProjectTodoList({ projectId }: ProjectTodoListProps) {
+  const [expanded, setExpanded] = useState(false);
+  const [todos, setTodos] = useState<ProjectTodo[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [showCreate, setShowCreate] = useState(false);
+  const [hasLoaded, setHasLoaded] = useState(false);
+  const [createDraft, setCreateDraft] = useState<TodoDraft>(emptyDraft);
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [editDraft, setEditDraft] = useState<TodoDraft>(emptyDraft);
+  const [taskTodo, setTaskTodo] = useState<ProjectTodo | null>(null);
+  const [taskDraft, setTaskDraft] = useState<TodoDraft>(emptyDraft);
+  const [saving, setSaving] = useState(false);
+  const [running, setRunning] = useState(false);
+  const [updatingId, setUpdatingId] = useState<number | null>(null);
+
+  const openCount = useMemo(() => todos.filter((todo) => todo.status === 'open').length, [todos]);
+
+  const loadTodos = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      setTodos(await api.listProjectTodos(projectId));
+      setHasLoaded(true);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [projectId]);
+
+  useEffect(() => {
+    if (expanded) {
+      loadTodos();
+    }
+  }, [expanded, loadTodos]);
+
+  const openCreateModal = () => {
+    setCreateDraft(emptyDraft);
+    setExpanded(true);
+    setShowCreate(true);
+  };
+
+  const createTodo = async (event: FormEvent) => {
+    event.preventDefault();
+    setSaving(true);
+    setError('');
+    try {
+      await api.createProjectTodo(projectId, createDraft);
+      setShowCreate(false);
+      setCreateDraft(emptyDraft);
+      await loadTodos();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const startEdit = (todo: ProjectTodo) => {
+    setEditingId(todo.id);
+    setEditDraft({ title: todo.title, prompt: todo.prompt });
+  };
+
+  const saveEdit = async (todoId: number) => {
+    setUpdatingId(todoId);
+    setError('');
+    try {
+      const updated = await api.updateProjectTodo(projectId, todoId, editDraft);
+      setTodos((prev) => prev.map((todo) => (todo.id === todoId ? updated : todo)));
+      setEditingId(null);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setUpdatingId(null);
+    }
+  };
+
+  const toggleDone = async (todo: ProjectTodo) => {
+    setUpdatingId(todo.id);
+    setError('');
+    try {
+      const updated = await api.updateProjectTodo(projectId, todo.id, {
+        status: todo.status === 'done' ? 'open' : 'done',
+      });
+      setTodos((prev) => prev.map((item) => (item.id === todo.id ? updated : item)));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setUpdatingId(null);
+    }
+  };
+
+  const archiveTodo = async (todo: ProjectTodo) => {
+    if (!confirm('Archive this todo?')) return;
+    setUpdatingId(todo.id);
+    setError('');
+    try {
+      await api.deleteProjectTodo(projectId, todo.id);
+      setTodos((prev) => prev.filter((item) => item.id !== todo.id));
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setUpdatingId(null);
+    }
+  };
+
+  const openTaskModal = (todo: ProjectTodo) => {
+    setTaskTodo(todo);
+    setTaskDraft({ title: todo.title, prompt: todo.prompt });
+  };
+
+  const createTask = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!taskTodo) return;
+    setRunning(true);
+    setError('');
+    try {
+      const task = await api.createTask({
+        title: taskDraft.title,
+        description: taskDraft.prompt,
+        project_id: projectId,
+      });
+      window.location.hash = `#/tasks/chat/${task.id}`;
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  return (
+    <div className="mt-3 border-t border-gray-700/70 pt-3">
+      <div className="flex items-center justify-between gap-2">
+        <button
+          type="button"
+          onClick={() => setExpanded((value) => !value)}
+          className="flex h-8 min-w-0 items-center gap-2 rounded px-2 text-sm text-gray-300 hover:bg-gray-700 hover:text-gray-100"
+          title={expanded ? 'Collapse todos' : 'Expand todos'}
+        >
+          {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+          <span className="font-medium">To-dos</span>
+          {hasLoaded && (
+            <span className="rounded bg-gray-700 px-1.5 py-0.5 text-xs text-gray-300">{openCount}</span>
+          )}
+        </button>
+        <button
+          type="button"
+          onClick={openCreateModal}
+          className="flex h-8 items-center gap-1.5 rounded bg-gray-700 px-2.5 text-sm text-gray-200 hover:bg-gray-600"
+          title="Add todo"
+        >
+          <Plus size={14} /> Add
+        </button>
+      </div>
+
+      {expanded && (
+        <div className="mt-2 space-y-2">
+          {error && <div className="rounded bg-red-500/15 px-3 py-2 text-xs text-red-300">{error}</div>}
+
+          {loading ? (
+            <div className="px-2 py-3 text-sm text-gray-500">Loading...</div>
+          ) : todos.length === 0 ? (
+            <div className="px-2 py-3 text-sm text-gray-500">No to-dos.</div>
+          ) : (
+            <div className="space-y-1.5">
+              {todos.map((todo) => {
+                const isEditing = editingId === todo.id;
+                const isBusy = updatingId === todo.id;
+                return (
+                  <div key={todo.id} className="rounded border border-gray-700 bg-gray-900/35 px-2.5 py-2">
+                    {isEditing ? (
+                      <div className="space-y-2">
+                        <input
+                          value={editDraft.title}
+                          onChange={(e) => setEditDraft((prev) => ({ ...prev, title: e.target.value }))}
+                          className="w-full rounded border border-gray-600 bg-gray-800 px-2 py-1.5 text-sm text-gray-100 outline-none focus:border-indigo-500"
+                          placeholder="Title"
+                        />
+                        <textarea
+                          value={editDraft.prompt}
+                          onChange={(e) => setEditDraft((prev) => ({ ...prev, prompt: e.target.value }))}
+                          className="min-h-24 w-full resize-y rounded border border-gray-600 bg-gray-800 px-2 py-1.5 text-sm text-gray-100 outline-none focus:border-indigo-500"
+                          placeholder="Prompt"
+                        />
+                        <div className="flex justify-end gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setEditingId(null)}
+                            className="flex h-8 items-center gap-1.5 rounded px-2.5 text-sm text-gray-300 hover:bg-gray-700"
+                          >
+                            <X size={14} /> Cancel
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => saveEdit(todo.id)}
+                            disabled={isBusy}
+                            className="flex h-8 items-center gap-1.5 rounded bg-indigo-600 px-2.5 text-sm text-white hover:bg-indigo-500 disabled:opacity-60"
+                          >
+                            <Save size={14} /> Save
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex items-start gap-2">
+                        <button
+                          type="button"
+                          onClick={() => toggleDone(todo)}
+                          disabled={isBusy}
+                          className="mt-0.5 h-7 w-7 shrink-0 rounded text-gray-400 hover:bg-gray-700 hover:text-emerald-400 disabled:opacity-60"
+                          title={todo.status === 'done' ? 'Mark open' : 'Mark done'}
+                        >
+                          {todo.status === 'done' ? <CheckCircle2 size={17} /> : <Circle size={17} />}
+                        </button>
+                        <div className="min-w-0 flex-1">
+                          <div className={`truncate text-sm font-medium ${todo.status === 'done' ? 'text-gray-500 line-through' : 'text-gray-200'}`}>
+                            {todo.title}
+                          </div>
+                          <div className="mt-0.5 line-clamp-2 whitespace-pre-wrap text-xs text-gray-500">{todo.prompt}</div>
+                        </div>
+                        <div className="flex shrink-0 items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => openTaskModal(todo)}
+                            className="h-8 w-8 rounded text-gray-400 hover:bg-gray-700 hover:text-emerald-400"
+                            title="Create task"
+                          >
+                            <Play size={15} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => startEdit(todo)}
+                            className="h-8 w-8 rounded text-gray-400 hover:bg-gray-700 hover:text-indigo-400"
+                            title="Edit todo"
+                          >
+                            <Pencil size={15} />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => archiveTodo(todo)}
+                            disabled={isBusy}
+                            className="h-8 w-8 rounded text-gray-400 hover:bg-gray-700 hover:text-amber-400 disabled:opacity-60"
+                            title="Archive todo"
+                          >
+                            <Archive size={15} />
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {showCreate && (
+        <TodoModal
+          title="New todo"
+          draft={createDraft}
+          setDraft={setCreateDraft}
+          submitLabel="Create todo"
+          saving={saving}
+          onClose={() => setShowCreate(false)}
+          onSubmit={createTodo}
+        />
+      )}
+
+      {taskTodo && (
+        <TodoModal
+          title="Create task"
+          draft={taskDraft}
+          setDraft={setTaskDraft}
+          submitLabel="Create task"
+          saving={running}
+          onClose={() => setTaskTodo(null)}
+          onSubmit={createTask}
+        />
+      )}
+    </div>
+  );
+}
+
+function TodoModal({
+  title,
+  draft,
+  setDraft,
+  submitLabel,
+  saving,
+  onClose,
+  onSubmit,
+}: {
+  title: string;
+  draft: TodoDraft;
+  setDraft: (draft: TodoDraft) => void;
+  submitLabel: string;
+  saving: boolean;
+  onClose: () => void;
+  onSubmit: (event: FormEvent) => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+      <form
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        onSubmit={onSubmit}
+        className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl bg-gray-800 shadow-2xl"
+      >
+        <div className="flex items-center justify-between border-b border-gray-700 px-5 py-4">
+          <h3 className="font-semibold text-gray-100">{title}</h3>
+          <button type="button" onClick={onClose} className="text-gray-400 hover:text-gray-200">
+            <X size={18} />
+          </button>
+        </div>
+        <div className="space-y-4 overflow-y-auto p-5">
+          <label className="block space-y-1.5">
+            <span className="text-sm text-gray-300">Title</span>
+            <input
+              value={draft.title}
+              onChange={(e) => setDraft({ ...draft, title: e.target.value })}
+              className="w-full rounded border border-gray-600 bg-gray-900 px-3 py-2 text-sm text-gray-100 outline-none focus:border-indigo-500"
+              autoFocus
+              required
+            />
+          </label>
+          <label className="block space-y-1.5">
+            <span className="text-sm text-gray-300">Prompt</span>
+            <textarea
+              value={draft.prompt}
+              onChange={(e) => setDraft({ ...draft, prompt: e.target.value })}
+              className="min-h-44 w-full resize-y rounded border border-gray-600 bg-gray-900 px-3 py-2 text-sm text-gray-100 outline-none focus:border-indigo-500"
+              required
+            />
+          </label>
+        </div>
+        <div className="flex justify-end gap-2 border-t border-gray-700 px-5 py-4">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded px-3 py-2 text-sm text-gray-300 hover:bg-gray-700"
+          >
+            Cancel
+          </button>
+          <button
+            type="submit"
+            disabled={saving}
+            className="rounded bg-indigo-600 px-3 py-2 text-sm text-white hover:bg-indigo-500 disabled:opacity-60"
+          >
+            {saving ? 'Saving...' : submitLabel}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}

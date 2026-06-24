@@ -21,6 +21,7 @@ from backend.api.voice import router as voice_router
 from backend.api.auth import router as auth_router
 from backend.api.chat import router as chat_router
 from backend.api.projects import router as projects_router
+from backend.api.project_todos import router as project_todos_router
 from backend.api.settings import router as settings_router
 from backend.api.uploads import router as uploads_router
 from backend.api.secrets import router as secrets_router
@@ -299,6 +300,7 @@ app.include_router(voice_router)
 app.include_router(auth_router)
 app.include_router(chat_router)
 app.include_router(projects_router)
+app.include_router(project_todos_router)
 app.include_router(settings_router)
 app.include_router(dispatcher_router)
 app.include_router(uploads_router)

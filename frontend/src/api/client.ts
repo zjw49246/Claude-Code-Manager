@@ -76,6 +76,19 @@ export interface Project {
   created_at: string;
 }
 
+export type ProjectTodoStatus = 'open' | 'done' | 'archived';
+
+export interface ProjectTodo {
+  id: number;
+  project_id: number;
+  title: string;
+  prompt: string;
+  status: ProjectTodoStatus;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Task {
   id: number;
   worker_id: number | null;
@@ -547,6 +560,14 @@ export const api = {
     request<{ ok: boolean }>(`/api/projects/${id}`, { method: 'DELETE' }),
   recloneProject: (id: number) =>
     request<{ ok: boolean }>(`/api/projects/${id}/reclone`, { method: 'POST' }),
+  listProjectTodos: (projectId: number, includeArchived = false) =>
+    request<ProjectTodo[]>(`/api/projects/${projectId}/todos${includeArchived ? '?include_archived=true' : ''}`),
+  createProjectTodo: (projectId: number, data: { title: string; prompt: string }) =>
+    request<ProjectTodo>(`/api/projects/${projectId}/todos`, { method: 'POST', body: JSON.stringify(data) }),
+  updateProjectTodo: (projectId: number, todoId: number, data: Partial<Pick<ProjectTodo, 'title' | 'prompt' | 'status'>>) =>
+    request<ProjectTodo>(`/api/projects/${projectId}/todos/${todoId}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  deleteProjectTodo: (projectId: number, todoId: number) =>
+    request<{ ok: boolean }>(`/api/projects/${projectId}/todos/${todoId}`, { method: 'DELETE' }),
 
   // Env files
   listEnvFiles: (projectId: number) =>

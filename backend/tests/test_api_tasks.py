@@ -416,7 +416,46 @@ async def test_create_task_without_model_fills_default(client):
         "title": "No model", "description": "d", "target_repo": "/tmp",
     })
     assert resp.status_code == 201
-    assert resp.json()["model"] == settings.default_model
+    expected_model = (
+        settings.default_codex_model
+        if settings.default_provider == "codex"
+        else settings.default_model
+    )
+    assert resp.json()["model"] == expected_model
+
+
+@pytest.mark.asyncio
+async def test_create_task_without_provider_uses_config_default(client, monkeypatch):
+    """Omitted provider should use the configured default, not the schema fallback."""
+    from backend.config import settings
+
+    monkeypatch.setattr(settings, "default_provider", "codex")
+    monkeypatch.setattr(settings, "default_codex_model", "gpt-test")
+
+    resp = await client.post("/api/tasks", json={
+        "title": "Codex default", "description": "d", "target_repo": "/tmp",
+    })
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["provider"] == "codex"
+    assert data["model"] == "gpt-test"
+
+
+@pytest.mark.asyncio
+async def test_create_task_explicit_provider_overrides_config_default(client, monkeypatch):
+    """Explicit provider must still win over the configured default."""
+    from backend.config import settings
+
+    monkeypatch.setattr(settings, "default_provider", "codex")
+
+    resp = await client.post("/api/tasks", json={
+        "title": "Claude explicit",
+        "description": "d",
+        "target_repo": "/tmp",
+        "provider": "claude",
+    })
+    assert resp.status_code == 201
+    assert resp.json()["provider"] == "claude"
 
 
 @pytest.mark.asyncio
