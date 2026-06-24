@@ -586,7 +586,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
         >
           <Star size={13} fill={starOnCreate ? 'currentColor' : 'none'} />
         </button>
-        {/* Tools dropdown */}
+        {/* Skills dropdown */}
         {AVAILABLE_TOOLS.length > 0 && (
           <div ref={toolsRef} className="relative">
             <button
@@ -599,7 +599,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
               }`}
             >
               <Wrench size={13} />
-              <span className="hidden sm:inline">Tools{enabledToolCount > 0 ? ` (${enabledToolCount})` : ''}</span>
+              <span className="hidden sm:inline">Skills{enabledToolCount > 0 ? ` (${enabledToolCount})` : ''}</span>
               {enabledToolCount > 0 && <span className="sm:hidden">{enabledToolCount}</span>}
             </button>
             {showToolsDropdown && (
