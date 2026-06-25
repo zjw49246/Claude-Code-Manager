@@ -305,17 +305,27 @@ class UpdateService:
         has_frontend_changes = False
         has_package_changes = False
 
-        # Step 1: git fetch + reset --hard origin/main
+        # Step 1: check clean → git pull
         step = state.steps[0]
         await self._start_step(step)
         state.old_commit = (await self._run_cmd(["git", "rev-parse", "HEAD"]))["stdout"].strip()
 
-        result = await self._run_cmd(["git", "fetch", "origin", "main"], timeout=60, step=step)
-        if result["returncode"] != 0:
-            await self._fail_step(step, state, f"git fetch 失败: {result['stderr']}")
+        # Reject if working directory has uncommitted changes
+        status_result = await self._run_cmd(["git", "status", "--porcelain"])
+        dirty_files = [l for l in status_result["stdout"].strip().split("\n") if l.strip()]
+        if dirty_files:
+            await self._fail_step(
+                step, state,
+                f"工作目录有未提交的改动（{len(dirty_files)} 个文件），请先提交或清理后再更新"
+            )
             return
 
-        state.new_commit = (await self._run_cmd(["git", "rev-parse", "origin/main"]))["stdout"].strip()
+        result = await self._run_cmd(["git", "pull", "origin", "main"], timeout=60, step=step)
+        if result["returncode"] != 0:
+            await self._fail_step(step, state, f"git pull 失败: {result['stderr']}")
+            return
+
+        state.new_commit = (await self._run_cmd(["git", "rev-parse", "HEAD"]))["stdout"].strip()
 
         if state.old_commit == state.new_commit and not force:
             step.message = "已是最新版本"
@@ -325,11 +335,6 @@ class UpdateService:
             for s in state.steps[1:]:
                 s.status = "skipped"
             await self._broadcast("update_complete", message="已是最新版本，无需更新")
-            return
-
-        result = await self._run_cmd(["git", "reset", "--hard", "origin/main"], timeout=30, step=step)
-        if result["returncode"] != 0:
-            await self._fail_step(step, state, f"git reset 失败: {result['stderr']}")
             return
 
         await self._complete_step(step)
