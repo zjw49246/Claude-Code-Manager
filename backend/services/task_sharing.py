@@ -52,9 +52,16 @@ async def share_task(
         if project:
             project_name = project.name
 
+    my_url = (settings.public_base_url or "").rstrip("/")
+
     created = []
     for target in targets:
         open_id = target["open_id"]
+        # Skip sharing to self
+        target_url = (target.get("ccm_url") or "").rstrip("/")
+        if my_url and target_url and target_url == my_url:
+            logger.debug("Skipping self-share to %s", target_url)
+            continue
         # Skip if already shared to this person
         existing = await db.execute(
             select(TaskShare).where(

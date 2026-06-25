@@ -34,6 +34,12 @@ class RevokeSharePayload(BaseModel):
 @router.post("/receive")
 async def receive_share(payload: ReceiveSharePayload, db: AsyncSession = Depends(get_db)):
     """Called by the sharer's CCM to push a share notification."""
+    from backend.config import settings
+    my_url = (settings.public_base_url or "").rstrip("/")
+    incoming_url = (payload.owner_ccm_url or "").rstrip("/")
+    if my_url and incoming_url and incoming_url == my_url:
+        return {"ok": True, "skipped": "self-share"}
+
     from backend.models.task import Task
 
     result = await db.execute(
