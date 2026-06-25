@@ -102,12 +102,13 @@ async def relogin_account(account_id: str):
         raise HTTPException(status_code=409, detail=f"另一个账号正在登录中（{', '.join(running)}），请等它完成后再试")
 
     root = Path(__file__).resolve().parents[2]
-    # auto_login 的依赖（playwright/mitmproxy）装在仓库自带的 .login-venv，
-    # 不在 CCM 主 venv 里——6/7 三个号就是用它登录的
-    login_py = root / ".login-venv" / "bin" / "python3"
+    # CDP 登录只依赖 httpx/websockets，已在主 venv 中；优先用 .venv，兼容旧 .login-venv
+    login_py = root / ".venv" / "bin" / "python3"
+    if not login_py.exists():
+        login_py = root / ".login-venv" / "bin" / "python3"
     if not login_py.exists():
         raise HTTPException(status_code=501, detail=(
-            "Token 刷新失败，且 .login-venv 不存在（auto_login 依赖装在那里）。"
+            "Token 刷新失败，找不到 .venv 或 .login-venv。"
             f"请手动登录：python3 scripts/auto_login.py --email {acc.email} "
             f"--config-dir {acc.config_dir}"
         ))
@@ -238,7 +239,9 @@ async def add_account(body: AddAccountRequest):
         return {"ok": True, "status": "running"}
 
     root = Path(__file__).resolve().parents[2]
-    login_py = root / ".login-venv" / "bin" / "python3"
+    login_py = root / ".venv" / "bin" / "python3"
+    if not login_py.exists():
+        login_py = root / ".login-venv" / "bin" / "python3"
     if not login_py.exists():
         login_py = Path(shutil.which("python3") or "python3")
 
