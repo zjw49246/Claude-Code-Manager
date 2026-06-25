@@ -116,6 +116,40 @@ export function TaskForm({ onCreated }: TaskFormProps) {
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [showToolsDropdown, showConfigPanel]);
 
+  const STORAGE_KEY = 'cc_default_task_config';
+
+  // Load saved defaults on mount
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (!saved) return;
+      const cfg = JSON.parse(saved);
+      if (cfg.priority != null) setPriority(cfg.priority);
+      if (cfg.mode) setMode(cfg.mode);
+      if (cfg.provider) setProvider(cfg.provider);
+      if (cfg.model) setModel(cfg.model);
+      if (cfg.effort) setEffort(cfg.effort);
+      if (cfg.thinkingBudget) setThinkingBudget(cfg.thinkingBudget);
+      if (cfg.timeoutHours) setTimeoutHours(cfg.timeoutHours);
+      if (cfg.systemPromptMode) setSystemPromptMode(cfg.systemPromptMode);
+    } catch {}
+  }, []);
+
+  const saveAsDefault = () => {
+    const cfg = { priority, mode, provider, model, effort, thinkingBudget, timeoutHours, systemPromptMode };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(cfg));
+    setDefaultSaved(true);
+    setTimeout(() => setDefaultSaved(false), 2000);
+  };
+
+  const clearDefault = () => {
+    localStorage.removeItem(STORAGE_KEY);
+    setDefaultSaved(false);
+  };
+
+  const [defaultSaved, setDefaultSaved] = useState(false);
+  const hasStoredDefault = !!localStorage.getItem(STORAGE_KEY);
+
   const hasNonDefaultConfig = priority !== 0 || mode !== 'auto' || provider !== (providerOptions[0] || 'claude') || model !== '' || effort !== '' || thinkingBudget !== '' || timeoutHours !== '';
 
   const activeDefaultModel = provider === 'codex' ? defaultCodexModel : defaultModel;
@@ -450,7 +484,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
             <span className="hidden sm:inline">Config</span>
           </button>
           {showConfigPanel && (
-            <div className="absolute bottom-full mb-1 left-0 bg-gray-800 border border-gray-600 rounded shadow-lg z-20 p-3 min-w-[280px]">
+            <div className="absolute top-full mt-1 left-0 bg-gray-800 border border-gray-600 rounded shadow-lg z-20 p-3 min-w-[280px]">
               <div className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-2 items-center text-xs">
                 <span className="text-gray-400">Priority</span>
                 <select
@@ -570,6 +604,24 @@ export function TaskForm({ onCreated }: TaskFormProps) {
                   <option value="append">Fable 5 (Append)</option>
                   <option value="replace">Fable 5 (Replace)</option>
                 </select>
+              </div>
+              <div className="flex items-center gap-2 mt-3 pt-2 border-t border-gray-700">
+                <button
+                  type="button"
+                  onClick={saveAsDefault}
+                  className="text-xs px-2 py-1 rounded bg-indigo-600/30 text-indigo-300 hover:bg-indigo-600/50 transition-colors"
+                >
+                  {defaultSaved ? '✓ 已保存' : '设为默认配置'}
+                </button>
+                {hasStoredDefault && !defaultSaved && (
+                  <button
+                    type="button"
+                    onClick={clearDefault}
+                    className="text-xs px-2 py-1 rounded text-gray-500 hover:text-gray-300 transition-colors"
+                  >
+                    清除默认
+                  </button>
+                )}
               </div>
             </div>
           )}

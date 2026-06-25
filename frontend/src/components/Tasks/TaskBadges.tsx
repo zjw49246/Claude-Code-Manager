@@ -1,5 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
-import { createPortal } from 'react-dom';
+import { useState, useEffect, useCallback } from 'react';
 import { Wrench, Users, Settings } from 'lucide-react';
 import { api } from '../../api/client';
 import type { Task, SubAgentSummary } from '../../api/client';
@@ -275,21 +274,9 @@ export function TaskConfigBadge({ task, onRefresh, openUp, align }: { task: Task
   const models = opts ? (isCodex ? opts.codex : opts.claude) : [];
   const efforts = opts ? (isCodex ? opts.codexEffort : opts.effort) : [];
 
-  const btnRef = useRef<HTMLButtonElement>(null);
-  const [pos, setPos] = useState<{ top: number; left: number }>({ top: 0, left: 0 });
-
-  useEffect(() => {
-    if (!open || !btnRef.current) return;
-    const rect = btnRef.current.getBoundingClientRect();
-    const top = openUp ? rect.top - 4 : rect.bottom + 4;
-    const left = align === 'right' ? rect.right : rect.left;
-    setPos({ top, left });
-  }, [open, openUp, align]);
-
   return (
     <div className="relative" data-task-config>
       <button
-        ref={btnRef}
         onClick={(e) => { e.stopPropagation(); setOpen(!open); }}
         className="text-xs bg-gray-700 text-gray-300 px-1.5 rounded cursor-pointer hover:bg-gray-600 hover:text-gray-100 flex items-center gap-0.5"
         title={`Config（model: ${task.model || 'default'}）`}
@@ -297,16 +284,10 @@ export function TaskConfigBadge({ task, onRefresh, openUp, align }: { task: Task
         <Settings size={12} />
         <span className="hidden sm:inline">Config</span>
       </button>
-      {open && createPortal(
+      {open && (
         <div
           data-task-config
-          className="fixed bg-gray-800 border border-gray-600 rounded shadow-lg z-[9999] p-3 min-w-[250px] max-w-[calc(100vw-1rem)] max-h-[80vh] overflow-y-auto"
-          style={{
-            top: openUp ? undefined : pos.top,
-            bottom: openUp ? `calc(100vh - ${pos.top}px)` : undefined,
-            left: align === 'right' ? undefined : pos.left,
-            right: align === 'right' ? `calc(100vw - ${pos.left}px)` : undefined,
-          }}
+          className={`absolute ${openUp ? 'bottom-full mb-1' : 'top-full mt-1'} ${align === 'right' ? 'right-0' : 'left-0'} bg-gray-800 border border-gray-600 rounded shadow-lg z-20 p-3 min-w-[250px] max-w-[calc(100vw-1rem)] max-h-[80vh] overflow-y-auto`}
           onClick={(e) => e.stopPropagation()}
         >
           {isShared && <p className="text-xs text-orange-400 mb-2">Shared task — read only</p>}
@@ -391,8 +372,7 @@ export function TaskConfigBadge({ task, onRefresh, openUp, align }: { task: Task
             </select>
           </div>
           <div className="mt-2 text-[10px] text-gray-500">修改在下一轮对话生效</div>
-        </div>,
-        document.body
+        </div>
       )}
     </div>
   );

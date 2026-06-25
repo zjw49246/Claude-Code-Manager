@@ -1,5 +1,5 @@
 import { useState, useMemo, useRef, useEffect } from 'react';
-import { createPortal } from 'react-dom';
+
 import { api } from '../../api/client';
 import type { Task, Project } from '../../api/client';
 import { Trash2, RotateCcw, XCircle, MessageCircle, Archive, ArchiveRestore, Star, Copy, Check, MoreVertical, Pencil, Mail, MailOpen, Clock, GripVertical, Share2 } from 'lucide-react';
@@ -37,11 +37,9 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId,
 
   const [copiedId, setCopiedId] = useState<number | null>(null);
   const [menuOpenId, setMenuOpenId] = useState<number | null>(null);
-  const [menuPos, setMenuPos] = useState<{ top: number; right: number }>({ top: 0, right: 0 });
   const [editingTitleId, setEditingTitleId] = useState<number | null>(null);
   const [titleDraft, setTitleDraft] = useState('');
   const menuRef = useRef<HTMLDivElement>(null);
-  const menuBtnRef = useRef<HTMLButtonElement>(null);
   const titleInputRef = useRef<HTMLInputElement>(null);
 
   // Close overflow menu on outside click
@@ -199,20 +197,16 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId,
               {/* Overflow menu */}
               <div className="relative">
                 <button
-                  ref={menuOpenId === t.id ? menuBtnRef : undefined}
-                  onClick={(e) => {
-                    if (menuOpenId === t.id) { setMenuOpenId(null); return; }
-                    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                    setMenuPos({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
-                    setMenuOpenId(t.id);
+                  onClick={() => {
+                    setMenuOpenId(menuOpenId === t.id ? null : t.id);
                   }}
                   className="p-1.5 text-gray-600 hover:text-gray-300 transition-colors"
                   title="More actions"
                 >
                   <MoreVertical size={16} />
                 </button>
-                {menuOpenId === t.id && createPortal(
-                  <div ref={menuRef} className="fixed z-[9999] bg-gray-900 border border-gray-700 rounded-lg shadow-xl py-1 min-w-[140px]" style={{ top: menuPos.top, right: menuPos.right }}>
+                {menuOpenId === t.id && (
+                  <div ref={menuRef} className="absolute top-full mt-1 right-0 bg-gray-900 border border-gray-700 rounded-lg shadow-xl z-20 py-1 min-w-[140px]">
                     <button
                       onClick={() => { setTitleDraft(t.title || ''); setEditingTitleId(t.id); setMenuOpenId(null); }}
                       className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-gray-300 hover:bg-gray-800 text-left"
@@ -260,8 +254,7 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId,
                         <Trash2 size={14} /> Delete
                       </button>
                     )}
-                  </div>,
-                  document.body
+                  </div>
                 )}
               </div>
             </div>
