@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { RefreshCw } from 'lucide-react';
+import { ArrowUpCircle, RefreshCw } from 'lucide-react';
 import { api } from '../../api/client';
 import { useWebSocket } from '../../hooks/useWebSocket';
 
@@ -216,7 +216,7 @@ export function UpdateButton() {
         className="p-2 rounded text-gray-400 hover:text-foreground hover:bg-gray-800 transition-colors"
         title="更新并重启"
       >
-        <RefreshCw size={18} />
+        <ArrowUpCircle size={18} />
       </button>
 
       {isModalOpen && (
