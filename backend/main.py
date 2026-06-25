@@ -44,6 +44,7 @@ from backend.services.ws_broadcaster import WebSocketBroadcaster
 from backend.services.instance_manager import InstanceManager
 from backend.services.ralph_loop import RalphLoop
 from backend.services.dispatcher import GlobalDispatcher
+from backend.services.update_service import UpdateService
 
 # Logging: surface INFO from our services AND claude_pty in the server log.
 # Without this, PTY delivery/turn diagnostics are invisible (learned the
@@ -70,6 +71,12 @@ dispatcher = GlobalDispatcher(
     db_factory=async_session,
     instance_manager=instance_manager,
     broadcaster=broadcaster,
+)
+
+update_service = UpdateService(
+    broadcaster=broadcaster,
+    port=settings.port,
+    project_dir=str(Path(__file__).resolve().parent.parent),
 )
 
 # 分布式 Worker（可选，WORKER_ENABLED=true 且装了 boto3 才启用）
@@ -209,6 +216,7 @@ async def lifespan(app: FastAPI):
         row = await db.get(GlobalSettings, 1)
         if row is not None and row.use_pty_mode is not None:
             instance_manager.set_pty_mode(row.use_pty_mode)
+    update_service.recover_from_status_file()
     await _reset_stale_discussion_agents()
     await _cleanup_stale_sub_agents()
     await _sync_tags()

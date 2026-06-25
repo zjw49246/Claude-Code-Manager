@@ -852,6 +852,14 @@ export const api = {
   poolAddStatus: (email: string) =>
     request<{ status: string; detail?: string }>(`/api/pool/add/${encodeURIComponent(email)}`),
 
+  // System Update
+  startUpdate: (data: { skip_frontend_build?: boolean; dry_run?: boolean; force?: boolean } = {}) =>
+    request<any>('/api/system/update', { method: 'POST', body: JSON.stringify(data) }),
+  getUpdateStatus: () =>
+    request<any>('/api/system/update/status'),
+  rollbackUpdate: () =>
+    request<any>('/api/system/update/rollback', { method: 'POST' }),
+
   // System
   health: () => request<{ status: string; commit?: string }>('/api/system/health'),
   stats: () => request<{ tasks: Record<string, number>; running_instances: number }>('/api/system/stats'),

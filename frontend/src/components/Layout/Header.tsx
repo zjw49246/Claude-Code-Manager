@@ -6,6 +6,7 @@ import { isCapacitor } from '../../config/server';
 import { getTheme, setTheme as persistTheme, THEME_OPTIONS, type Theme } from '../../config/theme';
 import { getTimezone, setTimezone, TIMEZONE_OPTIONS } from '../../config/timezone';
 import { PoolDrawer } from './PoolDrawer';
+import { UpdateButton } from '../System/UpdateButton';
 
 interface HeaderProps {
   currentPage: string;
@@ -139,6 +140,7 @@ export function Header({ currentPage, onNavigate }: HeaderProps) {
           </nav>
         )}
         <div ref={rightRef} className="ml-auto flex items-center gap-1">
+          <UpdateButton />
           <PoolDrawer />
           {runtime && (
             <div

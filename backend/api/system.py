@@ -1,4 +1,5 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -74,6 +75,48 @@ async def distill_skills(db: AsyncSession = Depends(get_db)):
     """Analyze conversation history and propose new skill candidates."""
     from backend.services.skill_distill import analyze_patterns
     return await analyze_patterns(db)
+
+
+class UpdateRequest(BaseModel):
+    skip_frontend_build: bool = False
+    dry_run: bool = False
+    force: bool = False
+
+
+def _get_update_service():
+    from backend.main import update_service
+    if update_service is None:
+        raise HTTPException(status_code=503, detail="UpdateService not initialized")
+    return update_service
+
+
+@router.post("/update")
+async def start_update(req: UpdateRequest):
+    svc = _get_update_service()
+    if req.dry_run:
+        return await svc.dry_run()
+    result = await svc.start_update(
+        skip_frontend_build=req.skip_frontend_build,
+        force=req.force,
+    )
+    if "error" in result:
+        raise HTTPException(status_code=409, detail=result["error"])
+    return result
+
+
+@router.get("/update/status")
+async def update_status():
+    svc = _get_update_service()
+    return await svc.get_status()
+
+
+@router.post("/update/rollback")
+async def rollback_update():
+    svc = _get_update_service()
+    result = await svc.rollback()
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
 
 
 @router.get("/skills")
