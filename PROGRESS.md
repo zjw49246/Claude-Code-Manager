@@ -450,3 +450,10 @@
 - **修复（commit b40d2b4）**: 让 `_running_tasks` + 新增 `_launching_instances` 成为两条路径共用的内存认领表。queued-message 选实例时排除「in-flight lifecycle」和「另一个 mid-launch」的实例；dispatch loop 跳过 `_launching_instances`；queued-message 的 launch 用 `try/finally` 持有/释放认领，失败也不泄漏（否则该 instance 会被永久挤出调度池）。新增双向排除回归测试 2 例，`test_service_dispatcher.py` 88 passed。
 - **预防**: ①「DB 状态」作为并发仲裁有滞后窗口（异步 spawn 期间状态没翻），跨协程抢资源不能只信 DB 行；要么选取时**原子**标占，要么用内存认领表且**两条路径都遵守**；②任何"选 idle 资源后再慢慢 launch"的模式都要问：launch 期间别的路径会不会也选到它？③内存认领必须 `try/finally` 释放，否则异常会把资源永久 wedge 出池。
 - **运维**: 该机（ccm-zhoujunwei, ap-northeast-1, i-03e9984e1c983a1a0）跑两套 CCM：`code/`(ccm-backend,8000) 与 `cyf/`(ccm-backend-cyf,8002)，DB 分别在仓库内 `./claude_manager.db` 与 `/home/ubuntu/cyf/claude_manager.db`；#676 在 `code/`。
+
+### 2026-06-25 — auto_login 在小机型上 Chrome 起不来：cdp_login 漏了 --disable-dev-shm-usage
+- **问题**: 在新开的 t3.medium worker 上跑 `scripts/auto_login.py` 登录 Claude 账号，step 1（171mail 接码、拿 magic link）正常，但 step 2「Chrome CDP」整段失败：`httpx.ConnectError: All connection attempts failed`，连 `http://127.0.0.1:9222/json` 都连不上。
+- **根因**: `scripts/cdp_login.py` 启 google-chrome 时没带 `--disable-dev-shm-usage`。Chrome 默认把渲染进程共享内存放 `/dev/shm`，小机型（t3.medium）的 `/dev/shm` 太小 → 渲染进程因共享内存不足**立即崩溃** → CDP 调试端口 9222 根本没起来 → 后续 `GET /json` 必然 ConnectError。大机型（Manager 是 c7i.2xlarge，/dev/shm 够大）不触发，所以一直没暴露。讽刺的是 `auto_login.py` 另一条 `_mailcatcher_browser_login` 路径早就带了这个 flag，唯独主路径 `cdp_login.py` 漏了。
+- **修复**: `cdp_login.py` 的 chrome 参数加 `--disable-dev-shm-usage`（必需）+ `--disable-software-rasterizer`（顺带），并把启动等待 `sleep(4)→6`（小机型冷启动更稳）。加 flag 后 CDP ~1s 即开放，登录一次成功（实测 BuffaloWingsxvq@diplomats.com，订阅 max，写出有效 .credentials.json）。
+- **预防**: ①任何无头机上跑 Chrome 一律带 `--no-sandbox --disable-dev-shm-usage`，前者过 root、后者过小 /dev/shm，二者是服务器跑 Chrome 的标配；②同一仓库里有多条「启 Chrome」代码时，flag 要对齐（这次就是一条带一条没带）；③只在大机型验证过的浏览器自动化，换小机型必复测。
+- **Commit**: 本次提交

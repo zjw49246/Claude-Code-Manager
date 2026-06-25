@@ -52,11 +52,15 @@ async def cdp_login(email: str, token: str, config_dir: str, oauth_url: str = ""
     shutil.rmtree("/tmp/chrome-test-login", ignore_errors=True)
 
     # 2. Launch Chrome (fresh profile)
+    # --disable-dev-shm-usage 必带：小机型（t3.medium 等）/dev/shm 太小，
+    # 不加会让渲染进程因共享内存不足直接崩溃 → CDP 9222 端口起不来，
+    # 后面连 http://127.0.0.1:9222/json 报 ConnectError（登录整段失败）。
     chrome = subprocess.Popen(["google-chrome", "--no-sandbox", "--disable-gpu",
+        "--disable-dev-shm-usage", "--disable-software-rasterizer",
         "--no-first-run", "--disable-extensions", "--window-size=1365,900",
         f"--remote-debugging-port={CDP_PORT}", "--user-data-dir=/tmp/chrome-test-login",
         "about:blank"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=os.environ)
-    await asyncio.sleep(4)
+    await asyncio.sleep(6)
     print(f"Chrome pid={chrome.pid}")
 
     # 3. Connect CDP
