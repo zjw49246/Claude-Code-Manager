@@ -107,11 +107,26 @@ STEP_TIMEOUTS = {
 }
 
 
+def _resolve_db_path(project_dir: str) -> Path:
+    """Resolve SQLite database path from settings."""
+    from backend.config import settings
+    url = settings.database_url
+    if "sqlite" in url:
+        # "sqlite+aiosqlite:///./claude_manager.db" → "./claude_manager.db"
+        raw = url.split("///", 1)[-1] if "///" in url else url
+        p = Path(raw)
+        if not p.is_absolute():
+            p = Path(project_dir) / p
+        return p.resolve()
+    return Path(project_dir) / "claude_manager.db"
+
+
 class UpdateService:
     def __init__(self, broadcaster: WebSocketBroadcaster, port: int, project_dir: str):
         self.broadcaster = broadcaster
         self.port = port
         self.project_dir = project_dir
+        self.db_path = _resolve_db_path(project_dir)
         self._lock = asyncio.Lock()
         self._current: UpdateState | None = None
         self._status_file = Path(f"/tmp/ccm-update-status-{port}.json")
@@ -240,7 +255,7 @@ class UpdateService:
             await self._broadcast("step_update", step="rollback", status="running", message="正在回滚...")
 
             if backup_file and Path(backup_file).exists():
-                db_path = Path(self.project_dir) / "claude_manager.db"
+                db_path = self.db_path
                 for ext in ("-wal", "-shm"):
                     p = db_path.with_suffix(db_path.suffix + ext)
                     if p.exists():
@@ -290,17 +305,17 @@ class UpdateService:
         has_frontend_changes = False
         has_package_changes = False
 
-        # Step 1: git pull
+        # Step 1: git fetch + reset --hard origin/main
         step = state.steps[0]
         await self._start_step(step)
         state.old_commit = (await self._run_cmd(["git", "rev-parse", "HEAD"]))["stdout"].strip()
 
-        result = await self._run_cmd(["git", "pull", "origin", "main"], timeout=60, step=step)
+        result = await self._run_cmd(["git", "fetch", "origin", "main"], timeout=60, step=step)
         if result["returncode"] != 0:
-            await self._fail_step(step, state, f"git pull 失败: {result['stderr']}")
+            await self._fail_step(step, state, f"git fetch 失败: {result['stderr']}")
             return
 
-        state.new_commit = (await self._run_cmd(["git", "rev-parse", "HEAD"]))["stdout"].strip()
+        state.new_commit = (await self._run_cmd(["git", "rev-parse", "origin/main"]))["stdout"].strip()
 
         if state.old_commit == state.new_commit and not force:
             step.message = "已是最新版本"
@@ -310,6 +325,11 @@ class UpdateService:
             for s in state.steps[1:]:
                 s.status = "skipped"
             await self._broadcast("update_complete", message="已是最新版本，无需更新")
+            return
+
+        result = await self._run_cmd(["git", "reset", "--hard", "origin/main"], timeout=30, step=step)
+        if result["returncode"] != 0:
+            await self._fail_step(step, state, f"git reset 失败: {result['stderr']}")
             return
 
         await self._complete_step(step)
@@ -443,6 +463,7 @@ class UpdateService:
                 state.old_commit,
                 state.backup_file,
                 str(self.port),
+                str(self.db_path),
             ],
             stdout=open(log_file, "a"),
             stderr=subprocess.STDOUT,
@@ -487,7 +508,7 @@ class UpdateService:
     async def _backup_database(self) -> str:
         import sqlite3 as _sqlite3
 
-        db_path = Path(self.project_dir) / "claude_manager.db"
+        db_path = self.db_path
         if not db_path.exists():
             raise FileNotFoundError(f"数据库文件不存在: {db_path}")
 

@@ -7,6 +7,7 @@ PROJECT_DIR="$1"
 OLD_COMMIT="$2"
 BACKUP_FILE="$3"
 PORT="$4"
+DB_FILE="${5:-claude_manager.db}"
 SERVICE_NAME="ccm.service"
 STATUS_FILE="/tmp/ccm-update-status-${PORT}.json"
 LOG_FILE="/tmp/ccm-update-migrate-${PORT}.log"
@@ -50,8 +51,8 @@ else
     echo "=== Migration failed (exit=$EXIT_CODE), rolling back ===" >> "$LOG_FILE"
 
     # Restore DB backup — must remove WAL/SHM residuals first
-    rm -f claude_manager.db-wal claude_manager.db-shm
-    cp "$BACKUP_FILE" claude_manager.db
+    rm -f "${DB_FILE}-wal" "${DB_FILE}-shm"
+    cp "$BACKUP_FILE" "$DB_FILE"
 
     git reset --hard "$OLD_COMMIT"
     uv sync >> "$LOG_FILE" 2>&1 || true
