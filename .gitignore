@@ -15,6 +15,7 @@ dist/
 *.egg-info/
 
 # Runtime artifacts (never commit)
+backups/
 uploads/
 claude_manager.db
 claude_manager.db-*
