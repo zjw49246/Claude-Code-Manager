@@ -107,6 +107,26 @@ STEP_TIMEOUTS = {
 }
 
 
+def _find_tool(name: str) -> str:
+    """Find a CLI tool by searching PATH + common install locations."""
+    import shutil
+    found = shutil.which(name)
+    if found:
+        return found
+    home = Path.home()
+    extra_dirs = [
+        home / ".local" / "bin",
+        home / ".cargo" / "bin",
+        Path("/usr/local/bin"),
+        Path("/opt/homebrew/bin"),
+    ]
+    for d in extra_dirs:
+        candidate = d / name
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
+    return name
+
+
 def _resolve_db_path(project_dir: str) -> Path:
     """Resolve SQLite database path from settings."""
     from backend.config import settings
@@ -130,6 +150,14 @@ class UpdateService:
         self._lock = asyncio.Lock()
         self._current: UpdateState | None = None
         self._status_file = Path(f"/tmp/ccm-update-status-{port}.json")
+        self._tools = {
+            "git": _find_tool("git"),
+            "uv": _find_tool("uv"),
+            "npm": _find_tool("npm"),
+            "bash": _find_tool("bash"),
+            "systemctl": _find_tool("systemctl"),
+        }
+        logger.info("Resolved tool paths: %s", self._tools)
 
     def recover_from_status_file(self):
         """Called on startup to recover state from a previous update cycle."""
@@ -269,8 +297,9 @@ class UpdateService:
             await self._broadcast("restarting", message="服务即将重启...")
             await asyncio.sleep(1)
 
+            systemctl = self._tools["systemctl"]
             subprocess.Popen(
-                ["bash", "-c", f"sleep 2 && systemctl --user restart ccm.service"],
+                [self._tools["bash"], "-c", f"sleep 2 && {systemctl} --user restart ccm.service"],
                 stdout=open(f"/tmp/ccm-restart-{self.port}.log", "w"),
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
@@ -461,9 +490,15 @@ class UpdateService:
         script = Path(self.project_dir) / "scripts" / "update_migrate.sh"
         log_file = f"/tmp/ccm-update-migrate-{self.port}.log"
 
+        env = os.environ.copy()
+        for tool_path in self._tools.values():
+            tool_dir = str(Path(tool_path).parent)
+            if tool_dir not in env.get("PATH", ""):
+                env["PATH"] = tool_dir + ":" + env.get("PATH", "")
+
         subprocess.Popen(
             [
-                "bash", str(script),
+                self._tools["bash"], str(script),
                 self.project_dir,
                 state.old_commit,
                 state.backup_file,
@@ -473,6 +508,7 @@ class UpdateService:
             stdout=open(log_file, "a"),
             stderr=subprocess.STDOUT,
             start_new_session=True,
+            env=env,
         )
 
         state.status = "restarting"
@@ -501,8 +537,9 @@ class UpdateService:
         await self._broadcast("restarting", message="服务即将重启，请等待自动重连...")
         await asyncio.sleep(1)
 
+        systemctl = self._tools["systemctl"]
         subprocess.Popen(
-            ["bash", "-c", f"sleep 2 && systemctl --user restart ccm.service"],
+            [self._tools["bash"], "-c", f"sleep 2 && {systemctl} --user restart ccm.service"],
             stdout=open(f"/tmp/ccm-restart-{self.port}.log", "w"),
             stderr=subprocess.STDOUT,
             start_new_session=True,
@@ -543,6 +580,12 @@ class UpdateService:
             old.unlink()
             logger.info("Removed old backup: %s", old.name)
 
+    def _resolve_cmd(self, cmd: list[str]) -> list[str]:
+        """Replace the first element with its resolved absolute path."""
+        if cmd and cmd[0] in self._tools:
+            return [self._tools[cmd[0]]] + cmd[1:]
+        return cmd
+
     async def _run_cmd(
         self,
         cmd: list[str],
@@ -550,22 +593,13 @@ class UpdateService:
         step: StepInfo | None = None,
         cwd: str | None = None,
     ) -> dict[str, Any]:
+        cmd = self._resolve_cmd(cmd)
         try:
-            env = os.environ.copy()
-            home = Path.home()
-            extra_paths = [str(home / ".local" / "bin"), "/usr/local/bin"]
-            current = env.get("PATH", "")
-            for p in extra_paths:
-                if p not in current:
-                    current = p + ":" + current
-            env["PATH"] = current
-
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd or self.project_dir,
-                env=env,
             )
 
             async def read_stream(stream, is_stderr=False):
