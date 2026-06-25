@@ -320,7 +320,7 @@ class UpdateService:
             )
             return
 
-        result = await self._run_cmd(["git", "pull", "origin", "main"], timeout=60, step=step)
+        result = await self._run_cmd(["git", "pull", "--rebase", "origin", "main"], timeout=60, step=step)
         if result["returncode"] != 0:
             await self._fail_step(step, state, f"git pull 失败: {result['stderr']}")
             return
