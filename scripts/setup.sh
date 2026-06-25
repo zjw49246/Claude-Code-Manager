@@ -56,6 +56,43 @@ npm install --no-fund --no-audit
 npm run build
 cd ..
 
+# ── 6. Claude CLI warmup（完成 onboarding 对话框，否则 PTY 模式 MCP 不初始化）
+echo "[6/6] Claude CLI warmup..."
+if command -v claude &>/dev/null; then
+    # Phase 1: -p 模式填充 GrowthBook cache + 验证凭证
+    timeout 30 claude -p 'reply: ok' --dangerously-skip-permissions 2>/dev/null || true
+    # Phase 2: PTY 交互模式完成 theme picker 等 onboarding 对话框
+    .venv/bin/python3 -c '
+import asyncio
+
+async def warmup():
+    from claude_pty.session import Session
+    from claude_pty.config import PTYConfig
+    from claude_pty.bridge import BridgeHub
+
+    bridge = BridgeHub()
+    bridge.start()
+    try:
+        cfg = PTYConfig(default_model="claude-opus-4-6", dangerously_skip_permissions=True)
+        s = Session(cwd="'"$(pwd)"'", config=cfg, bridge=bridge)
+        await s.start()
+        count = 0
+        async for ev in s.send_prompt("reply: ok"):
+            if ev.content:
+                count += 1
+                if count >= 2:
+                    break
+        await s.stop()
+        print("warmup ok")
+    except Exception as e:
+        print(f"warmup failed: {e}")
+    finally:
+        bridge.stop()
+
+asyncio.run(warmup())
+' 2>&1 | tail -1
+fi
+
 echo ""
 echo "=== 初始化完成 ==="
 echo "创建 .env 文件后启动服务："
