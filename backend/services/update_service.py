@@ -551,11 +551,21 @@ class UpdateService:
         cwd: str | None = None,
     ) -> dict[str, Any]:
         try:
+            env = os.environ.copy()
+            home = Path.home()
+            extra_paths = [str(home / ".local" / "bin"), "/usr/local/bin"]
+            current = env.get("PATH", "")
+            for p in extra_paths:
+                if p not in current:
+                    current = p + ":" + current
+            env["PATH"] = current
+
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd or self.project_dir,
+                env=env,
             )
 
             async def read_stream(stream, is_stderr=False):
