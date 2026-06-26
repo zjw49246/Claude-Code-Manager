@@ -46,6 +46,7 @@ from backend.services.instance_manager import InstanceManager
 from backend.services.ralph_loop import RalphLoop
 from backend.services.dispatcher import GlobalDispatcher
 from backend.services.update_service import UpdateService
+from backend.services.sub_agent_watcher import SubAgentWatcher
 
 # Logging: surface INFO from our services AND claude_pty in the server log.
 # Without this, PTY delivery/turn diagnostics are invisible (learned the
@@ -73,6 +74,8 @@ dispatcher = GlobalDispatcher(
     instance_manager=instance_manager,
     broadcaster=broadcaster,
 )
+
+sub_agent_watcher = SubAgentWatcher(db_factory=async_session, broadcaster=broadcaster)
 
 update_service = UpdateService(
     broadcaster=broadcaster,
@@ -221,6 +224,7 @@ async def lifespan(app: FastAPI):
     await _reset_stale_discussion_agents()
     await _cleanup_stale_sub_agents()
     await _sync_tags()
+    sub_agent_watcher.start()
     if settings.auto_start_dispatcher:
         await dispatcher.start()
 
@@ -284,6 +288,7 @@ async def lifespan(app: FastAPI):
     for inst_id in list(instance_manager.processes.keys()):
         await instance_manager.stop(inst_id)
 
+    sub_agent_watcher.stop()
     if backup_svc:
         backup_svc.stop()
     await dispatcher.stop()
