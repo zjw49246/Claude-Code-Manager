@@ -852,6 +852,16 @@ export const api = {
   poolAddStatus: (email: string) =>
     request<{ status: string; detail?: string }>(`/api/pool/add/${encodeURIComponent(email)}`),
 
+  // User Skills
+  listUserSkills: () => request<any[]>('/api/user-skills'),
+  getUserSkill: (id: number) => request<any>(`/api/user-skills/${id}`),
+  createUserSkill: (data: { name: string; description?: string; content?: string }) =>
+    request<any>('/api/user-skills', { method: 'POST', body: JSON.stringify(data) }),
+  updateUserSkill: (id: number, data: { name?: string; description?: string; content?: string }) =>
+    request<any>(`/api/user-skills/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  deleteUserSkill: (id: number) =>
+    request<{ ok: boolean }>(`/api/user-skills/${id}`, { method: 'DELETE' }),
+
   // System Update
   startUpdate: (data: { skip_frontend_build?: boolean; dry_run?: boolean; force?: boolean } = {}) =>
     request<any>('/api/system/update', { method: 'POST', body: JSON.stringify(data) }),

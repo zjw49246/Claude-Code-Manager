@@ -118,11 +118,13 @@ async def send_chat_message(
 
     # Broadcast user message to task channel
     from backend.main import broadcaster
+    image_urls = [a["url"] for a in attachments if a.get("is_image")]
     await broadcaster.broadcast(f"task:{task_id}", {
         "event_type": "user_message",
         "role": "user",
         "content": display_content,
-        "image_paths": body.image_paths or [],
+        "image_urls": image_urls,
+        "attachments": attachments,
     })
 
     # Enqueue for serial processing (replaces direct launch)

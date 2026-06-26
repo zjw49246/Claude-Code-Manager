@@ -209,6 +209,13 @@ class SharedRelay:
 
         # Write chat events to local log_entries
         if event_type in CHAT_EVENT_TYPES:
+            raw_json = data.get("raw_json")
+            if not raw_json and (data.get("attachments") or data.get("image_urls")):
+                import json
+                raw_json = json.dumps({
+                    k: data[k] for k in ("attachments", "image_urls", "source")
+                    if data.get(k)
+                })
             async with self.db_factory() as db:
                 db.add(LogEntry(
                     instance_id=None,
@@ -219,7 +226,7 @@ class SharedRelay:
                     tool_name=data.get("tool_name"),
                     tool_input=data.get("tool_input"),
                     tool_output=data.get("tool_output"),
-                    raw_json=data.get("raw_json"),
+                    raw_json=raw_json,
                     is_error=data.get("is_error", False),
                 ))
                 await db.commit()

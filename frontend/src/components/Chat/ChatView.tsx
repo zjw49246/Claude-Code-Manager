@@ -506,12 +506,14 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
     if (eventType === 'user_message') {
       const content = (msg.data.content as string) || '';
       const source = (msg.data.source as string) || null;
+      const imageUrls = (msg.data.image_urls as string[]) || null;
+      const attachments = (msg.data.attachments as { url: string; name: string; is_image: boolean }[]) || null;
       setSending(true);
       setMessages((prev) => [...prev, {
         id: Date.now() + Math.random(), role: 'user', event_type: 'user_message',
         content, tool_name: null, tool_input: null, tool_output: null,
         is_error: false, loop_iteration: null, timestamp: new Date().toISOString(),
-        image_urls: null, attachments: null, source,
+        image_urls: imageUrls, attachments: attachments, source,
       }]);
       return;
     }

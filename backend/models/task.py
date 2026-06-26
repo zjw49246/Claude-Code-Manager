@@ -55,6 +55,7 @@ class Task(Base):
     sort_order: Mapped[float | None] = mapped_column(Float, nullable=True)
     enable_workflows: Mapped[bool] = mapped_column(default=False, server_default="0")
     enabled_skills: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    selected_user_skills: Mapped[list | None] = mapped_column(JSON, nullable=True)
     tags: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     metadata_: Mapped[dict | None] = mapped_column("metadata", JSON, nullable=True)
     context_window_usage: Mapped[dict | None] = mapped_column(JSON, nullable=True)

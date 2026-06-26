@@ -134,6 +134,34 @@ async def ccm_read_skill(skill_name: str) -> str:
 
 
 @mcp.tool()
+async def ccm_read_user_skill(skill_id: int) -> str:
+    """读取一个用户自定义 Skill 的完整内容。
+
+    用户 Skill 目录（name + description）在 system prompt 中可见。
+    当需要某个 Skill 的详细内容时，调用此工具获取全文。
+
+    Args:
+        skill_id: Skill ID（在目录中显示为 id=N）
+    """
+    try:
+        from backend.database import async_session
+        from backend.models.user_skill import UserSkill
+        async with async_session() as db:
+            skill = await db.get(UserSkill, skill_id)
+        if not skill:
+            return json.dumps({"success": False, "error": f"User skill {skill_id} not found"}, ensure_ascii=False)
+        return json.dumps({
+            "success": True,
+            "id": skill.id,
+            "name": skill.name,
+            "description": skill.description,
+            "content": skill.content,
+        }, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+
+
+@mcp.tool()
 async def ccm_create_skill(
     name: str,
     description: str,

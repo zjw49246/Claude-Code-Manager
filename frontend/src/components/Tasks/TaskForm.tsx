@@ -103,6 +103,15 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   const AVAILABLE_TOOLS = availableSkills;
   const enabledToolCount = Object.values(enabledTools).filter(Boolean).length;
 
+  const [userSkills, setUserSkills] = useState<{ id: number; name: string; description: string }[]>([]);
+  const [enabledUserSkills, setEnabledUserSkills] = useState<Record<number, boolean>>({});
+  const [showSkillsDropdown, setShowSkillsDropdown] = useState(false);
+  const skillsRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    api.listUserSkills().then((list: any[]) => setUserSkills(list.map((s) => ({ id: s.id, name: s.name, description: s.description })))).catch(() => {});
+  }, []);
+  const enabledUserSkillCount = Object.values(enabledUserSkills).filter(Boolean).length;
+
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       if (toolsRef.current && !toolsRef.current.contains(e.target as Node)) {
@@ -111,8 +120,11 @@ export function TaskForm({ onCreated }: TaskFormProps) {
       if (configRef.current && !configRef.current.contains(e.target as Node)) {
         setShowConfigPanel(false);
       }
+      if (skillsRef.current && !skillsRef.current.contains(e.target as Node)) {
+        setShowSkillsDropdown(false);
+      }
     };
-    if (showToolsDropdown || showConfigPanel) document.addEventListener('mousedown', handleClickOutside);
+    if (showToolsDropdown || showConfigPanel || showSkillsDropdown) document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [showToolsDropdown, showConfigPanel]);
 
@@ -178,6 +190,32 @@ export function TaskForm({ onCreated }: TaskFormProps) {
     setFilePreviews,
     onError: (msg) => setDropError(msg),
   });
+
+  useEffect(() => {
+    const handlePaste = (e: ClipboardEvent) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      const files: File[] = [];
+      for (const item of items) {
+        if (item.kind === 'file') {
+          const f = item.getAsFile();
+          if (f) files.push(f);
+        }
+      }
+      if (files.length > 0) {
+        e.preventDefault();
+        const combined = [...pendingFiles, ...files].slice(0, 10);
+        setPendingFiles(combined);
+        const newPreviews = files.filter(isImageFile).map((f) => URL.createObjectURL(f));
+        setFilePreviews((prev) => [...prev, ...newPreviews]);
+      }
+    };
+    const form = formRef.current;
+    if (form) {
+      form.addEventListener('paste', handlePaste);
+      return () => form.removeEventListener('paste', handlePaste);
+    }
+  }, [pendingFiles]);
 
   useEffect(() => {
     if (dropError) {
@@ -269,6 +307,11 @@ export function TaskForm({ onCreated }: TaskFormProps) {
             .reduce((acc, [k]) => ({ ...acc, [k]: true }), {} as Record<string, boolean>);
           return Object.keys(skills).length > 0 ? skills : undefined;
         })(),
+        ...(enabledUserSkillCount > 0 ? {
+          selected_user_skills: Object.entries(enabledUserSkills)
+            .filter(([, v]) => v)
+            .map(([k]) => Number(k)),
+        } : {}),
         ...(starOnCreate ? { starred: true } : {}),
         ...(cloneFromTaskId ? { clone_from_task_id: cloneFromTaskId as number } : {}),
       });
@@ -638,7 +681,44 @@ export function TaskForm({ onCreated }: TaskFormProps) {
         >
           <Star size={13} fill={starOnCreate ? 'currentColor' : 'none'} />
         </button>
-        {/* Skills dropdown */}
+        {/* User Skills dropdown */}
+        <div ref={skillsRef} className="relative">
+            <button
+              type="button"
+              onClick={() => setShowSkillsDropdown(!showSkillsDropdown)}
+              className={`flex items-center gap-1 text-xs px-2 py-1.5 rounded border transition-colors ${
+                enabledUserSkillCount > 0
+                  ? 'bg-green-600/30 text-green-300 border-green-500/50 hover:bg-green-600/40'
+                  : 'bg-gray-700 text-gray-400 border-gray-600 hover:bg-gray-600 hover:text-gray-300'
+              }`}
+            >
+              <span className="text-xs">📝</span>
+              <span className="hidden sm:inline">Skills{enabledUserSkillCount > 0 ? ` (${enabledUserSkillCount})` : ''}</span>
+              {enabledUserSkillCount > 0 && <span className="sm:hidden">{enabledUserSkillCount}</span>}
+            </button>
+            {showSkillsDropdown && (
+              <div className="absolute top-full mt-1 left-0 bg-gray-800 border border-gray-600 rounded shadow-lg z-20 min-w-[180px]">
+                {userSkills.length === 0 ? (
+                  <div className="px-3 py-2 text-xs text-gray-500">暂无 Skill，去 Skills 页面创建</div>
+                ) : userSkills.map((skill) => (
+                  <label
+                    key={skill.id}
+                    className="flex items-center gap-2 px-3 py-2 text-xs text-gray-300 hover:bg-gray-700 cursor-pointer"
+                    title={skill.description}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={!!enabledUserSkills[skill.id]}
+                      onChange={(e) => setEnabledUserSkills((prev) => ({ ...prev, [skill.id]: e.target.checked }))}
+                      className="accent-green-500"
+                    />
+                    {skill.name}
+                  </label>
+                ))}
+              </div>
+            )}
+          </div>
+        {/* Plugins dropdown */}
         {AVAILABLE_TOOLS.length > 0 && (
           <div ref={toolsRef} className="relative">
             <button
@@ -651,7 +731,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
               }`}
             >
               <Wrench size={13} />
-              <span className="hidden sm:inline">Skills{enabledToolCount > 0 ? ` (${enabledToolCount})` : ''}</span>
+              <span className="hidden sm:inline">Plugins{enabledToolCount > 0 ? ` (${enabledToolCount})` : ''}</span>
               {enabledToolCount > 0 && <span className="sm:hidden">{enabledToolCount}</span>}
             </button>
             {showToolsDropdown && (

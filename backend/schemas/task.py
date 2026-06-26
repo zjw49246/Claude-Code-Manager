@@ -34,6 +34,7 @@ class TaskCreate(BaseModel):
     sort_order: float | None = None
     enable_workflows: bool = False
     enabled_skills: dict | None = None
+    selected_user_skills: list[int] | None = None
     tags: list[str] | None = None
     image_paths: list[str] | None = None  # kept for backwards compat
     file_paths: list[str] | None = None
@@ -121,6 +122,7 @@ class TaskResponse(BaseModel):
     sort_order: float | None = None
     enable_workflows: bool
     enabled_skills: dict | None
+    selected_user_skills: list[int] | None = None
     starred: bool
     archived: bool
     has_unread: bool

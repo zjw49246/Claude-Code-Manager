@@ -390,10 +390,16 @@ class InstanceManager:
                 cmd.extend(["--disallowedTools", ",".join(sorted(set(disallowed)))])
             if mcp_config_path and Path(mcp_config_path).exists():
                 cmd.extend(["--mcp-config", mcp_config_path])
-            # Skill prompt injection
+            # Skill prompt injection (plugins + user skills)
             skill_prompt_path = build_skill_prompt_file(skills, enabled_skills, task_id)
             if skill_prompt_path:
                 cmd.extend(["--append-system-prompt-file", skill_prompt_path])
+            # User skill injection (L0 directory in prompt)
+            if task_id:
+                from backend.services.user_skill_injector import build_user_skill_prompt_sync
+                user_skill_path = build_user_skill_prompt_sync(task_id)
+                if user_skill_path:
+                    cmd.extend(["--append-system-prompt-file", user_skill_path])
             if system_prompt_mode and settings.append_system_prompt_file:
                 sp_path = Path(settings.append_system_prompt_file)
                 if not sp_path.is_absolute():
