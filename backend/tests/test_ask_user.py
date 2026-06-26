@@ -59,6 +59,18 @@ async def test_registry_discard_and_list_excludes_done():
     assert reg.get(p2.request_id) is None
 
 
+@pytest.mark.asyncio
+async def test_registry_list_all_spans_tasks_and_excludes_done():
+    reg = AskUserRegistry()
+    a = reg.create(task_id=1, session_id="s", questions=[{"question": "?"}])
+    b = reg.create(task_id=2, session_id="s", questions=[{"question": "?"}])
+    # list_all 跨 task 汇总（驱动全局通知）
+    assert {p.request_id for p in reg.list_all()} == {a.request_id, b.request_id}
+    reg.resolve(a.request_id, [])
+    # 已回答（future done）从全局列表剔除
+    assert [p.request_id for p in reg.list_all()] == [b.request_id]
+
+
 # ------------------------------------------------------------------- format
 
 def test_format_answer_reason_single_select():

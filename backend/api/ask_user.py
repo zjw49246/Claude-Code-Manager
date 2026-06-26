@@ -14,7 +14,7 @@ import json
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from backend.database import async_session
 from backend.models.log_entry import LogEntry
@@ -72,25 +72,39 @@ async def ask_user_wait(body: AskUserWaitRequest):
     )
     timeout = max(10, int(getattr(settings, "ask_user_timeout", 1800)))
 
-    # 落库（审计用，不进 chat 历史 allowed）+ 广播活跃卡片
+    summary = _questions_summary(body.questions)
+
+    # 落库（审计用，不进 chat 历史 allowed）+ 标记 task 未读 + 广播活跃卡片
+    # has_unread 让任务列表亮起未读点，即便用户当前不在该 task 页面也能察觉。
     async with async_session() as db:
         db.add(LogEntry(
             instance_id=instance_id,
             task_id=task_id,
             event_type="ask_user_question",
             role="system",
-            content=_questions_summary(body.questions),
+            content=summary,
             tool_name="AskUserQuestion",
             tool_input=json.dumps(body.questions, ensure_ascii=False),
             raw_json=json.dumps({"request_id": pending.request_id}, ensure_ascii=False),
         ))
+        await db.execute(
+            update(Task).where(Task.id == task_id).values(has_unread=True)
+        )
         await db.commit()
 
+    # 该 task 频道：渲染内联卡片（用户正在看这个 task 时）
     await broadcaster.broadcast(f"task:{task_id}", {
         "event_type": "ask_user_question",
         "request_id": pending.request_id,
         "questions": body.questions,
         "timeout_seconds": timeout,
+    })
+    # 全局 tasks 频道：弹出全局通知，让在别的页面的用户也能看到并跳转过来
+    await broadcaster.broadcast("tasks", {
+        "event": "ask_user_pending",
+        "task_id": task_id,
+        "request_id": pending.request_id,
+        "summary": summary,
     })
 
     try:
@@ -101,6 +115,11 @@ async def ask_user_wait(body: AskUserWaitRequest):
             "event_type": "ask_user_resolved",
             "request_id": pending.request_id,
             "timed_out": True,
+        })
+        await broadcaster.broadcast("tasks", {
+            "event": "ask_user_resolved",
+            "task_id": task_id,
+            "request_id": pending.request_id,
         })
         return {"answered": False, "timed_out": True}
     except asyncio.CancelledError:
@@ -121,6 +140,26 @@ async def ask_user_pending(task_id: int):
     return {
         "pending": [
             {"request_id": p.request_id, "questions": p.questions}
+            for p in pendings
+        ]
+    }
+
+
+@router.get("/ask-user/pending")
+async def ask_user_pending_all():
+    """全局：所有仍在等待回答的提问。
+
+    前端刷新/重连时回填全局通知，让用户即便不在对应 task 页面也能看到
+    哪些任务正在等待回答（避免 WS 卡片 live-only 在刷新后丢失）。
+    """
+    pendings = ask_user_registry.list_all()
+    return {
+        "pending": [
+            {
+                "task_id": p.task_id,
+                "request_id": p.request_id,
+                "summary": _questions_summary(p.questions),
+            }
             for p in pendings
         ]
     }
@@ -155,6 +194,12 @@ async def ask_user_submit(task_id: int, request_id: str, body: AskUserAnswer):
         "event_type": "ask_user_resolved",
         "request_id": request_id,
         "answers": body.answers,
+    })
+    # 关掉别的页面上挂着的全局通知
+    await broadcaster.broadcast("tasks", {
+        "event": "ask_user_resolved",
+        "task_id": task_id,
+        "request_id": request_id,
     })
     return {"ok": True}
 

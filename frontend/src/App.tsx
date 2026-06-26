@@ -13,6 +13,7 @@ import { PRMonitorPage } from './pages/PRMonitorPage';
 import WorkersPage from './pages/WorkersPage';
 import TeamPage from './pages/TeamPage';
 import { SkillsPage } from './pages/SkillsPage';
+import { AskUserNotifications } from './components/AskUserNotifications';
 import { getToken } from './api/client';
 import { isCapacitor, getServerUrl, getApiBase } from './config/server';
 
@@ -165,6 +166,7 @@ function App() {
             <ServerConfigPage onConfigured={() => window.location.reload()} />
           )}
         </main>
+        <AskUserNotifications />
       </div>
     </ErrorBoundary>
   );

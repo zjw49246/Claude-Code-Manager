@@ -798,6 +798,11 @@ export const api = {
     request<{ pending: { request_id: string; questions: AskUserQuestion[] }[] }>(
       `/api/tasks/${taskId}/ask-user/pending`,
     ),
+  // 全局：所有正在等待回答的提问（驱动跨页面通知）
+  getAskUserPendingAll: () =>
+    request<{ pending: { task_id: number; request_id: string; summary: string }[] }>(
+      `/api/ask-user/pending`,
+    ),
   getSubAgentSummary: (taskId: number) =>
     request<SubAgentSummary>(`/api/tasks/${taskId}/sub-agents/summary`),
 

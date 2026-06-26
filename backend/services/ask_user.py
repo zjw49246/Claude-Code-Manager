@@ -78,6 +78,10 @@ class AskUserRegistry:
             if p.task_id == task_id and not p.future.done()
         ]
 
+    def list_all(self) -> list[PendingAsk]:
+        """所有仍在等待回答的请求（全局通知 / 跨页面重连回填用）。"""
+        return [p for p in self._pending.values() if not p.future.done()]
+
 
 # 进程内单例
 ask_user_registry = AskUserRegistry()
