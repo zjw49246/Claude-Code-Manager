@@ -652,7 +652,7 @@ class InstanceManager:
             # 需要 auto-resume 让主 agent 处理积压的 <task-notification>。
             if task_id:
                 from backend.models.sub_agent import SubAgentSession
-                has_pending_monitors = False
+                has_pending_native = False
                 async with self.db_factory() as db:
                     stale = await db.execute(
                         select(SubAgentSession).where(
@@ -662,15 +662,15 @@ class InstanceManager:
                         )
                     )
                     for sa in stale.scalars().all():
-                        if sa.agent_type in ("native-monitor", "monitor"):
-                            has_pending_monitors = True
+                        if sa.agent_type in ("native-monitor", "monitor", "native-agent"):
+                            has_pending_native = True
                         sa.status = "completed"
                         sa.completed_at = datetime.utcnow()
                     await db.commit()
 
-                # Auto-resume: native monitor 随进程退出，
-                # resume 让主 agent 拿到 <task-notification> 并做出反应
-                if has_pending_monitors and exit_code == 0 and chat_initiated:
+                # Auto-resume: native sub-agents (monitor/agent) 随进程退出，
+                # resume 让主 agent 处理积压的结果并回复用户
+                if has_pending_native and exit_code == 0 and chat_initiated:
                     try:
                         from backend.main import dispatcher
                         from backend.services.dispatcher import PRIORITY_MONITOR_COMPLETE
@@ -1385,26 +1385,27 @@ class InstanceManager:
                     "status": "completed",
                 })
 
-                # Auto-resume: native monitor 完成后通知主 Agent
-                if existing.agent_type in ("native-monitor",):
+                # Auto-resume: native sub-agent 完成后通知主 Agent
+                if existing.agent_type in ("native-monitor", "native-agent"):
                     try:
                         from backend.main import dispatcher
                         from backend.services.dispatcher import PRIORITY_MONITOR_COMPLETE
-                        summary = existing.last_summary or existing.description or "监控完成"
+                        summary = existing.last_summary or existing.description or "子任务完成"
+                        label = "Monitor" if "monitor" in existing.agent_type else "Agent"
                         prompt = (
-                            f"[Native Monitor 完成] {summary}\n\n"
-                            "请根据监控结果决定下一步操作。"
+                            f"[{label} 完成] {summary}\n\n"
+                            "请根据结果回复用户。"
                         )
                         await dispatcher.enqueue_message(
                             task_id=task_id,
                             prompt=prompt,
                             priority=PRIORITY_MONITOR_COMPLETE,
-                            source="monitor:native-complete",
-                            user_message_text=f"[Monitor] 监控完成: {summary}",
+                            source=f"sub-agent:native-complete",
+                            user_message_text=f"[{label}] 后台任务完成: {summary[:100]}",
                         )
                     except Exception:
                         logger.exception(
-                            "Failed to enqueue auto-resume for native monitor on task %s",
+                            "Failed to enqueue auto-resume for native sub-agent on task %s",
                             task_id,
                         )
 
