@@ -1680,6 +1680,12 @@ class GlobalDispatcher:
 
             if turn == 0:
                 prompt = self._build_goal_initial_prompt(task)
+                # Pool: pick a healthy account for the fresh session (mirrors the
+                # non-goal Step 4 path). Without this, goal launches passed
+                # config_dir=None and silently inherited the hardcoded systemd
+                # CLAUDE_CONFIG_DIR — the pool was never consulted. See loop fix
+                # (#770); goal had the identical gap.
+                config_dir = await self._resolve_resume_config_dir(None)
                 await self.instance_manager.launch(
                     instance_id=instance_id,
                     prompt=prompt,
@@ -1691,11 +1697,15 @@ class GlobalDispatcher:
                     thinking_budget=task.thinking_budget,
                     effort_level=task.effort_level or effort_level,
                     provider=task.provider,
+                    config_dir=config_dir,
                     enable_workflows=task.enable_workflows,
                     enabled_skills=task.enabled_skills,
                 )
             else:
                 follow_up = self._build_goal_followup_prompt(last_reason, turn, max_turns)
+                # Resume on the session's resident account (no config_dir drift →
+                # PTY hot session preserved); migrate / fall back if cooled down.
+                config_dir = await self._resolve_resume_config_dir(session_id)
                 await self.instance_manager.launch(
                     instance_id=instance_id,
                     prompt=follow_up,
@@ -1708,6 +1718,7 @@ class GlobalDispatcher:
                     thinking_budget=task.thinking_budget,
                     effort_level=task.effort_level or effort_level,
                     provider=task.provider,
+                    config_dir=config_dir,
                     enable_workflows=task.enable_workflows,
                     enabled_skills=task.enabled_skills,
                 )

@@ -1969,6 +1969,45 @@ async def test_goal_achieved_after_one_turn(db_factory):
 
 
 @pytest.mark.asyncio
+async def test_goal_turn_passes_pool_config_dir(db_factory):
+    """Regression (#770 follow-up): goal launches must resolve a pool account
+    via _resolve_resume_config_dir and pass it as config_dir.
+
+    Same defect as loop mode — turn 0 (and followups) passed no config_dir, so
+    the child inherited the hardcoded systemd CLAUDE_CONFIG_DIR and the pool was
+    never consulted.
+    """
+    d = _make_dispatcher(db_factory)
+    d._resolve_resume_config_dir = AsyncMock(return_value="/pool/acc-9")
+
+    async with db_factory() as db:
+        inst = Instance(name="goal-pool-worker")
+        db.add(inst)
+        task = _make_goal_task(db)
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_obj = task
+
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.wait = AsyncMock(return_value=0)
+    d.instance_manager.processes = {inst_id: mock_proc}
+
+    from backend.services.goal_evaluator import GoalEvalResult
+    with patch("backend.services.goal_evaluator.GoalEvaluator.evaluate",
+               return_value=GoalEvalResult(achieved=True, reason="done")):
+        await d._run_goal_lifecycle(inst_id, task_obj, "/repo")
+
+    d._resolve_resume_config_dir.assert_awaited()
+    # turn 0 launches a fresh session → resolver called with None
+    assert d._resolve_resume_config_dir.await_args.args == (None,)
+    assert d.instance_manager.launch.await_args.kwargs["config_dir"] == "/pool/acc-9"
+
+
+@pytest.mark.asyncio
 async def test_goal_achieved_after_multiple_turns(db_factory):
     """Goal task continues until evaluator says achieved."""
     d = _make_dispatcher(db_factory)
