@@ -339,9 +339,9 @@ class UpdateService:
         await self._start_step(step)
         state.old_commit = (await self._run_cmd(["git", "rev-parse", "HEAD"]))["stdout"].strip()
 
-        # Reject if working directory has uncommitted changes
+        # Reject if working directory has uncommitted changes (ignore untracked files)
         status_result = await self._run_cmd(["git", "status", "--porcelain"])
-        dirty_files = [l for l in status_result["stdout"].strip().split("\n") if l.strip()]
+        dirty_files = [l for l in status_result["stdout"].strip().split("\n") if l.strip() and not l.startswith("??")]
         if dirty_files:
             await self._fail_step(
                 step, state,
