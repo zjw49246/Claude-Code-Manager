@@ -126,7 +126,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
     };
     if (showToolsDropdown || showConfigPanel || showSkillsDropdown) document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, [showToolsDropdown, showConfigPanel]);
+  }, [showToolsDropdown, showConfigPanel, showSkillsDropdown]);
 
   const STORAGE_KEY = 'cc_default_task_config';
 
