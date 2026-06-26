@@ -457,3 +457,9 @@
 - **修复**: `cdp_login.py` 的 chrome 参数加 `--disable-dev-shm-usage`（必需）+ `--disable-software-rasterizer`（顺带），并把启动等待 `sleep(4)→6`（小机型冷启动更稳）。加 flag 后 CDP ~1s 即开放，登录一次成功（实测 BuffaloWingsxvq@diplomats.com，订阅 max，写出有效 .credentials.json）。
 - **预防**: ①任何无头机上跑 Chrome 一律带 `--no-sandbox --disable-dev-shm-usage`，前者过 root、后者过小 /dev/shm，二者是服务器跑 Chrome 的标配；②同一仓库里有多条「启 Chrome」代码时，flag 要对齐（这次就是一条带一条没带）；③只在大机型验证过的浏览器自动化，换小机型必复测。
 - **Commit**: 本次提交
+
+### 2026-06-26 — task #770 loop 模式选号失效：launch 漏传 config_dir，号池从未被咨询
+- **问题**: loop 模式（含 `_resume_fix_signal` 补信号那次）调用 `instance_manager.launch()` 时**完全没传 `config_dir`**。`launch()` 只在 `config_dir` 为真时才写 `env["CLAUDE_CONFIG_DIR"]`，否则子进程继承 systemd 里写死的 `CLAUDE_CONFIG_DIR`。后果：loop 永远跑在那一个默认号上——不从池里选号、不避开冷却中的号、PTY 模式下 `iteration>0` resume 还可能落到没存该 session 的号上 `No conversation found`。普通 Step 4 路径早就 `pool_config_dir = await self._resolve_resume_config_dir(task.session_id)` 选好了，loop/goal 两条提前 return 的分支各自漏了。
+- **修复（本次提交）**: `_run_loop_iterations` 主 launch 与 `_resume_fix_signal` 各加一行 `config_dir = await self._resolve_resume_config_dir(resume_sid)` 并传入 launch——iteration 0（resume_sid=None）走「挑健康号」；iteration>0 锚到 session 所在号（不漂移 config_dir → 保 PTY 热 session）；号池耗尽时回退到 resident 号。新增回归测试 `test_loop_iteration_passes_pool_config_dir`（断言 launch 收到 resolver 返回的 config_dir）。
+- **预防**: ①新增「另起一条 lifecycle 分支」（loop/goal/plan）时，凡 launch 子进程都要问：号池选号那步（`_resolve_resume_config_dir`）走了没？别让分支静默继承 systemd 默认号。②`config_dir=None` 不是「用默认号」的安全默认，而是「听天由命继承 env」——池开着时必须显式选号。
+- **遗留**: **goal 模式（`_run_goal_lifecycle`）同款缺陷仍在**（turn 0 与 followup 的两处 launch 都没传 config_dir），本次只修了用户报的 loop；goal 待单独跟进。

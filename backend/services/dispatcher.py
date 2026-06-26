@@ -1489,6 +1489,16 @@ class GlobalDispatcher:
                     t = await db.get(Task, task.id)
                     resume_sid = t.session_id if t else None
 
+            # Pool: pick the account for this iteration (mirrors the non-loop
+            # Step 4 path). Without this, loop launches passed config_dir=None
+            # and silently inherited the hardcoded systemd CLAUDE_CONFIG_DIR —
+            # the pool was never consulted, cooled-down accounts were never
+            # avoided, and a PTY resume on iteration>0 could hit the wrong
+            # account and die with "No conversation found". For a resume it
+            # anchors to the session's resident account (no config_dir drift →
+            # PTY hot session preserved); fresh iterations get a healthy pick.
+            config_dir = await self._resolve_resume_config_dir(resume_sid)
+
             await self.instance_manager.launch(
                 instance_id=instance_id,
                 prompt=prompt,
@@ -1501,6 +1511,7 @@ class GlobalDispatcher:
                 thinking_budget=task.thinking_budget,
                 effort_level=task.effort_level or effort_level,
                 provider=task.provider,
+                config_dir=config_dir,
                 enable_workflows=task.enable_workflows,
                 enabled_skills=task.enabled_skills,
             )
@@ -2042,6 +2053,11 @@ class GlobalDispatcher:
             f'无法继续：{{"action": "abort", "reason": "具体原因"}}'
         )
 
+        # Same pool anchoring as the main loop launch: resume on the session's
+        # resident account, not the inherited systemd default (else --resume
+        # misses the JSONL on the wrong account).
+        config_dir = await self._resolve_resume_config_dir(resume_sid)
+
         logger.info(f"Loop task {task.id} iter {iteration}: resuming session {resume_sid} to fix missing signal")
         await self.instance_manager.launch(
             instance_id=instance_id,
@@ -2055,6 +2071,7 @@ class GlobalDispatcher:
             thinking_budget=task.thinking_budget,
             effort_level=effort_level,
             provider=task.provider,
+            config_dir=config_dir,
             enable_workflows=task.enable_workflows,
             enabled_skills=task.enabled_skills,
         )

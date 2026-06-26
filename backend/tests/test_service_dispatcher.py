@@ -418,6 +418,51 @@ async def test_loop_done_after_one_iteration(db_factory, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_loop_iteration_passes_pool_config_dir(db_factory, tmp_path):
+    """Regression (#770): loop launches must resolve a pool account via
+    _resolve_resume_config_dir and pass it as config_dir.
+
+    Before the fix the loop omitted config_dir entirely, so the child process
+    inherited the hardcoded systemd CLAUDE_CONFIG_DIR — the pool was never
+    consulted, cooled-down accounts were never avoided, and a PTY resume could
+    land on the wrong account ("No conversation found").
+    """
+    d = _make_dispatcher(db_factory)
+    d._resolve_resume_config_dir = AsyncMock(return_value="/pool/acc-7")
+
+    async with db_factory() as db:
+        inst = Instance(name="loop-pool-worker")
+        db.add(inst)
+        task = _make_loop_task(db, tmp_path)
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_obj = task
+
+    signal_path = tmp_path / ".claude-manager" / f"loop_signal_{task_obj.id}.json"
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.wait = AsyncMock(return_value=0)
+
+    async def launch_and_write(*args, **kwargs):
+        signal_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_signal(signal_path, "done", "all done", "1/1")
+        return 12345
+    d.instance_manager.launch = AsyncMock(side_effect=launch_and_write)
+    d.instance_manager.processes = {inst_id: mock_proc}
+
+    await d._run_loop_lifecycle(inst_id, task_obj, str(tmp_path))
+
+    # Pool was consulted, and its choice flowed into the launch.
+    d._resolve_resume_config_dir.assert_awaited()
+    # iteration 0 has no session to resume yet → resolver called with None
+    assert d._resolve_resume_config_dir.await_args.args == (None,)
+    assert d.instance_manager.launch.await_args.kwargs["config_dir"] == "/pool/acc-7"
+
+
+@pytest.mark.asyncio
 async def test_loop_continue_then_done(db_factory, tmp_path):
     """Loop iterates twice: first 'continue', then 'done'."""
     d = _make_dispatcher(db_factory)
