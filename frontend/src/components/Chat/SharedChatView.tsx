@@ -3,7 +3,7 @@ import { api } from '../../api/client';
 import type { SharedTaskReceived } from '../../api/client';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { ArrowLeft, Send, RefreshCw, Wifi, WifiOff } from 'lucide-react';
+import { ArrowLeft, Send, RefreshCw, Wifi, WifiOff, Loader2 } from 'lucide-react';
 
 interface SharedChatViewProps {
   shared: SharedTaskReceived;
@@ -73,19 +73,46 @@ export function SharedChatView({ shared, onBack }: SharedChatViewProps) {
 
     ws.onmessage = (ev) => {
       try {
-        const data = JSON.parse(ev.data);
-        if (data.action === 'subscribed') return;
+        const raw = JSON.parse(ev.data);
+        if (raw.action === 'subscribed') return;
+        const data = raw.data || raw;
+        const eventType = data.event_type || data.event;
+        if (!eventType) return;
 
-        if (data.event_type) {
-          const msg: ChatMsg = {
+        if (eventType === 'user_message') {
+          setSending(true);
+          setMessages(prev => [...prev, {
             id: Date.now(),
+            role: 'user',
+            event_type: 'user_message',
+            content: data.content || null,
+          }]);
+          return;
+        }
+
+        if (eventType === 'process_exit') {
+          setTimeout(() => setSending(false), 500);
+          return;
+        }
+
+        if (eventType === 'status_change') return;
+        if (['thinking', 'system_init'].includes(eventType)) return;
+        const skipSystem = ['task_progress', 'thinking_tokens', 'token_usage', 'api_request', 'api_response'];
+        if (eventType === 'system_event' && skipSystem.includes(data.content)) return;
+
+        if (['message', 'result'].includes(eventType) && data.role === 'assistant') {
+          setSending(false);
+        }
+
+        if (data.content || data.tool_name) {
+          setMessages(prev => [...prev, {
+            id: Date.now() + Math.random(),
             role: data.role || 'assistant',
-            event_type: data.event_type,
+            event_type: eventType,
             content: data.content || null,
             tool_name: data.tool_name,
             is_error: data.is_error,
-          };
-          setMessages(prev => [...prev, msg]);
+          }]);
         }
       } catch { /* ignore */ }
     };
@@ -131,7 +158,6 @@ export function SharedChatView({ shared, onBack }: SharedChatViewProps) {
       await api.sendSharedChat(shared.id, text);
     } catch (e) {
       setError(String(e));
-    } finally {
       setSending(false);
     }
   };
@@ -193,6 +219,12 @@ export function SharedChatView({ shared, onBack }: SharedChatViewProps) {
         {messages.map((msg) => (
           <MessageRow key={msg.id} msg={msg} />
         ))}
+        {sending && (
+          <div className="flex gap-2 items-center text-gray-500 text-sm px-3">
+            <Loader2 size={14} className="animate-spin" />
+            <span>Claude is thinking...</span>
+          </div>
+        )}
         <div ref={bottomRef} />
       </div>
 
