@@ -88,7 +88,19 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
         api.listProjects(),
         api.listTags(),
       ]);
-      setTasks(filtered);
+      // When chat is open, preserve sidebar order — only update task data in place
+      // to prevent the list from jumping when last_accessed_at changes sort order.
+      if (chatTaskRef.current) {
+        setTasks(prev => {
+          const byId = new Map(filtered.map(t => [t.id, t]));
+          const updated = prev.map(t => byId.get(t.id) ?? t);
+          const newIds = new Set(prev.map(t => t.id));
+          const added = filtered.filter(t => !newIds.has(t.id));
+          return [...updated.filter(t => byId.has(t.id)), ...added];
+        });
+      } else {
+        setTasks(filtered);
+      }
       setTotalCount(count.total);
       setAllTasks(all);
       setProjects(projs);
