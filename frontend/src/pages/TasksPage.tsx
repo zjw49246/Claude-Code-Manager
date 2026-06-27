@@ -88,15 +88,21 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
         api.listProjects(),
         api.listTags(),
       ]);
-      // When chat is open, preserve sidebar order — only update task data in place
-      // to prevent the list from jumping when last_accessed_at changes sort order.
+      // When chat is open, freeze sidebar order: update task data in place and
+      // append genuinely-new tasks at the end, but NEVER drop a task just because
+      // it fell off page-1. With 20/page over hundreds of tasks, an active task
+      // (loop/executing) bumping last_accessed_at constantly crosses the page-1
+      // boundary; the old code dropped the task that fell off and re-appended the
+      // returning one at the end, so the list churned/flickered every few seconds.
+      // Keeping fallen-off tasks in place (with last-known data until they return)
+      // is what "freeze" should mean — the full server order is restored on close.
       if (chatTaskRef.current) {
         setTasks(prev => {
           const byId = new Map(filtered.map(t => [t.id, t]));
           const updated = prev.map(t => byId.get(t.id) ?? t);
-          const newIds = new Set(prev.map(t => t.id));
-          const added = filtered.filter(t => !newIds.has(t.id));
-          return [...updated.filter(t => byId.has(t.id)), ...added];
+          const prevIds = new Set(prev.map(t => t.id));
+          const added = filtered.filter(t => !prevIds.has(t.id));
+          return [...updated, ...added];
         });
       } else {
         setTasks(filtered);
