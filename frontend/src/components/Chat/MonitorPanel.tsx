@@ -45,7 +45,6 @@ function MonitorSessionRow({ session, taskId, onStopped }: { session: MonitorSes
   const [expanded, setExpanded] = useState(false);
   const [checks, setChecks] = useState<MonitorCheck[]>([]);
   const [stopping, setStopping] = useState(false);
-  // native 子 agent 由模型/harness 自管：没有可停的子进程，也没有 checks 明细
   const isNative = session.source === 'native';
 
   const loadChecks = useCallback(() => {
@@ -71,14 +70,12 @@ function MonitorSessionRow({ session, taskId, onStopped }: { session: MonitorSes
   return (
     <div className="border border-gray-700 rounded">
       <div className="flex items-center gap-2 px-3 py-2">
-        {!isNative && (
-          <button
-            className="text-gray-400 hover:text-gray-200"
-            onClick={() => setExpanded(!expanded)}
-          >
-            {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-          </button>
-        )}
+        <button
+          className="text-gray-400 hover:text-gray-200"
+          onClick={() => setExpanded(!expanded)}
+        >
+          {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        </button>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
             <TypeChip agentType={session.agent_type} source={session.source} />
