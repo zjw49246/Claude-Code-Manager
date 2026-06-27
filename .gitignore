@@ -30,3 +30,7 @@ archive-do-not-use/
 # Claude Code CLI project MCP config — auto-written per machine/session
 # (absolute venv path, ephemeral port, session-id). Not read by CCM itself.
 .mcp.json
+
+# AWS sub-account credentials (huangyixiao) — never commit
+huangyixiao.pem
+huangyixiao-login.csv

@@ -105,6 +105,27 @@ class TestResolveResumeConfigDir:
         assert new_jsonl.stat().st_ino == old_jsonl.stat().st_ino
 
     @pytest.mark.asyncio
+    async def test_healthy_resident_reused_without_probe(self, dispatcher, pool, tmp_path, monkeypatch):
+        """Hot path: session lives on a healthy account → reuse it as-is.
+
+        No ``claude -p`` probe (the old per-message latency) and no migration /
+        config_dir drift (which would drop the PTY hot session). We prove the
+        probe is never reached by making it explode if called.
+        """
+        monkeypatch.setenv("HOME", str(tmp_path))
+        def _boom(acc):
+            raise AssertionError("probe must not run on the resume hot path")
+        monkeypatch.setattr(pool, "_probe_account", _boom)
+        _seed_session(tmp_path / "claude-1", "sess-hot")
+        # acc-1 healthy (no cooldown) — must be returned untouched.
+
+        result = await dispatcher._resolve_resume_config_dir("sess-hot")
+
+        assert result == str(tmp_path / "claude-1")
+        # Session NOT copied into the other account (no drift).
+        assert not (tmp_path / "claude-2" / "projects").exists()
+
+    @pytest.mark.asyncio
     async def test_pool_disabled_returns_none(self, tmp_path, monkeypatch):
         """No pool → use the inherited/default account (return None)."""
         monkeypatch.setenv("HOME", str(tmp_path))

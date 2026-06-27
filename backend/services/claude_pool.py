@@ -428,6 +428,22 @@ class ClaudePool:
         self._cooldowns.pop(account_id, None)
         logger.info("Pool cooldown cleared for account %s", account_id)
 
+    def is_in_cooldown(self, config_dir: str) -> bool:
+        """Cheap (no subprocess) check: is this account currently cooled down?
+
+        Used on the resume hot path to decide whether the session's resident
+        account is healthy enough to reuse as-is, instead of spawning a
+        ``claude -p`` validation probe. Rate-limit / auth-failure cooldowns are
+        already tracked in :attr:`_cooldowns`, so this is enough to avoid
+        handing work to a known-bad account. A config_dir that isn't a pool
+        account (e.g. a leftover ``~/.claude*`` dir) is treated as not cooled
+        down — we can't know better and ``--resume`` should still find it.
+        """
+        account_id = self.account_id_from_config_dir(config_dir)
+        if not account_id:
+            return False
+        return time.time() < self._cooldowns.get(account_id, 0)
+
     def locate_session_config_dir(self, session_id: str, extra_dirs: list[str] | None = None) -> str | None:
         """Find which config dir actually holds the session JSONL.
 

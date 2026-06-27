@@ -647,34 +647,49 @@ class GlobalDispatcher:
         """
         if not (self.pool and self.pool.enabled):
             return None
-        config_dir = await self.pool.select_async(validate=True)
-        if config_dir:
-            if session_id:
-                from backend.services.claude_pool import migrate_session
-                # The session may live under any account dir (whichever ran the
-                # previous turn), not necessarily env CLAUDE_CONFIG_DIR.
-                old_config_dir = self.pool.locate_session_config_dir(session_id)
-                if old_config_dir and old_config_dir != config_dir:
+
+        # --- Resume happy path: anchor to the session's resident account ---
+        # The expensive part used to be ``select_async(validate=True)``, which
+        # spawned a ``claude -p`` probe (a full API round-trip, up to 30s) on
+        # EVERY message before resume even started. That probe is redundant on
+        # the resume path: rate-limited / auth-failed accounts are already
+        # excluded by the in-memory cooldown map, and a limit that slips through
+        # surfaces as a recoverable event the reactive rotation path handles.
+        # Worse, validate-driven round-robin drifted the config_dir off the
+        # session's resident account every turn, forcing the PTY pool to drop a
+        # hot session and pay an 8s cold restart. So: if the session lives on a
+        # healthy (not cooled-down) account, reuse it directly — no probe, no
+        # migration, no config_dir drift, PTY hot-session preserved.
+        if session_id:
+            resident = self.pool.locate_session_config_dir(session_id)
+            if resident and not self.pool.is_in_cooldown(resident):
+                return resident
+            # Resident account is missing or rate-limited → pick a healthy one
+            # cheaply (cooldown-aware, no subprocess) and migrate the session in.
+            config_dir = self.pool.select(validate=False)
+            if config_dir:
+                if resident and resident != config_dir:
+                    from backend.services.claude_pool import migrate_session
                     migrate_session(
-                        old_config_dir=old_config_dir,
+                        old_config_dir=resident,
                         new_config_dir=config_dir,
                         session_id=session_id,
                     )
-            return config_dir
-        # Pool exhausted: anchor to where the session actually lives so
-        # --resume finds the conversation instead of hard-failing on a wrong
-        # (inherited) account dir.
-        if session_id:
-            located = self.pool.locate_session_config_dir(session_id)
-            if located:
+                return config_dir
+            # Pool exhausted: anchor to where the session actually lives so
+            # --resume finds the conversation instead of hard-failing on a wrong
+            # (inherited) account dir.
+            if resident:
                 logger.warning(
                     "Pool exhausted; resuming session %s on its resident account "
                     "dir %s (account may be rate-limited, but --resume can still "
                     "find the conversation)",
-                    session_id, located,
+                    session_id, resident,
                 )
-            return located
-        return None
+            return resident
+
+        # Fresh launch (no session to anchor): just pick a healthy account.
+        return self.pool.select(validate=False)
 
     async def _collect_failure_output(self, instance_id: int, task_id: int) -> str:
         """Gather stderr + recent log text once for failure classification.
