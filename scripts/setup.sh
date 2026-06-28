@@ -56,8 +56,23 @@ npm install --no-fund --no-audit
 npm run build
 cd ..
 
-# ── 6. Claude CLI warmup（完成 onboarding 对话框，否则 PTY 模式 MCP 不初始化）
-echo "[6/6] Claude CLI warmup..."
+# ── 6. SSH 密钥（Worker 功能需要，用于 Manager→Worker SSH 连接）────────
+echo "[6/8] 配置 SSH 密钥..."
+CCM_KEY="$HOME/.ssh/ccm_worker_key"
+if [ ! -f "$CCM_KEY" ]; then
+    ssh-keygen -t ed25519 -f "$CCM_KEY" -N "" -C "ccm-worker-$(hostname)" >/dev/null 2>&1
+    echo "  生成密钥: $CCM_KEY"
+else
+    echo "  密钥已存在: $CCM_KEY"
+fi
+# 把公钥加到 authorized_keys（允许 Worker 反向连接本机，或本机作为 Worker 被连接）
+if ! grep -qf "${CCM_KEY}.pub" "$HOME/.ssh/authorized_keys" 2>/dev/null; then
+    cat "${CCM_KEY}.pub" >> "$HOME/.ssh/authorized_keys"
+    echo "  公钥已添加到 authorized_keys"
+fi
+
+# ── 7. Claude CLI warmup（完成 onboarding 对话框，否则 PTY 模式 MCP 不初始化）
+echo "[7/8] Claude CLI warmup..."
 if command -v claude &>/dev/null; then
     # Phase 1: -p 模式填充 GrowthBook cache + 验证凭证
     timeout 30 claude -p 'reply: ok' --dangerously-skip-permissions 2>/dev/null || true
@@ -93,7 +108,30 @@ asyncio.run(warmup())
 ' 2>&1 | tail -1
 fi
 
+# ── 8. 自动生成 .env（如不存在）───────────────────────────────────────
+echo "[8/8] 配置 .env..."
+if [ ! -f .env ]; then
+    TOKEN=$(python3 -c "import secrets; print(secrets.token_urlsafe(24))")
+    cat > .env <<ENVEOF
+AUTH_TOKEN=${TOKEN}
+DATABASE_URL=sqlite+aiosqlite:///./claude_manager.db
+WORKSPACE_DIR=~/Projects
+AUTO_START_DISPATCHER=true
+PORT=8002
+POOL_ENABLED=true
+WORKER_SSH_KEY_PATH=${CCM_KEY}
+ENVEOF
+    echo "  .env 已生成（AUTH_TOKEN=${TOKEN}）"
+else
+    # 确保 WORKER_SSH_KEY_PATH 存在
+    if ! grep -q "WORKER_SSH_KEY_PATH" .env; then
+        echo "WORKER_SSH_KEY_PATH=${CCM_KEY}" >> .env
+        echo "  已追加 WORKER_SSH_KEY_PATH 到 .env"
+    fi
+    echo "  .env 已存在，跳过生成"
+fi
+
 echo ""
 echo "=== 初始化完成 ==="
-echo "创建 .env 文件后启动服务："
+echo "启动服务："
 echo "  uv run uvicorn backend.main:app --host 127.0.0.1 --port 8002"
