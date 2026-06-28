@@ -585,6 +585,13 @@ class ClaudePool:
         async def fetch_one(account: PoolAccount) -> dict:
             base = {"id": account.id, "email": account.email, "enabled": account.enabled,
                     "subscription_type": None, "error": None, "usage": None}
+            # Disabled (retired) accounts make zero outbound requests: don't read
+            # their credentials, don't refresh their OAuth token, don't hit the
+            # usage API. Combined with select() skipping them and resume migrating
+            # off them, a disabled account is fully untouched by this process.
+            if not account.enabled:
+                base["error"] = "disabled"
+                return base
             cred_path = Path(account.config_dir) / ".credentials.json"
             try:
                 creds = json.loads(cred_path.read_text(encoding="utf-8"))["claudeAiOauth"]

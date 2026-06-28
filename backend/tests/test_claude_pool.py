@@ -610,6 +610,23 @@ class TestFetchUsage:
         assert by_id["acc-2"]["usage"] is None
 
     @pytest.mark.asyncio
+    async def test_fetch_usage_skips_disabled_no_request(self, pool, tmp_path, monkeypatch):
+        """Disabled accounts make zero outbound usage requests, even with valid
+        creds on disk: no token read/refresh, no usage API call."""
+        self._write_creds(tmp_path / "claude-1")  # acc-1 enabled
+        self._write_creds(tmp_path / "claude-3")  # acc-3 disabled — must be skipped
+        counter = {"n": 0}
+        payload = {"five_hour": {"utilization": 1.0, "resets_at": None}}
+        monkeypatch.setattr("httpx.AsyncClient", self._fake_client(payload, counter=counter))
+        results = await pool.fetch_usage()
+        by_id = {r["id"]: r for r in results}
+        # acc-3 reported as disabled, never queried.
+        assert by_id["acc-3"]["error"] == "disabled"
+        assert by_id["acc-3"]["usage"] is None
+        # Only the one enabled account with creds hit the usage API.
+        assert counter["n"] == 1
+
+    @pytest.mark.asyncio
     async def test_fetch_usage_expired_token(self, pool, tmp_path, monkeypatch):
         # 无 refreshToken → 无法刷新，报 token_expired
         self._write_creds(tmp_path / "claude-1", expires_in_ms=1000)
