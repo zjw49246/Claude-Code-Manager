@@ -551,12 +551,37 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
 
   const fetchHistory = useCallback(() => {
     setHistoryLoading(true);
-    api.getTaskChatHistory(task.id, true, HISTORY_PAGE_SIZE, 0, true).then((msgs) => {
+    Promise.all([
+      api.getTaskChatHistory(task.id, true, HISTORY_PAGE_SIZE, 0, true),
+      api.getAskUserPending(task.id).catch(() => ({ pending: [] as { request_id: string; questions: AskUserQuestion[] }[] })),
+    ]).then(([msgs, askPending]) => {
       const filtered = msgs.filter((m) =>
         !((m.event_type === 'message' || m.event_type === 'result') && !m.content)
       );
-      setMessages(filtered);
       setHasMoreHistory(msgs.length >= HISTORY_PAGE_SIZE);
+      const existingIds = new Set(
+        filtered.filter((m) => m.event_type === 'ask_user_question').map((m) => m.request_id)
+      );
+      const cards: ChatMessage[] = (askPending.pending || [])
+        .filter((p) => !existingIds.has(p.request_id))
+        .map((p) => ({
+          id: Date.now() + Math.random(),
+          role: 'system' as const,
+          event_type: 'ask_user_question',
+          content: null,
+          tool_name: 'AskUserQuestion',
+          tool_input: null,
+          tool_output: null,
+          is_error: false,
+          loop_iteration: null,
+          timestamp: new Date().toISOString(),
+          image_urls: null,
+          attachments: null,
+          request_id: p.request_id,
+          ask_questions: p.questions,
+          ask_status: 'pending',
+        }));
+      setMessages(cards.length ? [...filtered, ...cards] : filtered);
     }).catch(() => {}).finally(() => setHistoryLoading(false));
   }, [task.id]);
 
@@ -618,37 +643,6 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
     api.listMonitorSessions(task.id).then(setMonitorSessions).catch(() => {});
   }, [task.id]);
 
-  // 重连/切换 task 时回填仍在等待回答的 ask_user 卡片（WS 卡片是 live-only）
-  useEffect(() => {
-    api.getAskUserPending(task.id).then(({ pending }) => {
-      if (!pending.length) return;
-      setMessages((prev) => {
-        const existing = new Set(
-          prev.filter((m) => m.event_type === 'ask_user_question').map((m) => m.request_id)
-        );
-        const cards: ChatMessage[] = pending
-          .filter((p) => !existing.has(p.request_id))
-          .map((p) => ({
-            id: Date.now() + Math.random(),
-            role: 'system',
-            event_type: 'ask_user_question',
-            content: null,
-            tool_name: 'AskUserQuestion',
-            tool_input: null,
-            tool_output: null,
-            is_error: false,
-            loop_iteration: null,
-            timestamp: new Date().toISOString(),
-            image_urls: null,
-            attachments: null,
-            request_id: p.request_id,
-            ask_questions: p.questions,
-            ask_status: 'pending',
-          }));
-        return cards.length ? [...prev, ...cards] : prev;
-      });
-    }).catch(() => {});
-  }, [task.id]);
 
   const monitorCount = useMemo(
     () => monitorSessions.filter((s) => s.status === 'running').length,
