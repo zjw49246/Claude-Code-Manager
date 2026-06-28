@@ -339,20 +339,32 @@ class UpdateService:
         await self._start_step(step)
         state.old_commit = (await self._run_cmd(["git", "rev-parse", "HEAD"]))["stdout"].strip()
 
-        # Reject if working directory has uncommitted changes (ignore untracked files)
+        # Auto-stash local changes before pulling
         status_result = await self._run_cmd(["git", "status", "--porcelain"])
         dirty_files = [l for l in status_result["stdout"].strip().split("\n") if l.strip() and not l.startswith("??")]
+        stashed = False
         if dirty_files:
-            await self._fail_step(
-                step, state,
-                f"工作目录有未提交的改动（{len(dirty_files)} 个文件），请先提交或清理后再更新"
-            )
-            return
+            stash_result = await self._run_cmd(["git", "stash", "push", "-m", "ccm-auto-stash-before-update"], step=step)
+            if stash_result["returncode"] != 0:
+                await self._fail_step(step, state, f"git stash 失败: {stash_result['stderr']}")
+                return
+            stashed = True
+            await self._broadcast("log_line", step="git_pull", log=f"已暂存 {len(dirty_files)} 个本地改动", status="running")
 
         result = await self._run_cmd(["git", "pull", "--rebase", "origin", "main"], timeout=60, step=step)
         if result["returncode"] != 0:
+            if stashed:
+                await self._run_cmd(["git", "stash", "pop"])
             await self._fail_step(step, state, f"git pull 失败: {result['stderr']}")
             return
+
+        # Restore stashed changes
+        if stashed:
+            pop_result = await self._run_cmd(["git", "stash", "pop"])
+            if pop_result["returncode"] != 0:
+                await self._broadcast("log_line", step="git_pull", log="本地改动与更新冲突，已保留在 git stash 中，请手动处理", status="running")
+            else:
+                await self._broadcast("log_line", step="git_pull", log="本地改动已恢复", status="running")
 
         state.new_commit = (await self._run_cmd(["git", "rev-parse", "HEAD"]))["stdout"].strip()
 
