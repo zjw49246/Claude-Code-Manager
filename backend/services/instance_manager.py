@@ -1153,6 +1153,27 @@ class InstanceManager:
                         "new_status": "executing",
                     })
 
+        # Skip streaming text fragments (e.g. "court" from Opus 4.8 encrypted
+        # thinking). These are tiny text chunks emitted before a tool_use block
+        # with no stop_reason — not real assistant replies.
+        if (
+            event["event_type"] == "message"
+            and event.get("role") == "assistant"
+            and event.get("content")
+            and len(event["content"]) < 10
+        ):
+            raw = event.get("raw_json")
+            if raw:
+                import json as _json
+                try:
+                    parsed = _json.loads(raw) if isinstance(raw, str) else raw
+                    stop = (parsed.get("message") or {}).get("stop_reason")
+                    if not stop:
+                        logger.debug("Dropping streaming fragment: %r", event["content"])
+                        return
+                except (ValueError, TypeError):
+                    pass
+
         # Store in DB
         async with self.db_factory() as db:
             entry = LogEntry(
