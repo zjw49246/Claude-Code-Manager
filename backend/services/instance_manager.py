@@ -1160,7 +1160,7 @@ class InstanceManager:
             event["event_type"] == "message"
             and event.get("role") == "assistant"
             and event.get("content")
-            and len(event["content"]) < 10
+            and len(event["content"]) < 5
         ):
             raw = event.get("raw_json")
             if raw:
