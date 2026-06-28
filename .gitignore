@@ -34,3 +34,11 @@ archive-do-not-use/
 # AWS sub-account credentials (huangyixiao) — never commit
 huangyixiao.pem
 huangyixiao-login.csv
+
+# AWS sub-account credentials (wujunhao)
+wujunhao.pem
+wujunhao-login.csv
+
+# AWS sub-account credentials (wanghuan)
+wanghuan.pem
+wanghuan-login.csv
