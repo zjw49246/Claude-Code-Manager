@@ -39,6 +39,8 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
   const [sharingTask, setSharingTask] = useState<Task | null>(null);
   const chatTaskRef = useRef<Task | null>(null);
   chatTaskRef.current = chatTask;
+  const chatTaskIdRef = useRef(chatTaskId);
+  chatTaskIdRef.current = chatTaskId;
   const skipFreezeOnce = useRef(false);
 
   const setChatTaskWrapped = useCallback((t: Task | null) => {
@@ -116,11 +118,12 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
       // Resolve chatTaskId from URL on first load, or update open chatTask.
       // chatTaskId comes from URL hash — null after onBack.
       // chatTaskRef tracks the currently open chat — used to refresh its data.
-      if (chatTaskId) {
+      const currentChatTaskId = chatTaskIdRef.current;
+      if (currentChatTaskId) {
         const pool = [...filtered, ...all];
-        let found = pool.find((t) => t.id === chatTaskId);
+        let found = pool.find((t) => t.id === currentChatTaskId);
         if (!found) {
-          try { found = await api.getTask(chatTaskId); } catch { /* task may not exist */ }
+          try { found = await api.getTask(currentChatTaskId); } catch { /* task may not exist */ }
         }
         if (found) setChatTaskWrapped(found);
       } else if (chatTaskRef.current) {
@@ -131,7 +134,7 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
     } catch (e) {
       console.error('Failed to load tasks:', e);
     }
-  }, [statusFilterParam, showArchived, projectFilter, starredFilter, unreadFilter, page, chatTaskId, setChatTaskWrapped]);
+  }, [statusFilterParam, showArchived, projectFilter, starredFilter, unreadFilter, page, setChatTaskWrapped]);
 
   useEffect(() => {
     refresh();
@@ -240,7 +243,10 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
 
   // 侧边栏拖拽排序（与主列表同一套逻辑）
   const sidebarTasks = searchResults ?? filteredTasks;
-  const reorderRefresh = useCallback(() => {
+  const reorderRefresh = useCallback((optimistic?: Task[]) => {
+    if (optimistic) {
+      setTasks(optimistic);
+    }
     skipFreezeOnce.current = true;
     refresh();
   }, [refresh]);

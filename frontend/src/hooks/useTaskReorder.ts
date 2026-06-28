@@ -76,7 +76,7 @@ interface ReorderApi {
  *   导致"浮起来但拖不动"）
  * - 标星置顶保留：只能在同 starred 分组内移动
  */
-export function useTaskReorder(tasks: Task[], onReordered: () => void, autoSort = true): ReorderApi {
+export function useTaskReorder(tasks: Task[], onReordered: (optimistic?: Task[]) => void, autoSort = true): ReorderApi {
   const [draggingId, setDraggingId] = useState<number | null>(null);
   const [overIndex, setOverIndex] = useState<number | null>(null);
   const longPress = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -99,10 +99,14 @@ export function useTaskReorder(tasks: Task[], onReordered: () => void, autoSort 
     const toIdx = Math.min(Math.max(toIdxRaw, gs), ge);
     if (toIdx === fromIdx) return;
     const sort = newSortFor(list, fromIdx, toIdx, autoSortRef.current);
+    // Optimistic: reorder locally first for instant feedback
+    const reordered = [...list];
+    const [moved] = reordered.splice(fromIdx, 1);
+    reordered.splice(toIdx > fromIdx ? toIdx - 1 : toIdx, 0, moved);
+    onReordered(reordered);
     try {
       await api.updateTask(fromId, { sort_order: sort });
-      onReordered();
-    } catch { /* keep order */ }
+    } catch { /* keep optimistic order */ }
   }, [onReordered]);
 
   const endDrag = useCallback((commitDrop: boolean) => {
