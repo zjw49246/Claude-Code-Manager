@@ -126,6 +126,25 @@ class TestResolveResumeConfigDir:
         assert not (tmp_path / "claude-2" / "projects").exists()
 
     @pytest.mark.asyncio
+    async def test_disabled_resident_migrates_off(self, dispatcher, pool, tmp_path, monkeypatch):
+        """enabled=false is a hard guarantee: a session sitting on a disabled
+        account is migrated off it on resume, never reused — even though the
+        account is healthy (no cooldown) and still holds the JSONL."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(pool, "_probe_account", lambda acc: True)
+        # Retire acc-1 (where the session lives); acc-2 stays enabled.
+        for a in pool._accounts:
+            if a.id == "acc-1":
+                a.enabled = False
+        _seed_session(tmp_path / "claude-1", "sess-dis")
+
+        result = await dispatcher._resolve_resume_config_dir("sess-dis")
+
+        # Must NOT reuse the disabled resident — migrated to the enabled account.
+        assert result == str(tmp_path / "claude-2")
+        assert (tmp_path / "claude-2" / "projects" / "-home-user-repo" / "sess-dis.jsonl").exists()
+
+    @pytest.mark.asyncio
     async def test_pool_disabled_returns_none(self, tmp_path, monkeypatch):
         """No pool → use the inherited/default account (return None)."""
         monkeypatch.setenv("HOME", str(tmp_path))

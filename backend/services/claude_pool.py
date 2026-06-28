@@ -444,6 +444,22 @@ class ClaudePool:
             return False
         return time.time() < self._cooldowns.get(account_id, 0)
 
+    def is_disabled(self, config_dir: str) -> bool:
+        """Whether this config_dir belongs to a pool account that is disabled.
+
+        Used on the resume hot path so a session that physically lives on a
+        ``enabled=false`` account is migrated off it rather than reused — that
+        is the only way ``enabled=false`` becomes a hard "never call this
+        account" guarantee (``select`` already skips disabled accounts for fresh
+        launches, but resume anchors to wherever the session JSONL sits). A
+        config_dir that isn't a pool account (e.g. a leftover ``~/.claude*``
+        dir) is treated as not disabled — we can't know better.
+        """
+        account = next(
+            (a for a in self._accounts if a.config_dir == config_dir), None
+        )
+        return account is not None and not account.enabled
+
     def locate_session_config_dir(self, session_id: str, extra_dirs: list[str] | None = None) -> str | None:
         """Find which config dir actually holds the session JSONL.
 

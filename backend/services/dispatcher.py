@@ -662,10 +662,18 @@ class GlobalDispatcher:
         # migration, no config_dir drift, PTY hot-session preserved.
         if session_id:
             resident = self.pool.locate_session_config_dir(session_id)
-            if resident and not self.pool.is_in_cooldown(resident):
+            if (
+                resident
+                and not self.pool.is_in_cooldown(resident)
+                and not self.pool.is_disabled(resident)
+            ):
                 return resident
-            # Resident account is missing or rate-limited → pick a healthy one
-            # cheaply (cooldown-aware, no subprocess) and migrate the session in.
+            # Resident account is missing, rate-limited, or disabled → pick a
+            # healthy enabled account cheaply (cooldown/enabled-aware, no
+            # subprocess) and migrate the session in. The disabled case makes
+            # ``enabled=false`` a hard guarantee: an in-flight session sitting on
+            # a retired account is moved off it on its next resume instead of
+            # being reused.
             config_dir = self.pool.select(validate=False)
             if config_dir:
                 if resident and resident != config_dir:
