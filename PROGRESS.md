@@ -463,3 +463,10 @@
 - **修复（本次提交）**: `_run_loop_iterations` 主 launch 与 `_resume_fix_signal` 各加一行 `config_dir = await self._resolve_resume_config_dir(resume_sid)` 并传入 launch——iteration 0（resume_sid=None）走「挑健康号」；iteration>0 锚到 session 所在号（不漂移 config_dir → 保 PTY 热 session）；号池耗尽时回退到 resident 号。新增回归测试 `test_loop_iteration_passes_pool_config_dir`（断言 launch 收到 resolver 返回的 config_dir）。
 - **预防**: ①新增「另起一条 lifecycle 分支」（loop/goal/plan）时，凡 launch 子进程都要问：号池选号那步（`_resolve_resume_config_dir`）走了没？别让分支静默继承 systemd 默认号。②`config_dir=None` 不是「用默认号」的安全默认，而是「听天由命继承 env」——池开着时必须显式选号。
 - **goal 模式同款修复（commit 7499d94 之后的后续提交）**: `_run_goal_lifecycle` 的 turn 0（fresh，resolver 传 None）与 followup（resume，resolver 传 session_id）两处 launch 同样补上 `config_dir = await self._resolve_resume_config_dir(...)`。新增回归测试 `test_goal_turn_passes_pool_config_dir`。至此 loop / goal / Step 4 三条路径选号行为一致。
+
+### 2026-06-28 — Safari 整页崩 "Invalid regular expression: invalid group specifier name"（前端 lookbehind）
+- **问题**: 用户在 Safari 打开 `*.claude-code-manager.com`（CCM 前端）整页崩，错误边界显示 `Something went wrong / Invalid regular expression: invalid group specifier name`。Chrome 正常，故之前 curl/Chrome 验证一直没暴露。
+- **根因**: 依赖 `mdast-util-gfm-autolink-literal@2.0.1`（`remark-gfm@4` → react-markdown 渲染 Chat markdown 时引入）在模块加载时构造了带 **lookbehind** 的正则 `(?<=^|\s|\p{P}|\p{S})([-.\w+]+)@(...)`（email 自动链接）。Safari <16.4 不支持 lookbehind → 解析即抛 → React 错误边界整页崩。打开任意聊天页（ChatView/LoopChatView/DiscussionView/SharedChatView）即触发。
+- **修复**: 用 `patch-package` 删掉该 lookbehind（`frontend/patches/mdast-util-gfm-autolink-literal+2.0.1.patch`），并加 `postinstall: patch-package`。**行为不变**：URL 那条正则本就不用 lookbehind，email 的 `findEmail` 内部已调用 `previous(match, true)` 做完全等价的「前一字符必须是行首/空白/标点」校验，lookbehind 纯属冗余。重建 dist 后全量扫描无任何 lookbehind/命名组，Vite build 通过。
+- **预防**: ①前端验收不能只用 Chrome/curl——Safari 的正则引擎更严（lookbehind 需 16.4+），关键页面要在 Safari 实测；②markdown/gfm 这类依赖升级时留意是否引入 lookbehind；③`patch-package` + `postinstall` 已固化，`npm install` 后自动重打。
+- **Commit**: 本次提交
