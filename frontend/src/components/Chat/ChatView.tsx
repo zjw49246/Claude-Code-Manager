@@ -906,7 +906,9 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
                       setError(null);
                     }
                   } catch (e) {
-                    setError(`Interrupt failed: ${e instanceof Error ? e.message : String(e)}`);
+                    setSending(false);
+                    setStillRunning(false);
+                    setLocalStatus(null);
                   }
                   finally { setInterrupting(false); }
                 }}
