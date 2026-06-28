@@ -39,6 +39,7 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
   const [sharingTask, setSharingTask] = useState<Task | null>(null);
   const chatTaskRef = useRef<Task | null>(null);
   chatTaskRef.current = chatTask;
+  const skipFreezeOnce = useRef(false);
 
   const setChatTaskWrapped = useCallback((t: Task | null) => {
     setChatTask(t);
@@ -96,7 +97,7 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
       // returning one at the end, so the list churned/flickered every few seconds.
       // Keeping fallen-off tasks in place (with last-known data until they return)
       // is what "freeze" should mean — the full server order is restored on close.
-      if (chatTaskRef.current) {
+      if (chatTaskRef.current && !skipFreezeOnce.current) {
         setTasks(prev => {
           const byId = new Map(filtered.map(t => [t.id, t]));
           const updated = prev.map(t => byId.get(t.id) ?? t);
@@ -105,6 +106,7 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
           return [...updated, ...added];
         });
       } else {
+        skipFreezeOnce.current = false;
         setTasks(filtered);
       }
       setTotalCount(count.total);
@@ -238,7 +240,11 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
 
   // 侧边栏拖拽排序（与主列表同一套逻辑）
   const sidebarTasks = searchResults ?? filteredTasks;
-  const sidebarReorder = useTaskReorder(sidebarTasks, refresh, autoSortOnAccess);
+  const reorderRefresh = useCallback(() => {
+    skipFreezeOnce.current = true;
+    refresh();
+  }, [refresh]);
+  const sidebarReorder = useTaskReorder(sidebarTasks, reorderRefresh, autoSortOnAccess);
 
   const handleOpenChat = useCallback((t: Task) => {
     setChatTaskWrapped(t);
