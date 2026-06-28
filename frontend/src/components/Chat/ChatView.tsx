@@ -292,15 +292,19 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
 
   // Auto-dequeue: triggered by process_exit via flag increment
   const [autoDequeueFlag, setAutoDequeueFlag] = useState(0);
+  const sendingRef = useRef(false);
+  sendingRef.current = sending;
   const handleSendRef = useRef<(text: string, uploadResults?: UploadResult[]) => void>(() => {});
 
   useEffect(() => {
     if (autoDequeueFlag === 0) return;
+    // Don't dequeue if previous message is still processing
+    if (sendingRef.current) return;
     const queue = messageQueueRef.current;
     if (queue.length > 0) {
       const next = queue[0];
       setMessageQueue(prev => prev.slice(1));
-      setTimeout(() => handleSendRef.current(next.text, next.uploadResults), 200);
+      setTimeout(() => handleSendRef.current(next.text, next.uploadResults), 500);
     }
   }, [autoDequeueFlag]);
 
@@ -500,21 +504,27 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
       return;
     }
 
-    // WS user_message: always append. No dedup — every message is unique.
-    // Also trigger "thinking" indicator — the message is queued and CC will
-    // start processing it, regardless of who sent it.
+    // WS user_message: append unless already shown (optimistic queue send).
+    // Also trigger "thinking" indicator.
     if (eventType === 'user_message') {
       const content = (msg.data.content as string) || '';
       const source = (msg.data.source as string) || null;
       const imageUrls = (msg.data.image_urls as string[]) || null;
       const attachments = (msg.data.attachments as { url: string; name: string; is_image: boolean }[]) || null;
       setSending(true);
-      setMessages((prev) => [...prev, {
-        id: Date.now() + Math.random(), role: 'user', event_type: 'user_message',
-        content, tool_name: null, tool_input: null, tool_output: null,
-        is_error: false, loop_iteration: null, timestamp: new Date().toISOString(),
-        image_urls: imageUrls, attachments: attachments, source,
-      }]);
+      setMessages((prev) => {
+        // Skip if last message is an optimistic duplicate (same content, recent)
+        const last = prev[prev.length - 1];
+        if (last && last.role === 'user' && last.event_type === 'user_message' && last.content === content) {
+          return prev;
+        }
+        return [...prev, {
+          id: Date.now() + Math.random(), role: 'user', event_type: 'user_message',
+          content, tool_name: null, tool_input: null, tool_output: null,
+          is_error: false, loop_iteration: null, timestamp: new Date().toISOString(),
+          image_urls: imageUrls, attachments: attachments, source,
+        }];
+      });
       return;
     }
 
@@ -806,10 +816,17 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
       }
       snapshotPreviews.forEach((url) => { if (url) URL.revokeObjectURL(url); });
 
-      // No optimistic message add — WS broadcast is the single source of truth.
-      // Backend stores the message and broadcasts it via WS in the same API call.
-      // The WS event arrives within milliseconds, so the user sees their message
-      // almost instantly without any dedup complexity.
+      // Optimistic message for queued sends — WS may miss during rapid turn cycles.
+      // For manual sends WS user_message arrives fast enough, but queue auto-sends
+      // fire right after process_exit when WS may be reconnecting.
+      if (fromQueue && text) {
+        setMessages(prev => [...prev, {
+          id: Date.now() + Math.random(), role: 'user', event_type: 'user_message',
+          content: text, tool_name: null, tool_input: null, tool_output: null,
+          is_error: false, loop_iteration: null, timestamp: new Date().toISOString(),
+          image_urls: null, attachments: null,
+        }]);
+      }
 
       await api.sendTaskChat(task.id, text || '(files attached)', uploadedPaths, selectedSecretIds.length > 0 ? selectedSecretIds : undefined, modelOverride);
       setModelOverride(null);
