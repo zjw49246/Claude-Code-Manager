@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     git_ssh_key_path: str = ""  # Instance-level SSH key, fallback when project has none
 
     # --- Distributed workers (docs/plans/elastic-worker-design.md) ---
-    worker_enabled: bool = False
+    worker_enabled: bool = True
     worker_cloud_provider: str = "aws"  # 目前仅 aws
     worker_ssh_key_path: str = ""       # Manager 自己密钥对的私钥 .pem 路径
     worker_ssh_user: str = "ubuntu"
