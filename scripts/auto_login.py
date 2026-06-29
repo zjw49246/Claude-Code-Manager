@@ -757,10 +757,13 @@ async def perform_login(
 
     _use_mailcatcher = is_mailcom_domain(email)
 
-    # Clear stale credentials
+    # Backup old credentials — only delete after successful login to avoid
+    # leaving the account in a "no credentials" state if login fails.
+    _backup_creds = {}
     for f in [".claude.json", ".credentials.json"]:
         fp = config_path / f
         if fp.exists():
+            _backup_creds[f] = fp.read_bytes()
             fp.unlink()
 
     # Step 1: 171mail 域先通过 API 拿 magic link（mail.com 域在 Chrome+MailCatcher 里拿）
@@ -774,7 +777,9 @@ async def perform_login(
                 magic_link_171 = await _poll_magic_link(mc, token_171, send_ts, EMAIL_POLL_TIMEOUT)
                 logger.info("got magic link (%d chars)", len(magic_link_171))
         except MailServiceError as exc:
-            logger.error("171mail error: %s", exc)
+            logger.error("171mail error: %s — restoring old credentials", exc)
+            for f, data in _backup_creds.items():
+                (config_path / f).write_bytes(data)
             return False
     else:
         logger.info("step 1: mail.com 域（Chrome 输入邮箱 + MailCatcher 接码）")
@@ -791,7 +796,9 @@ async def perform_login(
         magic_link=magic_link_171,
     )
     if not result or not result.get("success"):
-        logger.error("Chrome CDP 登录失败")
+        logger.error("Chrome CDP 登录失败 — restoring old credentials")
+        for f, data in _backup_creds.items():
+            (config_path / f).write_bytes(data)
         return False
 
     # Write default settings.json if not exists
