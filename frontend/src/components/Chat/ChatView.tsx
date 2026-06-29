@@ -298,14 +298,20 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
 
   useEffect(() => {
     if (autoDequeueFlag === 0) return;
-    // Don't dequeue if previous message is still processing
-    if (sendingRef.current) return;
-    const queue = messageQueueRef.current;
-    if (queue.length > 0) {
-      const next = queue[0];
-      setMessageQueue(prev => prev.slice(1));
-      setTimeout(() => handleSendRef.current(next.text, next.uploadResults), 500);
-    }
+    // Delay to let React flush setSending(false) from status_change/process_exit
+    // before we check sendingRef. Without this, PTY mode (no process_exit)
+    // triggers autoDequeue in the same cycle as setSending(false) and the
+    // ref still reads true → skips the queued message.
+    const timer = setTimeout(() => {
+      if (sendingRef.current) return;
+      const queue = messageQueueRef.current;
+      if (queue.length > 0) {
+        const next = queue[0];
+        setMessageQueue(prev => prev.slice(1));
+        setTimeout(() => handleSendRef.current(next.text, next.uploadResults), 300);
+      }
+    }, 200);
+    return () => clearTimeout(timer);
   }, [autoDequeueFlag]);
 
   useEffect(() => {
