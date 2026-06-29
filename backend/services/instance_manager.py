@@ -307,7 +307,7 @@ class InstanceManager:
         so everything downstream (DB, WebSocket, dispatcher wait) is
         unchanged.
         """
-        await self._pty_backend.launch_for_ccm(
+        session_id = await self._pty_backend.launch_for_ccm(
             instance_id=instance_id,
             prompt=prompt,
             task_id=task_id,
@@ -324,6 +324,13 @@ class InstanceManager:
             enabled_skills=enabled_skills,
             mcp_config_path=mcp_config_path,
         )
+
+        if task_id and session_id:
+            async with self.db_factory() as db:
+                await db.execute(
+                    update(Task).where(Task.id == task_id).values(session_id=session_id)
+                )
+                await db.commit()
 
         process = self.processes.get(instance_id)
         pid = getattr(process, "pid", 0) or 0
