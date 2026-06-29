@@ -725,6 +725,31 @@ export const api = {
     request<{ path: string; entries: { name: string; path: string; is_dir: boolean; size: number | null }[] }>(`/api/files/list?path=${encodeURIComponent(path)}`),
   readFile: (path: string) =>
     request<{ path: string; content: string; size: number }>(`/api/files/read?path=${encodeURIComponent(path)}`),
+  uploadToDir: (targetDir: string, files: File[]): Promise<{ name: string; path: string; size: number }[]> => {
+    const token = getToken();
+    const formData = new FormData();
+    formData.append('target_dir', targetDir);
+    for (const file of files) formData.append('files', file);
+    const controller = new AbortController();
+    const totalSize = files.reduce((sum, f) => sum + f.size, 0);
+    const timeoutMs = Math.max(120_000, Math.ceil(totalSize / 50_000) * 1000);
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    return fetch(`${getBase()}/api/files/upload`, {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: formData,
+      signal: controller.signal,
+    }).then(async (res) => {
+      clearTimeout(timeout);
+      if (res.status === 401) { clearToken(); window.location.reload(); throw new Error('Unauthorized'); }
+      if (!res.ok) { const err = await res.json().catch(() => ({ detail: res.statusText })); throw new Error(err.detail || res.statusText); }
+      return res.json();
+    }).catch((e) => {
+      clearTimeout(timeout);
+      if (e.name === 'AbortError') throw new Error(`Upload timed out. Total size: ${(totalSize / 1024 / 1024).toFixed(1)}MB`);
+      throw e;
+    });
+  },
 
   // Files (download)
   downloadFileUrl: (path: string) =>

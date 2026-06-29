@@ -1,7 +1,7 @@
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   ChevronRight, ChevronDown, Folder, FolderOpen, FileText,
-  AlertCircle, Loader2, Plus, Trash2, Server, HardDrive, Download,
+  AlertCircle, Loader2, Plus, Trash2, Server, HardDrive, Download, Upload,
 } from 'lucide-react';
 import { api, getToken } from '../api/client';
 import type { Project } from '../api/client';
@@ -279,6 +279,11 @@ export function FilesPage() {
   const [sshLoading, setSshLoading] = useState(false);
   const [sshError, setSshError] = useState<string | null>(null);
 
+  // Upload state
+  const uploadInputRef = useRef<HTMLInputElement>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+
   // Shared viewer state
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [fileContent, setFileContent] = useState<string | null>(null);
@@ -414,6 +419,22 @@ export function FilesPage() {
     }
   };
 
+  const handleUploadFiles = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files || []);
+    if (!files.length || !rootPath) return;
+    e.target.value = '';
+    setUploading(true);
+    setUploadError(null);
+    try {
+      await api.uploadToDir(rootPath, files);
+      await loadLocalRoot(rootPath);
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : 'Upload failed');
+    } finally {
+      setUploading(false);
+    }
+  };
+
   const currentEntries = mode === 'local' ? rootEntries : sshEntries;
   const currentRootLabel = mode === 'local' ? rootPath : (activeProfile ? `${activeProfile.username}@${activeProfile.host}:${sshPath}` : '');
 
@@ -439,7 +460,7 @@ export function FilesPage() {
           </div>
         </div>
 
-        {mode === 'local' && (
+        {mode === 'local' && <React.Fragment>
           <div className="flex gap-2 flex-wrap">
             {projects.filter((p) => p.local_path).length > 0 && (
               <select
@@ -471,8 +492,26 @@ export function FilesPage() {
             >
               Browse
             </button>
+            {rootPath && (
+              <>
+                <input ref={uploadInputRef} type="file" multiple className="hidden" onChange={handleUploadFiles} />
+                <button
+                  onClick={() => uploadInputRef.current?.click()}
+                  disabled={uploading}
+                  className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 text-white text-sm rounded hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {uploading ? <Loader2 size={14} className="animate-spin" /> : <Upload size={14} />}
+                  Upload
+                </button>
+              </>
+            )}
           </div>
-        )}
+          {uploadError && (
+            <div className="text-xs text-red-400 bg-red-500/10 border border-red-500/30 rounded px-2 py-1">
+              {uploadError}
+            </div>
+          )}
+        </React.Fragment>}
 
         {mode === 'ssh' && (
           <div className="space-y-3">

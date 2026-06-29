@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm';
 import { api } from '../../api/client';
 import type { ChatMessage, FileAttachment, Task, Project, UploadResult, MonitorSession, AskUserQuestion, AskUserAnswer } from '../../api/client';
 import { useWebSocket } from '../../hooks/useWebSocket';
-import { Send, ArrowLeft, Loader2, ChevronDown, ChevronRight, ChevronUp, Copy, Check, Paperclip, X, StopCircle, Pencil, ArrowDown, Star, ListPlus, Trash2 } from 'lucide-react';
+import { Send, ArrowLeft, Loader2, ChevronDown, ChevronRight, ChevronUp, Copy, Check, Paperclip, X, StopCircle, Pencil, ArrowDown, Star, ListPlus, Trash2, AlertCircle } from 'lucide-react';
 import { SecretPicker } from '../Secrets/SecretPicker';
 import { QuickPhraseDropdown } from '../QuickPhrases/QuickPhraseDropdown';
 import { ListFilter, Syringe } from 'lucide-react';
@@ -12,6 +12,7 @@ import { TaskConfigBadge } from '../Tasks/TaskBadges';
 import { ExpandableText } from '../ExpandableText';
 import { formatMessageTime } from '../../config/timezone';
 import { useFileDrop } from '../../hooks/useFileDrop';
+import { useFileUpload } from '../../hooks/useFileUpload';
 import { SubAgentIndicator } from './SubAgentIndicator';
 import { MonitorPanel } from './MonitorPanel';
 
@@ -125,8 +126,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
   const [stillRunning, setStillRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [dropError, setDropError] = useState<string | null>(null);
-  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
-  const [filePreviews, setFilePreviews] = useState<string[]>([]);
+  const fileUpload = useFileUpload();
   const [selectedSecretIds, setSelectedSecretIds] = useState<number[]>([]);
   const [contextUsage, setContextUsage] = useState<ContextUsage | null>(task.context_window_usage ?? null);
   const [editingTitle, setEditingTitle] = useState(false);
@@ -244,15 +244,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
     localStorage.setItem(`ccm-chat-queue-${task.id}`, JSON.stringify(messageQueue));
   }, [messageQueue, task.id]);
 
-  const addToQueue = useCallback(async (text: string, files?: File[]) => {
-    let uploadResults: UploadResult[] | undefined;
-    if (files && files.length > 0) {
-      try {
-        uploadResults = await api.uploadImages(files);
-      } catch {
-        // Upload failed — queue text only
-      }
-    }
+  const addToQueue = useCallback((text: string, uploadResults?: UploadResult[]) => {
     setMessageQueue(prev => [...prev, { text, uploadResults }]);
   }, []);
 
@@ -700,15 +692,9 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
     el.style.height = el.scrollHeight + 'px';
   }, [input]);
 
-  const IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.gif', '.webp'];
-  const isImageFile = (f: File) => IMAGE_EXTS.some((ext) => f.name.toLowerCase().endsWith(ext));
-
-  const { addFiles } = useFileDrop({
-    pendingFiles,
-    setPendingFiles,
-    setFilePreviews,
+  useFileDrop({
+    onDrop: (files) => fileUpload.addFiles(files, (msg) => setDropError(msg)),
     disabled: !task.session_id && !task.shared_from_id,
-    onError: (msg) => setDropError(msg),
   });
 
   useEffect(() => {
@@ -725,12 +711,12 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
       }
       if (files.length > 0) {
         e.preventDefault();
-        addFiles(files);
+        fileUpload.addFiles(files, (msg) => setDropError(msg));
       }
     };
     document.addEventListener('paste', handlePaste);
     return () => document.removeEventListener('paste', handlePaste);
-  }, [task.session_id, addFiles]);
+  }, [task.session_id, task.shared_from_id, fileUpload.addFiles]);
 
   useEffect(() => {
     if (dropError) {
@@ -742,14 +728,8 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
     if (!files.length) return;
-    addFiles(files);
+    fileUpload.addFiles(files, (msg) => setDropError(msg));
     e.target.value = '';
-  };
-
-  const removeFile = (idx: number) => {
-    if (filePreviews[idx]) URL.revokeObjectURL(filePreviews[idx]);
-    setPendingFiles((prev) => prev.filter((_, i) => i !== idx));
-    setFilePreviews((prev) => prev.filter((_, i) => i !== idx));
   };
 
   const handleTitleSave = async () => {
@@ -775,7 +755,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
 
   const handleSend = async (overrideText?: string, fromQueue?: boolean, preUploadedResults?: UploadResult[]) => {
     const text = (overrideText ?? input).trim();
-    if (!text && pendingFiles.length === 0 && !preUploadedResults?.length) return;
+    if (!text && fileUpload.uploads.length === 0 && !preUploadedResults?.length) return;
 
     // 注入模式：发送动作改走 PTY 注入（仅文本；不开新 turn、不排队）
     if (injectMode && ptyMode && !fromQueue) {
@@ -783,42 +763,31 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
       return;
     }
 
-    // If currently sending and not from auto-dequeue, add to queue (with files)
+    // If currently sending and not from auto-dequeue, add to queue (with already-uploaded results)
     if (isProcessing && !fromQueue) {
-      if (text || pendingFiles.length > 0) {
-        const filesToQueue = pendingFiles.length > 0 ? [...pendingFiles] : undefined;
-        addToQueue(text, filesToQueue);
+      if (text || fileUpload.uploads.length > 0) {
+        const results = fileUpload.uploadedResults.length > 0 ? [...fileUpload.uploadedResults] : undefined;
+        addToQueue(text, results);
         setInput('');
-        if (filesToQueue) {
-          filePreviews.forEach(url => { if (url) URL.revokeObjectURL(url); });
-          setPendingFiles([]);
-          setFilePreviews([]);
-        }
+        fileUpload.clear();
       }
       return;
     }
 
-    const snapshotFiles = fromQueue ? [] : [...pendingFiles];
-    const snapshotPreviews = fromQueue ? [] : [...filePreviews];
-
     if (!fromQueue) {
       setInput('');
-      setPendingFiles([]);
-      setFilePreviews([]);
     }
     setSending(true);
     setError(null);
 
     try {
       let uploadedPaths: string[] | undefined;
-
       if (preUploadedResults && preUploadedResults.length > 0) {
         uploadedPaths = preUploadedResults.map((r) => r.path);
-      } else if (snapshotFiles.length > 0) {
-        const results: UploadResult[] = await api.uploadImages(snapshotFiles);
-        uploadedPaths = results.map((r) => r.path);
+      } else if (fileUpload.uploadedResults.length > 0) {
+        uploadedPaths = fileUpload.uploadedResults.map((r) => r.path);
       }
-      snapshotPreviews.forEach((url) => { if (url) URL.revokeObjectURL(url); });
+      if (!fromQueue) fileUpload.clear();
 
       // Optimistic message for queued sends — WS may miss during rapid turn cycles.
       // For manual sends WS user_message arrives fast enough, but queue auto-sends
@@ -837,20 +806,11 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
     } catch (e) {
       setSending(false);
       const errMsg = String(e);
-      // 409 = task still being processed, show Interrupt button
       if (errMsg.includes('409') || errMsg.toLowerCase().includes('currently being processed')) {
         setStillRunning(true);
       }
       setError(errMsg);
-      // Restore files and input on failure so user doesn't lose them
-      if (!fromQueue) {
-        if (snapshotFiles.length > 0) {
-          setPendingFiles(snapshotFiles);
-          setFilePreviews(snapshotFiles.map((f) => isImageFile(f) ? URL.createObjectURL(f) : ''));
-        }
-        if (text) setInput(text);
-      }
-      // If from queue and failed, re-queue at front
+      if (!fromQueue && text) setInput(text);
       if (fromQueue && (text || preUploadedResults?.length)) {
         setMessageQueue(prev => [{ text, uploadResults: preUploadedResults }, ...prev]);
       }
@@ -1172,23 +1132,33 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
       <div className="border-t border-gray-800 bg-gray-900 p-3">
         <div className="flex flex-col gap-2 max-w-3xl mx-auto">
           {/* File preview strip */}
-          {pendingFiles.length > 0 && (
+          {fileUpload.uploads.length > 0 && (
             <div className="flex gap-2 flex-wrap">
-              {pendingFiles.map((file, idx) => (
-                <div key={idx} className="relative rounded overflow-hidden border border-gray-600">
-                  {filePreviews[idx] ? (
+              {fileUpload.uploads.map((upload) => (
+                <div key={upload.id} className="relative rounded overflow-hidden border border-gray-600">
+                  {upload.preview ? (
                     <div className="w-14 h-14">
-                      <img src={filePreviews[idx]} alt="" className="w-full h-full object-cover" />
+                      <img src={upload.preview} alt="" className="w-full h-full object-cover" />
                     </div>
                   ) : (
                     <div className="flex items-center gap-1.5 px-2.5 py-1.5 bg-gray-800 text-xs text-gray-300 max-w-[150px]">
                       <Paperclip size={12} className="shrink-0" />
-                      <span className="truncate">{file.name}</span>
+                      <span className="truncate">{upload.file.name}</span>
+                    </div>
+                  )}
+                  {upload.status === 'uploading' && (
+                    <div className="absolute inset-0 bg-black/50 flex items-center justify-center">
+                      <Loader2 size={16} className="animate-spin text-white" />
+                    </div>
+                  )}
+                  {upload.status === 'failed' && (
+                    <div className="absolute inset-0 bg-red-900/50 flex items-center justify-center cursor-pointer" onClick={() => fileUpload.retryFile(upload.id)} title="Click to retry">
+                      <AlertCircle size={16} className="text-red-400" />
                     </div>
                   )}
                   <button
                     type="button"
-                    onClick={() => removeFile(idx)}
+                    onClick={() => fileUpload.removeFile(upload.id)}
                     className="absolute top-0 right-0 bg-gray-900/80 rounded-bl p-0.5 text-gray-300 hover:text-white"
                   >
                     <X size={10} />
@@ -1210,7 +1180,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
             <button
               type="button"
               onClick={() => fileInputRef.current?.click()}
-              disabled={(!task.session_id && !task.shared_from_id) || pendingFiles.length >= 10}
+              disabled={(!task.session_id && !task.shared_from_id) || fileUpload.uploads.length >= 10}
               className="p-2 text-gray-500 hover:text-gray-300 disabled:opacity-40 disabled:cursor-not-allowed"
               title="Attach files"
             >
@@ -1322,7 +1292,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
             />
             <button
               onClick={() => handleSend()}
-              disabled={(!input.trim() && pendingFiles.length === 0) || (!task.session_id && !task.shared_from_id) || (injectMode && ptyMode && !isProcessing)}
+              disabled={(!input.trim() && fileUpload.uploads.length === 0) || (!task.session_id && !task.shared_from_id) || (injectMode && ptyMode && !isProcessing) || fileUpload.isUploading}
               title={injectMode && ptyMode
                 ? (isProcessing ? '注入到运行中的 turn (Ctrl+Enter)' : '注入模式：仅在 turn 运行中可用，空闲时请关闭注入模式')
                 : isProcessing ? 'Add to queue (Ctrl+Enter)' : 'Send (Ctrl+Enter)'}

@@ -1,11 +1,12 @@
 import { useState, useEffect, useRef } from 'react';
 import { api } from '../../api/client';
-import type { Project, TagItem, Task, UploadResult } from '../../api/client';
-import { Plus, Paperclip, X, Star, Wrench, Settings } from 'lucide-react';
+import type { Project, TagItem, Task } from '../../api/client';
+import { Plus, Paperclip, X, Star, Wrench, Settings, Loader2, AlertCircle } from 'lucide-react';
 import { ProjectSelect } from '../ProjectSelect';
 import { VoiceButton } from '../Voice/VoiceButton';
 import { SecretPicker } from '../Secrets/SecretPicker';
 import { useFileDrop } from '../../hooks/useFileDrop';
+import { useFileUpload } from '../../hooks/useFileUpload';
 
 interface TaskFormProps {
   onCreated: () => void;
@@ -47,8 +48,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   const [error, setError] = useState('');
   const [projects, setProjects] = useState<Project[]>([]);
   const [tagItems, setTagItems] = useState<TagItem[]>([]);
-  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
-  const [filePreviews, setFilePreviews] = useState<string[]>([]);
+  const fileUpload = useFileUpload();
   const [selectedSecretIds, setSelectedSecretIds] = useState<number[]>([]);
   const [dropError, setDropError] = useState('');
   const [enabledTools, setEnabledTools] = useState<Record<string, boolean>>({});
@@ -180,15 +180,10 @@ export function TaskForm({ onCreated }: TaskFormProps) {
     }
   };
 
-  const IMAGE_EXTS = ['.png', '.jpg', '.jpeg', '.gif', '.webp'];
-  const isImageFile = (f: File) => IMAGE_EXTS.some((ext) => f.name.toLowerCase().endsWith(ext));
-
   useFileDrop({
     targetRef: formRef,
-    pendingFiles,
-    setPendingFiles,
-    setFilePreviews,
-    onError: (msg) => setDropError(msg),
+    onDrop: (files) => fileUpload.addFiles(files, (msg) => setDropError(msg)),
+    disabled: false,
   });
 
   useEffect(() => {
@@ -204,10 +199,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
       }
       if (files.length > 0) {
         e.preventDefault();
-        const combined = [...pendingFiles, ...files].slice(0, 10);
-        setPendingFiles(combined);
-        const newPreviews = files.filter(isImageFile).map((f) => URL.createObjectURL(f));
-        setFilePreviews((prev) => [...prev, ...newPreviews]);
+        fileUpload.addFiles(files, (msg) => setDropError(msg));
       }
     };
     const form = formRef.current;
@@ -215,7 +207,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
       form.addEventListener('paste', handlePaste);
       return () => form.removeEventListener('paste', handlePaste);
     }
-  }, [pendingFiles]);
+  }, [fileUpload.addFiles]);
 
   useEffect(() => {
     if (dropError) {
@@ -227,23 +219,16 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
     if (!files.length) return;
-    const combined = [...pendingFiles, ...files].slice(0, 10);
-    setPendingFiles(combined);
-    setFilePreviews(combined.map((f) => isImageFile(f) ? URL.createObjectURL(f) : ''));
+    fileUpload.addFiles(files, (msg) => setDropError(msg));
     e.target.value = '';
-  };
-
-  const removeFile = (idx: number) => {
-    if (filePreviews[idx]) URL.revokeObjectURL(filePreviews[idx]);
-    setPendingFiles((prev) => prev.filter((_, i) => i !== idx));
-    setFilePreviews((prev) => prev.filter((_, i) => i !== idx));
   };
 
   const canSubmit =
     (description || mode === 'loop') &&
     (mode !== 'loop' || todoFilePath) &&
     (mode !== 'goal' || goalCondition) &&
-    (projectId || (isNewProject && newProjectName));
+    (projectId || (isNewProject && newProjectName)) &&
+    !fileUpload.isUploading;
 
   useEffect(() => {
     api.listWorkers().then(setWorkers).catch(() => {});
@@ -272,17 +257,12 @@ export function TaskForm({ onCreated }: TaskFormProps) {
         setProjectId(project.id);
       }
 
-      let uploadedPaths: string[] = [];
-      let attachments: { url: string; name: string; is_image: boolean }[] = [];
-      if (pendingFiles.length > 0) {
-        const results: UploadResult[] = await api.uploadImages(pendingFiles);
-        uploadedPaths = results.map((r) => r.path);
-        attachments = results.map((r) => ({
-          url: r.url,
-          name: r.filename || r.url.split('/').pop() || 'file',
-          is_image: r.is_image,
-        }));
-      }
+      const uploadedPaths = fileUpload.uploadedResults.map(r => r.path);
+      const attachments = fileUpload.uploadedResults.map(r => ({
+        url: r.url,
+        name: r.filename || r.url.split('/').pop() || 'file',
+        is_image: r.is_image,
+      }));
 
       await api.createTask({
         description: description || undefined,
@@ -317,9 +297,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
       });
       setDescription('');
       setPriority(0);
-      filePreviews.forEach((url) => URL.revokeObjectURL(url));
-      setPendingFiles([]);
-      setFilePreviews([]);
+      fileUpload.clear();
       setSelectedSecretIds([]);
       setModel('');
       setEffort('');
@@ -374,21 +352,31 @@ export function TaskForm({ onCreated }: TaskFormProps) {
           onChange={handleFileSelect}
         />
         <SecretPicker selectedIds={selectedSecretIds} onChange={setSelectedSecretIds} />
-        {pendingFiles.map((file, idx) => (
-          <div key={idx} className="relative rounded overflow-hidden border border-gray-600">
-            {filePreviews[idx] ? (
+        {fileUpload.uploads.map((upload) => (
+          <div key={upload.id} className="relative rounded overflow-hidden border border-gray-600">
+            {upload.preview ? (
               <div className="w-12 h-12">
-                <img src={filePreviews[idx]} alt="" className="w-full h-full object-cover" />
+                <img src={upload.preview} alt="" className="w-full h-full object-cover" />
               </div>
             ) : (
-              <div className="flex items-center gap-1 px-2 py-1.5 bg-gray-700 text-xs text-gray-300 max-w-[120px]">
-                <Paperclip size={11} className="shrink-0" />
-                <span className="truncate">{file.name}</span>
+              <div className="flex items-center gap-1.5 px-2.5 py-1.5 bg-gray-800 text-xs text-gray-300 max-w-[120px]">
+                <Paperclip size={12} className="shrink-0" />
+                <span className="truncate">{upload.file.name}</span>
+              </div>
+            )}
+            {upload.status === 'uploading' && (
+              <div className="absolute inset-0 bg-black/50 flex items-center justify-center">
+                <Loader2 size={16} className="animate-spin text-white" />
+              </div>
+            )}
+            {upload.status === 'failed' && (
+              <div className="absolute inset-0 bg-red-900/50 flex items-center justify-center cursor-pointer" onClick={() => fileUpload.retryFile(upload.id)} title="Click to retry">
+                <AlertCircle size={16} className="text-red-400" />
               </div>
             )}
             <button
               type="button"
-              onClick={() => removeFile(idx)}
+              onClick={() => fileUpload.removeFile(upload.id)}
               className="absolute top-0 right-0 bg-gray-900/80 rounded-bl p-0.5 text-gray-300 hover:text-white"
             >
               <X size={10} />
@@ -505,12 +493,12 @@ export function TaskForm({ onCreated }: TaskFormProps) {
         <button
           type="button"
           onClick={() => fileInputRef.current?.click()}
-          disabled={pendingFiles.length >= 10}
+          disabled={fileUpload.uploads.length >= 10}
           className="flex items-center gap-1 text-xs px-2 py-1.5 rounded border transition-colors bg-gray-700 text-gray-400 border-gray-600 hover:bg-gray-600 hover:text-gray-300 disabled:opacity-40"
         >
           <Paperclip size={13} />
-          <span className="hidden sm:inline">{pendingFiles.length > 0 ? `${pendingFiles.length}/10 files` : 'Attach files'}</span>
-          {pendingFiles.length > 0 && <span className="sm:hidden">{pendingFiles.length}</span>}
+          <span className="hidden sm:inline">{fileUpload.uploads.length > 0 ? `${fileUpload.uploads.length}/10 files` : 'Attach files'}</span>
+          {fileUpload.uploads.length > 0 && <span className="sm:hidden">{fileUpload.uploads.length}</span>}
         </button>
         {/* Config dropdown */}
         <div ref={configRef} className="relative">

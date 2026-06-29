@@ -1,78 +1,12 @@
-import { useEffect, useCallback, type RefObject } from 'react';
-
-const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
-const MAX_FILES = 10;
-const BLOCKED_EXTENSIONS = new Set(['.exe']);
+import { useEffect, type RefObject } from 'react';
 
 interface UseFileDropOptions {
   targetRef?: RefObject<HTMLElement | null>;
-  pendingFiles: File[];
-  setPendingFiles: React.Dispatch<React.SetStateAction<File[]>>;
-  setFilePreviews: React.Dispatch<React.SetStateAction<string[]>>;
-  imageExts?: string[];
+  onDrop: (files: File[]) => void;
   disabled?: boolean;
-  onError?: (message: string) => void;
 }
 
-export function useFileDrop({
-  targetRef,
-  pendingFiles,
-  setPendingFiles,
-  setFilePreviews,
-  imageExts = ['.png', '.jpg', '.jpeg', '.gif', '.webp'],
-  disabled = false,
-  onError,
-}: UseFileDropOptions) {
-  const isImageFile = useCallback(
-    (f: File) => imageExts.some((ext) => f.name.toLowerCase().endsWith(ext)),
-    [imageExts],
-  );
-
-  const addFiles = useCallback(
-    (incoming: File[]) => {
-      const blocked = incoming.filter((f) => {
-        const ext = f.name.toLowerCase().slice(f.name.lastIndexOf('.'));
-        return BLOCKED_EXTENSIONS.has(ext);
-      });
-      if (blocked.length > 0) {
-        onError?.(`File type not allowed: ${blocked.map((f) => f.name).join(', ')}`);
-      }
-      const allowed = incoming.filter((f) => {
-        const ext = f.name.toLowerCase().slice(f.name.lastIndexOf('.'));
-        return !BLOCKED_EXTENSIONS.has(ext);
-      });
-      const oversized = allowed.filter((f) => f.size > MAX_FILE_SIZE);
-      const valid = allowed.filter((f) => f.size <= MAX_FILE_SIZE);
-
-      if (oversized.length > 0) {
-        const names = oversized.map((f) => f.name).join(', ');
-        onError?.(
-          oversized.length === 1
-            ? `File "${names}" exceeds 50MB limit`
-            : `${oversized.length} files exceed 50MB limit: ${names}`,
-        );
-      }
-
-      if (valid.length === 0) return;
-
-      const slots = MAX_FILES - pendingFiles.length;
-      if (slots <= 0) {
-        onError?.(`Maximum ${MAX_FILES} files allowed`);
-        return;
-      }
-
-      if (valid.length > slots) {
-        onError?.(`Only ${slots} more file${slots === 1 ? '' : 's'} can be added (max ${MAX_FILES})`);
-      }
-
-      const accepted = valid.slice(0, slots);
-      const combined = [...pendingFiles, ...accepted];
-      setPendingFiles(combined);
-      setFilePreviews(combined.map((f) => (isImageFile(f) ? URL.createObjectURL(f) : '')));
-    },
-    [pendingFiles, setPendingFiles, setFilePreviews, isImageFile, onError],
-  );
-
+export function useFileDrop({ targetRef, onDrop, disabled = false }: UseFileDropOptions) {
   useEffect(() => {
     if (disabled) return;
 
@@ -91,14 +25,12 @@ export function useFileDrop({
       e.stopPropagation();
       const dt = (e as DragEvent).dataTransfer;
       if (!dt?.files.length) return;
-      addFiles(Array.from(dt.files));
+      onDrop(Array.from(dt.files));
     };
 
     target.addEventListener('dragover', handleDragOver);
     target.addEventListener('drop', handleDrop);
 
-    // When listening on a local element (not document), also block
-    // the browser's default file-open behavior on the rest of the page.
     const blockBrowserOpen = (e: Event) => {
       e.preventDefault();
       const dt = (e as DragEvent).dataTransfer;
@@ -117,7 +49,5 @@ export function useFileDrop({
         document.removeEventListener('drop', blockBrowserOpen);
       }
     };
-  }, [targetRef, disabled, addFiles]);
-
-  return { addFiles };
+  }, [targetRef, disabled, onDrop]);
 }

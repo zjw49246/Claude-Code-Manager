@@ -3,13 +3,15 @@ import tempfile
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
 router = APIRouter(prefix="/api/files", tags=["files"])
 
-MAX_FILE_SIZE = 1 * 1024 * 1024  # 1 MB
+MAX_FILE_SIZE = 1 * 1024 * 1024  # 1 MB (for reading)
+MAX_UPLOAD_SIZE = 50 * 1024 * 1024  # 50 MB (for uploading)
+MAX_UPLOAD_FILES = 10
 
 
 # ---------------------------------------------------------------------------
@@ -56,6 +58,42 @@ def _make_ssh_client(creds: SSHCreds):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"SSH connection failed: {e}")
     return client
+
+
+@router.post("/upload")
+async def upload_to_directory(
+    target_dir: str = Form(...),
+    files: list[UploadFile] = File(...),
+):
+    """Upload files to a specific directory on the server."""
+    target = Path(target_dir).expanduser().resolve()
+    if not target.exists():
+        raise HTTPException(400, f"Directory not found: {target_dir}")
+    if not target.is_dir():
+        raise HTTPException(400, f"Not a directory: {target_dir}")
+    if len(files) > MAX_UPLOAD_FILES:
+        raise HTTPException(400, f"Maximum {MAX_UPLOAD_FILES} files per request")
+
+    results = []
+    for f in files:
+        data = await f.read()
+        if len(data) > MAX_UPLOAD_SIZE:
+            raise HTTPException(400, f"File '{f.filename}' exceeds 50 MB limit")
+        save_path = target / (f.filename or "upload")
+        if save_path.exists():
+            stem = save_path.stem
+            suffix = save_path.suffix
+            counter = 1
+            while save_path.exists():
+                save_path = target / f"{stem}_{counter}{suffix}"
+                counter += 1
+        save_path.write_bytes(data)
+        results.append({
+            "name": save_path.name,
+            "path": str(save_path),
+            "size": len(data),
+        })
+    return results
 
 
 def _safe_path(path: str) -> Path:
