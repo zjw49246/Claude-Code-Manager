@@ -612,7 +612,9 @@ export const api = {
       formData.append('files', file);
     }
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 120_000);
+    const totalSize = files.reduce((sum, f) => sum + f.size, 0);
+    const timeoutMs = Math.max(120_000, Math.ceil(totalSize / 50_000) * 1000);
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
     return fetch(`${getBase()}/api/uploads`, {
       method: 'POST',
       headers: token ? { Authorization: `Bearer ${token}` } : {},
@@ -625,7 +627,7 @@ export const api = {
       return res.json();
     }).catch((e) => {
       clearTimeout(timeout);
-      if (e.name === 'AbortError') throw new Error('Upload timed out (120s). File may be too large.');
+      if (e.name === 'AbortError') throw new Error(`Upload timed out. Total size: ${(totalSize / 1024 / 1024).toFixed(1)}MB`);
       throw e;
     });
   },
