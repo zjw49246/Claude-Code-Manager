@@ -2,6 +2,7 @@ import { useEffect, useCallback, type RefObject } from 'react';
 
 const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
 const MAX_FILES = 10;
+const BLOCKED_EXTENSIONS = new Set(['.exe']);
 
 interface UseFileDropOptions {
   targetRef?: RefObject<HTMLElement | null>;
@@ -29,15 +30,26 @@ export function useFileDrop({
 
   const addFiles = useCallback(
     (incoming: File[]) => {
-      const oversized = incoming.filter((f) => f.size > MAX_FILE_SIZE);
-      const valid = incoming.filter((f) => f.size <= MAX_FILE_SIZE);
+      const blocked = incoming.filter((f) => {
+        const ext = f.name.toLowerCase().slice(f.name.lastIndexOf('.'));
+        return BLOCKED_EXTENSIONS.has(ext);
+      });
+      if (blocked.length > 0) {
+        onError?.(`File type not allowed: ${blocked.map((f) => f.name).join(', ')}`);
+      }
+      const allowed = incoming.filter((f) => {
+        const ext = f.name.toLowerCase().slice(f.name.lastIndexOf('.'));
+        return !BLOCKED_EXTENSIONS.has(ext);
+      });
+      const oversized = allowed.filter((f) => f.size > MAX_FILE_SIZE);
+      const valid = allowed.filter((f) => f.size <= MAX_FILE_SIZE);
 
       if (oversized.length > 0) {
         const names = oversized.map((f) => f.name).join(', ');
         onError?.(
           oversized.length === 1
             ? `File "${names}" exceeds 50MB limit`
-            : `${oversized.length} files exceed 10MB limit: ${names}`,
+            : `${oversized.length} files exceed 50MB limit: ${names}`,
         );
       }
 

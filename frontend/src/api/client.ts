@@ -611,14 +611,22 @@ export const api = {
     for (const file of files) {
       formData.append('files', file);
     }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 120_000);
     return fetch(`${getBase()}/api/uploads`, {
       method: 'POST',
       headers: token ? { Authorization: `Bearer ${token}` } : {},
       body: formData,
+      signal: controller.signal,
     }).then(async (res) => {
+      clearTimeout(timeout);
       if (res.status === 401) { clearToken(); window.location.reload(); throw new Error('Unauthorized'); }
       if (!res.ok) { const err = await res.json().catch(() => ({ detail: res.statusText })); throw new Error(err.detail || res.statusText); }
       return res.json();
+    }).catch((e) => {
+      clearTimeout(timeout);
+      if (e.name === 'AbortError') throw new Error('Upload timed out (120s). File may be too large.');
+      throw e;
     });
   },
 

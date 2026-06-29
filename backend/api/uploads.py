@@ -17,7 +17,7 @@ UPLOAD_DIR = _PROJECT_ROOT / "uploads"
 
 _CLEANUP_MAX_AGE_DAYS = 15
 _CLEANUP_INTERVAL_HOURS = 24
-_BLOCKED_EXTENSIONS = {".exe", ".zip"}
+_BLOCKED_EXTENSIONS = {".exe"}
 _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 _MAX_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB
 _MAX_FILES = 10
@@ -42,7 +42,7 @@ async def upload_files(files: list[UploadFile] = File(...)):
 
         data = await file.read()
         if len(data) > _MAX_SIZE_BYTES:
-            raise HTTPException(400, f"File '{file.filename}' exceeds 10 MB limit")
+            raise HTTPException(400, f"File '{file.filename}' exceeds 50 MB limit")
 
         file_id = str(uuid.uuid4())
         saved_name = f"{file_id}{ext}" if ext else file_id

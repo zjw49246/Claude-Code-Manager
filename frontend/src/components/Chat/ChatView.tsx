@@ -742,9 +742,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files || []);
     if (!files.length) return;
-    const combined = [...pendingFiles, ...files].slice(0, 10);
-    setPendingFiles(combined);
-    setFilePreviews(combined.map((f) => isImageFile(f) ? URL.createObjectURL(f) : ''));
+    addFiles(files);
     e.target.value = '';
   };
 
@@ -844,6 +842,14 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
         setStillRunning(true);
       }
       setError(errMsg);
+      // Restore files and input on failure so user doesn't lose them
+      if (!fromQueue) {
+        if (snapshotFiles.length > 0) {
+          setPendingFiles(snapshotFiles);
+          setFilePreviews(snapshotFiles.map((f) => isImageFile(f) ? URL.createObjectURL(f) : ''));
+        }
+        if (text) setInput(text);
+      }
       // If from queue and failed, re-queue at front
       if (fromQueue && (text || preUploadedResults?.length)) {
         setMessageQueue(prev => [{ text, uploadResults: preUploadedResults }, ...prev]);
