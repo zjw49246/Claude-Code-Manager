@@ -24,6 +24,7 @@ from backend.models.monitor_session import MonitorSession, MonitorCheck  # noqa:
 from backend.models.pr_monitor import MonitoredRepo, PRReview  # noqa: F401
 from backend.models.worker import Worker  # noqa: F401
 from backend.models.skill_lesson import SkillLesson, SkillUsage  # noqa: F401
+from backend.models.user_skill import UserSkill  # noqa: F401
 from backend.models.feishu_binding import FeishuUserBinding  # noqa: F401
 from backend.models.org import OrgMember, OrgTeam, OrgTeamMember  # noqa: F401
 from backend.models.task_share import TaskShare, ProjectShare, SharedTaskReceived  # noqa: F401

@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 logger = logging.getLogger(__name__)
 
 
-async def analyze_patterns(db: AsyncSession, days: int = 30) -> list[dict]:
+async def analyze_patterns(db: AsyncSession, days: int = 30) -> dict:
     """Analyze recent task history for repeating patterns.
 
     MiMo's 6-phase approach (simplified):

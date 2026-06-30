@@ -10,7 +10,7 @@ import { LoopChatView } from '../components/Chat/LoopChatView';
 import { ProjectSelect } from '../components/ProjectSelect';
 import { resolveTagColor } from '../components/TagColors';
 import { ChevronLeft, ChevronRight, ChevronDown, Filter, PanelLeftClose, PanelLeftOpen, Search, X, Star, Archive, ArchiveRestore, Share2 } from 'lucide-react';
-import { ToolsBadge, SubAgentsBadge } from '../components/Tasks/TaskBadges';
+import { PluginsBadge, SubAgentsBadge } from '../components/Tasks/TaskBadges';
 import { TAG_COLOR_OPTIONS } from '../components/TagColors';
 import { useTaskReorder } from '../hooks/useTaskReorder';
 import { ShareModal } from '../components/ShareModal';
@@ -555,7 +555,7 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
                     )}
                   </div>
                   <div className="flex items-center gap-1.5 mt-1 ml-4" onClick={(e) => e.stopPropagation()}>
-                    <ToolsBadge task={t} onRefresh={refresh} />
+                    <PluginsBadge task={t} onRefresh={refresh} />
                     <SubAgentsBadge task={t} />
                     <span className="flex-1" />
                     <button

@@ -3,7 +3,7 @@ import { useState, useMemo, useRef, useEffect } from 'react';
 import { api } from '../../api/client';
 import type { Task, Project } from '../../api/client';
 import { Trash2, RotateCcw, XCircle, MessageCircle, Archive, ArchiveRestore, Star, Copy, Check, MoreVertical, Pencil, Mail, MailOpen, Clock, GripVertical, Share2 } from 'lucide-react';
-import { ToolsBadge, SubAgentsBadge, TaskConfigBadge } from './TaskBadges';
+import { PluginsBadge, SubAgentsBadge, TaskConfigBadge } from './TaskBadges';
 import { TAG_COLOR_OPTIONS } from '../TagColors';
 import { ExpandableText } from '../ExpandableText';
 import { formatDateTime } from '../../config/timezone';
@@ -159,7 +159,7 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId,
                 {t.provider === 'codex' ? 'Codex' : 'Claude'}
               </span>
               <TaskConfigBadge task={t} onRefresh={onRefresh} />
-              <ToolsBadge task={t} onRefresh={onRefresh} />
+              <PluginsBadge task={t} onRefresh={onRefresh} />
               <SubAgentsBadge task={t} />
             </div>
             {/* Action buttons — always top-right aligned */}

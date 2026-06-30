@@ -118,6 +118,7 @@ export interface Task {
   sort_order?: number | null;
   enable_workflows: boolean;
   enabled_skills: Record<string, boolean> | null;
+  selected_user_skills: number[] | null;
   shared_from_id: number | null;
   active_sub_agents: number;
   tags: string[] | null;

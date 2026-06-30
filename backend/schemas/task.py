@@ -79,6 +79,7 @@ class TaskUpdate(BaseModel):
     goal_evaluator_model: str | None = None
     enable_workflows: bool | None = None
     enabled_skills: dict | None = None
+    selected_user_skills: list[int] | None = None
     provider: str | None = None
     starred: bool | None = None
     tags: list[str] | None = None

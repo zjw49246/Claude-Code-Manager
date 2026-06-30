@@ -1,8 +1,10 @@
 import asyncio
+import glob
 import logging
 import os
 import re
 import shutil
+import tempfile
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -25,6 +27,17 @@ from backend.services.task_queue import TaskQueue
 from backend.services.ws_broadcaster import WebSocketBroadcaster
 
 logger = logging.getLogger(__name__)
+
+
+def _cleanup_skill_prompt_files(task_id: int):
+    """Clean up temporary skill prompt files created during task launch."""
+    tmpdir = tempfile.gettempdir()
+    for pattern in [f"ccm-skills-{task_id}-*", f"ccm-user-skills-{task_id}-*"]:
+        for f in glob.glob(os.path.join(tmpdir, pattern)):
+            try:
+                os.unlink(f)
+            except OSError:
+                pass
 
 
 def _default_provider() -> str:
@@ -1253,6 +1266,7 @@ class GlobalDispatcher:
         finally:
             from backend.services.mcp_config import cleanup_mcp_config
             cleanup_mcp_config(task.id)
+            _cleanup_skill_prompt_files(task.id)
             self._running_tasks.pop(instance_id, None)
             await self._reset_instance_if_stale(instance_id, task.id)
 

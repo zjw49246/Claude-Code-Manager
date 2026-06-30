@@ -46,8 +46,8 @@ def build_user_skill_prompt_sync(task_id: int) -> str | None:
         "Use the MCP tool ccm_read_user_skill(id) to load full content when needed.\n",
     ]
     for s in skills:
-        desc = (s.description or "").strip().replace("\n", " ")[:100]
-        lines.append(f"- **{s.name}** (id={s.id}): {desc}")
+        desc = (s["description"] or "").strip().replace("\n", " ")[:100]
+        lines.append(f"- **{s['name']}** (id={s['id']}): {desc}")
     lines.append("")
 
     content = "\n".join(lines)

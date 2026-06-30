@@ -51,11 +51,11 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   const fileUpload = useFileUpload();
   const [selectedSecretIds, setSelectedSecretIds] = useState<number[]>([]);
   const [dropError, setDropError] = useState('');
-  const [enabledTools, setEnabledTools] = useState<Record<string, boolean>>({});
-  const [showToolsDropdown, setShowToolsDropdown] = useState(false);
+  const [enabledPlugins, setEnabledPlugins] = useState<Record<string, boolean>>({});
+  const [showPluginsDropdown, setShowPluginsDropdown] = useState(false);
   const [showConfigPanel, setShowConfigPanel] = useState(false);
   const [starOnCreate, setStarOnCreate] = useState(false);
-  const toolsRef = useRef<HTMLDivElement>(null);
+  const pluginsRef = useRef<HTMLDivElement>(null);
   const configRef = useRef<HTMLDivElement>(null);
   const [cloneFromTaskId, setCloneFromTaskId] = useState<number | ''>('');
   const [contextTasks, setContextTasks] = useState<Task[]>([]);
@@ -100,8 +100,8 @@ export function TaskForm({ onCreated }: TaskFormProps) {
       .then((skills) => setAvailableSkills(skills.map((s) => ({ key: s.key, label: s.label, description: s.description }))))
       .catch(() => setAvailableSkills([{ key: 'monitor', label: 'Monitor', description: 'Background monitoring sub-agents' }]));
   }, [provider]);
-  const AVAILABLE_TOOLS = availableSkills;
-  const enabledToolCount = Object.values(enabledTools).filter(Boolean).length;
+  const AVAILABLE_PLUGINS = availableSkills;
+  const enabledPluginCount = Object.values(enabledPlugins).filter(Boolean).length;
 
   const [userSkills, setUserSkills] = useState<{ id: number; name: string; description: string }[]>([]);
   const [enabledUserSkills, setEnabledUserSkills] = useState<Record<number, boolean>>({});
@@ -114,8 +114,8 @@ export function TaskForm({ onCreated }: TaskFormProps) {
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
-      if (toolsRef.current && !toolsRef.current.contains(e.target as Node)) {
-        setShowToolsDropdown(false);
+      if (pluginsRef.current && !pluginsRef.current.contains(e.target as Node)) {
+        setShowPluginsDropdown(false);
       }
       if (configRef.current && !configRef.current.contains(e.target as Node)) {
         setShowConfigPanel(false);
@@ -124,9 +124,9 @@ export function TaskForm({ onCreated }: TaskFormProps) {
         setShowSkillsDropdown(false);
       }
     };
-    if (showToolsDropdown || showConfigPanel || showSkillsDropdown) document.addEventListener('mousedown', handleClickOutside);
+    if (showPluginsDropdown || showConfigPanel || showSkillsDropdown) document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, [showToolsDropdown, showConfigPanel, showSkillsDropdown]);
+  }, [showPluginsDropdown, showConfigPanel, showSkillsDropdown]);
 
   const STORAGE_KEY = 'cc_default_task_config';
 
@@ -282,7 +282,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
         ...(systemPromptMode ? { system_prompt_mode: systemPromptMode } : {}),
         ...(timeoutHours !== '' ? { timeout_hours: Number(timeoutHours) } : {}),
         enabled_skills: (() => {
-          const skills = Object.entries(enabledTools)
+          const skills = Object.entries(enabledPlugins)
             .filter(([, v]) => v)
             .reduce((acc, [k]) => ({ ...acc, [k]: true }), {} as Record<string, boolean>);
           return Object.keys(skills).length > 0 ? skills : undefined;
@@ -707,24 +707,24 @@ export function TaskForm({ onCreated }: TaskFormProps) {
             )}
           </div>
         {/* Plugins dropdown */}
-        {AVAILABLE_TOOLS.length > 0 && (
-          <div ref={toolsRef} className="relative">
+        {AVAILABLE_PLUGINS.length > 0 && (
+          <div ref={pluginsRef} className="relative">
             <button
               type="button"
-              onClick={() => setShowToolsDropdown(!showToolsDropdown)}
+              onClick={() => setShowPluginsDropdown(!showPluginsDropdown)}
               className={`flex items-center gap-1 text-xs px-2 py-1.5 rounded border transition-colors ${
-                enabledToolCount > 0
+                enabledPluginCount > 0
                   ? 'bg-indigo-600/30 text-indigo-300 border-indigo-500/50 hover:bg-indigo-600/40'
                   : 'bg-gray-700 text-gray-400 border-gray-600 hover:bg-gray-600 hover:text-gray-300'
               }`}
             >
               <Wrench size={13} />
-              <span className="hidden sm:inline">Plugins{enabledToolCount > 0 ? ` (${enabledToolCount})` : ''}</span>
-              {enabledToolCount > 0 && <span className="sm:hidden">{enabledToolCount}</span>}
+              <span className="hidden sm:inline">Plugins{enabledPluginCount > 0 ? ` (${enabledPluginCount})` : ''}</span>
+              {enabledPluginCount > 0 && <span className="sm:hidden">{enabledPluginCount}</span>}
             </button>
-            {showToolsDropdown && (
+            {showPluginsDropdown && (
               <div className="absolute top-full mt-1 left-0 bg-gray-800 border border-gray-600 rounded shadow-lg z-20 min-w-[180px]">
-                {AVAILABLE_TOOLS.map((tool) => {
+                {AVAILABLE_PLUGINS.map((tool) => {
                   const locked = false;
                   return (
                     <label
@@ -734,8 +734,8 @@ export function TaskForm({ onCreated }: TaskFormProps) {
                     >
                       <input
                         type="checkbox"
-                        checked={!!enabledTools[tool.key]}
-                        onChange={(e) => !locked && setEnabledTools((prev) => ({ ...prev, [tool.key]: e.target.checked }))}
+                        checked={!!enabledPlugins[tool.key]}
+                        onChange={(e) => !locked && setEnabledPlugins((prev) => ({ ...prev, [tool.key]: e.target.checked }))}
                         disabled={locked}
                         className="accent-indigo-500"
                       />

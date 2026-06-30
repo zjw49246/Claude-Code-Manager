@@ -3,17 +3,15 @@ import { Wrench, Users, Settings } from 'lucide-react';
 import { api } from '../../api/client';
 import type { Task, SubAgentSummary } from '../../api/client';
 
-// Skills loaded from API at page load, cached globally
-let _skillsCache: { key: string; label: string }[] | null = null;
+// Plugins (SKILL.md-based) loaded from API at page load, cached globally
+let _pluginsCache: { key: string; label: string }[] | null = null;
 
-export const ALL_TOOLS: { key: string; label: string }[] = [];
-
-export async function loadSkills(): Promise<{ key: string; label: string }[]> {
-  if (_skillsCache) return _skillsCache;
+export async function loadPlugins(): Promise<{ key: string; label: string }[]> {
+  if (_pluginsCache) return _pluginsCache;
   try {
     const skills = await api.listSkills();
-    _skillsCache = skills.map((s: { key: string; label: string }) => ({ key: s.key, label: s.label }));
-    return _skillsCache;
+    _pluginsCache = skills.map((s: { key: string; label: string }) => ({ key: s.key, label: s.label }));
+    return _pluginsCache;
   } catch {
     return [{ key: 'monitor', label: 'Monitor' }];
   }
@@ -21,29 +19,29 @@ export async function loadSkills(): Promise<{ key: string; label: string }[]> {
 
 /** Wrench badge with a dropdown to toggle per-task tools (shared by the
  * task list and the split-mode sidebar). */
-export function ToolsBadge({ task, onRefresh }: { task: Task; onRefresh: () => void }) {
+export function PluginsBadge({ task, onRefresh }: { task: Task; onRefresh: () => void }) {
   const [open, setOpen] = useState(false);
   const [tools, setTools] = useState<{ key: string; label: string }[]>([]);
 
   useEffect(() => {
-    loadSkills().then(setTools).catch(() => {});
+    loadPlugins().then(setTools).catch(() => {});
   }, []);
 
   useEffect(() => {
     if (!open) return;
     const handle = (e: MouseEvent) => {
-      if (!(e.target as HTMLElement).closest('[data-tools-dropdown]')) setOpen(false);
+      if (!(e.target as HTMLElement).closest('[data-plugins-dropdown]')) setOpen(false);
     };
     document.addEventListener('mousedown', handle);
     return () => document.removeEventListener('mousedown', handle);
   }, [open]);
 
   return (
-    <div className="relative" data-tools-dropdown>
+    <div className="relative" data-plugins-dropdown>
       <button
         onClick={(e) => { e.stopPropagation(); setOpen(!open); }}
         className="text-xs bg-amber-600/30 text-amber-300 px-1.5 rounded cursor-pointer hover:bg-amber-600/40 flex items-center gap-0.5"
-        title="Skills"
+        title="Plugins"
       >
         <Wrench size={12} />
         {task.enabled_skills ? Object.entries(task.enabled_skills).filter(([k, v]) => v && tools.some(t => t.key === k)).length : 0}
