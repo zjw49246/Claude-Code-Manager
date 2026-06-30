@@ -54,6 +54,22 @@ class WorkerProvisioner:
         src = settings.worker_deploy_source_dir
         self._repo_dir = REPO_ROOT if src in (".", "") else os.path.abspath(src)
 
+    @staticmethod
+    def _build_ec2_overrides() -> dict:
+        """Build EC2 overrides from fixed config (non-empty values only)."""
+        o: dict = {}
+        if settings.worker_instance_type:
+            o["instance_type"] = settings.worker_instance_type
+        if settings.worker_image_id:
+            o["image_id"] = settings.worker_image_id
+        if settings.worker_subnet_id:
+            o["subnet_id"] = settings.worker_subnet_id
+        if settings.worker_security_group_ids:
+            o["security_group_ids"] = [s.strip() for s in settings.worker_security_group_ids.split(",") if s.strip()]
+        if settings.worker_key_name:
+            o["key_name"] = settings.worker_key_name
+        return o
+
     # ------------------------------------------------------------------
     # 工具
     # ------------------------------------------------------------------
@@ -155,8 +171,10 @@ class WorkerProvisioner:
                     existing_iid = None  # 查不到 → 新建
 
             if not existing_iid:
-                await self._log(worker_id, "creating EC2 instance (config inherited from manager)")
-                iid = await self.cloud.create_instance(worker.name)
+                overrides = self._build_ec2_overrides()
+                src = "fixed config" if overrides else "inherited from manager"
+                await self._log(worker_id, f"creating EC2 instance ({src})")
+                iid = await self.cloud.create_instance(worker.name, overrides or None)
                 worker = await self._update(worker_id, cloud_instance_id=iid)
 
             private_ip = await self.cloud.wait_until_running(iid)

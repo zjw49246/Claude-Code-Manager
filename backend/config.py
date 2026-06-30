@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     worker_ssh_user: str = "ubuntu"
     worker_remote_dir: str = "/home/ubuntu/ccm"  # Worker 上 CCM 部署目录
     worker_deploy_source_dir: str = "."          # rsync 部署源（Manager 本地仓库根）
+    # Worker EC2 固定配置（非空时覆盖 Manager 自身配置，避免随 Manager 升级漂移）
+    worker_instance_type: str = ""       # e.g. "t3.medium"
+    worker_image_id: str = ""            # AMI ID
+    worker_subnet_id: str = ""           # VPC subnet
+    worker_security_group_ids: str = ""  # 逗号分隔的安全组 ID
+    worker_key_name: str = ""            # SSH key pair name
 
     # --- Team CCM: Feishu + Org Registry ---
     feishu_app_id: str = ""
