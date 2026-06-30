@@ -151,14 +151,7 @@ async def _migrate_back_then_destroy(prov, worker_id: int, db_factory=None):
     if db_factory is None:
         from backend.database import async_session as db_factory
 
-    # 迁移时 Worker 需要是 ready（TaskMigrator 检查源 Worker 状态），
-    # 但 destroy API 已同步置 destroying。临时改回 ready 让迁移能跑
-    async with db_factory() as db:
-        w = await db.get(Worker, worker_id)
-        if w:
-            w.status = "ready"
-            await db.commit()
-
+    # TaskMigrator 已接受 destroying 状态作为迁移源，无需临时改 ready
     async with db_factory() as db:
         result = await db.execute(select(Task).where(Task.worker_id == worker_id))
         tasks = result.scalars().all()

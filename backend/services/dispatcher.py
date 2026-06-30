@@ -616,22 +616,32 @@ class GlobalDispatcher:
 
     async def _safe_forward_to_worker(self, task: Task):
         from backend.main import worker_proxy
-        try:
-            await worker_proxy.forward_task_to_worker(task)
-        except Exception as e:
-            logger.error("forward task %s to worker failed: %s", task.id, e)
-            async with self.db_factory() as db:
-                await db.execute(
-                    update(Task).where(Task.id == task.id)
-                    .values(status="failed", error_message=f"转发到 Worker 失败: {e}")
-                )
-                await db.commit()
-            await self.broadcaster.broadcast("tasks", {
-                "event": "status_change",
-                "task_id": task.id,
-                "old_status": "in_progress",
-                "new_status": "failed",
-            })
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                await worker_proxy.forward_task_to_worker(task)
+                return
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    delay = 2 ** attempt
+                    logger.warning("forward task %s to worker failed (attempt %d/%d), retry in %ds: %s",
+                                   task.id, attempt + 1, max_retries, delay, e)
+                    await asyncio.sleep(delay)
+                else:
+                    logger.error("forward task %s to worker failed after %d attempts: %s",
+                                 task.id, max_retries, e)
+                    async with self.db_factory() as db:
+                        await db.execute(
+                            update(Task).where(Task.id == task.id)
+                            .values(status="failed", error_message=f"转发到 Worker 失败 ({max_retries} 次重试): {e}")
+                        )
+                        await db.commit()
+                    await self.broadcaster.broadcast("tasks", {
+                        "event": "status_change",
+                        "task_id": task.id,
+                        "old_status": "in_progress",
+                        "new_status": "failed",
+                    })
 
     async def _pool_select(self, exclude: set[str] | None = None) -> str | None:
         """Select a pool account config_dir, or None if pool is off / exhausted."""

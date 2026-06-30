@@ -69,7 +69,7 @@ class TaskMigrator:
         dst = await self._get_worker(target) if target else None
         if target and (not dst or dst.status != "ready"):
             raise MigrationError(f"目标 Worker {dst.name if dst else target} 不可用")
-        if src_worker_id and (not src or src.status != "ready"):
+        if src_worker_id and (not src or src.status not in ("ready", "destroying")):
             raise MigrationError(
                 f"源 Worker {src.name if src else src_worker_id} 不可用（{src.status if src else '不存在'}）——"
                 "无法取回执行态。可先启动该 Worker 再切换"
