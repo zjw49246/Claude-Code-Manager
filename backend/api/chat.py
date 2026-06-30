@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import json
@@ -656,37 +657,54 @@ async def distill_task(
         f"--- 对话记录 ---\n{conversation}"
     )
 
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise HTTPException(500, "ANTHROPIC_API_KEY not configured")
+    from backend.config import settings
+    env = {
+        k: v for k, v in os.environ.items()
+        if k.upper() not in ("CLAUDECODE", "CLAUDE_CODE")
+    }
+    cmd = [
+        settings.claude_binary,
+        "-p", prompt,
+        "--dangerously-skip-permissions",
+        "--output-format", "json",
+        "--model", _DISTILL_MODEL,
+        "--max-turns", "1",
+    ]
 
     try:
-        import httpx
-        async with httpx.AsyncClient(timeout=120) as client:
-            resp = await client.post(
-                "https://api.anthropic.com/v1/messages",
-                headers={
-                    "x-api-key": api_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                },
-                json={
-                    "model": _DISTILL_MODEL,
-                    "max_tokens": 4096,
-                    "messages": [{"role": "user", "content": prompt}],
-                },
-            )
-            if resp.status_code != 200:
-                detail = resp.json().get("error", {}).get("message", resp.text[:200])
-                raise HTTPException(502, f"Anthropic API error: {detail}")
-            skill_content = resp.json()["content"][0]["text"].strip()
-    except httpx.TimeoutException:
-        raise HTTPException(504, "Distillation timed out")
-    except HTTPException:
-        raise
+        process = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=300)
+    except asyncio.TimeoutError:
+        raise HTTPException(504, "Distillation timed out (5min)")
     except Exception as e:
-        logger.exception("distill: API call failed")
+        logger.exception("distill: subprocess failed")
         raise HTTPException(500, f"Distillation failed: {e}")
+
+    raw = stdout.decode("utf-8", errors="replace")
+    if process.returncode != 0:
+        err = stderr.decode("utf-8", errors="replace")[:500]
+        raise HTTPException(502, f"Claude process failed (exit {process.returncode}): {err}")
+
+    skill_content = ""
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+            if obj.get("type") == "result":
+                skill_content = obj.get("result", "")
+                break
+        except json.JSONDecodeError:
+            continue
+
+    if not skill_content:
+        skill_content = raw.strip()
 
     suggested_name = (task.title or task.description or "untitled")[:50].strip()
 
