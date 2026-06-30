@@ -193,6 +193,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
   const [showMonitorPanel, setShowMonitorPanel] = useState(false);
 
   // Distill state
+  const [distillOpen, setDistillOpen] = useState(false);
   const [distilling, setDistilling] = useState(false);
   const [distillResult, setDistillResult] = useState<{ suggested_name: string; content: string } | null>(null);
   const [distillName, setDistillName] = useState('');
@@ -862,25 +863,17 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
             />
             <TaskConfigBadge task={task} onRefresh={() => onTaskUpdated?.()} align="right" />
             <button
-              onClick={async () => {
-                setDistilling(true);
+              onClick={() => {
+                setDistillOpen(true);
+                setDistillResult(null);
                 setDistillError(null);
-                try {
-                  const result = await api.distillTask(task.id);
-                  setDistillResult(result);
-                  setDistillName(result.suggested_name);
-                  setDistillContent(result.content);
-                } catch (e) {
-                  setDistillError(e instanceof Error ? e.message : 'Distill failed');
-                } finally {
-                  setDistilling(false);
-                }
+                setDistilling(false);
               }}
-              disabled={distilling || messages.length === 0}
+              disabled={messages.length === 0}
               className="p-1.5 transition-colors text-gray-600 hover:text-purple-400 disabled:opacity-30 disabled:cursor-not-allowed"
               title="Distill skill from conversation"
             >
-              {distilling ? <Loader2 size={18} className="animate-spin text-purple-400" /> : <Sparkles size={18} />}
+              <Sparkles size={18} />
             </button>
             <button
               onClick={handleStar}
@@ -975,7 +968,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
       )}
 
       {/* Distill modal */}
-      {(distillResult || distillError) && (
+      {distillOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
           <div className="bg-gray-800 rounded-lg shadow-xl w-full max-w-2xl max-h-[80vh] flex flex-col m-4 border border-gray-700">
             <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700">
@@ -983,66 +976,123 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
                 <Sparkles size={16} className="text-purple-400" />
                 <span className="text-sm font-medium text-foreground">Distill Skill</span>
               </div>
-              <button onClick={() => { setDistillResult(null); setDistillError(null); }} className="text-gray-500 hover:text-gray-300">
+              <button onClick={() => { setDistillOpen(false); setDistillResult(null); setDistillError(null); }} className="text-gray-500 hover:text-gray-300">
                 <X size={16} />
               </button>
             </div>
-            {distillError ? (
-              <div className="p-4">
-                <div className="text-red-400 text-sm flex items-center gap-2">
-                  <AlertCircle size={14} /> {distillError}
-                </div>
-              </div>
-            ) : distillResult && (
-              <div className="flex-1 overflow-auto p-4 space-y-3">
-                <div>
-                  <label className="text-xs text-gray-400 mb-1 block">Skill Name</label>
-                  <input
-                    value={distillName}
-                    onChange={(e) => setDistillName(e.target.value)}
-                    className="w-full bg-gray-700 text-foreground text-sm rounded px-3 py-1.5 border border-gray-600 focus:outline-none focus:border-purple-500"
-                    placeholder="Enter skill name..."
-                  />
-                </div>
-                <div className="flex-1">
-                  <label className="text-xs text-gray-400 mb-1 block">Content (editable)</label>
-                  <textarea
-                    value={distillContent}
-                    onChange={(e) => setDistillContent(e.target.value)}
-                    className="w-full h-80 bg-gray-700 text-foreground text-xs font-mono rounded px-3 py-2 border border-gray-600 focus:outline-none focus:border-purple-500 resize-y"
-                  />
+
+            {/* State 1: Initial — show description and Distill button */}
+            {!distilling && !distillResult && !distillError && (
+              <div className="p-6 space-y-4">
+                <p className="text-sm text-gray-300">
+                  从当前 Task 的对话记录中提取可复用的经验，生成一份结构化的 Skill 卡片。
+                </p>
+                <p className="text-xs text-gray-500">
+                  将使用 Opus 4.6 分析对话历史，提取关键步骤、踩坑点和验证方法，生成 Markdown 格式的 Skill。
+                </p>
+                <div className="flex justify-end">
+                  <button
+                    onClick={async () => {
+                      setDistilling(true);
+                      setDistillError(null);
+                      try {
+                        const result = await api.distillTask(task.id);
+                        setDistillResult(result);
+                        setDistillName(result.suggested_name);
+                        setDistillContent(result.content);
+                      } catch (e) {
+                        setDistillError(e instanceof Error ? e.message : 'Distill failed');
+                      } finally {
+                        setDistilling(false);
+                      }
+                    }}
+                    className="flex items-center gap-2 px-4 py-2 text-sm text-white bg-purple-600 rounded-lg hover:bg-purple-700"
+                  >
+                    <Sparkles size={14} />
+                    Start Distill
+                  </button>
                 </div>
               </div>
             )}
-            {distillResult && (
-              <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-gray-700">
-                <button
-                  onClick={() => { setDistillResult(null); setDistillError(null); }}
-                  className="px-3 py-1.5 text-xs text-gray-400 hover:text-gray-200 bg-gray-700 rounded hover:bg-gray-600"
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={async () => {
-                    if (!distillName.trim()) { setDistillError('Name is required'); return; }
-                    setDistillSaving(true);
-                    setDistillError(null);
-                    try {
-                      await api.saveDistilledSkill(task.id, { name: distillName.trim(), content: distillContent, description: `Distilled from task #${task.id}` });
-                      setDistillResult(null);
-                    } catch (e) {
-                      setDistillError(e instanceof Error ? e.message : 'Save failed');
-                    } finally {
-                      setDistillSaving(false);
-                    }
-                  }}
-                  disabled={distillSaving || !distillName.trim()}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-white bg-purple-600 rounded hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {distillSaving ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
-                  Save as Skill
-                </button>
+
+            {/* State 2: Distilling — loading */}
+            {distilling && (
+              <div className="p-8 flex flex-col items-center gap-3">
+                <Loader2 size={32} className="animate-spin text-purple-400" />
+                <p className="text-sm text-gray-400">Distilling skill from conversation...</p>
+                <p className="text-xs text-gray-600">This may take 30-60 seconds</p>
               </div>
+            )}
+
+            {/* State 3: Error */}
+            {distillError && !distilling && (
+              <div className="p-4 space-y-3">
+                <div className="text-red-400 text-sm flex items-center gap-2">
+                  <AlertCircle size={14} /> {distillError}
+                </div>
+                <div className="flex justify-end">
+                  <button
+                    onClick={() => setDistillError(null)}
+                    className="px-3 py-1.5 text-xs text-gray-400 hover:text-gray-200 bg-gray-700 rounded hover:bg-gray-600"
+                  >
+                    Retry
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* State 4: Result — preview and save */}
+            {distillResult && !distilling && (
+              <>
+                <div className="flex-1 overflow-auto p-4 space-y-3">
+                  <div>
+                    <label className="text-xs text-gray-400 mb-1 block">Skill Name</label>
+                    <input
+                      value={distillName}
+                      onChange={(e) => setDistillName(e.target.value)}
+                      className="w-full bg-gray-700 text-foreground text-sm rounded px-3 py-1.5 border border-gray-600 focus:outline-none focus:border-purple-500"
+                      placeholder="Enter skill name..."
+                    />
+                  </div>
+                  <div className="flex-1">
+                    <label className="text-xs text-gray-400 mb-1 block">Content (editable)</label>
+                    <textarea
+                      value={distillContent}
+                      onChange={(e) => setDistillContent(e.target.value)}
+                      className="w-full h-80 bg-gray-700 text-foreground text-xs font-mono rounded px-3 py-2 border border-gray-600 focus:outline-none focus:border-purple-500 resize-y"
+                    />
+                  </div>
+                </div>
+                <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-gray-700">
+                  <button
+                    onClick={() => { setDistillOpen(false); setDistillResult(null); setDistillError(null); }}
+                    className="px-3 py-1.5 text-xs text-gray-400 hover:text-gray-200 bg-gray-700 rounded hover:bg-gray-600"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={async () => {
+                      if (!distillName.trim()) { setDistillError('Name is required'); return; }
+                      setDistillSaving(true);
+                      setDistillError(null);
+                      try {
+                        await api.saveDistilledSkill(task.id, { name: distillName.trim(), content: distillContent, description: `Distilled from task #${task.id}` });
+                        setDistillOpen(false);
+                        setDistillResult(null);
+                      } catch (e) {
+                        setDistillError(e instanceof Error ? e.message : 'Save failed');
+                      } finally {
+                        setDistillSaving(false);
+                      }
+                    }}
+                    disabled={distillSaving || !distillName.trim()}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-white bg-purple-600 rounded hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {distillSaving ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
+                    Save as Skill
+                  </button>
+                </div>
+              </>
             )}
           </div>
         </div>
