@@ -166,14 +166,12 @@ async def transfer_registry(body: TransferBody, db: AsyncSession = Depends(get_d
     ]
 
     teams_result = await db.execute(select(OrgTeam))
-    teams = [
-        {"name": t.name, "description": t.description}
-        for t in teams_result.scalars().all()
-    ]
-
+    teams_all = teams_result.scalars().all()
+    teams = [{"name": t.name, "description": t.description} for t in teams_all]
+    team_id_to_name = {t.id: t.name for t in teams_all}
     tm_result = await db.execute(select(OrgTeamMember))
     team_members_data = [
-        {"team_id": tm.team_id, "feishu_open_id": tm.feishu_open_id}
+        {"team_name": team_id_to_name.get(tm.team_id, ""), "feishu_open_id": tm.feishu_open_id}
         for tm in tm_result.scalars().all()
     ]
 
@@ -250,12 +248,25 @@ async def import_registry(body: ImportBody, db: AsyncSession = Depends(get_db)):
     teams_result = await db.execute(select(OrgTeam))
     team_name_to_id = {t.name: t.id for t in teams_result.scalars().all()}
 
-    # Import team members
+    # Import team members — resolve by team_name (new format) or skip if unresolvable
     for tm_data in body.team_members:
-        # team_id in transfer may refer to old DB — need team name
-        # For simplicity, skip team members if we can't resolve
-        # In practice, transfer should include team_name
-        pass
+        team_name = tm_data.get("team_name", "")
+        if not team_name:
+            continue
+        new_team_id = team_name_to_id.get(team_name)
+        if not new_team_id:
+            continue
+        open_id = tm_data.get("feishu_open_id", "")
+        if not open_id:
+            continue
+        existing = await db.execute(
+            select(OrgTeamMember).where(
+                OrgTeamMember.team_id == new_team_id,
+                OrgTeamMember.feishu_open_id == open_id,
+            )
+        )
+        if not existing.scalar_one_or_none():
+            db.add(OrgTeamMember(team_id=new_team_id, feishu_open_id=open_id))
 
     await db.commit()
     return {"ok": True}
@@ -323,19 +334,32 @@ async def list_teams(db: AsyncSession = Depends(get_db)):
 
     result = await db.execute(select(OrgTeam).order_by(OrgTeam.name))
     teams = result.scalars().all()
+
+    # Build member lookup: feishu_open_id -> OrgMember (name, avatar)
+    members_result = await db.execute(select(OrgMember))
+    member_lookup = {m.feishu_open_id: m for m in members_result.scalars().all()}
+
     out = []
     for t in teams:
-        # Fetch members for this team
-        members_result = await db.execute(
+        tm_result = await db.execute(
             select(OrgTeamMember).where(OrgTeamMember.team_id == t.id)
         )
-        members = members_result.scalars().all()
+        team_members = tm_result.scalars().all()
+        enriched = []
+        for tm in team_members:
+            org_m = member_lookup.get(tm.feishu_open_id)
+            enriched.append({
+                "feishu_open_id": tm.feishu_open_id,
+                "name": org_m.name if org_m else tm.feishu_open_id,
+                "avatar_url": org_m.avatar_url if org_m else "",
+                "ccm_url": org_m.ccm_url if org_m else "",
+            })
         out.append({
             "id": t.id,
             "name": t.name,
             "description": t.description,
             "created_at": t.created_at.isoformat() if t.created_at else None,
-            "members": [{"feishu_open_id": m.feishu_open_id} for m in members],
+            "members": enriched,
         })
     return out
 

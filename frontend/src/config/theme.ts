@@ -2,7 +2,6 @@ const STORAGE_KEY = 'cc_theme';
 
 export const THEME_OPTIONS = [
   { value: 'dark', label: '深色' },
-  { value: 'light', label: '浅色' },
   { value: 'ocean', label: '海蓝' },
   { value: 'forest', label: '森林' },
   { value: 'rose', label: '莓红' },

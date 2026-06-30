@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import socket
+import time
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import desc, select
@@ -312,8 +313,9 @@ async def add_worker_account(worker_id: int, body: dict, db: AsyncSession = Depe
             "detail": out[-1000:],
         }
 
-    import asyncio
-    asyncio.create_task(_run())
+    task = asyncio.create_task(_run())
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
     return {"ok": True, "status": "running", "slot": slot}
 
 

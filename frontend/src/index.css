@@ -10,40 +10,6 @@ html {
   overflow-x: clip;
 }
 
-/* Light theme: reverse the gray scale + flip foreground */
-html[data-theme='light'] {
-  background-color: #f9fafb;
-
-  --color-foreground: #111827;
-
-  --color-gray-950: #f9fafb;
-  --color-gray-900: #f3f4f6;
-  --color-gray-800: #e5e7eb;
-  --color-gray-700: #d1d5db;
-  --color-gray-600: #9ca3af;
-  --color-gray-500: #6b7280;
-  --color-gray-400: #4b5563;
-  --color-gray-300: #374151;
-  --color-gray-200: #1f2937;
-  --color-gray-100: #111827;
-  --color-gray-50: #030712;
-
-  /* Darken bright accent colors for readability on light bg */
-  --color-green-400: #16a34a;
-  --color-green-300: #22c55e;
-
-  --color-yellow-400: #a16207;
-  --color-yellow-500: #ca8a04;
-
-  --color-red-400: #dc2626;
-
-  --color-blue-400: #2563eb;
-
-  --color-indigo-400: #4f46e5;
-  --color-indigo-300: #6366f1;
-
-  --color-emerald-300: #059669;
-}
 
 html[data-theme='ocean'] {
   background-color: #06131f;

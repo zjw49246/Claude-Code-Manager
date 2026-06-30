@@ -319,7 +319,7 @@ uv run python scripts/auto_login.py --email '{email}' --token '{token}' --config
 """
             # 写脚本到 worker 再执行
             await ssh.run(f"cat > /tmp/ccm_login.sh << 'SCRIPT'\n{login_script}SCRIPT\nchmod +x /tmp/ccm_login.sh")
-            cmd = "bash /tmp/ccm_login.sh"
+            cmd = "bash /tmp/ccm_login.sh && rm -f /tmp/ccm_login.sh"
             code, out = await ssh.run(cmd, timeout=600)
             status = "logged_in" if code == 0 else "failed"
             results.append({"email": email, "status": status})

@@ -52,7 +52,7 @@ class WorkerRelay:
 
     @staticmethod
     def _ws_url(worker: Worker) -> str:
-        return f"ws://{worker.private_ip}:{worker.ccm_port}/ws?token={worker.auth_token}"
+        return f"ws://{worker.private_ip}:{worker.ccm_port}/ws"
 
     @staticmethod
     def _api(worker: Worker, path: str) -> str:
@@ -146,16 +146,22 @@ class WorkerRelay:
 
     async def _reconnect(self, worker: Worker):
         task_ids = self._tasks.pop(worker.id, set())
+        worker_id = worker.id
         for attempt in range(10):
-            if worker.id in self._closing:
+            if worker_id in self._closing:
                 return
             await asyncio.sleep(min(2 ** attempt, 60))
             try:
-                await self.ensure_connection(worker)
+                # Re-fetch worker from DB to get latest IP/token after stop/start
+                async with self.db_factory() as db:
+                    fresh = await db.get(Worker, worker_id)
+                    if not fresh or fresh.status in ("terminated", "destroying"):
+                        return
+                await self.ensure_connection(fresh)
                 for tid in task_ids:
-                    await self.subscribe_task(worker, tid)
-                await self._backfill_missing_logs(worker, task_ids)
-                logger.info("worker %s relay reconnected", worker.id)
+                    await self.subscribe_task(fresh, tid)
+                await self._backfill_missing_logs(fresh, task_ids)
+                logger.info("worker %s relay reconnected", worker_id)
                 return
             except Exception:
                 continue
