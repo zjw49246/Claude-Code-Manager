@@ -212,6 +212,20 @@ async def _org_heartbeat_loop():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    # Create default admin on first startup
+    from backend.models.user import User
+    from backend.api.auth import _hash_password
+    async with async_session() as db:
+        result = await db.execute(select(User))
+        if result.scalars().first() is None:
+            db.add(User(
+                email="admin@apexin.ai",
+                name="Admin",
+                password_hash=_hash_password("admin123456"),
+                role="admin",
+            ))
+            await db.commit()
+            logger.info("Default admin account created: admin@apexin.ai")
     # PTY 权限透传：bridge HTTP 线程需要往主循环调度协程
     instance_manager._loop = asyncio.get_running_loop()
     # Apply persisted runtime-settings override (frontend PTY toggle)
