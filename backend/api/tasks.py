@@ -195,8 +195,15 @@ async def get_task(task_id: int, queue: TaskQueue = Depends(_get_queue)):
 
 @router.put("/{task_id}", response_model=TaskResponse)
 async def update_task(
-    task_id: int, body: TaskUpdate, queue: TaskQueue = Depends(_get_queue)
+    task_id: int, body: TaskUpdate, request: Request, queue: TaskQueue = Depends(_get_queue)
 ):
+    # Permission: only creator or admin can modify task config
+    user_id = get_current_user_id(request)
+    user_role = get_current_user_role(request)
+    if user_role != "admin":
+        task = await queue.get(task_id)
+        if task and task.created_by != user_id:
+            raise HTTPException(403, "Only the task creator or admin can modify task config")
     updates = body.model_dump(exclude_unset=True)
 
     # 执行位置切换走 TaskMigrator（同 mode/model 一样在 task 详情改，
