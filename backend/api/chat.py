@@ -657,14 +657,30 @@ async def distill_task(
         f"--- 对话记录 ---\n{conversation}"
     )
 
+    import tempfile
     from backend.config import settings
     env = {
         k: v for k, v in os.environ.items()
         if k.upper() not in ("CLAUDECODE", "CLAUDE_CODE")
     }
+    if "CLAUDE_CONFIG_DIR" not in env:
+        try:
+            from backend.services.claude_pool import pool
+            if pool:
+                acct = pool.select(validate=False)
+                if acct:
+                    env["CLAUDE_CONFIG_DIR"] = acct.config_dir
+        except Exception:
+            pass
+        if "CLAUDE_CONFIG_DIR" not in env:
+            for candidate in ["/home/ubuntu/.claude-account-2", "/home/ubuntu/.claude"]:
+                if os.path.isdir(candidate):
+                    env["CLAUDE_CONFIG_DIR"] = candidate
+                    break
+
     cmd = [
         settings.claude_binary,
-        "-p", prompt,
+        "-p", "-",
         "--dangerously-skip-permissions",
         "--output-format", "json",
         "--model", _DISTILL_MODEL,
@@ -674,11 +690,15 @@ async def distill_task(
     try:
         process = await asyncio.create_subprocess_exec(
             *cmd,
+            stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
         )
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=300)
+        stdout, stderr = await asyncio.wait_for(
+            process.communicate(input=prompt.encode("utf-8")),
+            timeout=300,
+        )
     except asyncio.TimeoutError:
         raise HTTPException(504, "Distillation timed out (5min)")
     except Exception as e:
@@ -688,6 +708,7 @@ async def distill_task(
     raw = stdout.decode("utf-8", errors="replace")
     if process.returncode != 0:
         err = stderr.decode("utf-8", errors="replace")[:500]
+        logger.error("distill: claude failed. stdout=%s stderr=%s", raw[:500], err)
         raise HTTPException(502, f"Claude process failed (exit {process.returncode}): {err}")
 
     skill_content = ""
