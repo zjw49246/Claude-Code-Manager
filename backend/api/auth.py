@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 
 import bcrypt
 import jwt
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, EmailStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -167,24 +167,22 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/me")
-async def get_me(request, db: AsyncSession = Depends(get_db)):
-    from starlette.requests import Request
-    request: Request = request
-    auth_type = getattr(request.state, "auth_type", None)
-    if auth_type == "token":
-        return {"ok": True, "auth_type": "token", "role": "admin"}
-
+async def get_me(request: Request, db: AsyncSession = Depends(get_db)):
     user_id = getattr(request.state, "user_id", None)
     if not user_id:
+        auth_type = getattr(request.state, "auth_type", None)
+        if auth_type == "token":
+            return {"ok": True, "auth_type": "token", "role": "admin"}
         raise HTTPException(401, "Not authenticated")
 
     user = await db.get(User, user_id)
     if not user:
         raise HTTPException(404, "User not found")
 
+    auth_type = getattr(request.state, "auth_type", "jwt")
     return {
         "ok": True,
-        "auth_type": "jwt",
+        "auth_type": auth_type,
         "user": {
             "id": user.id,
             "email": user.email,

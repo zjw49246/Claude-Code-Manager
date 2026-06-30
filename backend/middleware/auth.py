@@ -16,6 +16,9 @@ class TokenAuthMiddleware(BaseHTTPMiddleware):
         "/api/org/register",
     }
 
+    _admin_user_id: int | None = None
+    _admin_resolved: bool = False
+
     async def dispatch(self, request: Request, call_next):
         if not settings.auth_token:
             return await call_next(request)
@@ -40,9 +43,11 @@ class TokenAuthMiddleware(BaseHTTPMiddleware):
         if not token:
             return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
 
-        # Legacy token → treat as admin
+        # Legacy token → resolve to default admin account
         if token == settings.auth_token:
-            request.state.user_id = None
+            if not self._admin_resolved:
+                await self._resolve_admin_id()
+            request.state.user_id = self._admin_user_id
             request.state.user_role = "admin"
             request.state.auth_type = "token"
             return await call_next(request)
@@ -57,3 +62,18 @@ class TokenAuthMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+
+    @classmethod
+    async def _resolve_admin_id(cls):
+        from backend.database import async_session
+        from backend.models.user import User
+        from sqlalchemy import select
+        try:
+            async with async_session() as db:
+                result = await db.execute(
+                    select(User.id).where(User.role == "admin").order_by(User.id).limit(1)
+                )
+                cls._admin_user_id = result.scalar_one_or_none()
+        except Exception:
+            cls._admin_user_id = None
+        cls._admin_resolved = True
