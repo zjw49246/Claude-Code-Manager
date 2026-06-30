@@ -13,7 +13,6 @@ export function LoginPage({ onLogin }: LoginPageProps) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');
-  const [inviteCode, setInviteCode] = useState('');
   const [serverUrl, setServerUrlValue] = useState(getServerUrl());
   const [showServer, setShowServer] = useState(false);
   const [error, setError] = useState('');
@@ -80,7 +79,7 @@ export function LoginPage({ onLogin }: LoginPageProps) {
       const res = await fetch(`${base()}/api/auth/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, name, password, invite_code: inviteCode }),
+        body: JSON.stringify({ email, name, password }),
       });
       const data = await res.json();
       if (res.ok && data.token) {
@@ -190,14 +189,6 @@ export function LoginPage({ onLogin }: LoginPageProps) {
               placeholder="Password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              required
-            />
-            <input
-              type="text"
-              className="w-full bg-gray-700 text-foreground rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              placeholder="Invite Code"
-              value={inviteCode}
-              onChange={(e) => setInviteCode(e.target.value)}
               required
             />
             <button type="submit" disabled={loading}

@@ -60,7 +60,6 @@ class RegisterRequest(BaseModel):
     email: str
     name: str
     password: str
-    invite_code: str = ""
 
 
 class UserResponse(BaseModel):
@@ -116,10 +115,6 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
 
 @router.post("/register")
 async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
-    # Check invite code (use AUTH_TOKEN as invite code for now)
-    if settings.auth_token and body.invite_code != settings.auth_token:
-        raise HTTPException(403, "Invalid invite code")
-
     # Check duplicate email
     result = await db.execute(select(User).where(User.email == body.email))
     if result.scalar_one_or_none():
