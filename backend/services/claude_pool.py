@@ -460,6 +460,15 @@ class ClaudePool:
         )
         return account is not None and not account.enabled
 
+    def is_known_account(self, config_dir: str) -> bool:
+        """Whether this config_dir is a registered pool account.
+
+        A session JSONL might land in a stray ``~/.claude`` dir (e.g. after
+        migration from a Worker) that has no credentials on this machine.
+        Callers use this to avoid blindly trusting such dirs as healthy.
+        """
+        return any(a.config_dir == config_dir for a in self._accounts)
+
     def locate_session_config_dir(self, session_id: str, extra_dirs: list[str] | None = None) -> str | None:
         """Find which config dir actually holds the session JSONL.
 

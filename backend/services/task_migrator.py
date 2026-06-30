@@ -240,14 +240,14 @@ class TaskMigrator:
             src_file = os.path.join(tmp, f"{session_id}.jsonl")
             await ssh.rsync_from(remote_file, src_file, delete=False)
 
-        target_rel = f".claude/projects/{encoded}/{session_id}.jsonl"
         if dst is None:
-            target = os.path.join(os.path.expanduser("~"), target_rel)
+            config_dir = os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude")
+            target = os.path.join(config_dir, f"projects/{encoded}/{session_id}.jsonl")
             os.makedirs(os.path.dirname(target), exist_ok=True)
             if os.path.abspath(src_file) != os.path.abspath(target):
                 shutil.copy2(src_file, target)
         else:
-            target = f"/home/{dst.ssh_user}/{target_rel}"
+            target = f"/home/{dst.ssh_user}/.claude/projects/{encoded}/{session_id}.jsonl"
             await self._ssh(dst).copy_file(src_file, target)
 
     # -- 目标 worker 上重建 task ----------------------------------------

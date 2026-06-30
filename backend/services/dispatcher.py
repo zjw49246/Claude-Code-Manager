@@ -689,6 +689,7 @@ class GlobalDispatcher:
                 resident
                 and not self.pool.is_in_cooldown(resident)
                 and not self.pool.is_disabled(resident)
+                and self.pool.is_known_account(resident)
             ):
                 return resident
             # Resident account is missing, rate-limited, or disabled → pick a
