@@ -28,6 +28,7 @@ from backend.models.user_skill import UserSkill  # noqa: F401
 from backend.models.feishu_binding import FeishuUserBinding  # noqa: F401
 from backend.models.org import OrgMember, OrgTeam, OrgTeamMember  # noqa: F401
 from backend.models.task_share import TaskShare, ProjectShare, SharedTaskReceived  # noqa: F401
+from backend.models.user import User  # noqa: F401
 from backend.database import Base, _async_url_to_sync, _is_sqlite
 
 target_metadata = Base.metadata

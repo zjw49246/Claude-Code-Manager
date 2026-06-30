@@ -6,43 +6,54 @@ from backend.config import settings
 
 
 class TokenAuthMiddleware(BaseHTTPMiddleware):
-    """Simple bearer token authentication middleware."""
+    """Bearer token + JWT authentication middleware."""
 
-    # Paths that don't require authentication
     PUBLIC_PATHS = {
-        "/api/system/health", "/api/auth/login", "/api/github/webhook",
+        "/api/system/health", "/api/auth/login", "/api/auth/register",
+        "/api/github/webhook",
         "/api/feishu/callback",
         "/api/shared/receive", "/api/shared/revoke",
         "/api/org/register",
     }
 
     async def dispatch(self, request: Request, call_next):
-        # Skip auth if no token is configured
         if not settings.auth_token:
             return await call_next(request)
 
         path = request.url.path
 
-        # Skip auth for public paths, static files, and uploaded images (UUID filenames)
         if path in self.PUBLIC_PATHS or not path.startswith("/api") or path.startswith("/api/uploads/"):
             return await call_next(request)
 
-        # shared-access uses share_token auth (not admin auth_token)
         if path.startswith("/api/shared-access/"):
             return await call_next(request)
 
-        # Skip auth for WebSocket (handled separately)
         if path in ("/ws", "/ws/shared"):
             return await call_next(request)
 
-        # Check Authorization header
         auth_header = request.headers.get("Authorization", "")
-        if auth_header == f"Bearer {settings.auth_token}":
+        token = auth_header.replace("Bearer ", "") if auth_header.startswith("Bearer ") else ""
+
+        if not token:
+            token = request.query_params.get("token", "")
+
+        if not token:
+            return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+
+        # Legacy token → treat as admin
+        if token == settings.auth_token:
+            request.state.user_id = None
+            request.state.user_role = "admin"
+            request.state.auth_type = "token"
             return await call_next(request)
 
-        # Check query parameter (for convenience on mobile)
-        token_param = request.query_params.get("token", "")
-        if token_param == settings.auth_token:
+        # JWT token
+        from backend.api.auth import decode_jwt
+        payload = decode_jwt(token)
+        if payload:
+            request.state.user_id = payload.get("user_id")
+            request.state.user_role = payload.get("role", "member")
+            request.state.auth_type = "jwt"
             return await call_next(request)
 
         return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
