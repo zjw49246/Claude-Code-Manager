@@ -200,6 +200,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
   const [distillContent, setDistillContent] = useState('');
   const [distillSaving, setDistillSaving] = useState(false);
   const [distillError, setDistillError] = useState<string | null>(null);
+  const [distillInstruction, setDistillInstruction] = useState('');
   const effectiveStatus = localStatus || task.status;
   const isProcessing = sending || ['in_progress', 'executing'].includes(effectiveStatus);
   const [hasMoreHistory, setHasMoreHistory] = useState(true);
@@ -987,8 +988,17 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
                 <p className="text-sm text-gray-300">
                   从当前 Task 的对话记录中提取可复用的经验，生成一份结构化的 Skill 卡片。
                 </p>
+                <div>
+                  <label className="text-xs text-gray-400 mb-1 block">补充说明（可选）</label>
+                  <textarea
+                    value={distillInstruction}
+                    onChange={(e) => setDistillInstruction(e.target.value)}
+                    placeholder="例如：只提取上传功能相关的经验 / 重点关注 bug 排查过程..."
+                    className="w-full h-20 bg-gray-700 text-foreground text-sm rounded px-3 py-2 border border-gray-600 focus:outline-none focus:border-purple-500 resize-y"
+                  />
+                </div>
                 <p className="text-xs text-gray-500">
-                  将使用 Opus 4.6 分析对话历史，提取关键步骤、踩坑点和验证方法，生成 Markdown 格式的 Skill。
+                  将使用 Opus 4.6 分析对话历史，提取关键步骤、踩坑点和验证方法。可多次蒸馏，每次指定不同侧重点。
                 </p>
                 <div className="flex justify-end">
                   <button
@@ -996,7 +1006,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
                       setDistilling(true);
                       setDistillError(null);
                       try {
-                        const result = await api.distillTask(task.id);
+                        const result = await api.distillTask(task.id, distillInstruction.trim() || undefined);
                         setDistillResult(result);
                         setDistillName(result.suggested_name);
                         setDistillContent(result.content);
