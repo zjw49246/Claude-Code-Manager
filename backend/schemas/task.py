@@ -88,6 +88,7 @@ class TaskUpdate(BaseModel):
 class TaskResponse(BaseModel):
     id: int
     worker_id: int | None = None
+    created_by: int | None = None
     title: str
     description: str | None
     status: str

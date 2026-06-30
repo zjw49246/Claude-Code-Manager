@@ -3,7 +3,7 @@ import shutil
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
@@ -11,6 +11,7 @@ from backend.models.task import Task
 from backend.models.instance import Instance
 from backend.schemas.task import TaskCreate, TaskUpdate, TaskResponse
 from backend.services.task_queue import TaskQueue
+from backend.api.deps import get_current_user_id, get_current_user_role
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
@@ -109,6 +110,7 @@ async def count_tasks(
 
 @router.get("", response_model=list[TaskResponse])
 async def list_tasks(
+    request: Request,
     status: str | None = None,
     include_archived: bool = False,
     archived_only: bool = False,
@@ -119,18 +121,22 @@ async def list_tasks(
     offset: int = 0,
     queue: TaskQueue = Depends(_get_queue),
 ):
+    user_id = get_current_user_id(request)
+    user_role = get_current_user_role(request)
     return await queue.list_tasks(
         status=status, include_archived=include_archived,
         archived_only=archived_only,
         project_id=project_id, starred=starred,
         has_unread=has_unread,
         limit=limit, offset=offset,
+        user_id=user_id if user_role != "admin" else None,
     )
 
 
 @router.post("", response_model=TaskResponse, status_code=201)
-async def create_task(body: TaskCreate, queue: TaskQueue = Depends(_get_queue), db: AsyncSession = Depends(get_db)):
+async def create_task(request: Request, body: TaskCreate, queue: TaskQueue = Depends(_get_queue), db: AsyncSession = Depends(get_db)):
     data = body.model_dump()
+    data["created_by"] = get_current_user_id(request)
     if data.get("id") is None:
         data.pop("id", None)  # 未指定 → 正常自增；指定 → 用 Manager 分配的全局 ID
     image_paths = data.pop("image_paths", None)

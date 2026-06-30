@@ -11,7 +11,7 @@ import logging
 import socket
 import time
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -45,10 +45,14 @@ def _provisioner():
 
 
 @router.get("", response_model=list[WorkerResponse])
-async def list_workers(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(Worker).where(Worker.status != "terminated").order_by(desc(Worker.created_at))
-    )
+async def list_workers(request: Request, db: AsyncSession = Depends(get_db)):
+    from backend.api.deps import get_current_user_id, get_current_user_role
+    user_id = get_current_user_id(request)
+    user_role = get_current_user_role(request)
+    stmt = select(Worker).where(Worker.status != "terminated").order_by(desc(Worker.created_at))
+    if user_role != "admin":
+        stmt = stmt.where(Worker.owner_user_id == user_id)
+    result = await db.execute(stmt)
     return result.scalars().all()
 
 
@@ -404,3 +408,27 @@ async def update_worker_runtime_settings(worker_id: int, body: dict, db: AsyncSe
     if r.status_code >= 400:
         raise HTTPException(r.status_code, r.text[:300])
     return r.json()
+
+
+# --- Team CCM: Worker assignment ---
+
+from pydantic import BaseModel as _BaseModel
+
+
+class AssignWorkerBody(_BaseModel):
+    owner_user_id: int | None = None
+
+
+@router.put("/{worker_id}/assign", response_model=WorkerResponse)
+async def assign_worker(worker_id: int, body: AssignWorkerBody, request: Request, db: AsyncSession = Depends(get_db)):
+    """Assign a worker to a user (admin only). Set owner_user_id=null for public pool."""
+    from backend.api.deps import get_current_user_role
+    if get_current_user_role(request) != "admin":
+        raise HTTPException(403, "Only admin can assign workers")
+    worker = await db.get(Worker, worker_id)
+    if not worker:
+        raise HTTPException(404, "Worker not found")
+    worker.owner_user_id = body.owner_user_id
+    await db.commit()
+    await db.refresh(worker)
+    return worker

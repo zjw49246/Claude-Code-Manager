@@ -47,6 +47,7 @@ class TaskQueue:
         project_id: int | None = None, starred: bool | None = None,
         has_unread: bool | None = None,
         limit: int = 50, offset: int = 0,
+        user_id: int | None = None,
     ) -> list[Task]:
         auto_sort = await self._auto_sort_enabled()
         effective_key = _effective_key_expr(auto_sort)
@@ -64,6 +65,13 @@ class TaskQueue:
             stmt = stmt.where(Task.starred == starred)
         if has_unread is not None:
             stmt = stmt.where(Task.has_unread == has_unread)
+        # Team CCM: member only sees tasks on their own Workers or created by them
+        if user_id is not None:
+            from backend.models.worker import Worker
+            owned_worker_ids_q = select(Worker.id).where(Worker.owner_user_id == user_id)
+            stmt = stmt.where(
+                (Task.created_by == user_id) | Task.worker_id.in_(owned_worker_ids_q)
+            )
         stmt = stmt.limit(limit).offset(offset)
         result = await self.db.execute(stmt)
         return list(result.scalars().all())
