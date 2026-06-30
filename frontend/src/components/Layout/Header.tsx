@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { Palette, Globe, Menu, X, Settings } from 'lucide-react';
-import { api } from '../../api/client';
+import { Palette, Globe, Menu, X, Settings, LogOut } from 'lucide-react';
+import { api, clearToken } from '../../api/client';
 import type { RuntimeSettings } from '../../api/client';
 import { isCapacitor } from '../../config/server';
 import { getTheme, setTheme as persistTheme, THEME_OPTIONS, type Theme } from '../../config/theme';
@@ -246,6 +246,15 @@ export function Header({ currentPage, onNavigate }: HeaderProps) {
                       >绑定</button>
                     ) : null}
                   </div>
+                </div>
+                {/* Logout */}
+                <div className="border-t border-gray-700 pt-2 mt-1">
+                  <button
+                    onClick={() => { clearToken(); localStorage.removeItem('cc_user'); window.location.reload(); }}
+                    className="flex items-center gap-1.5 text-xs text-red-400 hover:text-red-300 transition-colors w-full"
+                  >
+                    <LogOut size={12} /> 退出登录
+                  </button>
                 </div>
               </div>
             )}
