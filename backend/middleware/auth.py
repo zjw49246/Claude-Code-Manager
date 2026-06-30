@@ -9,7 +9,7 @@ class TokenAuthMiddleware(BaseHTTPMiddleware):
     """Bearer token + JWT authentication middleware."""
 
     PUBLIC_PATHS = {
-        "/api/system/health", "/api/auth/login", "/api/auth/register",
+        "/api/system/health", "/api/auth/login", "/api/auth/register", "/api/auth/send-code",
         "/api/github/webhook",
         "/api/feishu/callback",
         "/api/shared/receive", "/api/shared/revoke",

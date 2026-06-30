@@ -13,12 +13,42 @@ export function LoginPage({ onLogin }: LoginPageProps) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');
+  const [code, setCode] = useState('');
+  const [codeSent, setCodeSent] = useState(false);
+  const [codeCooldown, setCodeCooldown] = useState(0);
   const [serverUrl, setServerUrlValue] = useState(getServerUrl());
   const [showServer, setShowServer] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
   const base = () => serverUrl.replace(/\/+$/, '') || getApiBase();
+
+  const handleSendCode = async () => {
+    if (!email || codeCooldown > 0) return;
+    setError('');
+    try {
+      const res = await fetch(`${base()}/api/auth/send-code`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }),
+      });
+      if (res.ok) {
+        setCodeSent(true);
+        setCodeCooldown(60);
+        const timer = setInterval(() => {
+          setCodeCooldown(prev => {
+            if (prev <= 1) { clearInterval(timer); return 0; }
+            return prev - 1;
+          });
+        }, 1000);
+      } else {
+        const data = await res.json();
+        setError(data.detail || 'Failed to send code');
+      }
+    } catch {
+      setError('Connection failed');
+    }
+  };
 
   const handleTokenLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -79,7 +109,7 @@ export function LoginPage({ onLogin }: LoginPageProps) {
       const res = await fetch(`${base()}/api/auth/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, name, password }),
+        body: JSON.stringify({ email, name, password, code }),
       });
       const data = await res.json();
       if (res.ok && data.token) {
@@ -175,12 +205,30 @@ export function LoginPage({ onLogin }: LoginPageProps) {
               autoFocus
               required
             />
+            <div className="flex gap-2">
+              <input
+                type="email"
+                className="flex-1 bg-gray-700 text-foreground rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                placeholder="Email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                required
+              />
+              <button
+                type="button"
+                onClick={handleSendCode}
+                disabled={!email || codeCooldown > 0}
+                className="shrink-0 bg-gray-600 hover:bg-gray-500 text-foreground px-3 py-2 rounded text-xs font-medium disabled:opacity-50 whitespace-nowrap"
+              >
+                {codeCooldown > 0 ? `${codeCooldown}s` : codeSent ? 'Resend' : 'Send Code'}
+              </button>
+            </div>
             <input
-              type="email"
+              type="text"
               className="w-full bg-gray-700 text-foreground rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              placeholder="Email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              placeholder="Verification Code"
+              value={code}
+              onChange={(e) => setCode(e.target.value)}
               required
             />
             <input
@@ -191,7 +239,7 @@ export function LoginPage({ onLogin }: LoginPageProps) {
               onChange={(e) => setPassword(e.target.value)}
               required
             />
-            <button type="submit" disabled={loading}
+            <button type="submit" disabled={loading || !codeSent}
               className="w-full bg-indigo-600 hover:bg-indigo-700 text-white py-2 rounded text-sm font-medium disabled:opacity-50">
               {loading ? 'Registering...' : 'Register'}
             </button>

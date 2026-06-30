@@ -56,10 +56,15 @@ class LoginRequest(BaseModel):
     password: str = ""
 
 
+class SendCodeRequest(BaseModel):
+    email: str
+
+
 class RegisterRequest(BaseModel):
     email: str
     name: str
     password: str
+    code: str
 
 
 class UserResponse(BaseModel):
@@ -113,8 +118,22 @@ async def login(body: LoginRequest, db: AsyncSession = Depends(get_db)):
     }
 
 
+@router.post("/send-code")
+async def send_code(body: SendCodeRequest):
+    from backend.services.email_service import send_verification_code
+    ok = send_verification_code(body.email)
+    if not ok:
+        raise HTTPException(500, "Failed to send verification code")
+    return {"ok": True}
+
+
 @router.post("/register")
 async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
+    # Verify email code
+    from backend.services.email_service import verify_code
+    if not verify_code(body.email, body.code):
+        raise HTTPException(400, "Invalid or expired verification code")
+
     # Check duplicate email
     result = await db.execute(select(User).where(User.email == body.email))
     if result.scalar_one_or_none():
