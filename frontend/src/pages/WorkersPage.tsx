@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '../api/client';
 import { useWebSocket } from '../hooks/useWebSocket';
-import type { Worker } from '../api/client';
+import type { Worker, TeamUser } from '../api/client';
 import { Plus, X, RefreshCw, Trash2, Power, Play, Server, ScrollText } from 'lucide-react';
 
 const STATUS_COLORS: Record<string, string> = {
@@ -135,7 +135,7 @@ function shortName(w: Worker): string {
   return w.name;
 }
 
-function WorkerCard({ worker, onAction }: { worker: Worker; onAction: () => void }) {
+function WorkerCard({ worker, onAction, users, isAdmin }: { worker: Worker; onAction: () => void; users: TeamUser[]; isAdmin: boolean }) {
   const [logsOpen, setLogsOpen] = useState(false);
   const [poolOpen, setPoolOpen] = useState(false);
   const [pool, setPool] = useState<Awaited<ReturnType<typeof api.getWorkerPool>> | null>(null);
@@ -179,6 +179,25 @@ function WorkerCard({ worker, onAction }: { worker: Worker; onAction: () => void
           <span className={`text-xs px-2 py-0.5 rounded-full shrink-0 ${STATUS_COLORS[worker.status] || 'bg-gray-500/20 text-gray-400'}`}>
             {worker.status}{busy && worker.bootstrap_step ? `: ${worker.bootstrap_step}` : ''}
           </span>
+          {isAdmin && (
+            <select
+              value={worker.owner_user_id ?? ''}
+              onChange={async (e) => {
+                const val = e.target.value ? Number(e.target.value) : null;
+                try { await api.assignWorker(worker.id, val); onAction(); } catch {}
+              }}
+              className="text-xs bg-gray-700 text-gray-300 rounded px-1.5 py-0.5 border border-gray-600 shrink-0"
+              title="Assign to user"
+            >
+              <option value="">Public Pool</option>
+              {users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
+            </select>
+          )}
+          {!isAdmin && worker.owner_user_id && (
+            <span className="text-xs text-gray-500 shrink-0">
+              {users.find(u => u.id === worker.owner_user_id)?.name || ''}
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-1 shrink-0">
           {worker.status === 'ready' && ptyEnabled !== null && (
@@ -335,16 +354,23 @@ function WorkerCard({ worker, onAction }: { worker: Worker; onAction: () => void
 
 export default function WorkersPage() {
   const [workers, setWorkers] = useState<Worker[]>([]);
+  const [users, setUsers] = useState<TeamUser[]>([]);
   const [loading, setLoading] = useState(true);
   const [adding, setAdding] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const ccUser = JSON.parse(localStorage.getItem('cc_user') || '{}');
+  const isAdmin = ccUser.role === 'admin' || !ccUser.role;
 
   const load = useCallback(() => {
     api.listWorkers()
       .then((w) => { setWorkers(w); setError(null); })
       .catch((e) => setError(String(e)))
       .finally(() => setLoading(false));
-  }, []);
+    if (isAdmin) {
+      api.getTeamUsers().then(setUsers).catch(() => {});
+    }
+  }, [isAdmin]);
 
   useEffect(() => {
     load();
@@ -377,7 +403,7 @@ export default function WorkersPage() {
         </div>
       ) : (
         <div className="grid gap-3 sm:grid-cols-2">
-          {workers.map((w) => <WorkerCard key={w.id} worker={w} onAction={load} />)}
+          {workers.map((w) => <WorkerCard key={w.id} worker={w} onAction={load} users={users} isAdmin={isAdmin} />)}
         </div>
       )}
       {adding && <AddWorkerModal onClose={() => setAdding(false)} onSaved={load} />}

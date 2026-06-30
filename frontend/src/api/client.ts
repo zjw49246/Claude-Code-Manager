@@ -406,10 +406,19 @@ export interface PoolUsageStatus {
 }
 
 
+export interface TeamUser {
+  id: number;
+  email: string;
+  name: string;
+  role: string;
+  avatar_url: string;
+}
+
 export interface Worker {
   id: number;
   name: string;
   status: string;
+  owner_user_id: number | null;
   cloud_instance_id: string | null;
   private_ip: string | null;
   public_ip: string | null;
@@ -900,6 +909,23 @@ export const api = {
   startWorker: (id: number) => request<Worker>(`/api/workers/${id}/start`, { method: 'POST' }),
   destroyWorker: (id: number) => request<Worker>(`/api/workers/${id}/destroy`, { method: 'POST' }),
   retryWorker: (id: number) => request<Worker>(`/api/workers/${id}/retry`, { method: 'POST' }),
+  assignWorker: (id: number, ownerUserId: number | null) =>
+    request<Worker>(`/api/workers/${id}/assign`, { method: 'PUT', body: JSON.stringify({ owner_user_id: ownerUserId }) }),
+
+  // Team CCM
+  getTeamUsers: () => request<TeamUser[]>('/api/team/users'),
+  teamShareProject: (projectId: number, targetType: string, targetId: number) =>
+    request<{ ok: boolean }>(`/api/team/projects/${projectId}/share`, { method: 'POST', body: JSON.stringify({ target_type: targetType, target_id: targetId }) }),
+  teamUnshareProject: (projectId: number, targetType: string, targetId: number) =>
+    request<{ ok: boolean }>(`/api/team/projects/${projectId}/share`, { method: 'DELETE', body: JSON.stringify({ target_type: targetType, target_id: targetId }) }),
+  teamGetProjectShares: (projectId: number) =>
+    request<any[]>(`/api/team/projects/${projectId}/shares`),
+  shareTaskTeam: (taskId: number, targetType: string, targetId: number, permission?: string) =>
+    request<{ ok: boolean }>(`/api/team/tasks/${taskId}/share`, { method: 'POST', body: JSON.stringify({ target_type: targetType, target_id: targetId, permission: permission || 'chat' }) }),
+  unshareTaskTeam: (taskId: number, targetType: string, targetId: number) =>
+    request<{ ok: boolean }>(`/api/team/tasks/${taskId}/share`, { method: 'DELETE', body: JSON.stringify({ target_type: targetType, target_id: targetId }) }),
+  getTaskSharesTeam: (taskId: number) =>
+    request<any[]>(`/api/team/tasks/${taskId}/shares`),
 
   // Pool add account
   poolAddAccount: (data: { email: string; token: string }) =>
