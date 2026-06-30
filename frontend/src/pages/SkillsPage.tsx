@@ -17,6 +17,7 @@ export function SkillsPage() {
   const [creating, setCreating] = useState(false);
   const [form, setForm] = useState({ name: '', description: '', content: '' });
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const load = () => {
     api.listUserSkills().then(setSkills).catch(() => {});
@@ -27,48 +28,61 @@ export function SkillsPage() {
   const handleCreate = async () => {
     if (!form.name.trim()) return;
     setLoading(true);
+    setError(null);
     try {
       await api.createUserSkill(form);
       setCreating(false);
       setForm({ name: '', description: '', content: '' });
       load();
-    } catch { /* keep form */ }
+    } catch (e) {
+      setError(String(e));  // keep form open and tell the user why it failed
+    }
     setLoading(false);
   };
 
   const handleUpdate = async () => {
     if (!editing || !form.name.trim()) return;
     setLoading(true);
+    setError(null);
     try {
       await api.updateUserSkill(editing.id, form);
       setEditing(null);
       setForm({ name: '', description: '', content: '' });
       load();
-    } catch { /* keep form */ }
+    } catch (e) {
+      setError(String(e));
+    }
     setLoading(false);
   };
 
   const handleDelete = async (id: number) => {
     if (!confirm('确定删除这个 Skill？')) return;
-    await api.deleteUserSkill(id);
-    load();
+    try {
+      await api.deleteUserSkill(id);
+      load();
+    } catch (e) {
+      setError(String(e));
+    }
   };
 
   const startEdit = (skill: UserSkill) => {
     setEditing(skill);
     setCreating(false);
+    setError(null);
     setForm({ name: skill.name, description: skill.description, content: skill.content });
   };
 
   const startCreate = () => {
     setCreating(true);
     setEditing(null);
+    setError(null);
     setForm({ name: '', description: '', content: '' });
   };
 
   const cancel = () => {
     setCreating(false);
     setEditing(null);
+    setError(null);
     setForm({ name: '', description: '', content: '' });
   };
 
@@ -130,6 +144,8 @@ export function SkillsPage() {
               placeholder="Skill 的完整内容（Markdown），Agent 按需加载..."
             />
           </div>
+
+          {error && <p className="text-red-400 text-xs whitespace-pre-wrap break-words">{error}</p>}
 
           <div className="flex justify-end gap-2">
             <button onClick={cancel} className="px-3 py-1.5 text-xs rounded bg-gray-700 text-gray-300 hover:bg-gray-600">
