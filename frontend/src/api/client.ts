@@ -751,6 +751,16 @@ export const api = {
     });
   },
 
+  // Git
+  gitStatus: (path: string) =>
+    request<{ path: string; branch: string; files: { path: string; status: string; x: string; y: string }[] }>(`/api/files/git/status?path=${encodeURIComponent(path)}`),
+  gitDiff: (path: string, file?: string, staged?: boolean) => {
+    let url = `/api/files/git/diff?path=${encodeURIComponent(path)}`;
+    if (file) url += `&file=${encodeURIComponent(file)}`;
+    if (staged) url += `&staged=true`;
+    return request<{ path: string; diff: string; file: string | null; staged: boolean }>(url);
+  },
+
   // Files (download)
   downloadFileUrl: (path: string) =>
     `${getBase()}/api/files/download?path=${encodeURIComponent(path)}`,

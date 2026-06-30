@@ -1,3 +1,4 @@
+import asyncio
 import os
 import tempfile
 from pathlib import Path
@@ -94,6 +95,125 @@ async def upload_to_directory(
             "size": len(data),
         })
     return results
+
+
+MAX_DIFF_SIZE = 2 * 1024 * 1024  # 2 MB max diff output
+
+
+async def _run_git(
+    repo_path: str, *args: str,
+    max_output: int = MAX_DIFF_SIZE,
+    allow_nonzero: bool = False,
+) -> str:
+    """Run a git command in repo_path and return stdout."""
+    proc = await asyncio.create_subprocess_exec(
+        "git", *args,
+        cwd=repo_path,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+    if proc.returncode != 0 and not allow_nonzero:
+        err_msg = stderr.decode(errors="replace").strip()
+        raise HTTPException(400, f"git error: {err_msg}")
+    output = stdout[:max_output].decode(errors="replace")
+    return output
+
+
+@router.get("/git/status")
+async def git_status(path: str = Query(..., description="Git repository root path")):
+    """Get git status (changed files) for a repository."""
+    target = Path(path).expanduser().resolve()
+    if not target.exists():
+        raise HTTPException(404, f"Path not found: {path}")
+    if not (target / ".git").exists() and not (target / ".git").is_file():
+        raise HTTPException(400, f"Not a git repository: {path}")
+
+    raw = await _run_git(str(target), "status", "--porcelain=v1", "-uall")
+    files = []
+    for line in raw.splitlines():
+        if len(line) < 4:
+            continue
+        x, y = line[0], line[1]
+        filepath = line[3:]
+        if " -> " in filepath:
+            filepath = filepath.split(" -> ", 1)[1]
+        if x == "?" and y == "?":
+            status = "untracked"
+        elif x in ("A", " ") and y == " ":
+            status = "added" if x == "A" else "clean"
+        elif x == "D" or y == "D":
+            status = "deleted"
+        elif x == "M" or y == "M":
+            status = "modified"
+        elif x == "R":
+            status = "renamed"
+        else:
+            status = "modified"
+        if status != "clean":
+            files.append({"path": filepath, "status": status, "x": x, "y": y})
+
+    branch = (await _run_git(str(target), "branch", "--show-current")).strip()
+    return {"path": str(target), "branch": branch, "files": files}
+
+
+async def _untracked_diff(repo_path: str, files: list[str]) -> str:
+    """Generate diff-like output for untracked files using git diff --no-index."""
+    parts = []
+    for f in files:
+        out = await _run_git(
+            repo_path, "diff", "--no-index", "--no-color", "/dev/null", f,
+            allow_nonzero=True,
+        )
+        if out.strip():
+            parts.append(out)
+    return "\n".join(parts)
+
+
+async def _get_untracked_files(repo_path: str) -> list[str]:
+    """List untracked files in the repo."""
+    raw = await _run_git(repo_path, "ls-files", "--others", "--exclude-standard")
+    return [f for f in raw.splitlines() if f.strip()]
+
+
+@router.get("/git/diff")
+async def git_diff(
+    path: str = Query(..., description="Git repository root path"),
+    file: Optional[str] = Query(None, description="Specific file to diff"),
+    staged: bool = Query(False, description="Show staged changes"),
+):
+    """Get git diff output for a repository or specific file."""
+    target = Path(path).expanduser().resolve()
+    if not target.exists():
+        raise HTTPException(404, f"Path not found: {path}")
+
+    repo = str(target)
+
+    if file:
+        untracked = await _get_untracked_files(repo)
+        if file in untracked:
+            diff_output = await _untracked_diff(repo, [file])
+        else:
+            args = ["diff"]
+            if staged:
+                args.append("--cached")
+            args.extend(["--no-color", "--", file])
+            diff_output = await _run_git(repo, *args)
+    else:
+        args = ["diff"]
+        if staged:
+            args.append("--cached")
+        args.append("--no-color")
+        diff_output = await _run_git(repo, *args)
+
+        if not staged:
+            untracked = await _get_untracked_files(repo)
+            if untracked:
+                ut_diff = await _untracked_diff(repo, untracked[:50])
+                if ut_diff:
+                    diff_output = diff_output + ("\n" if diff_output else "") + ut_diff
+
+    return {"path": repo, "diff": diff_output, "file": file, "staged": staged}
 
 
 def _safe_path(path: str) -> Path:

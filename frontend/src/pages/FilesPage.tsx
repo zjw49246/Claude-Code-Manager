@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   ChevronRight, ChevronDown, Folder, FolderOpen, FileText,
   AlertCircle, Loader2, Plus, Trash2, Server, HardDrive, Download, Upload,
+  GitBranch, RefreshCw,
 } from 'lucide-react';
 import { api, getToken } from '../api/client';
 import type { Project } from '../api/client';
@@ -27,7 +28,14 @@ interface SSHProfile {
   key_path: string;
 }
 
-type Mode = 'local' | 'ssh';
+type Mode = 'local' | 'ssh' | 'git';
+
+interface GitFileEntry {
+  path: string;
+  status: string;
+  x: string;
+  y: string;
+}
 
 const SSH_PROFILES_KEY = 'cc_ssh_profiles';
 
@@ -255,6 +263,59 @@ function SSHPanel({ profiles, active, onActivate, onSave }: SSHPanelProps) {
 }
 
 // ---------------------------------------------------------------------------
+// Git diff renderer
+// ---------------------------------------------------------------------------
+
+const STATUS_COLORS: Record<string, string> = {
+  modified: 'text-yellow-400',
+  added: 'text-green-400',
+  deleted: 'text-red-400',
+  untracked: 'text-gray-400',
+  renamed: 'text-blue-400',
+};
+
+const STATUS_LABELS: Record<string, string> = {
+  modified: 'M',
+  added: 'A',
+  deleted: 'D',
+  untracked: '?',
+  renamed: 'R',
+};
+
+function DiffView({ diff }: { diff: string }) {
+  if (!diff.trim()) {
+    return <div className="p-4 text-gray-500 text-sm">No changes</div>;
+  }
+
+  const lines = diff.split('\n');
+  return (
+    <pre className="p-4 text-xs font-mono leading-relaxed overflow-auto">
+      {lines.map((line, i) => {
+        let cls = 'text-gray-400';
+        let bg = '';
+        if (line.startsWith('+') && !line.startsWith('+++')) {
+          cls = 'text-green-400';
+          bg = 'bg-green-500/10';
+        } else if (line.startsWith('-') && !line.startsWith('---')) {
+          cls = 'text-red-400';
+          bg = 'bg-red-500/10';
+        } else if (line.startsWith('@@')) {
+          cls = 'text-indigo-400';
+          bg = 'bg-indigo-500/10';
+        } else if (line.startsWith('diff ') || line.startsWith('index ') || line.startsWith('---') || line.startsWith('+++')) {
+          cls = 'text-gray-500';
+        }
+        return (
+          <div key={i} className={`${cls} ${bg} px-1 whitespace-pre`}>
+            {line}
+          </div>
+        );
+      })}
+    </pre>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Main FilesPage
 // ---------------------------------------------------------------------------
 
@@ -284,6 +345,17 @@ export function FilesPage() {
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
 
+  // Git state
+  const [gitPath, setGitPath] = useState('');
+  const [gitBranch, setGitBranch] = useState('');
+  const [gitFiles, setGitFiles] = useState<GitFileEntry[] | null>(null);
+  const [gitLoading, setGitLoading] = useState(false);
+  const [gitError, setGitError] = useState<string | null>(null);
+  const [gitSelectedFile, setGitSelectedFile] = useState<string | null>(null);
+  const [gitDiff, setGitDiff] = useState<string | null>(null);
+  const [gitDiffLoading, setGitDiffLoading] = useState(false);
+  const [gitShowStaged, setGitShowStaged] = useState(false);
+
   // Shared viewer state
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [fileContent, setFileContent] = useState<string | null>(null);
@@ -293,6 +365,49 @@ export function FilesPage() {
   useEffect(() => {
     api.listProjects().then(setProjects).catch(() => {});
   }, []);
+
+  // --- git helpers ---
+
+  const loadGitStatus = useCallback(async (repoPath: string) => {
+    if (!repoPath.trim()) return;
+    setGitLoading(true);
+    setGitError(null);
+    setGitFiles(null);
+    setGitSelectedFile(null);
+    setGitDiff(null);
+    try {
+      const res = await api.gitStatus(repoPath.trim());
+      setGitPath(res.path);
+      setGitBranch(res.branch);
+      setGitFiles(res.files);
+    } catch (e) {
+      setGitError((e as Error).message);
+    } finally {
+      setGitLoading(false);
+    }
+  }, []);
+
+  const loadGitDiff = useCallback(async (repoPath: string, file?: string, staged?: boolean) => {
+    setGitDiffLoading(true);
+    try {
+      const res = await api.gitDiff(repoPath, file, staged);
+      setGitDiff(res.diff);
+    } catch (e) {
+      setGitDiff(`Error: ${(e as Error).message}`);
+    } finally {
+      setGitDiffLoading(false);
+    }
+  }, []);
+
+  const handleGitFileSelect = useCallback((filePath: string) => {
+    setGitSelectedFile(filePath);
+    loadGitDiff(gitPath, filePath, gitShowStaged);
+  }, [gitPath, gitShowStaged, loadGitDiff]);
+
+  const handleGitShowAll = useCallback(() => {
+    setGitSelectedFile(null);
+    loadGitDiff(gitPath, undefined, gitShowStaged);
+  }, [gitPath, gitShowStaged, loadGitDiff]);
 
   // --- local helpers ---
 
@@ -457,6 +572,12 @@ export function FilesPage() {
             >
               <Server size={12} /> SSH
             </button>
+            <button
+              onClick={() => setMode('git')}
+              className={`flex items-center gap-1 px-3 py-1.5 ${mode === 'git' ? 'bg-indigo-600 text-white' : 'bg-gray-700 text-gray-400 hover:bg-gray-600'}`}
+            >
+              <GitBranch size={12} /> Git
+            </button>
           </div>
         </div>
 
@@ -543,15 +664,143 @@ export function FilesPage() {
           </div>
         )}
 
-        {(rootError || sshError) && (
+        {mode === 'git' && (
+          <div className="space-y-2">
+            <div className="flex gap-2 flex-wrap">
+              {projects.filter((p) => p.local_path).length > 0 && (
+                <select
+                  onChange={(e) => {
+                    const proj = projects.find((p) => String(p.id) === e.target.value);
+                    if (proj?.local_path) { setGitPath(proj.local_path); loadGitStatus(proj.local_path); }
+                  }}
+                  defaultValue=""
+                  className="bg-gray-700 text-gray-300 text-sm rounded px-2 py-1.5 border border-gray-600 focus:outline-none focus:border-indigo-500"
+                >
+                  <option value="" disabled>Select project...</option>
+                  {projects.filter((p) => p.local_path).map((p) => (
+                    <option key={p.id} value={String(p.id)}>{p.name}</option>
+                  ))}
+                </select>
+              )}
+              <input
+                type="text"
+                value={gitPath}
+                onChange={(e) => setGitPath(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && loadGitStatus(gitPath)}
+                placeholder="/path/to/git/repo"
+                className="flex-1 bg-gray-700 text-gray-300 text-sm rounded px-3 py-1.5 border border-gray-600 focus:outline-none focus:border-indigo-500 min-w-48"
+              />
+              <button
+                onClick={() => loadGitStatus(gitPath)}
+                disabled={gitLoading || !gitPath.trim()}
+                className="px-3 py-1.5 bg-indigo-600 text-white text-sm rounded hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {gitLoading ? <Loader2 size={14} className="animate-spin" /> : 'Load'}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {(rootError || sshError || (mode === 'git' && gitError)) && (
           <div className="flex items-center gap-2 text-red-400 text-sm">
-            <AlertCircle size={14} /> {mode === 'local' ? rootError : sshError}
+            <AlertCircle size={14} /> {mode === 'local' ? rootError : mode === 'ssh' ? sshError : gitError}
           </div>
         )}
       </div>
 
+      {/* Git diff area */}
+      {mode === 'git' && gitFiles !== null && (
+        <div className="flex flex-col md:flex-row gap-4 h-auto md:h-[calc(100vh-260px)] min-h-80">
+          {/* Changed files list */}
+          <div className="w-full md:w-72 md:flex-shrink-0 max-h-64 md:max-h-none bg-gray-800 rounded-lg overflow-y-auto p-2">
+            <div className="flex items-center gap-2 px-2 pb-2 border-b border-gray-700 mb-2">
+              <GitBranch size={14} className="text-indigo-400" />
+              <span className="text-xs text-indigo-400 font-medium">{gitBranch || 'HEAD'}</span>
+              <span className="text-xs text-gray-500">({gitFiles.length} changes)</span>
+              <button
+                onClick={() => loadGitStatus(gitPath)}
+                className="ml-auto text-gray-500 hover:text-gray-300"
+                title="Refresh"
+              >
+                <RefreshCw size={12} />
+              </button>
+            </div>
+
+            <div className="flex gap-1 mb-2 px-1">
+              <button
+                onClick={() => { setGitShowStaged(false); if (gitSelectedFile) loadGitDiff(gitPath, gitSelectedFile, false); else if (gitDiff !== null) loadGitDiff(gitPath, undefined, false); }}
+                className={`px-2 py-0.5 rounded text-xs ${!gitShowStaged ? 'bg-indigo-600 text-white' : 'bg-gray-700 text-gray-400 hover:bg-gray-600'}`}
+              >
+                Unstaged
+              </button>
+              <button
+                onClick={() => { setGitShowStaged(true); if (gitSelectedFile) loadGitDiff(gitPath, gitSelectedFile, true); else if (gitDiff !== null) loadGitDiff(gitPath, undefined, true); }}
+                className={`px-2 py-0.5 rounded text-xs ${gitShowStaged ? 'bg-indigo-600 text-white' : 'bg-gray-700 text-gray-400 hover:bg-gray-600'}`}
+              >
+                Staged
+              </button>
+            </div>
+
+            {gitFiles.length === 0 && (
+              <div className="text-xs text-gray-500 px-2 py-4 text-center">Working tree clean</div>
+            )}
+
+            {gitFiles.length > 0 && (
+              <button
+                onClick={handleGitShowAll}
+                className={`w-full text-left flex items-center gap-2 px-2 py-1 rounded text-xs cursor-pointer hover:bg-gray-700 ${
+                  gitSelectedFile === null && gitDiff !== null ? 'bg-gray-700 text-indigo-400' : 'text-gray-300'
+                }`}
+              >
+                <FileText size={12} className="text-gray-500" />
+                <span>All changes</span>
+              </button>
+            )}
+
+            {gitFiles.map((f) => (
+              <button
+                key={f.path}
+                onClick={() => handleGitFileSelect(f.path)}
+                className={`w-full text-left flex items-center gap-2 px-2 py-1 rounded text-xs cursor-pointer hover:bg-gray-700 ${
+                  gitSelectedFile === f.path ? 'bg-gray-700 text-indigo-400' : 'text-gray-300'
+                }`}
+              >
+                <span className={`w-3 font-mono font-bold flex-shrink-0 ${STATUS_COLORS[f.status] || 'text-gray-400'}`}>
+                  {STATUS_LABELS[f.status] || '?'}
+                </span>
+                <span className="truncate">{f.path}</span>
+              </button>
+            ))}
+          </div>
+
+          {/* Diff viewer */}
+          <div className="flex-1 min-h-80 bg-gray-800 rounded-lg overflow-hidden flex flex-col">
+            {gitDiff === null && !gitDiffLoading && (
+              <div className="flex-1 flex items-center justify-center text-gray-600 text-sm">
+                Select a file or click "All changes" to view diff
+              </div>
+            )}
+            {gitDiffLoading && (
+              <div className="flex-1 flex items-center justify-center text-gray-400 text-sm gap-2">
+                <Loader2 size={14} className="animate-spin" /> Loading diff...
+              </div>
+            )}
+            {gitDiff !== null && !gitDiffLoading && (
+              <>
+                <div className="px-4 py-2 border-b border-gray-700 text-xs text-gray-400">
+                  {gitSelectedFile || 'All changes'} — {gitShowStaged ? 'staged' : 'unstaged'}
+                </div>
+                <div className="flex-1 overflow-auto">
+                  <DiffView diff={gitDiff} />
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Main browser area */}
-      {currentEntries !== null && (
+      {currentEntries !== null && mode !== 'git' && (
         <div className="flex flex-col md:flex-row gap-4 h-auto md:h-[calc(100vh-260px)] min-h-80">
           {/* File tree */}
           <div className="w-full md:w-64 md:flex-shrink-0 max-h-64 md:max-h-none bg-gray-800 rounded-lg overflow-y-auto p-2">
