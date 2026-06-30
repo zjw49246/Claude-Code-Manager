@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm';
 import { api } from '../../api/client';
 import type { ChatMessage, FileAttachment, Task, Project, UploadResult, MonitorSession, AskUserQuestion, AskUserAnswer } from '../../api/client';
 import { useWebSocket } from '../../hooks/useWebSocket';
-import { Send, ArrowLeft, Loader2, ChevronDown, ChevronRight, ChevronUp, Copy, Check, Paperclip, X, StopCircle, Pencil, ArrowDown, Star, ListPlus, Trash2, AlertCircle } from 'lucide-react';
+import { Send, ArrowLeft, Loader2, ChevronDown, ChevronRight, ChevronUp, Copy, Check, Paperclip, X, StopCircle, Pencil, ArrowDown, Star, ListPlus, Trash2, AlertCircle, Sparkles } from 'lucide-react';
 import { SecretPicker } from '../Secrets/SecretPicker';
 import { QuickPhraseDropdown } from '../QuickPhrases/QuickPhraseDropdown';
 import { ListFilter, Syringe } from 'lucide-react';
@@ -191,6 +191,14 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
   }, [input, task.id]);
   const [monitorSessions, setMonitorSessions] = useState<MonitorSession[]>([]);
   const [showMonitorPanel, setShowMonitorPanel] = useState(false);
+
+  // Distill state
+  const [distilling, setDistilling] = useState(false);
+  const [distillResult, setDistillResult] = useState<{ suggested_name: string; content: string } | null>(null);
+  const [distillName, setDistillName] = useState('');
+  const [distillContent, setDistillContent] = useState('');
+  const [distillSaving, setDistillSaving] = useState(false);
+  const [distillError, setDistillError] = useState<string | null>(null);
   const effectiveStatus = localStatus || task.status;
   const isProcessing = sending || ['in_progress', 'executing'].includes(effectiveStatus);
   const [hasMoreHistory, setHasMoreHistory] = useState(true);
@@ -854,6 +862,27 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
             />
             <TaskConfigBadge task={task} onRefresh={() => onTaskUpdated?.()} align="right" />
             <button
+              onClick={async () => {
+                setDistilling(true);
+                setDistillError(null);
+                try {
+                  const result = await api.distillTask(task.id);
+                  setDistillResult(result);
+                  setDistillName(result.suggested_name);
+                  setDistillContent(result.content);
+                } catch (e) {
+                  setDistillError(e instanceof Error ? e.message : 'Distill failed');
+                } finally {
+                  setDistilling(false);
+                }
+              }}
+              disabled={distilling || messages.length === 0}
+              className="p-1.5 transition-colors text-gray-600 hover:text-purple-400 disabled:opacity-30 disabled:cursor-not-allowed"
+              title="Distill skill from conversation"
+            >
+              {distilling ? <Loader2 size={18} className="animate-spin text-purple-400" /> : <Sparkles size={18} />}
+            </button>
+            <button
               onClick={handleStar}
               className={`p-1.5 transition-colors ${starred ? 'text-yellow-400 hover:text-yellow-300' : 'text-gray-600 hover:text-yellow-400'}`}
               title={starred ? "Unstar" : "Star"}
@@ -942,6 +971,80 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
             onSessionsChange={setMonitorSessions}
             onClose={() => setShowMonitorPanel(false)}
           />
+        </div>
+      )}
+
+      {/* Distill modal */}
+      {(distillResult || distillError) && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div className="bg-gray-800 rounded-lg shadow-xl w-full max-w-2xl max-h-[80vh] flex flex-col m-4 border border-gray-700">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700">
+              <div className="flex items-center gap-2">
+                <Sparkles size={16} className="text-purple-400" />
+                <span className="text-sm font-medium text-foreground">Distill Skill</span>
+              </div>
+              <button onClick={() => { setDistillResult(null); setDistillError(null); }} className="text-gray-500 hover:text-gray-300">
+                <X size={16} />
+              </button>
+            </div>
+            {distillError ? (
+              <div className="p-4">
+                <div className="text-red-400 text-sm flex items-center gap-2">
+                  <AlertCircle size={14} /> {distillError}
+                </div>
+              </div>
+            ) : distillResult && (
+              <div className="flex-1 overflow-auto p-4 space-y-3">
+                <div>
+                  <label className="text-xs text-gray-400 mb-1 block">Skill Name</label>
+                  <input
+                    value={distillName}
+                    onChange={(e) => setDistillName(e.target.value)}
+                    className="w-full bg-gray-700 text-foreground text-sm rounded px-3 py-1.5 border border-gray-600 focus:outline-none focus:border-purple-500"
+                    placeholder="Enter skill name..."
+                  />
+                </div>
+                <div className="flex-1">
+                  <label className="text-xs text-gray-400 mb-1 block">Content (editable)</label>
+                  <textarea
+                    value={distillContent}
+                    onChange={(e) => setDistillContent(e.target.value)}
+                    className="w-full h-80 bg-gray-700 text-foreground text-xs font-mono rounded px-3 py-2 border border-gray-600 focus:outline-none focus:border-purple-500 resize-y"
+                  />
+                </div>
+              </div>
+            )}
+            {distillResult && (
+              <div className="flex items-center justify-end gap-2 px-4 py-3 border-t border-gray-700">
+                <button
+                  onClick={() => { setDistillResult(null); setDistillError(null); }}
+                  className="px-3 py-1.5 text-xs text-gray-400 hover:text-gray-200 bg-gray-700 rounded hover:bg-gray-600"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={async () => {
+                    if (!distillName.trim()) { setDistillError('Name is required'); return; }
+                    setDistillSaving(true);
+                    setDistillError(null);
+                    try {
+                      await api.saveDistilledSkill(task.id, { name: distillName.trim(), content: distillContent, description: `Distilled from task #${task.id}` });
+                      setDistillResult(null);
+                    } catch (e) {
+                      setDistillError(e instanceof Error ? e.message : 'Save failed');
+                    } finally {
+                      setDistillSaving(false);
+                    }
+                  }}
+                  disabled={distillSaving || !distillName.trim()}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs text-white bg-purple-600 rounded hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {distillSaving ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
+                  Save as Skill
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       )}
 

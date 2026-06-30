@@ -1,14 +1,18 @@
+import logging
 import os
 import json
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import and_, not_, select  # still used by chat history
+from sqlalchemy import and_, not_, select, func  # still used by chat history
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
 from backend.models.task import Task
 from backend.models.log_entry import LogEntry
+from backend.models.user_skill import UserSkill
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/tasks", tags=["chat"])
 
@@ -551,3 +555,177 @@ async def resolve_permission(
     if not ok:
         raise HTTPException(410, "权限请求已过期或不存在（CC 侧可能已超时默认拒绝）")
     return {"ok": True, "behavior": body.behavior}
+
+
+# ---------------------------------------------------------------------------
+# Task Distill — extract reusable skill from conversation history
+# ---------------------------------------------------------------------------
+
+_DISTILL_MAX_CHARS = 30_000
+_DISTILL_MODEL = "claude-opus-4-6"
+
+
+async def _collect_conversation_for_distill(task_id: int, db: AsyncSession) -> str:
+    """Collect conversation history for distillation, capped at _DISTILL_MAX_CHARS."""
+    result = await db.execute(
+        select(LogEntry.event_type, LogEntry.role, LogEntry.content, LogEntry.tool_name, LogEntry.is_error)
+        .where(
+            LogEntry.task_id == task_id,
+            LogEntry.event_type.in_(["user_message", "message", "tool_use", "tool_result"]),
+        )
+        .order_by(LogEntry.id.asc())
+    )
+    rows = result.all()
+
+    parts: list[str] = []
+    total = 0
+    for row in rows:
+        event_type, role, content, tool_name, is_error = row
+        if not content:
+            continue
+
+        if event_type == "user_message":
+            line = f"[User]: {content[:2000]}"
+        elif event_type == "message" and role == "assistant":
+            line = f"[Assistant]: {content[:2000]}"
+        elif event_type == "tool_use" and tool_name:
+            line = f"[Tool: {tool_name}]: {content[:500]}"
+        elif event_type == "tool_result":
+            prefix = "[Error]" if is_error else "[Result]"
+            line = f"{prefix}: {content[:500]}"
+        else:
+            continue
+
+        total += len(line)
+        if total > _DISTILL_MAX_CHARS:
+            parts.append("... (conversation truncated)")
+            break
+        parts.append(line)
+
+    return "\n".join(parts)
+
+
+class DistillRequest(BaseModel):
+    custom_instruction: str | None = None
+
+
+class DistillSaveRequest(BaseModel):
+    name: str
+    description: str = ""
+    content: str
+
+
+@router.post("/{task_id}/distill")
+async def distill_task(
+    task_id: int,
+    body: DistillRequest = DistillRequest(),
+    db: AsyncSession = Depends(get_db),
+):
+    """Distill a task's conversation into a reusable skill (markdown).
+
+    Reads the full conversation history, sends it to Opus for extraction,
+    returns the generated skill card for user preview/editing.
+    """
+    task = await db.get(Task, task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+
+    conversation = await _collect_conversation_for_distill(task_id, db)
+    if not conversation.strip():
+        raise HTTPException(400, "No conversation history to distill")
+
+    custom = ""
+    if body.custom_instruction:
+        custom = f"\n\n用户补充说明：{body.custom_instruction}"
+
+    prompt = (
+        "你是一个经验提取专家。下面是一个编程任务的完整对话记录。\n"
+        "请从中提取可复用的经验，生成一份结构化的 Skill 卡片（Markdown 格式）。\n\n"
+        "Skill 卡片应包含：\n"
+        "1. **意图**：这类任务要解决什么问题\n"
+        "2. **关键步骤**：做这类任务的推荐流程\n"
+        "3. **踩坑点**：容易犯的错误和注意事项\n"
+        "4. **验证方法**：怎么确认做对了\n"
+        "5. **适用场景**：什么情况下这个 skill 有用\n\n"
+        "要求：\n"
+        "- 只保留可迁移的过程性知识，去掉具体的文件路径、变量名等细节\n"
+        "- 用中文输出\n"
+        "- 简洁实用，不要废话\n"
+        f"{custom}\n\n"
+        f"--- 任务标题 ---\n{task.title or task.description[:100] if task.description else 'Untitled'}\n\n"
+        f"--- 对话记录 ---\n{conversation}"
+    )
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise HTTPException(500, "ANTHROPIC_API_KEY not configured")
+
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": _DISTILL_MODEL,
+                    "max_tokens": 4096,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+            )
+            if resp.status_code != 200:
+                detail = resp.json().get("error", {}).get("message", resp.text[:200])
+                raise HTTPException(502, f"Anthropic API error: {detail}")
+            skill_content = resp.json()["content"][0]["text"].strip()
+    except httpx.TimeoutException:
+        raise HTTPException(504, "Distillation timed out")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("distill: API call failed")
+        raise HTTPException(500, f"Distillation failed: {e}")
+
+    suggested_name = (task.title or task.description or "untitled")[:50].strip()
+
+    return {
+        "task_id": task_id,
+        "suggested_name": suggested_name,
+        "content": skill_content,
+    }
+
+
+@router.post("/{task_id}/distill/save")
+async def save_distilled_skill(
+    task_id: int,
+    body: DistillSaveRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Save a distilled skill as a UserSkill."""
+    task = await db.get(Task, task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+
+    existing = await db.execute(
+        select(UserSkill).where(UserSkill.name == body.name)
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(409, f"Skill with name '{body.name}' already exists")
+
+    skill = UserSkill(
+        name=body.name,
+        description=body.description or f"Distilled from task #{task_id}",
+        content=body.content,
+    )
+    db.add(skill)
+    await db.commit()
+    await db.refresh(skill)
+
+    return {
+        "id": skill.id,
+        "name": skill.name,
+        "description": skill.description,
+        "content": skill.content,
+    }
