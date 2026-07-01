@@ -269,7 +269,106 @@ async def update_user_role(user_id: int, body: UpdateRoleBody, request: Request,
 
 # --- User groups (for quick batch sharing) ---
 
+class GroupCreate(BaseModel):
+    name: str
+    description: str = ""
+
+
+class GroupMemberAdd(BaseModel):
+    user_id: int
+
+
 @router.get("/groups")
 async def list_groups(request: Request, db: AsyncSession = Depends(get_db)):
-    # TODO: implement UserGroup model. For now return empty.
-    return []
+    from backend.models.user_group import UserGroup, UserGroupMember
+    from backend.models.user import User
+    result = await db.execute(select(UserGroup).order_by(UserGroup.name))
+    groups = result.scalars().all()
+    user_lookup = {}
+    if groups:
+        ur = await db.execute(select(User).where(User.is_active == True))
+        user_lookup = {u.id: {"id": u.id, "name": u.name, "email": u.email, "avatar_url": u.avatar_url} for u in ur.scalars().all()}
+    out = []
+    for g in groups:
+        mr = await db.execute(select(UserGroupMember).where(UserGroupMember.group_id == g.id))
+        members = [user_lookup.get(m.user_id, {"id": m.user_id, "name": str(m.user_id), "email": "", "avatar_url": ""}) for m in mr.scalars().all()]
+        out.append({"id": g.id, "name": g.name, "description": g.description, "members": members, "created_at": g.created_at.isoformat() if g.created_at else ""})
+    return out
+
+
+@router.post("/groups")
+async def create_group(body: GroupCreate, request: Request, db: AsyncSession = Depends(get_db)):
+    from backend.api.deps import is_admin as _is_admin
+    if not _is_admin(request):
+        raise HTTPException(403, "Admin only")
+    from backend.models.user_group import UserGroup
+    existing = await db.execute(select(UserGroup).where(UserGroup.name == body.name))
+    if existing.scalar_one_or_none():
+        raise HTTPException(400, f"Group '{body.name}' already exists")
+    group = UserGroup(name=body.name, description=body.description, created_by=get_current_user_id(request))
+    db.add(group)
+    await db.commit()
+    await db.refresh(group)
+    return {"id": group.id, "name": group.name, "description": group.description}
+
+
+@router.put("/groups/{group_id}")
+async def update_group(group_id: int, body: GroupCreate, request: Request, db: AsyncSession = Depends(get_db)):
+    from backend.api.deps import is_admin as _is_admin
+    if not _is_admin(request):
+        raise HTTPException(403, "Admin only")
+    from backend.models.user_group import UserGroup
+    group = await db.get(UserGroup, group_id)
+    if not group:
+        raise HTTPException(404, "Group not found")
+    group.name = body.name
+    group.description = body.description
+    await db.commit()
+    return {"id": group.id, "name": group.name, "description": group.description}
+
+
+@router.delete("/groups/{group_id}")
+async def delete_group(group_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    from backend.api.deps import is_admin as _is_admin
+    if not _is_admin(request):
+        raise HTTPException(403, "Admin only")
+    from backend.models.user_group import UserGroup, UserGroupMember
+    group = await db.get(UserGroup, group_id)
+    if not group:
+        raise HTTPException(404, "Group not found")
+    await db.execute(delete(UserGroupMember).where(UserGroupMember.group_id == group_id))
+    await db.delete(group)
+    await db.commit()
+    return {"ok": True}
+
+
+@router.post("/groups/{group_id}/members")
+async def add_group_member(group_id: int, body: GroupMemberAdd, request: Request, db: AsyncSession = Depends(get_db)):
+    from backend.api.deps import is_admin as _is_admin
+    if not _is_admin(request):
+        raise HTTPException(403, "Admin only")
+    from backend.models.user_group import UserGroup, UserGroupMember
+    group = await db.get(UserGroup, group_id)
+    if not group:
+        raise HTTPException(404, "Group not found")
+    existing = await db.execute(
+        select(UserGroupMember).where(UserGroupMember.group_id == group_id, UserGroupMember.user_id == body.user_id)
+    )
+    if existing.scalar_one_or_none():
+        return {"ok": True, "message": "Already a member"}
+    db.add(UserGroupMember(group_id=group_id, user_id=body.user_id))
+    await db.commit()
+    return {"ok": True}
+
+
+@router.delete("/groups/{group_id}/members/{user_id}")
+async def remove_group_member(group_id: int, user_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    from backend.api.deps import is_admin as _is_admin
+    if not _is_admin(request):
+        raise HTTPException(403, "Admin only")
+    from backend.models.user_group import UserGroupMember
+    await db.execute(
+        delete(UserGroupMember).where(UserGroupMember.group_id == group_id, UserGroupMember.user_id == user_id)
+    )
+    await db.commit()
+    return {"ok": True}

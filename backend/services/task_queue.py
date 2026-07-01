@@ -69,12 +69,16 @@ class TaskQueue:
         if user_id is not None:
             from backend.models.worker import Worker
             from backend.models.team_share import TeamTaskShare, TeamProjectShare
+            from backend.models.user_group import UserGroupMember
             owned_worker_ids_q = select(Worker.id).where(Worker.owner_user_id == user_id)
+            user_group_ids_q = select(UserGroupMember.group_id).where(UserGroupMember.user_id == user_id)
             shared_task_ids_q = select(TeamTaskShare.task_id).where(
-                (TeamTaskShare.target_type == "user") & (TeamTaskShare.target_id == user_id)
+                ((TeamTaskShare.target_type == "user") & (TeamTaskShare.target_id == user_id))
+                | ((TeamTaskShare.target_type == "group") & TeamTaskShare.target_id.in_(user_group_ids_q))
             )
             shared_project_ids_q = select(TeamProjectShare.project_id).where(
-                (TeamProjectShare.target_type == "user") & (TeamProjectShare.target_id == user_id)
+                ((TeamProjectShare.target_type == "user") & (TeamProjectShare.target_id == user_id))
+                | ((TeamProjectShare.target_type == "group") & TeamProjectShare.target_id.in_(user_group_ids_q))
             )
             stmt = stmt.where(
                 (Task.created_by == user_id)
@@ -110,12 +114,16 @@ class TaskQueue:
         if user_id is not None:
             from backend.models.worker import Worker
             from backend.models.team_share import TeamTaskShare, TeamProjectShare
+            from backend.models.user_group import UserGroupMember
             owned_worker_ids_q = select(Worker.id).where(Worker.owner_user_id == user_id)
+            user_group_ids_q = select(UserGroupMember.group_id).where(UserGroupMember.user_id == user_id)
             shared_task_ids_q = select(TeamTaskShare.task_id).where(
-                (TeamTaskShare.target_type == "user") & (TeamTaskShare.target_id == user_id)
+                ((TeamTaskShare.target_type == "user") & (TeamTaskShare.target_id == user_id))
+                | ((TeamTaskShare.target_type == "group") & TeamTaskShare.target_id.in_(user_group_ids_q))
             )
             shared_project_ids_q = select(TeamProjectShare.project_id).where(
-                (TeamProjectShare.target_type == "user") & (TeamProjectShare.target_id == user_id)
+                ((TeamProjectShare.target_type == "user") & (TeamProjectShare.target_id == user_id))
+                | ((TeamProjectShare.target_type == "group") & TeamProjectShare.target_id.in_(user_group_ids_q))
             )
             stmt = stmt.where(
                 (Task.created_by == user_id)

@@ -915,6 +915,17 @@ export const api = {
 
   // Team CCM
   getTeamUsers: () => request<TeamUser[]>('/api/team/users'),
+  getTeamGroups: () => request<any[]>('/api/team/groups'),
+  createTeamGroup: (name: string, description?: string) =>
+    request<any>('/api/team/groups', { method: 'POST', body: JSON.stringify({ name, description }) }),
+  updateTeamGroup: (id: number, name: string, description?: string) =>
+    request<any>(`/api/team/groups/${id}`, { method: 'PUT', body: JSON.stringify({ name, description }) }),
+  deleteTeamGroup: (id: number) =>
+    request<{ ok: boolean }>(`/api/team/groups/${id}`, { method: 'DELETE' }),
+  addTeamGroupMember: (groupId: number, userId: number) =>
+    request<{ ok: boolean }>(`/api/team/groups/${groupId}/members`, { method: 'POST', body: JSON.stringify({ user_id: userId }) }),
+  removeTeamGroupMember: (groupId: number, userId: number) =>
+    request<{ ok: boolean }>(`/api/team/groups/${groupId}/members/${userId}`, { method: 'DELETE' }),
   teamShareProject: (projectId: number, targetType: string, targetId: number) =>
     request<{ ok: boolean }>(`/api/team/projects/${projectId}/share`, { method: 'POST', body: JSON.stringify({ target_type: targetType, target_id: targetId }) }),
   teamUnshareProject: (projectId: number, targetType: string, targetId: number) =>
