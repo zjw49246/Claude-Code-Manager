@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { api } from '../api/client';
-import type { OrgMember, OrgTeam, SharedTaskReceived, Task } from '../api/client';
-import { Plus, X, Trash2, UserPlus, Users, MessageCircle, Search, RefreshCw } from 'lucide-react';
+import type { OrgMember, OrgTeam, SharedTaskReceived, Task, TeamUser, Worker } from '../api/client';
+import { Plus, X, Trash2, UserPlus, Users, MessageCircle, Search, RefreshCw, Shield, ShieldCheck, User } from 'lucide-react';
 import { ChatView } from '../components/Chat/ChatView';
 import { useWebSocket } from '../hooks/useWebSocket';
 
@@ -233,6 +233,9 @@ function TransferModal({
 export default function TeamPage() {
   const ccUser = JSON.parse(localStorage.getItem('cc_user') || '{}');
   const isAdmin = ccUser.role === 'admin' || ccUser.role === 'super_admin' || !ccUser.id;
+  const isSuperAdmin = ccUser.role === 'super_admin' || !ccUser.id;
+  const [teamUsers, setTeamUsers] = useState<TeamUser[]>([]);
+  const [workers, setWorkers] = useState<Worker[]>([]);
   const [members, setMembers] = useState<OrgMember[]>([]);
   const [teams, setTeams] = useState<OrgTeam[]>([]);
   const [selectedTeamId, setSelectedTeamId] = useState<number | null>(null);
@@ -270,6 +273,8 @@ export default function TeamPage() {
       api.getOrgTeams(),
       api.getSharedTasks(true),
       api.getFeishuStatus(),
+      isAdmin ? api.getTeamUsers() : Promise.resolve([]),
+      isAdmin ? api.listWorkers() : Promise.resolve([]),
     ]);
     if (results[0].status === 'fulfilled') setMembers(results[0].value);
     if (results[1].status === 'fulfilled') setTeams(results[1].value);
@@ -278,8 +283,10 @@ export default function TeamPage() {
       setIsRegistry(results[3].value.is_registry || false);
       setMyOpenId(results[3].value.open_id || '');
     }
+    if (results[4].status === 'fulfilled') setTeamUsers(results[4].value as TeamUser[]);
+    if (results[5].status === 'fulfilled') setWorkers(results[5].value as Worker[]);
     setLoading(false);
-  }, []);
+  }, [isAdmin]);
 
   useEffect(() => { fetchAll(); }, [fetchAll]);
 
@@ -358,6 +365,89 @@ export default function TeamPage() {
 
   return (
     <div className="p-4 space-y-6">
+      {/* ── Users Management (Admin only) ── */}
+      {isAdmin && teamUsers.length > 0 && (
+        <div>
+          <h2 className="text-lg font-semibold text-foreground flex items-center gap-2 mb-3">
+            <User size={20} /> Users
+          </h2>
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+            {teamUsers.map(u => (
+              <div key={u.id} className="bg-gray-800 rounded-lg p-3 flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  {u.avatar_url ? (
+                    <img src={u.avatar_url} className="w-8 h-8 rounded-full shrink-0" alt="" />
+                  ) : (
+                    <div className="w-8 h-8 rounded-full bg-gray-600 flex items-center justify-center text-xs text-gray-300 shrink-0">
+                      {u.name.charAt(0).toUpperCase()}
+                    </div>
+                  )}
+                  <div className="min-w-0">
+                    <div className="text-sm text-foreground truncate">{u.name}</div>
+                    <div className="text-xs text-gray-500 truncate">{u.email}</div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  {/* Role badge */}
+                  <span className={`text-[10px] px-1.5 py-0.5 rounded ${
+                    u.role === 'super_admin' ? 'bg-yellow-600/20 text-yellow-400' :
+                    u.role === 'admin' ? 'bg-indigo-600/20 text-indigo-400' :
+                    'bg-gray-600/20 text-gray-400'
+                  }`}>
+                    {u.role === 'super_admin' ? 'Super Admin' : u.role === 'admin' ? 'Admin' : 'Member'}
+                  </span>
+                  {/* Worker assignment */}
+                  <select
+                    value={workers.find(w => w.owner_user_id === u.id)?.id ?? ''}
+                    onChange={async (e) => {
+                      const wid = e.target.value ? Number(e.target.value) : null;
+                      // Unassign old worker if any
+                      const old = workers.find(w => w.owner_user_id === u.id);
+                      if (old && old.id !== wid) {
+                        try { await api.assignWorker(old.id, null); } catch {}
+                      }
+                      // Assign new
+                      if (wid) {
+                        try { await api.assignWorker(wid, u.id); } catch {}
+                      }
+                      fetchAll();
+                    }}
+                    className="text-[10px] bg-gray-700 text-gray-300 rounded px-1 py-0.5 border border-gray-600"
+                    title="Assign Worker"
+                  >
+                    <option value="">No Worker</option>
+                    {workers.filter(w => !w.owner_user_id || w.owner_user_id === u.id).map(w => (
+                      <option key={w.id} value={w.id}>{w.name}</option>
+                    ))}
+                  </select>
+                  {/* Role change (super_admin can promote to admin) */}
+                  {isSuperAdmin && u.role !== 'super_admin' && (
+                    <button
+                      onClick={async () => {
+                        const newRole = u.role === 'admin' ? 'member' : 'admin';
+                        if (!confirm(`Change ${u.name} to ${newRole}?`)) return;
+                        try {
+                          await fetch(`/api/team/users/${u.id}/role`, {
+                            method: 'PUT',
+                            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('cc_token')}` },
+                            body: JSON.stringify({ role: newRole }),
+                          });
+                          fetchAll();
+                        } catch {}
+                      }}
+                      className="p-1 text-gray-500 hover:text-indigo-400"
+                      title={u.role === 'admin' ? 'Demote to member' : 'Promote to admin'}
+                    >
+                      {u.role === 'admin' ? <Shield size={14} /> : <ShieldCheck size={14} />}
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* ── Groups Section ── */}
       <div>
         <div className="flex items-center justify-between mb-3">

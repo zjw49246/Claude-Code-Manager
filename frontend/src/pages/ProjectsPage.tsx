@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '../api/client';
 import type { Project, GlobalSettings, TagItem } from '../api/client';
-import { Trash2, RotateCcw, FolderGit2, Globe, HardDrive, Plus, Settings, X, ChevronDown, ChevronUp, GripVertical, Tag, FileKey, Palette, Server, Share2 } from 'lucide-react';
+import { Trash2, RotateCcw, FolderGit2, Globe, HardDrive, Plus, Settings, X, ChevronDown, ChevronUp, GripVertical, Tag, FileKey, Palette, Server, Share2, UserPlus } from 'lucide-react';
 import { ShareModal } from '../components/ShareModal';
+import { TeamShareModal } from '../components/TeamShareModal';
 import { resolveTagColor, TAG_COLOR_OPTIONS } from '../components/TagColors';
 import { TagManager } from '../components/TagManager';
 import { EnvFilesEditor } from '../components/EnvFilesEditor';
@@ -663,6 +664,9 @@ export function ProjectsPage() {
   const [editingGit, setEditingGit] = useState<Project | null>(null);
   const [editingEnvFiles, setEditingEnvFiles] = useState<Project | null>(null);
   const [sharingProject, setSharingProject] = useState<Project | null>(null);
+  const [teamSharingProject, setTeamSharingProject] = useState<Project | null>(null);
+  const ccUser = JSON.parse(localStorage.getItem('cc_user') || '{}');
+  const isAdmin = ccUser.role === 'admin' || ccUser.role === 'super_admin' || !ccUser.id;
   const [showGlobalGit, setShowGlobalGit] = useState(false);
   const [showTagManager, setShowTagManager] = useState(false);
   const [tagItems, setTagItems] = useState<TagItem[]>([]);
@@ -1100,10 +1104,19 @@ export function ProjectsPage() {
                 <button
                   onClick={() => setSharingProject(p)}
                   className="min-w-[44px] min-h-[44px] flex items-center justify-center text-gray-400 hover:text-blue-400 hover:bg-gray-700 rounded transition-colors"
-                  title="Share project"
+                  title="Share project (external)"
                 >
                   <Share2 size={16} />
                 </button>
+                {isAdmin && (
+                  <button
+                    onClick={() => setTeamSharingProject(p)}
+                    className="min-w-[44px] min-h-[44px] flex items-center justify-center text-gray-400 hover:text-indigo-400 hover:bg-gray-700 rounded transition-colors"
+                    title="Share to team members"
+                  >
+                    <UserPlus size={16} />
+                  </button>
+                )}
                 <button
                   onClick={() => handleDelete(p.id)}
                   className="min-w-[44px] min-h-[44px] flex items-center justify-center text-gray-400 hover:text-red-400 hover:bg-gray-700 rounded transition-colors"
@@ -1148,6 +1161,14 @@ export function ProjectsPage() {
           itemId={sharingProject.id}
           itemTitle={sharingProject.name}
           onClose={() => setSharingProject(null)}
+        />
+      )}
+      {teamSharingProject && (
+        <TeamShareModal
+          type="project"
+          itemId={teamSharingProject.id}
+          itemTitle={teamSharingProject.name}
+          onClose={() => setTeamSharingProject(null)}
         />
       )}
     </div>

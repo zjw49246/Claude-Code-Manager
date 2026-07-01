@@ -2,7 +2,7 @@ import { useState, useMemo, useRef, useEffect } from 'react';
 
 import { api } from '../../api/client';
 import type { Task, Project } from '../../api/client';
-import { Trash2, RotateCcw, XCircle, MessageCircle, Archive, ArchiveRestore, Star, Copy, Check, MoreVertical, Pencil, Mail, MailOpen, Clock, GripVertical, Share2 } from 'lucide-react';
+import { Trash2, RotateCcw, XCircle, MessageCircle, Archive, ArchiveRestore, Star, Copy, Check, MoreVertical, Pencil, Mail, MailOpen, Clock, GripVertical, Share2, UserPlus } from 'lucide-react';
 import { PluginsBadge, SubAgentsBadge, TaskConfigBadge } from './TaskBadges';
 import { TAG_COLOR_OPTIONS } from '../TagColors';
 import { ExpandableText } from '../ExpandableText';
@@ -222,6 +222,16 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId,
                       className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-gray-300 hover:bg-gray-800 text-left"
                     >
                       <Share2 size={14} /> Share
+                    </button>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setMenuOpenId(null);
+                        window.dispatchEvent(new CustomEvent('ccm-team-share-task', { detail: { task: t } }));
+                      }}
+                      className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-gray-300 hover:bg-gray-800 text-left"
+                    >
+                      <UserPlus size={14} /> Team Share
                     </button>
                     {['in_progress', 'executing'].includes(t.status) && (
                       <button

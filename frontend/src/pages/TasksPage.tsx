@@ -14,6 +14,7 @@ import { PluginsBadge, SubAgentsBadge } from '../components/Tasks/TaskBadges';
 import { TAG_COLOR_OPTIONS } from '../components/TagColors';
 import { useTaskReorder } from '../hooks/useTaskReorder';
 import { ShareModal } from '../components/ShareModal';
+import { TeamShareModal } from '../components/TeamShareModal';
 
 const PAGE_SIZE = 20;
 
@@ -37,6 +38,7 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
   const [tagItems, setTagItems] = useState<TagItem[]>([]);
   const [chatTask, setChatTask] = useState<Task | null>(null);
   const [sharingTask, setSharingTask] = useState<Task | null>(null);
+  const [teamSharingTask, setTeamSharingTask] = useState<Task | null>(null);
   const chatTaskRef = useRef<Task | null>(null);
   chatTaskRef.current = chatTask;
   const chatTaskIdRef = useRef(chatTaskId);
@@ -55,7 +57,15 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
       if (task) setSharingTask(task);
     };
     window.addEventListener('ccm-share-task', handler);
-    return () => window.removeEventListener('ccm-share-task', handler);
+    const teamHandler = (e: Event) => {
+      const task = (e as CustomEvent).detail?.task;
+      if (task) setTeamSharingTask(task);
+    };
+    window.addEventListener('ccm-team-share-task', teamHandler);
+    return () => {
+      window.removeEventListener('ccm-share-task', handler);
+      window.removeEventListener('ccm-team-share-task', teamHandler);
+    };
   }, []);
 
   const [autoSortOnAccess, setAutoSortOnAccess] = useState(true);
@@ -640,6 +650,14 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
           itemId={sharingTask.id}
           itemTitle={sharingTask.title || `Task #${sharingTask.id}`}
           onClose={() => setSharingTask(null)}
+        />
+      )}
+      {teamSharingTask && (
+        <TeamShareModal
+          type="task"
+          itemId={teamSharingTask.id}
+          itemTitle={teamSharingTask.title || `Task #${teamSharingTask.id}`}
+          onClose={() => setTeamSharingTask(null)}
         />
       )}
     </div>
