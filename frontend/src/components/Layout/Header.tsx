@@ -77,7 +77,7 @@ export function Header({ currentPage, onNavigate }: HeaderProps) {
     { key: 'files', label: 'Files', adminOnly: true },
     { key: 'discussions', label: 'Discussions', adminOnly: true },
     { key: 'pr-monitor', label: 'PR Monitor', adminOnly: true },
-    { key: 'workers', label: 'Workers', adminOnly: true },
+    { key: 'workers', label: 'Workers', adminOnly: false },
     { key: 'skills', label: 'Skills', adminOnly: true },
     { key: 'team', label: 'Team', adminOnly: false },
     ...(isCapacitor() ? [{ key: 'server', label: 'Server', adminOnly: false }] : []),
