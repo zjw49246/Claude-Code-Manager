@@ -117,8 +117,17 @@ function App() {
       .then((res) => {
         if (res.ok) {
           setAuthenticated(true);
+          // Ensure cc_user is populated (token login may not have set it)
+          const ccUser = JSON.parse(localStorage.getItem('cc_user') || '{}');
+          if (!ccUser.name) {
+            const token = getToken();
+            fetch(`${base}/api/auth/me`, {
+              headers: token ? { Authorization: `Bearer ${token}` } : {},
+            }).then(r => r.ok ? r.json() : null).then(d => {
+              if (d?.user) localStorage.setItem('cc_user', JSON.stringify(d.user));
+            }).catch(() => {});
+          }
         }
-        // 401 means auth is required and token is invalid/missing
       })
       .catch(() => {
         // Server down, show login anyway
