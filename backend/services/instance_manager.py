@@ -172,8 +172,9 @@ class InstanceManager:
             from backend.services.ask_user_settings import ensure_ask_user_hook
             ensure_ask_user_hook(config_dir or os.path.expanduser("~/.claude"))
 
-        # Shared projects skip PTY mode → subprocess + docker container
-        _skip_pty_for_container = False
+        # Check if shared project → prepare Docker container wrapper for PTY
+        _container_project_id = None
+        _container_wrapper = None
         if provider == "claude" and task_id:
             try:
                 from backend.services.container_manager import is_shared_project, ContainerManager
@@ -182,11 +183,24 @@ class InstanceManager:
                     _t = await _db.get(_Task, task_id)
                     if _t and _t.project_id:
                         if await is_shared_project(_t.project_id, self.db_factory) and ContainerManager.is_docker_available():
-                            _skip_pty_for_container = True
+                            _container_project_id = _t.project_id
+                            if not hasattr(self, '_container_mgr'):
+                                self._container_mgr = ContainerManager()
+                            project_path = cwd or os.getcwd()
+                            container_name = await self._container_mgr.ensure_container(
+                                _container_project_id, project_path, config_dir
+                            )
+                            # Create wrapper script for PTY: docker exec <container> claude "$@"
+                            wrapper_path = f"/tmp/ccm-docker-claude-{_container_project_id}.sh"
+                            with open(wrapper_path, "w") as wf:
+                                wf.write(f'#!/bin/bash\nexec docker exec -i {container_name} claude "$@"\n')
+                            os.chmod(wrapper_path, 0o755)
+                            _container_wrapper = wrapper_path
+                            self._container_tasks[instance_id] = _container_project_id
             except Exception:
-                pass
+                logger.debug("Container setup failed, falling back to bare process")
 
-        if provider == "claude" and self.pty_mode_enabled and not _skip_pty_for_container:
+        if provider == "claude" and self.pty_mode_enabled:
             return await self._launch_pty(
                 instance_id=instance_id,
                 prompt=prompt,
@@ -203,6 +217,7 @@ class InstanceManager:
                 enable_workflows=enable_workflows,
                 enabled_skills=enabled_skills,
                 mcp_config_path=str(mcp_config_path) if mcp_config_path else None,
+                claude_binary_override=_container_wrapper,
             )
 
         cmd = self._build_command(
@@ -342,6 +357,7 @@ class InstanceManager:
         enable_workflows: bool,
         enabled_skills: dict | None,
         mcp_config_path: str | None,
+        claude_binary_override: str | None = None,
     ) -> int:
         """PTY-mode launch: delegate to claude_pty, mirror -p bookkeeping.
 
@@ -350,23 +366,38 @@ class InstanceManager:
         so everything downstream (DB, WebSocket, dispatcher wait) is
         unchanged.
         """
-        session_id = await self._pty_backend.launch_for_ccm(
-            instance_id=instance_id,
-            prompt=prompt,
-            task_id=task_id,
-            cwd=cwd,
-            model=model if model and model != "default" else None,
-            resume_session_id=resume_session_id,
-            loop_iteration=loop_iteration,
-            git_env=git_env,
-            thinking_budget=thinking_budget,
-            effort_level=effort_level,
-            chat_initiated=chat_initiated,
-            config_dir=config_dir,
-            enable_workflows=enable_workflows,
-            enabled_skills=enabled_skills,
-            mcp_config_path=mcp_config_path,
-        )
+        # If container wrapper exists, monkey-patch build_config to use it
+        _original_build_config = None
+        if claude_binary_override:
+            _original_build_config = self._pty_backend.build_config
+            _wrapper = claude_binary_override
+            def _patched_build_config(**kw):
+                cfg = _original_build_config(**kw)
+                cfg.claude_binary = _wrapper
+                return cfg
+            self._pty_backend.build_config = _patched_build_config
+
+        try:
+            session_id = await self._pty_backend.launch_for_ccm(
+                instance_id=instance_id,
+                prompt=prompt,
+                task_id=task_id,
+                cwd=cwd,
+                model=model if model and model != "default" else None,
+                resume_session_id=resume_session_id,
+                loop_iteration=loop_iteration,
+                git_env=git_env,
+                thinking_budget=thinking_budget,
+                effort_level=effort_level,
+                chat_initiated=chat_initiated,
+                config_dir=config_dir,
+                enable_workflows=enable_workflows,
+                enabled_skills=enabled_skills,
+                mcp_config_path=mcp_config_path,
+            )
+        finally:
+            if _original_build_config:
+                self._pty_backend.build_config = _original_build_config
 
         if task_id and session_id:
             async with self.db_factory() as db:
