@@ -1,8 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
+from backend.api.deps import get_current_user_id, get_current_user_role
 from backend.models.discussion import (
     Discussion,
     DiscussionAgent,
@@ -32,11 +33,49 @@ def _get_service():
     return _discussion_service
 
 
+async def _require_discussion_owner(request: Request, discussion: Discussion):
+    """Only creator or admin can mutate a discussion."""
+    role = get_current_user_role(request)
+    if role in ("admin", "super_admin"):
+        return
+    user_id = get_current_user_id(request)
+    if discussion.creator_user_id == user_id:
+        return
+    raise HTTPException(403, "Only the discussion creator or admin can perform this action")
+
+
+async def _can_create_discussion(request: Request, db: AsyncSession) -> bool:
+    """Admin or user with Worker/Project access can create discussions."""
+    role = get_current_user_role(request)
+    if role in ("admin", "super_admin"):
+        return True
+    user_id = get_current_user_id(request)
+    if not user_id:
+        return False
+    from backend.models.worker import Worker
+    from backend.models.team_share import TeamProjectShare
+    has_worker = (await db.execute(
+        select(Worker.id).where(Worker.owner_user_id == user_id).limit(1)
+    )).scalar_one_or_none()
+    if has_worker:
+        return True
+    has_project = (await db.execute(
+        select(TeamProjectShare.id).where(
+            TeamProjectShare.target_type == "user",
+            TeamProjectShare.target_id == user_id,
+        ).limit(1)
+    )).scalar_one_or_none()
+    return has_project is not None
+
+
 @router.get("")
-async def list_discussions(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(Discussion).order_by(Discussion.created_at.desc())
-    )
+async def list_discussions(request: Request, db: AsyncSession = Depends(get_db)):
+    user_id = get_current_user_id(request)
+    user_role = get_current_user_role(request)
+    stmt = select(Discussion).order_by(Discussion.created_at.desc())
+    if user_role not in ("admin", "super_admin"):
+        stmt = stmt.where(Discussion.creator_user_id == user_id)
+    result = await db.execute(stmt)
     discussions = result.scalars().all()
     out = []
     for d in discussions:
@@ -59,13 +98,16 @@ async def list_discussions(db: AsyncSession = Depends(get_db)):
 
 @router.post("", status_code=201)
 async def create_discussion(
-    data: DiscussionCreate, db: AsyncSession = Depends(get_db)
+    data: DiscussionCreate, request: Request, db: AsyncSession = Depends(get_db)
 ):
+    if not await _can_create_discussion(request, db):
+        raise HTTPException(403, "You need a Worker or Project access to create Discussions")
     disc = Discussion(
         title=data.title,
         project_id=data.project_id,
         max_agents=data.max_agents,
         facilitator_model=data.facilitator_model,
+        creator_user_id=get_current_user_id(request),
         agent_model=data.agent_model,
     )
     db.add(disc)
@@ -114,11 +156,13 @@ async def get_discussion(
 async def send_broadcast_message(
     discussion_id: int,
     data: DiscussionSendMessage,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
     disc = await db.get(Discussion, discussion_id)
     if not disc:
         raise HTTPException(status_code=404, detail="Discussion not found")
+    await _require_discussion_owner(request, disc)
 
     service = _get_service()
     agents = await service.send_broadcast(db, discussion_id, data.message)
@@ -261,11 +305,12 @@ async def get_agent_events(
 
 @router.delete("/{discussion_id}")
 async def delete_discussion(
-    discussion_id: int, db: AsyncSession = Depends(get_db)
+    discussion_id: int, request: Request, db: AsyncSession = Depends(get_db)
 ):
     disc = await db.get(Discussion, discussion_id)
     if not disc:
         raise HTTPException(status_code=404, detail="Discussion not found")
+    await _require_discussion_owner(request, disc)
 
     # Stop running agents
     service = _get_service()

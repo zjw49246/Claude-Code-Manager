@@ -17,6 +17,7 @@ class Discussion(Base):
     agent_model: Mapped[str] = mapped_column(String(100), nullable=False, default="claude-opus-4-6")
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
     facilitator_session_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    creator_user_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
