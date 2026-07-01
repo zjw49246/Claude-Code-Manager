@@ -184,7 +184,7 @@ interface SSHPanelProps {
   onSave: (profiles: SSHProfile[]) => void;
 }
 
-function SSHPanel({ profiles, active, onActivate, onSave }: SSHPanelProps) {
+function SSHPanel({ profiles, active, onActivate, onSave, isAdmin = true }: SSHPanelProps & { isAdmin?: boolean }) {
   const [editing, setEditing] = useState<SSHProfile | null>(null);
 
   const startNew = () => setEditing(newProfile());
@@ -217,18 +217,20 @@ function SSHPanel({ profiles, active, onActivate, onSave }: SSHPanelProps) {
             <span className="flex-1 truncate" onClick={() => onActivate(p)}>
               {p.label || `${p.username}@${p.host}`}
             </span>
-            <button onClick={() => startEdit(p)} className="text-gray-400 hover:text-gray-200 text-xs px-1">edit</button>
-            <button onClick={() => handleDelete(p.id)} className="text-red-400 hover:text-red-300"><Trash2 size={12} /></button>
+            {isAdmin && <button onClick={() => startEdit(p)} className="text-gray-400 hover:text-gray-200 text-xs px-1">edit</button>}
+            {isAdmin && <button onClick={() => handleDelete(p.id)} className="text-red-400 hover:text-red-300"><Trash2 size={12} /></button>}
           </div>
         ))}
       </div>
 
-      <button
-        onClick={startNew}
-        className="flex items-center gap-1 text-xs text-indigo-400 hover:text-indigo-300"
-      >
-        <Plus size={12} /> Add server
-      </button>
+      {isAdmin && (
+        <button
+          onClick={startNew}
+          className="flex items-center gap-1 text-xs text-indigo-400 hover:text-indigo-300"
+        >
+          <Plus size={12} /> Add server
+        </button>
+      )}
 
       {/* Inline editor */}
       {editing && (
@@ -320,7 +322,9 @@ function DiffView({ diff }: { diff: string }) {
 // ---------------------------------------------------------------------------
 
 export function FilesPage() {
-  const [mode, setMode] = useState<Mode>('local');
+  const ccUser = JSON.parse(localStorage.getItem('cc_user') || '{}');
+  const isAdmin = ccUser.role === 'admin' || !ccUser.id;
+  const [mode, setMode] = useState<Mode>(isAdmin ? 'local' : 'ssh');
   const [projects, setProjects] = useState<Project[]>([]);
 
   // Local state
@@ -560,12 +564,14 @@ export function FilesPage() {
         <div className="flex items-center gap-3 flex-wrap">
           <h2 className="text-sm font-semibold text-foreground">File Browser</h2>
           <div className="flex rounded overflow-hidden border border-gray-600 text-xs">
-            <button
-              onClick={() => setMode('local')}
-              className={`flex items-center gap-1 px-3 py-1.5 ${mode === 'local' ? 'bg-indigo-600 text-white' : 'bg-gray-700 text-gray-400 hover:bg-gray-600'}`}
-            >
-              <HardDrive size={12} /> Local
-            </button>
+            {isAdmin && (
+              <button
+                onClick={() => setMode('local')}
+                className={`flex items-center gap-1 px-3 py-1.5 ${mode === 'local' ? 'bg-indigo-600 text-white' : 'bg-gray-700 text-gray-400 hover:bg-gray-600'}`}
+              >
+                <HardDrive size={12} /> Local
+              </button>
+            )}
             <button
               onClick={() => setMode('ssh')}
               className={`flex items-center gap-1 px-3 py-1.5 ${mode === 'ssh' ? 'bg-indigo-600 text-white' : 'bg-gray-700 text-gray-400 hover:bg-gray-600'}`}
@@ -641,6 +647,7 @@ export function FilesPage() {
               active={activeProfile}
               onActivate={handleActivateProfile}
               onSave={handleSaveProfiles}
+              isAdmin={isAdmin}
             />
             {activeProfile && (
               <div className="flex gap-2">
