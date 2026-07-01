@@ -17,7 +17,7 @@ async def list_tags(request: Request, db: AsyncSession = Depends(get_db)):
     user_role = get_current_user_role(request)
     stmt = select(Tag).order_by(Tag.name.asc())
     if user_role not in ("admin", "super_admin"):
-        stmt = stmt.where(or_(Tag.created_by == user_id, Tag.created_by.is_(None)))
+        stmt = stmt.where(Tag.created_by == user_id)
     result = await db.execute(stmt)
     return list(result.scalars().all())
 
