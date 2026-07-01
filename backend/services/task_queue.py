@@ -91,6 +91,7 @@ class TaskQueue:
         archived_only: bool = False,
         project_id: int | None = None, starred: bool | None = None,
         has_unread: bool | None = None,
+        user_id: int | None = None,
     ) -> int:
         stmt = select(func.count(Task.id)).where(Task.shared_from_id.is_(None))
         if archived_only:
@@ -106,6 +107,22 @@ class TaskQueue:
             stmt = stmt.where(Task.starred == starred)
         if has_unread is not None:
             stmt = stmt.where(Task.has_unread == has_unread)
+        if user_id is not None:
+            from backend.models.worker import Worker
+            from backend.models.team_share import TeamTaskShare, TeamProjectShare
+            owned_worker_ids_q = select(Worker.id).where(Worker.owner_user_id == user_id)
+            shared_task_ids_q = select(TeamTaskShare.task_id).where(
+                (TeamTaskShare.target_type == "user") & (TeamTaskShare.target_id == user_id)
+            )
+            shared_project_ids_q = select(TeamProjectShare.project_id).where(
+                (TeamProjectShare.target_type == "user") & (TeamProjectShare.target_id == user_id)
+            )
+            stmt = stmt.where(
+                (Task.created_by == user_id)
+                | Task.worker_id.in_(owned_worker_ids_q)
+                | Task.id.in_(shared_task_ids_q)
+                | Task.project_id.in_(shared_project_ids_q)
+            )
         result = await self.db.execute(stmt)
         return result.scalar() or 0
 

@@ -193,3 +193,60 @@ async def get_me(request: Request, db: AsyncSession = Depends(get_db)):
             "feishu_name": user.feishu_name,
         },
     }
+
+
+class ChangePasswordRequest(BaseModel):
+    old_password: str
+    new_password: str
+
+
+class UpdateProfileRequest(BaseModel):
+    name: str | None = None
+    avatar_url: str | None = None
+
+
+@router.put("/me/password")
+async def change_password(body: ChangePasswordRequest, request: Request, db: AsyncSession = Depends(get_db)):
+    user_id = getattr(request.state, "user_id", None)
+    if not user_id:
+        raise HTTPException(401, "Not authenticated")
+    user = await db.get(User, user_id)
+    if not user:
+        raise HTTPException(404, "User not found")
+    if not _verify_password(body.old_password, user.password_hash):
+        raise HTTPException(400, "Old password is incorrect")
+    user.password_hash = _hash_password(body.new_password)
+    await db.commit()
+    return {"ok": True}
+
+
+@router.put("/me")
+async def update_profile(body: UpdateProfileRequest, request: Request, db: AsyncSession = Depends(get_db)):
+    user_id = getattr(request.state, "user_id", None)
+    if not user_id:
+        raise HTTPException(401, "Not authenticated")
+    user = await db.get(User, user_id)
+    if not user:
+        raise HTTPException(404, "User not found")
+    if body.name is not None:
+        user.name = body.name
+    if body.avatar_url is not None:
+        user.avatar_url = body.avatar_url
+    await db.commit()
+    await db.refresh(user)
+    return {"ok": True, "user": {"id": user.id, "name": user.name, "avatar_url": user.avatar_url}}
+
+
+@router.delete("/me")
+async def delete_account(request: Request, db: AsyncSession = Depends(get_db)):
+    user_id = getattr(request.state, "user_id", None)
+    if not user_id:
+        raise HTTPException(401, "Not authenticated")
+    user = await db.get(User, user_id)
+    if not user:
+        raise HTTPException(404, "User not found")
+    if user.role == "admin":
+        raise HTTPException(400, "Admin account cannot be deleted")
+    user.is_active = False
+    await db.commit()
+    return {"ok": True}

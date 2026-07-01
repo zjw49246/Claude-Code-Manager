@@ -15,6 +15,8 @@ interface TaskFormProps {
 const NEW_PROJECT_VALUE = '__new__';
 
 export function TaskForm({ onCreated }: TaskFormProps) {
+  const ccUser = JSON.parse(localStorage.getItem('cc_user') || '{}');
+  const isAdmin = ccUser.role === 'admin' || !ccUser.id;
   const [description, setDescription] = useState('');
   const [projectId, setProjectId] = useState<number | ''>('');
   const [isNewProject, setIsNewProject] = useState(false);
@@ -47,6 +49,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [projects, setProjects] = useState<Project[]>([]);
+  const [hasWorker, setHasWorker] = useState(isAdmin);
   const [tagItems, setTagItems] = useState<TagItem[]>([]);
   const fileUpload = useFileUpload();
   const [selectedSecretIds, setSelectedSecretIds] = useState<number[]>([]);
@@ -69,6 +72,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
 
   useEffect(() => {
     loadProjects();
+    if (!isAdmin) api.listWorkers().then(w => setHasWorker(w.length > 0)).catch(() => {});
     api.config().then((c) => {
       setProvider(c.default_provider || 'claude');
       setProviderOptions(c.provider_options.length ? c.provider_options : ['claude', 'codex']);
@@ -390,7 +394,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
           value={isNewProject ? NEW_PROJECT_VALUE : projectId || undefined}
           onChange={handleProjectChange}
           placeholder="Select project..."
-          extraOptions={[{ value: NEW_PROJECT_VALUE, label: '+ New project' }]}
+          extraOptions={hasWorker ? [{ value: NEW_PROJECT_VALUE, label: '+ New project' }] : []}
           className="w-full"
           showStatus
           tagColorMap={Object.fromEntries(tagItems.map((t) => [t.name, t.color]))}

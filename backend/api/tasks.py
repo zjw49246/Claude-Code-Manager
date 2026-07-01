@@ -91,6 +91,7 @@ def _get_queue(db: AsyncSession = Depends(get_db)) -> TaskQueue:
 
 @router.get("/count")
 async def count_tasks(
+    request: Request,
     status: str | None = None,
     include_archived: bool = False,
     archived_only: bool = False,
@@ -99,11 +100,14 @@ async def count_tasks(
     has_unread: bool | None = None,
     queue: TaskQueue = Depends(_get_queue),
 ):
+    user_id = get_current_user_id(request)
+    user_role = get_current_user_role(request)
     total = await queue.count_tasks(
         status=status, include_archived=include_archived,
         archived_only=archived_only,
         project_id=project_id, starred=starred,
         has_unread=has_unread,
+        user_id=user_id if user_role != "admin" else None,
     )
     return {"total": total}
 
