@@ -1,9 +1,7 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { api } from '../api/client';
-import type { OrgMember, OrgTeam, SharedTaskReceived, Task, TeamUser, Worker } from '../api/client';
-import { Plus, X, Trash2, UserPlus, Users, MessageCircle, Search, RefreshCw, Shield, ShieldCheck, User } from 'lucide-react';
-import { ChatView } from '../components/Chat/ChatView';
-import { useWebSocket } from '../hooks/useWebSocket';
+import type { OrgMember, OrgTeam, TeamUser, Worker } from '../api/client';
+import { Plus, X, Trash2, UserPlus, Users, Shield, ShieldCheck, User } from 'lucide-react';
 
 /* ── Create / Edit Team Modal ─────────────────────────────────── */
 function TeamModal({
@@ -247,44 +245,23 @@ export default function TeamPage() {
   const [myOpenId, setMyOpenId] = useState('');
   const [showTransfer, setShowTransfer] = useState(false);
 
-  // Shared tasks state
-  const [sharedTasks, setSharedTasks] = useState<SharedTaskReceived[]>([]);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [ownerFilter, setOwnerFilter] = useState('');
-  const [refreshing, setRefreshing] = useState(false);
-  const [chatTask, setChatTask] = useState<Task | null>(null);
-
-  // Update chatTask status from WS events (for thinking indicator)
-  const handleWs = useCallback((raw: Record<string, unknown>) => {
-    const data = (raw as any).data;
-    if (!data || !chatTask) return;
-    const channel = (raw as any).channel;
-    if (channel !== `task:${chatTask.id}`) return;
-    const event = data.event_type || data.event;
-    if (event === 'status_change' && data.new_status) {
-      setChatTask(prev => prev ? { ...prev, status: data.new_status as string } : prev);
-    }
-  }, [chatTask]);
-  useWebSocket(chatTask ? [`task:${chatTask.id}`] : [], handleWs);
 
   const fetchAll = useCallback(async () => {
     const results = await Promise.allSettled([
       api.getOrgMembers(),
       api.getOrgTeams(),
-      api.getSharedTasks(true),
       api.getFeishuStatus(),
       isAdmin ? api.getTeamUsers() : Promise.resolve([]),
       isAdmin ? api.listWorkers() : Promise.resolve([]),
     ]);
     if (results[0].status === 'fulfilled') setMembers(results[0].value);
     if (results[1].status === 'fulfilled') setTeams(results[1].value);
-    if (results[2].status === 'fulfilled') setSharedTasks(results[2].value.tasks);
-    if (results[3].status === 'fulfilled') {
-      setIsRegistry(results[3].value.is_registry || false);
-      setMyOpenId(results[3].value.open_id || '');
+    if (results[2].status === 'fulfilled') {
+      setIsRegistry(results[2].value.is_registry || false);
+      setMyOpenId(results[2].value.open_id || '');
     }
-    if (results[4].status === 'fulfilled') setTeamUsers(results[4].value as TeamUser[]);
-    if (results[5].status === 'fulfilled') setWorkers(results[5].value as Worker[]);
+    if (results[3].status === 'fulfilled') setTeamUsers(results[3].value as TeamUser[]);
+    if (results[4].status === 'fulfilled') setWorkers(results[4].value as Worker[]);
     setLoading(false);
   }, [isAdmin]);
 
@@ -308,52 +285,6 @@ export default function TeamPage() {
       await fetchAll();
     } catch { /* ignore */ }
   };
-
-  const handleLeaveShared = async (id: number) => {
-    if (!confirm('Leave this shared task?')) return;
-    try {
-      await api.leaveSharedTask(id);
-      setSharedTasks(prev => prev.filter(t => t.id !== id));
-    } catch { /* ignore */ }
-  };
-
-  const owners = useMemo(() => {
-    const set = new Set<string>();
-    sharedTasks.forEach(t => { if (t.owner_name) set.add(t.owner_name); });
-    return Array.from(set).sort();
-  }, [sharedTasks]);
-
-  const filteredShared = useMemo(() => {
-    let result = sharedTasks;
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase();
-      result = result.filter(t =>
-        (t.task_title || '').toLowerCase().includes(q) ||
-        (t.task_description || '').toLowerCase().includes(q) ||
-        (t.project_name || '').toLowerCase().includes(q)
-      );
-    }
-    if (ownerFilter) {
-      result = result.filter(t => t.owner_name === ownerFilter);
-    }
-    return result;
-  }, [sharedTasks, searchQuery, ownerFilter]);
-
-
-  if (chatTask) {
-    return (
-      <div className="h-[calc(100vh-8rem)]">
-        <ChatView
-          task={chatTask}
-          projects={[]}
-          onBack={() => setChatTask(null)}
-          onTaskUpdated={() => {
-            api.getTask(chatTask.id).then(setChatTask).catch(() => {});
-          }}
-        />
-      </div>
-    );
-  }
 
   if (loading) {
     return (
@@ -425,7 +356,8 @@ export default function TeamPage() {
                     <button
                       onClick={async () => {
                         const newRole = u.role === 'admin' ? 'member' : 'admin';
-                        if (!confirm(`Change ${u.name} to ${newRole}?`)) return;
+                        const label = newRole === 'admin' ? '管理员' : '普通用户';
+                        if (!confirm(`将 ${u.name} 设为${label}？`)) return;
                         try {
                           await fetch(`/api/team/users/${u.id}/role`, {
                             method: 'PUT',
@@ -436,7 +368,7 @@ export default function TeamPage() {
                         } catch {}
                       }}
                       className="p-1 text-gray-500 hover:text-indigo-400"
-                      title={u.role === 'admin' ? 'Demote to member' : 'Promote to admin'}
+                      title={u.role === 'admin' ? '降级为普通用户' : '提升为管理员'}
                     >
                       {u.role === 'admin' ? <Shield size={14} /> : <ShieldCheck size={14} />}
                     </button>
@@ -576,118 +508,6 @@ export default function TeamPage() {
             )}
           </div>
         </div>
-        )}
-      </div>
-
-      {/* ── Shared Tasks Section ── */}
-      <div>
-        <div className="flex items-center justify-between mb-3">
-          <h2 className="text-lg font-semibold text-foreground">Shared with me</h2>
-          <button
-            onClick={() => { setRefreshing(true); fetchAll().finally(() => setRefreshing(false)); }}
-            disabled={refreshing}
-            className="flex items-center gap-2 px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 text-gray-200 rounded-lg disabled:opacity-50"
-          >
-            <RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} /> Refresh
-          </button>
-        </div>
-
-        {sharedTasks.length > 0 && (
-          <div className="flex items-center gap-3 mb-3">
-            <div className="relative flex-1">
-              <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500" />
-              <input
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search shared tasks..."
-                className="w-full bg-gray-800 text-foreground rounded-lg pl-9 pr-3 py-2 text-sm border border-gray-700 focus:outline-none focus:border-blue-500"
-              />
-            </div>
-            {owners.length > 1 && (
-              <select
-                value={ownerFilter}
-                onChange={(e) => setOwnerFilter(e.target.value)}
-                className="bg-gray-800 text-foreground rounded-lg px-3 py-2 text-sm border border-gray-700 focus:outline-none focus:border-blue-500"
-              >
-                <option value="">All owners</option>
-                {owners.map(o => <option key={o} value={o}>{o}</option>)}
-              </select>
-            )}
-          </div>
-        )}
-
-        {sharedTasks.length === 0 ? (
-          <div className="text-center py-10 text-gray-500 bg-gray-800 rounded-lg">
-            <p className="text-sm">No shared tasks yet. When someone shares a task with you, it will appear here.</p>
-          </div>
-        ) : filteredShared.length === 0 ? (
-          <p className="text-gray-500 text-sm text-center py-8">No tasks match your search.</p>
-        ) : (
-          <div className="space-y-2">
-            {filteredShared.map(task => {
-              const rt = task.remote_task;
-              const status = rt?.status || 'unknown';
-              const statusColor: Record<string, string> = {
-                pending: 'bg-yellow-500', in_progress: 'bg-blue-500', executing: 'bg-blue-400 animate-pulse',
-                plan_review: 'bg-purple-500', completed: 'bg-green-500', failed: 'bg-red-500', cancelled: 'bg-gray-500',
-              };
-              const title = rt?.title || task.task_title || '';
-              const desc = rt?.description || task.task_description || '';
-              const projectName = rt?.project_name || task.project_name;
-              return (
-                <div key={task.id} className="relative rounded-lg p-3 bg-gray-800">
-                  {/* Row 1: status + badges + actions */}
-                  <div className="flex items-center gap-2">
-                    <span className={`w-2.5 h-2.5 rounded-full shrink-0 self-start mt-[9px] ${statusColor[status] || 'bg-gray-500'}`} />
-                    <div className="flex items-center gap-2 flex-wrap flex-1 min-w-0 min-h-[28px]">
-                      <span className="text-xs text-orange-400 bg-orange-900/30 px-1.5 rounded font-medium">from {task.owner_name || '?'}</span>
-                      <span className="text-xs text-gray-500">#{task.remote_task_id}</span>
-                      {projectName && (
-                        <span className="text-xs bg-emerald-600/30 text-emerald-300 px-1.5 rounded font-medium">{projectName}</span>
-                      )}
-                      <span className="hidden sm:inline text-xs text-gray-500 capitalize">{status.replace('_', ' ')}</span>
-                      {rt?.provider && (
-                        <span className={`hidden sm:inline text-xs px-1.5 rounded font-medium ${rt.provider === 'codex' ? 'bg-green-600/30 text-green-300' : 'bg-blue-600/30 text-blue-300'}`}>
-                          {rt.provider === 'codex' ? 'Codex' : 'Claude'}
-                        </span>
-                      )}
-                      {rt?.model && (
-                        <span className="hidden sm:inline text-xs text-gray-600">{rt.model.split('-').slice(-2).join('-')}</span>
-                      )}
-                    </div>
-                    <div className="flex gap-1 shrink-0 items-center">
-                      <button
-                        onClick={async () => {
-                          if (!task.local_task_id) return;
-                          try {
-                            const t = await api.getTask(task.local_task_id);
-                            setChatTask(t);
-                          } catch { /* ignore */ }
-                        }}
-                        className="flex items-center gap-1 px-2 py-1 text-xs bg-indigo-600/80 hover:bg-indigo-500 text-white rounded"
-                      >
-                        <MessageCircle size={14} /> Chat
-                      </button>
-                      <button
-                        onClick={() => handleLeaveShared(task.id)}
-                        className="p-1.5 text-gray-600 hover:text-red-400 transition-colors"
-                        title="Leave shared task"
-                      >
-                        <X size={14} />
-                      </button>
-                    </div>
-                  </div>
-                  {/* Row 2: title + description */}
-                  <div className="mt-1 pl-[1.125rem]">
-                    <p className="text-sm text-foreground font-medium truncate">{title || `Task #${task.remote_task_id}`}</p>
-                    {desc && <p className="text-xs text-gray-400 mt-0.5 line-clamp-2">{desc}</p>}
-                    {rt?.target_repo && <p className="text-xs text-gray-600 mt-0.5">{rt.target_repo}</p>}
-                    {rt?.error_message && <p className="text-red-400 text-xs mt-1">{rt.error_message}</p>}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
         )}
       </div>
 
