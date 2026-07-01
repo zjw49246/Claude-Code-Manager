@@ -21,7 +21,7 @@ from backend.services.dispatcher import _build_git_env
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
 
-@router.get("", response_model=list[ProjectResponse])
+@router.get("")
 async def list_projects(request: Request, db: AsyncSession = Depends(get_db)):
     user_id = get_current_user_id(request)
     user_role = get_current_user_role(request)
@@ -46,7 +46,29 @@ async def list_projects(request: Request, db: AsyncSession = Depends(get_db)):
             | Project.id.in_(created_project_ids)
         )
     result = await db.execute(stmt)
-    return list(result.scalars().all())
+    projects = list(result.scalars().all())
+
+    # Annotate each project with its location (local or worker name)
+    from backend.models.task import Task
+    from backend.models.worker import Worker as WorkerModel
+    project_worker_map: dict[int, str] = {}
+    if projects:
+        pids = [p.id for p in projects]
+        tw_result = await db.execute(
+            select(Task.project_id, WorkerModel.name)
+            .join(WorkerModel, Task.worker_id == WorkerModel.id)
+            .where(Task.project_id.in_(pids), Task.worker_id.is_not(None))
+            .distinct()
+        )
+        for pid, wname in tw_result:
+            project_worker_map[pid] = wname
+
+    out = []
+    for p in projects:
+        d = ProjectResponse.model_validate(p).model_dump()
+        d["location"] = project_worker_map.get(p.id, "local")
+        out.append(d)
+    return out
 
 
 @router.get("/tags", response_model=list[str])

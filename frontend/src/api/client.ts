@@ -74,6 +74,7 @@ export interface Project {
   git_https_token: string | null;
   badge_color: string | null;
   created_at: string;
+  location?: string;  // "local" or worker name
 }
 
 export interface Task {

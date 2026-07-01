@@ -963,9 +963,25 @@ export function ProjectsPage() {
 
       {filteredProjects.length === 0 ? (
         <p className="text-gray-400 text-sm">{projects.length === 0 ? 'No projects yet.' : 'No projects match this tag.'}</p>
-      ) : (
-        <div className="space-y-3">
-          {filteredProjects.map((p) => (
+      ) : (() => {
+        const groups = new Map<string, typeof filteredProjects>();
+        for (const p of filteredProjects) {
+          const loc = p.location || 'local';
+          if (!groups.has(loc)) groups.set(loc, []);
+          groups.get(loc)!.push(p);
+        }
+        const sortedKeys = [...groups.keys()].sort((a, b) => a === 'local' ? -1 : b === 'local' ? 1 : a.localeCompare(b));
+        return (
+          <div className="space-y-4">
+            {sortedKeys.map(loc => (
+              <div key={loc}>
+                {groups.size > 1 && (
+                  <h3 className="text-xs text-gray-500 uppercase tracking-wider mb-2 flex items-center gap-1.5">
+                    {loc === 'local' ? '📍 本机' : `🖥 ${loc}`}
+                  </h3>
+                )}
+                <div className="space-y-3">
+                  {groups.get(loc)!.map((p) => (
             <div
               key={p.id}
               ref={setCardRef(p.id)}
@@ -1071,8 +1087,8 @@ export function ProjectsPage() {
                   </button>
                 </label>
 
-                {/* Admin-only project management */}
-                {isAdmin && (
+                {/* Project management: admin or Worker owner */}
+                {(isAdmin || hasWorker) && (
                   <>
                     <button
                       onClick={() => setEditingGit(p)}
@@ -1104,33 +1120,31 @@ export function ProjectsPage() {
                         <RotateCcw size={16} />
                       </button>
                     )}
+                    <button
+                      onClick={() => setTeamSharingProject(p)}
+                      className="min-w-[44px] min-h-[44px] flex items-center justify-center text-gray-400 hover:text-indigo-400 hover:bg-gray-700 rounded transition-colors"
+                      title="Share to team members"
+                    >
+                      <UserPlus size={16} />
+                    </button>
+                    <button
+                      onClick={() => handleDelete(p.id)}
+                      className="min-w-[44px] min-h-[44px] flex items-center justify-center text-gray-400 hover:text-red-400 hover:bg-gray-700 rounded transition-colors"
+                      title="Delete project"
+                    >
+                      <Trash2 size={16} />
+                    </button>
                   </>
-                )}
-
-
-                {isAdmin && (
-                  <button
-                    onClick={() => setTeamSharingProject(p)}
-                    className="min-w-[44px] min-h-[44px] flex items-center justify-center text-gray-400 hover:text-indigo-400 hover:bg-gray-700 rounded transition-colors"
-                    title="Share to team members"
-                  >
-                    <UserPlus size={16} />
-                  </button>
-                )}
-                {isAdmin && (
-                  <button
-                    onClick={() => handleDelete(p.id)}
-                    className="min-w-[44px] min-h-[44px] flex items-center justify-center text-gray-400 hover:text-red-400 hover:bg-gray-700 rounded transition-colors"
-                    title="Delete project"
-                  >
-                    <Trash2 size={16} />
-                  </button>
                 )}
               </div>
             </div>
-          ))}
-        </div>
-      )}
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        );
+      })()}
 
       {showCreate && <CreateModal onClose={() => setShowCreate(false)} onCreated={refresh} />}
       {editingGit && <GitConfigModal project={editingGit} onClose={() => setEditingGit(null)} onSaved={refresh} />}
