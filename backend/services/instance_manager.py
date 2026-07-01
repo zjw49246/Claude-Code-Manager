@@ -187,8 +187,15 @@ class InstanceManager:
                             if not hasattr(self, '_container_mgr'):
                                 self._container_mgr = ContainerManager()
                             project_path = cwd or os.getcwd()
+                            # Get project git credentials for container isolation
+                            from backend.models.project import Project as _Project
+                            _proj = await _db.get(_Project, _t.project_id)
                             container_name = await self._container_mgr.ensure_container(
-                                _container_project_id, project_path, config_dir
+                                _container_project_id, project_path, config_dir,
+                                git_credential_type=_proj.git_credential_type if _proj else None,
+                                git_ssh_key_path=_proj.git_ssh_key_path if _proj else None,
+                                git_https_username=_proj.git_https_username if _proj else None,
+                                git_https_token=_proj.git_https_token if _proj else None,
                             )
                             # Create wrapper script for PTY: docker exec <container> claude "$@"
                             wrapper_path = f"/tmp/ccm-docker-claude-{_container_project_id}.sh"
@@ -276,8 +283,23 @@ class InstanceManager:
             if not hasattr(self, '_container_mgr'):
                 self._container_mgr = ContainerManager()
             project_path = cwd or os.getcwd()
+            # Get project git credentials
+            _git_creds = {}
+            try:
+                async with self.db_factory() as _db2:
+                    from backend.models.project import Project as _Proj
+                    _p = await _db2.get(_Proj, container_project_id)
+                    if _p:
+                        _git_creds = {
+                            "git_credential_type": _p.git_credential_type,
+                            "git_ssh_key_path": _p.git_ssh_key_path,
+                            "git_https_username": _p.git_https_username,
+                            "git_https_token": _p.git_https_token,
+                        }
+            except Exception:
+                pass
             await self._container_mgr.ensure_container(
-                container_project_id, project_path, config_dir
+                container_project_id, project_path, config_dir, **_git_creds
             )
             process = await self._container_mgr.exec_command(
                 container_project_id, cmd, env=env, cwd="/workspace"

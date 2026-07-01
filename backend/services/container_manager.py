@@ -2,7 +2,7 @@
 
 Each shared Project gets its own Docker container with:
 - Project directory mounted as /workspace
-- Claude Code CLI available
+- Project-specific git credentials (Deploy Key or HTTPS token)
 - Restricted capabilities (cap-drop ALL, read-only root, no-new-privileges)
 - Resource limits (memory, CPU, pids)
 - No access to host filesystem, SSH keys, or other projects
@@ -12,6 +12,7 @@ import asyncio
 import logging
 import os
 import shutil
+import tempfile
 
 logger = logging.getLogger(__name__)
 
@@ -23,8 +24,9 @@ class ContainerManager:
     """Manages Docker containers for shared project isolation."""
 
     def __init__(self):
-        self._containers: dict[int, str] = {}  # project_id -> container_name
+        self._containers: dict[int, str] = {}
         self._locks: dict[int, asyncio.Lock] = {}
+        self._git_dirs: dict[int, str] = {}  # project_id -> temp dir with git credentials
 
     def _lock(self, project_id: int) -> asyncio.Lock:
         if project_id not in self._locks:
@@ -49,21 +51,73 @@ class ContainerManager:
     def is_docker_available() -> bool:
         return shutil.which("docker") is not None
 
+    def _prepare_git_credentials(self, project_id: int, git_credential_type: str | None,
+                                  git_ssh_key_path: str | None,
+                                  git_https_username: str | None,
+                                  git_https_token: str | None) -> str | None:
+        """Create a temp directory with project-specific git credentials.
+
+        Returns the temp dir path to mount into the container, or None.
+        """
+        if not git_credential_type:
+            return None
+
+        git_dir = tempfile.mkdtemp(prefix=f"ccm-git-{project_id}-")
+        self._git_dirs[project_id] = git_dir
+
+        if git_credential_type == "ssh" and git_ssh_key_path:
+            # Copy the Deploy Key into the temp dir
+            ssh_dir = os.path.join(git_dir, ".ssh")
+            os.makedirs(ssh_dir, mode=0o700)
+            key_dest = os.path.join(ssh_dir, "id_rsa")
+            try:
+                shutil.copy2(git_ssh_key_path, key_dest)
+                os.chmod(key_dest, 0o600)
+            except Exception:
+                logger.warning("Failed to copy SSH key %s for project %d", git_ssh_key_path, project_id)
+                return None
+
+            # SSH config: skip host key checking for git
+            with open(os.path.join(ssh_dir, "config"), "w") as f:
+                f.write("Host *\n  StrictHostKeyChecking no\n  UserKnownHostsFile /dev/null\n  IdentityFile ~/.ssh/id_rsa\n")
+            os.chmod(os.path.join(ssh_dir, "config"), 0o600)
+
+        elif git_credential_type == "https" and git_https_token:
+            # Git credential helper that returns the token
+            cred_script = os.path.join(git_dir, "git-credential-helper.sh")
+            username = git_https_username or "oauth2"
+            with open(cred_script, "w") as f:
+                f.write(f"#!/bin/sh\necho username={username}\necho password={git_https_token}\n")
+            os.chmod(cred_script, 0o755)
+
+            # .gitconfig that uses the credential helper
+            with open(os.path.join(git_dir, ".gitconfig"), "w") as f:
+                f.write(f"[credential]\n  helper = {cred_script}\n")
+
+        return git_dir
+
     async def ensure_container(self, project_id: int, project_path: str,
-                                config_dir: str | None = None) -> str:
-        """Ensure a running container exists for this project. Returns container name."""
+                                config_dir: str | None = None,
+                                git_credential_type: str | None = None,
+                                git_ssh_key_path: str | None = None,
+                                git_https_username: str | None = None,
+                                git_https_token: str | None = None) -> str:
+        """Ensure a running container for this project with isolated git credentials."""
         async with self._lock(project_id):
             name = f"{CONTAINER_PREFIX}{project_id}"
 
-            # Check if already running
             code, out = await self._run(["docker", "inspect", "-f", "{{.State.Running}}", name])
             if code == 0 and "true" in out.lower():
                 return name
 
-            # Remove stale container
             await self._run(["docker", "rm", "-f", name])
-
             os.makedirs(project_path, exist_ok=True)
+
+            # Prepare project-specific git credentials
+            git_dir = self._prepare_git_credentials(
+                project_id, git_credential_type,
+                git_ssh_key_path, git_https_username, git_https_token
+            )
 
             cmd = [
                 "docker", "run", "-d",
@@ -79,8 +133,21 @@ class ContainerManager:
                 "-v", f"{project_path}:/workspace",
             ]
 
+            # Mount Claude config (read-only, for auth)
             if config_dir:
                 cmd.extend(["-v", f"{config_dir}:/home/sandbox/.claude:ro"])
+
+            # Mount project-specific git credentials
+            if git_dir:
+                ssh_dir = os.path.join(git_dir, ".ssh")
+                if os.path.isdir(ssh_dir):
+                    cmd.extend(["-v", f"{ssh_dir}:/home/sandbox/.ssh:ro"])
+                gitconfig = os.path.join(git_dir, ".gitconfig")
+                if os.path.isfile(gitconfig):
+                    cmd.extend(["-v", f"{gitconfig}:/home/sandbox/.gitconfig:ro"])
+                cred_script = os.path.join(git_dir, "git-credential-helper.sh")
+                if os.path.isfile(cred_script):
+                    cmd.extend(["-v", f"{cred_script}:/home/sandbox/git-credential-helper.sh:ro"])
 
             cmd.extend(["--entrypoint", "tail", SANDBOX_IMAGE, "-f", "/dev/null"])
 
@@ -90,20 +157,20 @@ class ContainerManager:
                 raise RuntimeError(f"Docker container start failed: {out[:500]}")
 
             self._containers[project_id] = name
-            logger.info("Container %s started for project %d", name, project_id)
+            logger.info("Container %s started for project %d (git: %s)",
+                        name, project_id, git_credential_type or "none")
             return name
 
     async def exec_command(self, project_id: int, cmd: list[str],
                            env: dict[str, str] | None = None,
                            cwd: str = "/workspace") -> asyncio.subprocess.Process:
-        """Execute a command inside the project's container. Returns Process with pipes."""
+        """Execute a command inside the project's container."""
         name = self._containers.get(project_id, f"{CONTAINER_PREFIX}{project_id}")
 
         docker_cmd = ["docker", "exec", "-i", "-w", cwd]
         if env:
             for k, v in env.items():
                 docker_cmd.extend(["-e", f"{k}={v}"])
-
         docker_cmd.append(name)
         docker_cmd.extend(cmd)
 
@@ -118,6 +185,10 @@ class ContainerManager:
         name = self._containers.pop(project_id, f"{CONTAINER_PREFIX}{project_id}")
         await self._run(["docker", "stop", "-t", "10", name])
         await self._run(["docker", "rm", "-f", name])
+        # Clean up git credentials temp dir
+        git_dir = self._git_dirs.pop(project_id, None)
+        if git_dir and os.path.isdir(git_dir):
+            shutil.rmtree(git_dir, ignore_errors=True)
         logger.info("Container %s stopped", name)
 
     async def cleanup_all(self):
