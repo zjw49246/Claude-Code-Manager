@@ -62,7 +62,7 @@ export function TeamShareModal({ type, itemId, itemTitle, onClose }: TeamShareMo
           ) : users.length === 0 ? (
             <p className="text-gray-500 text-sm">No users to share with.</p>
           ) : (
-            users.map(u => (
+            users.filter(u => u.role !== 'admin' && u.role !== 'super_admin').map(u => (
               <div
                 key={u.id}
                 className="flex items-center justify-between p-2 rounded hover:bg-gray-700 cursor-pointer"

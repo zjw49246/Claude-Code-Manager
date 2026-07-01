@@ -665,6 +665,7 @@ export function ProjectsPage() {
   const [teamSharingProject, setTeamSharingProject] = useState<Project | null>(null);
   const ccUser = JSON.parse(localStorage.getItem('cc_user') || '{}');
   const isAdmin = ccUser.role === 'admin' || ccUser.role === 'super_admin' || !ccUser.id;
+  const [hasWorker, setHasWorker] = useState(isAdmin);
   const [showGlobalGit, setShowGlobalGit] = useState(false);
   const [showTagManager, setShowTagManager] = useState(false);
   const [tagItems, setTagItems] = useState<TagItem[]>([]);
@@ -701,6 +702,7 @@ export function ProjectsPage() {
       setAllTags(tags);
       setTagItems(tagList);
       setError(null);
+      if (!isAdmin) api.listWorkers().then(w => setHasWorker(w.length > 0)).catch(() => {});
     } catch (e) {
       setError(String(e));
     }
@@ -891,26 +893,32 @@ export function ProjectsPage() {
       <div className="flex items-center justify-between">
         <h2 className="text-foreground font-semibold text-lg">Projects</h2>
         <div className="flex items-center gap-2">
-          <button
-            onClick={() => setShowGlobalGit(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-300 border border-gray-600 rounded hover:bg-gray-700"
-            title="Global Git Config"
-          >
-            <Settings size={14} /><span className="hidden sm:inline"> Global Git</span> Config
-          </button>
-          <button
-            onClick={() => setShowTagManager(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-300 border border-gray-600 rounded hover:bg-gray-700"
-            title="Manage Tags"
-          >
-            <Tag size={14} /> Tags
-          </button>
-          <button
-            onClick={() => setShowCreate(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-indigo-600 text-white rounded hover:bg-indigo-500"
-          >
-            <Plus size={14} /><span className="hidden sm:inline"> New project</span><span className="sm:hidden"> New</span>
-          </button>
+          {isAdmin && (
+            <button
+              onClick={() => setShowGlobalGit(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-300 border border-gray-600 rounded hover:bg-gray-700"
+              title="Global Git Config"
+            >
+              <Settings size={14} /><span className="hidden sm:inline"> Global Git</span> Config
+            </button>
+          )}
+          {isAdmin && (
+            <button
+              onClick={() => setShowTagManager(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-300 border border-gray-600 rounded hover:bg-gray-700"
+              title="Manage Tags"
+            >
+              <Tag size={14} /> Tags
+            </button>
+          )}
+          {hasWorker && (
+            <button
+              onClick={() => setShowCreate(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-indigo-600 text-white rounded hover:bg-indigo-500"
+            >
+              <Plus size={14} /><span className="hidden sm:inline"> New project</span><span className="sm:hidden"> New</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -1063,40 +1071,40 @@ export function ProjectsPage() {
                   </button>
                 </label>
 
-                {/* Edit git config */}
-                <button
-                  onClick={() => setEditingGit(p)}
-                  className="p-2 text-gray-400 hover:text-indigo-400 hover:bg-gray-700 rounded transition-colors"
-                  title="Edit git config"
-                >
-                  <Settings size={16} />
-                </button>
-
-                {/* Env files */}
-                <button
-                  onClick={() => setEditingEnvFiles(p)}
-                  className="p-2 text-gray-400 hover:text-green-400 hover:bg-gray-700 rounded transition-colors"
-                  title="Manage env files"
-                >
-                  <FileKey size={16} />
-                </button>
-
-                {/* Reclone (remote only) */}
-                {p.has_remote && (
-                  <button
-                    onClick={async () => {
-                      try {
-                        await api.recloneProject(p.id);
-                        await refresh();
-                      } catch (e) {
-                        setError(String(e));
-                      }
-                    }}
-                    className="min-w-[44px] min-h-[44px] flex items-center justify-center text-gray-400 hover:text-sky-400 hover:bg-gray-700 rounded transition-colors"
-                    title="Re-clone"
-                  >
-                    <RotateCcw size={16} />
-                  </button>
+                {/* Admin-only project management */}
+                {isAdmin && (
+                  <>
+                    <button
+                      onClick={() => setEditingGit(p)}
+                      className="p-2 text-gray-400 hover:text-indigo-400 hover:bg-gray-700 rounded transition-colors"
+                      title="Edit git config"
+                    >
+                      <Settings size={16} />
+                    </button>
+                    <button
+                      onClick={() => setEditingEnvFiles(p)}
+                      className="p-2 text-gray-400 hover:text-green-400 hover:bg-gray-700 rounded transition-colors"
+                      title="Manage env files"
+                    >
+                      <FileKey size={16} />
+                    </button>
+                    {p.has_remote && (
+                      <button
+                        onClick={async () => {
+                          try {
+                            await api.recloneProject(p.id);
+                            await refresh();
+                          } catch (e) {
+                            setError(String(e));
+                          }
+                        }}
+                        className="min-w-[44px] min-h-[44px] flex items-center justify-center text-gray-400 hover:text-sky-400 hover:bg-gray-700 rounded transition-colors"
+                        title="Re-clone"
+                      >
+                        <RotateCcw size={16} />
+                      </button>
+                    )}
+                  </>
                 )}
 
 
@@ -1109,13 +1117,15 @@ export function ProjectsPage() {
                     <UserPlus size={16} />
                   </button>
                 )}
-                <button
-                  onClick={() => handleDelete(p.id)}
-                  className="min-w-[44px] min-h-[44px] flex items-center justify-center text-gray-400 hover:text-red-400 hover:bg-gray-700 rounded transition-colors"
-                  title="Delete project"
-                >
-                  <Trash2 size={16} />
-                </button>
+                {isAdmin && (
+                  <button
+                    onClick={() => handleDelete(p.id)}
+                    className="min-w-[44px] min-h-[44px] flex items-center justify-center text-gray-400 hover:text-red-400 hover:bg-gray-700 rounded transition-colors"
+                    title="Delete project"
+                  >
+                    <Trash2 size={16} />
+                  </button>
+                )}
               </div>
             </div>
           ))}
