@@ -88,3 +88,39 @@ async def send_status_notification(
         recipient_open_id,
         f"Task \"{task_title}\" (shared by {sharer_name}) is now {new_status}",
     )
+
+
+async def notify_user_by_id(user_id: int, message: str) -> bool:
+    """Send Feishu DM to a user by their user_id. Returns False if user has no Feishu binding."""
+    from backend.database import async_session
+    from backend.models.user import User
+    try:
+        async with async_session() as db:
+            user = await db.get(User, user_id)
+            if not user or not user.feishu_open_id:
+                return False
+            return await _send_dm(user.feishu_open_id, message)
+    except Exception:
+        logger.exception("Failed to notify user %s", user_id)
+        return False
+
+
+async def notify_project_shared(sharer_name: str, project_name: str, target_user_id: int) -> bool:
+    return await notify_user_by_id(
+        target_user_id,
+        f"📂 {sharer_name} 给你分享了项目「{project_name}」\n你现在可以在该项目下创建任务了。",
+    )
+
+
+async def notify_task_shared(sharer_name: str, task_title: str, target_user_id: int) -> bool:
+    return await notify_user_by_id(
+        target_user_id,
+        f"📋 {sharer_name} 给你分享了任务「{task_title}」\n你可以查看对话记录并发送消息。",
+    )
+
+
+async def notify_worker_assigned(admin_name: str, worker_name: str, target_user_id: int) -> bool:
+    return await notify_user_by_id(
+        target_user_id,
+        f"🖥 {admin_name} 给你分配了 Worker「{worker_name}」\n你现在可以在上面创建项目和任务了。",
+    )

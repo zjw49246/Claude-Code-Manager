@@ -84,6 +84,22 @@ async def share_project(project_id: int, body: ShareBody, request: Request, db: 
         shared_by=user_id or 0,
     ))
     await db.commit()
+    # Notify via Feishu
+    if body.target_type == "user":
+        try:
+            from backend.services.feishu_notify import notify_project_shared
+            from backend.models.user import User
+            sharer = await db.get(User, user_id) if user_id else None
+            proj = await db.get(Project, project_id)
+            if proj:
+                import asyncio
+                asyncio.create_task(notify_project_shared(
+                    sharer.name if sharer else "Admin",
+                    proj.name,
+                    body.target_id,
+                ))
+        except Exception:
+            pass
     return {"ok": True}
 
 
@@ -157,6 +173,19 @@ async def share_task(task_id: int, body: ShareBody, request: Request, db: AsyncS
         shared_by=user_id or 0,
     ))
     await db.commit()
+    if body.target_type == "user":
+        try:
+            from backend.services.feishu_notify import notify_task_shared
+            from backend.models.user import User
+            sharer = await db.get(User, user_id) if user_id else None
+            import asyncio
+            asyncio.create_task(notify_task_shared(
+                sharer.name if sharer else "Admin",
+                task.title or f"Task #{task_id}",
+                body.target_id,
+            ))
+        except Exception:
+            pass
     return {"ok": True}
 
 

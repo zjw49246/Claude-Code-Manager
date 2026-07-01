@@ -12,9 +12,10 @@ logger = logging.getLogger(__name__)
 _FEISHU_BASE = "https://open.feishu.cn/open-apis"
 
 
-async def get_auth_url(redirect_uri: str) -> str:
+async def get_auth_url(redirect_uri: str, state: str = "") -> str:
     """Build Feishu OAuth authorization URL."""
-    state = secrets.token_urlsafe(16)
+    if not state:
+        state = secrets.token_urlsafe(16)
     return (
         f"{_FEISHU_BASE}/authen/v1/authorize"
         f"?app_id={settings.feishu_app_id}"

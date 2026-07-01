@@ -440,4 +440,19 @@ async def assign_worker(worker_id: int, body: AssignWorkerBody, request: Request
     worker.owner_user_id = body.owner_user_id
     await db.commit()
     await db.refresh(worker)
+    if body.owner_user_id:
+        try:
+            from backend.services.feishu_notify import notify_worker_assigned
+            from backend.api.deps import get_current_user_id
+            from backend.models.user import User
+            admin_id = get_current_user_id(request)
+            admin = await db.get(User, admin_id) if admin_id else None
+            import asyncio
+            asyncio.create_task(notify_worker_assigned(
+                admin.name if admin else "Admin",
+                worker.name,
+                body.owner_user_id,
+            ))
+        except Exception:
+            pass
     return worker
