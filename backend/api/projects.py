@@ -37,13 +37,9 @@ async def list_projects(request: Request, db: AsyncSession = Depends(get_db)):
         worker_project_ids = select(Task.project_id).where(
             Task.worker_id.in_(owned_worker_ids), Task.project_id.is_not(None)
         ).distinct()
-        created_project_ids = select(Task.project_id).where(
-            Task.created_by == user_id, Task.project_id.is_not(None)
-        ).distinct()
         stmt = stmt.where(
             Project.id.in_(shared_project_ids)
             | Project.id.in_(worker_project_ids)
-            | Project.id.in_(created_project_ids)
         )
     result = await db.execute(stmt)
     projects = list(result.scalars().all())
