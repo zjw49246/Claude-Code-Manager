@@ -67,22 +67,29 @@ export function Header({ currentPage, onNavigate }: HeaderProps) {
   }, [runtime, switching]);
 
   const ccUser = JSON.parse(localStorage.getItem('cc_user') || '{}');
-  const isAdmin = ccUser.role === 'admin' || !ccUser.id;
+  const isAdmin = ccUser.role === 'admin' || ccUser.role === 'super_admin' || !ccUser.id;
+  const [hasWorker, setHasWorker] = useState(isAdmin);
+
+  useEffect(() => {
+    if (!isAdmin) {
+      api.listWorkers().then(w => setHasWorker(w.length > 0)).catch(() => {});
+    }
+  }, [isAdmin]);
 
   const allPages = [
-    { key: 'dashboard', label: 'Dashboard', adminOnly: true },
-    { key: 'tasks', label: 'Tasks', adminOnly: false },
-    { key: 'projects', label: 'Projects', adminOnly: false },
-    { key: 'secrets', label: 'Secrets', adminOnly: false },
-    { key: 'files', label: 'Files', adminOnly: false },
-    { key: 'discussions', label: 'Discussions', adminOnly: false },
-    { key: 'pr-monitor', label: 'PR Monitor', adminOnly: false },
-    { key: 'workers', label: 'Workers', adminOnly: false },
-    { key: 'skills', label: 'Skills', adminOnly: false },
-    { key: 'team', label: 'Team', adminOnly: false },
-    ...(isCapacitor() ? [{ key: 'server', label: 'Server', adminOnly: false }] : []),
+    { key: 'dashboard', label: 'Dashboard', show: isAdmin },
+    { key: 'tasks', label: 'Tasks', show: true },
+    { key: 'projects', label: 'Projects', show: true },
+    { key: 'secrets', label: 'Secrets', show: true },
+    { key: 'files', label: 'Files', show: true },
+    { key: 'discussions', label: 'Discussions', show: true },
+    { key: 'pr-monitor', label: 'PR Monitor', show: isAdmin || hasWorker },
+    { key: 'workers', label: 'Workers', show: isAdmin || hasWorker },
+    { key: 'skills', label: 'Skills', show: true },
+    { key: 'team', label: 'Team', show: true },
+    ...(isCapacitor() ? [{ key: 'server', label: 'Server', show: true }] : []),
   ];
-  const pages = isAdmin ? allPages : allPages.filter(p => !p.adminOnly);
+  const pages = allPages.filter(p => p.show);
 
   const handleThemeChange = (next: Theme) => {
     persistTheme(next);

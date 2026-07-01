@@ -16,7 +16,7 @@ const NEW_PROJECT_VALUE = '__new__';
 
 export function TaskForm({ onCreated }: TaskFormProps) {
   const ccUser = JSON.parse(localStorage.getItem('cc_user') || '{}');
-  const isAdmin = ccUser.role === 'admin' || !ccUser.id;
+  const isAdmin = ccUser.role === 'admin' || ccUser.role === 'super_admin' || !ccUser.id;
   const [description, setDescription] = useState('');
   const [projectId, setProjectId] = useState<number | ''>('');
   const [isNewProject, setIsNewProject] = useState(false);

@@ -364,7 +364,7 @@ export default function WorkersPage() {
   const [error, setError] = useState<string | null>(null);
 
   const ccUser = JSON.parse(localStorage.getItem('cc_user') || '{}');
-  const isAdmin = ccUser.role === 'admin' || !ccUser.role;
+  const isAdmin = ccUser.role === 'admin' || ccUser.role === 'super_admin' || !ccUser.role;
 
   const load = useCallback(() => {
     api.listWorkers()

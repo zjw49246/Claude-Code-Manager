@@ -323,8 +323,8 @@ function DiffView({ diff }: { diff: string }) {
 
 export function FilesPage() {
   const ccUser = JSON.parse(localStorage.getItem('cc_user') || '{}');
-  const isAdmin = ccUser.role === 'admin' || !ccUser.id;
-  const [mode, setMode] = useState<Mode>(isAdmin ? 'local' : 'ssh');
+  const isAdmin = ccUser.role === 'admin' || ccUser.role === 'super_admin' || !ccUser.id;
+  const [mode, setMode] = useState<Mode>('local');
   const [projects, setProjects] = useState<Project[]>([]);
 
   // Local state
@@ -564,14 +564,12 @@ export function FilesPage() {
         <div className="flex items-center gap-3 flex-wrap">
           <h2 className="text-sm font-semibold text-foreground">File Browser</h2>
           <div className="flex rounded overflow-hidden border border-gray-600 text-xs">
-            {isAdmin && (
-              <button
-                onClick={() => setMode('local')}
-                className={`flex items-center gap-1 px-3 py-1.5 ${mode === 'local' ? 'bg-indigo-600 text-white' : 'bg-gray-700 text-gray-400 hover:bg-gray-600'}`}
-              >
-                <HardDrive size={12} /> Local
-              </button>
-            )}
+            <button
+              onClick={() => setMode('local')}
+              className={`flex items-center gap-1 px-3 py-1.5 ${mode === 'local' ? 'bg-indigo-600 text-white' : 'bg-gray-700 text-gray-400 hover:bg-gray-600'}`}
+            >
+              <HardDrive size={12} /> Local
+            </button>
             <button
               onClick={() => setMode('ssh')}
               className={`flex items-center gap-1 px-3 py-1.5 ${mode === 'ssh' ? 'bg-indigo-600 text-white' : 'bg-gray-700 text-gray-400 hover:bg-gray-600'}`}
