@@ -63,6 +63,16 @@ export function LoginPage({ onLogin }: LoginPageProps) {
       });
       if (res.ok) {
         setToken(token);
+        // Load user info for token login
+        try {
+          const meRes = await fetch(`${base()}/api/auth/me`, {
+            headers: { 'Authorization': `Bearer ${token}` },
+          });
+          if (meRes.ok) {
+            const meData = await meRes.json();
+            if (meData.user) localStorage.setItem('cc_user', JSON.stringify(meData.user));
+          }
+        } catch {}
         onLogin();
       } else {
         setError('Invalid token');
