@@ -1069,8 +1069,8 @@ export function ProjectsPage() {
 
               {/* Actions */}
               <div className="flex items-center gap-3 pl-10 sm:pl-0 sm:justify-end">
-                {/* Show in selector toggle (admin only) */}
-                {isAdmin && <label className="flex items-center gap-2 cursor-pointer select-none" title="Show in task project dropdown">
+                {/* Show in selector toggle */}
+                <label className="flex items-center gap-2 cursor-pointer select-none" title="Show in task project dropdown">
                   <span className="text-xs text-gray-400">Selector</span>
                   <button
                     onClick={() => toggleSelector(p)}
@@ -1085,7 +1085,7 @@ export function ProjectsPage() {
                       }`}
                     />
                   </button>
-                </label>}
+                </label>
 
                 {/* Project management: admin or Worker owner */}
                 {(isAdmin || hasWorker) && (
