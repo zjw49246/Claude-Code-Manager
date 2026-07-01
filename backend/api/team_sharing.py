@@ -1,4 +1,4 @@
-"""Team CCM sharing API — Admin shares Projects/Tasks to users."""
+"""Team CCM sharing API — share Projects/Tasks to users/groups."""
 
 import logging
 
@@ -10,6 +10,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.database import get_db
 from backend.models.team_share import TeamProjectShare, TeamTaskShare
 from backend.models.task import Task
+from backend.models.project import Project
+from backend.models.worker import Worker
 from backend.api.deps import get_current_user_id, get_current_user_role
 
 logger = logging.getLogger(__name__)
@@ -20,7 +22,7 @@ router = APIRouter(prefix="/api/team", tags=["team-sharing"])
 class ShareBody(BaseModel):
     target_type: str = "user"  # 'user' | 'group'
     target_id: int
-    permission: str = "chat"  # for task shares: 'chat' only
+    permission: str = "chat"
 
 
 class UnshareBody(BaseModel):
@@ -28,12 +30,44 @@ class UnshareBody(BaseModel):
     target_id: int
 
 
+async def _can_share_project(user_id: int | None, user_role: str, project_id: int, db: AsyncSession) -> bool:
+    """Admin can share any project. Worker owner can share projects on their worker."""
+    if user_role == "admin":
+        return True
+    if not user_id:
+        return False
+    owned_worker_ids = await db.execute(
+        select(Worker.id).where(Worker.owner_user_id == user_id)
+    )
+    worker_ids = [w for w in owned_worker_ids.scalars().all()]
+    if not worker_ids:
+        return False
+    has_task = await db.execute(
+        select(Task.id).where(
+            Task.project_id == project_id,
+            Task.worker_id.in_(worker_ids),
+        ).limit(1)
+    )
+    return has_task.scalar_one_or_none() is not None
+
+
+async def _can_share_task(user_id: int | None, user_role: str, task: Task, db: AsyncSession) -> bool:
+    """Admin can share any task. Creator can share their own task."""
+    if user_role == "admin":
+        return True
+    if not user_id:
+        return False
+    return task.created_by == user_id
+
+
 # --- Project sharing ---
 
 @router.post("/projects/{project_id}/share")
 async def share_project(project_id: int, body: ShareBody, request: Request, db: AsyncSession = Depends(get_db)):
-    if get_current_user_role(request) != "admin":
-        raise HTTPException(403, "Only admin can share projects")
+    user_id = get_current_user_id(request)
+    user_role = get_current_user_role(request)
+    if not await _can_share_project(user_id, user_role, project_id, db):
+        raise HTTPException(403, "No permission to share this project")
     existing = await db.execute(
         select(TeamProjectShare).where(
             TeamProjectShare.project_id == project_id,
@@ -47,7 +81,7 @@ async def share_project(project_id: int, body: ShareBody, request: Request, db: 
         project_id=project_id,
         target_type=body.target_type,
         target_id=body.target_id,
-        shared_by=get_current_user_id(request) or 0,
+        shared_by=user_id or 0,
     ))
     await db.commit()
     return {"ok": True}
@@ -55,8 +89,10 @@ async def share_project(project_id: int, body: ShareBody, request: Request, db: 
 
 @router.delete("/projects/{project_id}/share")
 async def unshare_project(project_id: int, body: UnshareBody, request: Request, db: AsyncSession = Depends(get_db)):
-    if get_current_user_role(request) != "admin":
-        raise HTTPException(403, "Only admin can manage sharing")
+    user_id = get_current_user_id(request)
+    user_role = get_current_user_role(request)
+    if not await _can_share_project(user_id, user_role, project_id, db):
+        raise HTTPException(403, "No permission to manage this project's sharing")
     await db.execute(
         delete(TeamProjectShare).where(
             TeamProjectShare.project_id == project_id,
@@ -70,8 +106,10 @@ async def unshare_project(project_id: int, body: UnshareBody, request: Request, 
 
 @router.get("/projects/{project_id}/shares")
 async def list_project_shares(project_id: int, request: Request, db: AsyncSession = Depends(get_db)):
-    if get_current_user_role(request) != "admin":
-        raise HTTPException(403, "Only admin can view shares")
+    user_id = get_current_user_id(request)
+    user_role = get_current_user_role(request)
+    if not await _can_share_project(user_id, user_role, project_id, db):
+        raise HTTPException(403, "No permission to view this project's shares")
     result = await db.execute(
         select(TeamProjectShare).where(TeamProjectShare.project_id == project_id)
     )
@@ -84,12 +122,14 @@ async def list_project_shares(project_id: int, request: Request, db: AsyncSessio
 
 @router.post("/tasks/{task_id}/share")
 async def share_task(task_id: int, body: ShareBody, request: Request, db: AsyncSession = Depends(get_db)):
-    if get_current_user_role(request) != "admin":
-        raise HTTPException(403, "Only admin can share tasks")
-    # Verify the user has Project access
+    user_id = get_current_user_id(request)
+    user_role = get_current_user_role(request)
     task = await db.get(Task, task_id)
     if not task:
         raise HTTPException(404, "Task not found")
+    if not await _can_share_task(user_id, user_role, task, db):
+        raise HTTPException(403, "No permission to share this task")
+    # Verify target has Project access
     if task.project_id:
         proj_share = await db.execute(
             select(TeamProjectShare).where(
@@ -99,7 +139,7 @@ async def share_task(task_id: int, body: ShareBody, request: Request, db: AsyncS
             )
         )
         if not proj_share.scalar_one_or_none():
-            raise HTTPException(400, "User does not have Project access. Share the Project first.")
+            raise HTTPException(400, "Target does not have Project access. Share the Project first.")
     existing = await db.execute(
         select(TeamTaskShare).where(
             TeamTaskShare.task_id == task_id,
@@ -114,7 +154,7 @@ async def share_task(task_id: int, body: ShareBody, request: Request, db: AsyncS
         target_type=body.target_type,
         target_id=body.target_id,
         permission=body.permission,
-        shared_by=get_current_user_id(request) or 0,
+        shared_by=user_id or 0,
     ))
     await db.commit()
     return {"ok": True}
@@ -122,8 +162,13 @@ async def share_task(task_id: int, body: ShareBody, request: Request, db: AsyncS
 
 @router.delete("/tasks/{task_id}/share")
 async def unshare_task(task_id: int, body: UnshareBody, request: Request, db: AsyncSession = Depends(get_db)):
-    if get_current_user_role(request) != "admin":
-        raise HTTPException(403, "Only admin can manage sharing")
+    user_id = get_current_user_id(request)
+    user_role = get_current_user_role(request)
+    task = await db.get(Task, task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    if not await _can_share_task(user_id, user_role, task, db):
+        raise HTTPException(403, "No permission to manage this task's sharing")
     await db.execute(
         delete(TeamTaskShare).where(
             TeamTaskShare.task_id == task_id,
@@ -137,8 +182,13 @@ async def unshare_task(task_id: int, body: UnshareBody, request: Request, db: As
 
 @router.get("/tasks/{task_id}/shares")
 async def list_task_shares(task_id: int, request: Request, db: AsyncSession = Depends(get_db)):
-    if get_current_user_role(request) != "admin":
-        raise HTTPException(403, "Only admin can view shares")
+    user_id = get_current_user_id(request)
+    user_role = get_current_user_role(request)
+    task = await db.get(Task, task_id)
+    if not task:
+        raise HTTPException(404, "Task not found")
+    if not await _can_share_task(user_id, user_role, task, db):
+        raise HTTPException(403, "No permission to view this task's shares")
     result = await db.execute(
         select(TeamTaskShare).where(TeamTaskShare.task_id == task_id)
     )
@@ -148,14 +198,21 @@ async def list_task_shares(task_id: int, request: Request, db: AsyncSession = De
              "created_at": s.created_at.isoformat()} for s in shares]
 
 
-# --- Users list (for admin share UI) ---
+# --- Users list (for share dialogs) ---
 
 @router.get("/users")
 async def list_users(request: Request, db: AsyncSession = Depends(get_db)):
-    if get_current_user_role(request) != "admin":
-        raise HTTPException(403, "Only admin can list users")
     from backend.models.user import User
     result = await db.execute(select(User).where(User.is_active == True).order_by(User.id))
     users = result.scalars().all()
     return [{"id": u.id, "email": u.email, "name": u.name, "role": u.role,
              "avatar_url": u.avatar_url} for u in users]
+
+
+# --- User groups (for quick batch sharing) ---
+
+@router.get("/groups")
+async def list_groups(request: Request, db: AsyncSession = Depends(get_db)):
+    from backend.models.user import User
+    # TODO: implement UserGroup model. For now return empty.
+    return []
