@@ -66,19 +66,23 @@ export function Header({ currentPage, onNavigate }: HeaderProps) {
     }
   }, [runtime, switching]);
 
-  const pages = [
-    { key: 'dashboard', label: 'Dashboard' },
-    { key: 'tasks', label: 'Tasks' },
-    { key: 'projects', label: 'Projects' },
-    { key: 'secrets', label: 'Secrets' },
-    { key: 'files', label: 'Files' },
-    { key: 'discussions', label: 'Discussions' },
-    { key: 'pr-monitor', label: 'PR Monitor' },
-    { key: 'workers', label: 'Workers' },
-    { key: 'skills', label: 'Skills' },
-    { key: 'team', label: 'Team' },
-    ...(isCapacitor() ? [{ key: 'server', label: 'Server' }] : []),
+  const ccUser = JSON.parse(localStorage.getItem('cc_user') || '{}');
+  const isAdmin = ccUser.role === 'admin' || !ccUser.id;
+
+  const allPages = [
+    { key: 'dashboard', label: 'Dashboard', adminOnly: true },
+    { key: 'tasks', label: 'Tasks', adminOnly: false },
+    { key: 'projects', label: 'Projects', adminOnly: false },
+    { key: 'secrets', label: 'Secrets', adminOnly: true },
+    { key: 'files', label: 'Files', adminOnly: true },
+    { key: 'discussions', label: 'Discussions', adminOnly: true },
+    { key: 'pr-monitor', label: 'PR Monitor', adminOnly: true },
+    { key: 'workers', label: 'Workers', adminOnly: true },
+    { key: 'skills', label: 'Skills', adminOnly: true },
+    { key: 'team', label: 'Team', adminOnly: false },
+    ...(isCapacitor() ? [{ key: 'server', label: 'Server', adminOnly: false }] : []),
   ];
+  const pages = isAdmin ? allPages : allPages.filter(p => !p.adminOnly);
 
   const handleThemeChange = (next: Theme) => {
     persistTheme(next);
@@ -141,9 +145,12 @@ export function Header({ currentPage, onNavigate }: HeaderProps) {
           </nav>
         )}
         <div ref={rightRef} className="ml-auto flex items-center gap-1">
+          {ccUser.name && (
+            <span className="text-xs text-gray-400 mr-1 hidden sm:inline">{ccUser.name}</span>
+          )}
           <UpdateButton />
-          <PoolDrawer />
-          {runtime && (
+          {isAdmin && <PoolDrawer />}
+          {isAdmin && runtime && (
             <div
               className="flex items-center gap-1.5 mr-1 px-2 py-1 rounded bg-gray-800 border border-gray-700"
               title={
