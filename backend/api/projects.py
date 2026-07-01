@@ -71,9 +71,29 @@ async def list_projects(request: Request, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/tags", response_model=list[str])
-async def list_project_tags(db: AsyncSession = Depends(get_db)):
-    """Return all unique tags across all projects, sorted alphabetically."""
-    result = await db.execute(select(Project.tags))
+async def list_project_tags(request: Request, db: AsyncSession = Depends(get_db)):
+    """Return unique tags from projects the user can see."""
+    user_id = get_current_user_id(request)
+    user_role = get_current_user_role(request)
+    stmt = select(Project.tags)
+    if user_role not in ("admin", "super_admin") and user_id:
+        from backend.models.team_share import TeamProjectShare
+        from backend.models.worker import Worker
+        from backend.models.task import Task
+        from backend.models.user_group import UserGroupMember
+        user_group_ids = select(UserGroupMember.group_id).where(UserGroupMember.user_id == user_id)
+        shared_project_ids = select(TeamProjectShare.project_id).where(
+            ((TeamProjectShare.target_type == "user") & (TeamProjectShare.target_id == user_id))
+            | ((TeamProjectShare.target_type == "group") & TeamProjectShare.target_id.in_(user_group_ids))
+        )
+        owned_worker_ids = select(Worker.id).where(Worker.owner_user_id == user_id)
+        worker_project_ids = select(Task.project_id).where(
+            Task.worker_id.in_(owned_worker_ids), Task.project_id.is_not(None)
+        ).distinct()
+        stmt = stmt.where(
+            Project.id.in_(shared_project_ids) | Project.id.in_(worker_project_ids)
+        )
+    result = await db.execute(stmt)
     all_tags: set[str] = set()
     for (tags,) in result:
         if tags:
