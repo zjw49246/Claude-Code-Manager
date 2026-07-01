@@ -267,6 +267,7 @@ async def add_worker_account(worker_id: int, body: dict, db: AsyncSession = Depe
 
     email = body.get("email", "").strip()
     token = body.get("token", "").strip()
+    login_method = body.get("login_method", "").strip()
     if not email or not token:
         raise HTTPException(400, "email 和 token 必填")
 
@@ -289,11 +290,12 @@ async def add_worker_account(worker_id: int, body: dict, db: AsyncSession = Depe
     remote_dir = settings.worker_remote_dir
 
     # 后台跑 auto_login（xvfb-run 包装）
+    login_method_arg = f" --login-method {login_method}" if login_method in ("171mail", "mailcom") else ""
     cmd = (
         f"cd {remote_dir} && export PATH=\"$HOME/.local/bin:$PATH\" && "
         f"xvfb-run --auto-servernum --server-args='-screen 0 1920x1080x24' "
         f"python3 scripts/auto_login.py --email {email} --token {token} "
-        f"--add-to-pool {slot} --save-token"
+        f"--add-to-pool {slot} --save-token{login_method_arg}"
     )
 
     # 这个任务可能跑 1-2 分钟，用 fire-and-forget

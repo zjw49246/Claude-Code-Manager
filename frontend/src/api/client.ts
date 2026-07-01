@@ -878,7 +878,7 @@ export const api = {
 
   // Workers (distributed)
   listWorkers: () => request<Worker[]>('/api/workers'),
-  addWorkerAccount: (workerId: number, data: { email: string; token: string }) =>
+  addWorkerAccount: (workerId: number, data: { email: string; token: string; login_method?: string }) =>
     request<{ ok: boolean; status: string; slot?: string }>(`/api/workers/${workerId}/pool/add`, { method: 'POST', body: JSON.stringify(data) }),
   workerAddStatus: (workerId: number, email: string) =>
     request<{ status: string; detail?: string }>(`/api/workers/${workerId}/pool/add/${encodeURIComponent(email)}`),
@@ -902,7 +902,7 @@ export const api = {
   retryWorker: (id: number) => request<Worker>(`/api/workers/${id}/retry`, { method: 'POST' }),
 
   // Pool add account
-  poolAddAccount: (data: { email: string; token: string }) =>
+  poolAddAccount: (data: { email: string; token: string; login_method?: string }) =>
     request<{ ok: boolean; status: string; account_id?: string }>('/api/pool/add', { method: 'POST', body: JSON.stringify(data) }),
   poolAddStatus: (email: string) =>
     request<{ status: string; detail?: string }>(`/api/pool/add/${encodeURIComponent(email)}`),

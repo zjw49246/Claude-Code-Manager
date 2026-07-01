@@ -302,9 +302,10 @@ echo deploy-ok
         for i, acct in enumerate(accounts):
             email = acct.get("email", "")
             token = acct.get("token", "")
+            login_method = acct.get("login_method", "")
             name = "default" if i == 0 else f"account-{i + 1}"
-            await self._log(worker_id, f"login {email} -> pool slot {name}")
-            # 写一个临时脚本到 worker 上执行（避免 shell 命令拼接的引号/分号陷阱）
+            await self._log(worker_id, f"login {email} -> pool slot {name} (method: {login_method or 'auto'})")
+            login_method_arg = f" --login-method {login_method}" if login_method in ("171mail", "mailcom") else ""
             login_script = f"""#!/bin/bash
 set +e
 export PATH="$HOME/.local/bin:$PATH"
@@ -315,7 +316,7 @@ Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp -ac > /dev/null 2>&1 &
 sleep 1
 export DISPLAY=:99
 CONFIG_DIR="$HOME/.claude" && [ "{name}" != "default" ] && CONFIG_DIR="$HOME/.claude-{name}"
-uv run python scripts/auto_login.py --email '{email}' --token '{token}' --config-dir "$CONFIG_DIR" --add-to-pool {name} --save-token
+uv run python scripts/auto_login.py --email '{email}' --token '{token}' --config-dir "$CONFIG_DIR" --add-to-pool {name} --save-token{login_method_arg}
 """
             # 写脚本到 worker 再执行
             await ssh.run(f"cat > /tmp/ccm_login.sh << 'SCRIPT'\n{login_script}SCRIPT\nchmod +x /tmp/ccm_login.sh")
