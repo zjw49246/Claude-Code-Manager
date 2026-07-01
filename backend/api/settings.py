@@ -1,5 +1,5 @@
-from fastapi import APIRouter, Request
-from backend.api.deps import require_admin, Depends
+from fastapi import APIRouter, Depends, Request
+from backend.api.deps import require_admin
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
