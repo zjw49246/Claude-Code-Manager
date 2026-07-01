@@ -77,7 +77,14 @@ async def reorder_projects(
 
 
 @router.post("", response_model=ProjectResponse, status_code=201)
-async def create_project(body: ProjectCreate, db: AsyncSession = Depends(get_db)):
+async def create_project(request: Request, body: ProjectCreate, db: AsyncSession = Depends(get_db)):
+    user_id = get_current_user_id(request)
+    user_role = get_current_user_role(request)
+    if user_role != "admin" and user_id:
+        from backend.models.worker import Worker
+        owned = await db.execute(select(Worker.id).where(Worker.owner_user_id == user_id).limit(1))
+        if not owned.scalar_one_or_none():
+            raise HTTPException(403, "You need a Worker to create Projects")
     # Check duplicate name
     existing = await db.execute(select(Project).where(Project.name == body.name))
     if existing.scalar_one_or_none():

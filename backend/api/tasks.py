@@ -135,8 +135,28 @@ async def list_tasks(
 
 @router.post("", response_model=TaskResponse, status_code=201)
 async def create_task(request: Request, body: TaskCreate, queue: TaskQueue = Depends(_get_queue), db: AsyncSession = Depends(get_db)):
+    user_id = get_current_user_id(request)
+    user_role = get_current_user_role(request)
+    if user_role != "admin" and user_id:
+        from backend.models.worker import Worker
+        from backend.models.team_share import TeamProjectShare
+        has_worker = (await db.execute(
+            select(Worker.id).where(Worker.owner_user_id == user_id).limit(1)
+        )).scalar_one_or_none()
+        project_id = body.project_id if hasattr(body, 'project_id') else None
+        has_project = False
+        if project_id:
+            has_project = (await db.execute(
+                select(TeamProjectShare.id).where(
+                    TeamProjectShare.project_id == project_id,
+                    TeamProjectShare.target_type == "user",
+                    TeamProjectShare.target_id == user_id,
+                ).limit(1)
+            )).scalar_one_or_none() is not None
+        if not has_worker and not has_project:
+            raise HTTPException(403, "You need a Worker or Project access to create Tasks")
     data = body.model_dump()
-    data["created_by"] = get_current_user_id(request)
+    data["created_by"] = user_id
     if data.get("id") is None:
         data.pop("id", None)  # 未指定 → 正常自增；指定 → 用 Manager 分配的全局 ID
     image_paths = data.pop("image_paths", None)
