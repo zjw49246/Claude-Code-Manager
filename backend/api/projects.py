@@ -3,7 +3,7 @@ import fnmatch
 import os
 import pathlib
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.config import settings
 from backend.database import get_db, async_session
 from backend.models.project import Project
+from backend.api.deps import get_current_user_id, get_current_user_role
 from backend.models.tag import Tag
 from backend.models.global_settings import GlobalSettings
 from backend.schemas.project import ProjectCreate, ProjectUpdate, ProjectResponse, ProjectReorderItem
@@ -21,10 +22,30 @@ router = APIRouter(prefix="/api/projects", tags=["projects"])
 
 
 @router.get("", response_model=list[ProjectResponse])
-async def list_projects(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(Project).order_by(Project.sort_order.asc(), Project.name.asc())
-    )
+async def list_projects(request: Request, db: AsyncSession = Depends(get_db)):
+    user_id = get_current_user_id(request)
+    user_role = get_current_user_role(request)
+    stmt = select(Project).order_by(Project.sort_order.asc(), Project.name.asc())
+    if user_role != "admin" and user_id:
+        from backend.models.team_share import TeamProjectShare
+        from backend.models.worker import Worker
+        from backend.models.task import Task
+        shared_project_ids = select(TeamProjectShare.project_id).where(
+            (TeamProjectShare.target_type == "user") & (TeamProjectShare.target_id == user_id)
+        )
+        owned_worker_ids = select(Worker.id).where(Worker.owner_user_id == user_id)
+        worker_project_ids = select(Task.project_id).where(
+            Task.worker_id.in_(owned_worker_ids), Task.project_id.is_not(None)
+        ).distinct()
+        created_project_ids = select(Task.project_id).where(
+            Task.created_by == user_id, Task.project_id.is_not(None)
+        ).distinct()
+        stmt = stmt.where(
+            Project.id.in_(shared_project_ids)
+            | Project.id.in_(worker_project_ids)
+            | Project.id.in_(created_project_ids)
+        )
+    result = await db.execute(stmt)
     return list(result.scalars().all())
 
 

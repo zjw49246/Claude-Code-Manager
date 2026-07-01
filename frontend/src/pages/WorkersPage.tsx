@@ -216,37 +216,41 @@ function WorkerCard({ worker, onAction, users, isAdmin }: { worker: Worker; onAc
               className={`flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-semibold ${ptyEnabled ? 'bg-green-600/30 text-green-400' : 'bg-gray-700 text-gray-400'}`}
             >PTY</button>
           )}
-          {worker.status === 'ready' && (
+          {worker.status === 'ready' && isAdmin && (
             <button title="Worker 号池额度" onClick={togglePool}
               className={`flex items-center gap-0.5 px-1.5 py-0.5 rounded ${poolOpen ? 'bg-indigo-600/30 text-indigo-300' : 'bg-gray-700 text-gray-400'} hover:text-indigo-300 text-[10px] font-semibold`}>Pro</button>
           )}
-          <button title="日志" onClick={() => setLogsOpen(true)}
-            className="p-1.5 text-gray-400 hover:text-gray-200"><ScrollText size={15} /></button>
-          {worker.status === 'error' && (
+          {isAdmin && (
+            <button title="日志" onClick={() => setLogsOpen(true)}
+              className="p-1.5 text-gray-400 hover:text-gray-200"><ScrollText size={15} /></button>
+          )}
+          {isAdmin && worker.status === 'error' && (
             <button title="重试 bootstrap" onClick={() => act(api.retryWorker)}
               className="p-1.5 text-gray-400 hover:text-blue-400"><RefreshCw size={15} /></button>
           )}
-          {worker.status === 'ready' && (
+          {isAdmin && worker.status === 'ready' && (
             <button title="关机（EC2 stop，数据保留）" onClick={() => act(api.stopWorker, `关机 ${shortName(worker)}？数据保留，停机期间不可派发任务。`)}
               className="p-1.5 text-gray-400 hover:text-yellow-400"><Power size={15} /></button>
           )}
-          {worker.status === 'stopped' && (
+          {isAdmin && worker.status === 'stopped' && (
             <button title="开机" onClick={() => act(api.startWorker)}
               className="p-1.5 text-gray-400 hover:text-green-400"><Play size={15} /></button>
           )}
-          {(
+          {isAdmin && (
             <button title="销毁（terminate EC2）"
               onClick={() => act(api.destroyWorker, `销毁 ${shortName(worker)}？EC2 实例将被 terminate，不可恢复！`)}
               className="p-1.5 text-gray-400 hover:text-red-400"><Trash2 size={15} /></button>
           )}
         </div>
       </div>
-      <div className="text-xs text-gray-400 flex flex-wrap gap-x-4 gap-y-1">
-        {worker.private_ip && <span>内网 {worker.private_ip}</span>}
-        {worker.cloud_instance_id && <span>{worker.cloud_instance_id}</span>}
-        {worker.ccm_commit && <span title={worker.ccm_commit}>@{worker.ccm_commit.slice(0, 8)}</span>}
-        {worker.last_heartbeat && <span>心跳 {new Date(worker.last_heartbeat + 'Z').toLocaleTimeString()}</span>}
-      </div>
+      {isAdmin && (
+        <div className="text-xs text-gray-400 flex flex-wrap gap-x-4 gap-y-1">
+          {worker.private_ip && <span>内网 {worker.private_ip}</span>}
+          {worker.cloud_instance_id && <span>{worker.cloud_instance_id}</span>}
+          {worker.ccm_commit && <span title={worker.ccm_commit}>@{worker.ccm_commit.slice(0, 8)}</span>}
+          {worker.last_heartbeat && <span>心跳 {new Date(worker.last_heartbeat + 'Z').toLocaleTimeString()}</span>}
+        </div>
+      )}
 
       {poolOpen && (
         <div className="bg-gray-900/60 rounded p-3 space-y-2">
@@ -387,11 +391,13 @@ export default function WorkersPage() {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold text-foreground">Workers</h2>
-        <button onClick={() => setAdding(true)}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-indigo-600 text-white rounded hover:bg-indigo-500">
-          <Plus size={15} /> Add Worker
-        </button>
+        <h2 className="text-lg font-semibold text-foreground">{isAdmin ? 'Workers' : 'My Workers'}</h2>
+        {isAdmin && (
+          <button onClick={() => setAdding(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-indigo-600 text-white rounded hover:bg-indigo-500">
+            <Plus size={15} /> Add Worker
+          </button>
+        )}
       </div>
       {error && <p className="text-red-400 text-sm">{error}</p>}
       {loading ? (
