@@ -838,14 +838,19 @@ def main():
     # 兼容旧调用（Worker bootstrap 可能还传这些参数）
     parser.add_argument("--provider", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--mail-password", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--login-method", default=None, choices=["171mail", "mailcom"],
+                        help="Login method: 171mail (API) or mailcom (Chrome CDP). Auto-detected by email suffix if not specified.")
     args = parser.parse_args()
 
     email = args.email
     if not email:
         email = input("Email: ").strip()
 
-    # 按邮箱后缀自动判断登录方式
-    use_webmail = is_mailcom_domain(email)
+    # 按 --login-method 参数或邮箱后缀判断登录方式
+    if args.login_method:
+        use_webmail = args.login_method == "mailcom"
+    else:
+        use_webmail = is_mailcom_domain(email)
 
     # token: 171mail 的接码 token，或 mail.com 的邮箱密码
     saved = load_email_tokens().get(email)

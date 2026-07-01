@@ -4,7 +4,8 @@ from pydantic import BaseModel, ConfigDict, field_serializer
 
 class WorkerAccountIn(BaseModel):
     email: str
-    token: str | None = None     # 171mail 接码 token 或 mail.com 邮箱密码（按后缀自动判断）
+    token: str | None = None
+    login_method: str = ""  # "171mail" | "mailcom" | "" (auto-detect by suffix)
 
 
 class WorkerCreate(BaseModel):

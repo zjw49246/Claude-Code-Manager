@@ -470,3 +470,10 @@
 - **修复**: 用 `patch-package` 删掉该 lookbehind（`frontend/patches/mdast-util-gfm-autolink-literal+2.0.1.patch`），并加 `postinstall: patch-package`。**行为不变**：URL 那条正则本就不用 lookbehind，email 的 `findEmail` 内部已调用 `previous(match, true)` 做完全等价的「前一字符必须是行首/空白/标点」校验，lookbehind 纯属冗余。重建 dist 后全量扫描无任何 lookbehind/命名组，Vite build 通过。
 - **预防**: ①前端验收不能只用 Chrome/curl——Safari 的正则引擎更严（lookbehind 需 16.4+），关键页面要在 Safari 实测；②markdown/gfm 这类依赖升级时留意是否引入 lookbehind；③`patch-package` + `postinstall` 已固化，`npm install` 后自动重打。
 - **Commit**: 本次提交
+
+### 2026-06-30 — Skills 页「点创建无反应」：user_skills 表缺失 + 前端静默吞错误
+- **问题**: 用户在 Skills 页填好「新建 Skill」点「创建」毫无反应，skill 不入库。
+- **根因（两层）**: ①后端：线上 DB 的 `user_skills` 表**根本不存在**，所以 `POST/GET /api/user-skills` 全 500（`no such table: user_skills`）。怪点是 `alembic_version` 已在 head `a2628601782f`（晚于建表迁移 `a70ee5479e2e`），且更晚那条加的 `tasks.selected_user_skills` 列**在**——只有早一条的 `create_table` 没落地（迁移漂移，非纯 stamp），导致 `alembic upgrade head` 永远空操作、修不回来。②前端：`SkillsPage.tsx` 的 create/update 用 `catch { /* keep form */ }` **静默吞掉** 500，UI 上「什么都没发生」，连进页面的 list 也被 `.catch(()=>{})` 吞掉 → 列表空。
+- **修复**: ①线上 DB（运维动作，非本提交）：备份后按迁移/模型精确 schema 补建 `user_skills` 表，`alembic_version` 不动（本就该指向「表已存在」）；**不能**重新 stamp+upgrade——重跑 `a2628601782f` 会去重复添加已存在的 `selected_user_skills` 列而炸。无需重启（SQLite 下次查询即见新表）。验证 create/list/delete 均 200。②前端（本提交）：create/update/delete 三个 handler 改 `setError(String(e))` 并在弹窗红字显示，沿用其它页面既有写法。
+- **预防**: ①「alembic 在 head」**不等于**「表一定存在」——排查 DB 问题先 `PRAGMA`/实际查表，别只信 `alembic current`；修漂移要**按模型补建缺失对象**，而不是 stamp 回退去重跑已部分应用的更晚迁移。②前端任何 `catch {}` 静默吞错误都是「按钮无反应」类 bug 的温床——一律 `setError` 给用户看见。③线上跑的是 rsync 副本 `~/.claude-code-manager/claude-code-manager/`（:8000，DB 在那），不是 git 仓库；调试线上现象要查副本+其 DB，可用 `ps` 里 MCP 进程的 `--auth-token` 直接 curl 复现。
+- **Commit**: 本次提交

@@ -168,6 +168,7 @@ function AccountCard({ account, preferred, lastSelected, onClearCooldown, onSetP
 function AddAccountModal({ onClose, onAdded }: { onClose: () => void; onAdded: () => void }) {
   const [email, setEmail] = useState('');
   const [token, setToken] = useState('');
+  const [loginMethod, setLoginMethod] = useState('');
 
   const [status, setStatus] = useState<string | null>(null);
   const [detail, setDetail] = useState<string | null>(null);
@@ -179,7 +180,7 @@ function AddAccountModal({ onClose, onAdded }: { onClose: () => void; onAdded: (
     setSubmitting(true);
     setDetail(null);
     try {
-      await api.poolAddAccount({ email: email.trim(), token: token.trim() });
+      await api.poolAddAccount({ email: email.trim(), token: token.trim(), login_method: loginMethod || undefined });
       setStatus('running');
       const poll = async () => {
         const s = await api.poolAddStatus(email.trim());
@@ -210,9 +211,20 @@ function AddAccountModal({ onClose, onAdded }: { onClose: () => void; onAdded: (
               value={email} onChange={e => setEmail(e.target.value)} placeholder="user@example.com" required />
           </div>
           <div>
-            <label className="block text-xs text-gray-400 mb-1">接码 Token</label>
+            <label className="block text-xs text-gray-400 mb-1">接码 Token / 密码</label>
             <input className="w-full bg-gray-700 text-foreground text-xs rounded px-2.5 py-1.5 outline-none focus:ring-1 focus:ring-indigo-500"
-              value={token} onChange={e => setToken(e.target.value)} placeholder="接码 Token（mail.com 域填邮箱密码）" required />
+              value={token} onChange={e => setToken(e.target.value)} placeholder="Token 或邮箱密码" required />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">登录方式</label>
+            <select
+              className="w-full bg-gray-700 text-foreground text-xs rounded px-2.5 py-1.5 outline-none focus:ring-1 focus:ring-indigo-500"
+              value={loginMethod} onChange={e => setLoginMethod(e.target.value)}
+            >
+              <option value="">自动识别（按邮箱后缀）</option>
+              <option value="171mail">171mail（API 接码）</option>
+              <option value="mailcom">mail.com（Chrome 接码）</option>
+            </select>
           </div>
           {status === 'running' && <p className="text-xs text-blue-400">登录中… 请等待（可能需要 1-2 分钟）</p>}
           {status === 'failed' && <p className="text-xs text-red-400 break-all">{detail || '登录失败'}</p>}

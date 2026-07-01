@@ -189,7 +189,8 @@ async def set_preferred(request: Request, body: dict):
 
 class AddAccountRequest(BaseModel):
     email: str
-    token: str  # 171mail 的接码 token 或 mail.com 的邮箱密码（按邮箱后缀自动判断）
+    token: str
+    login_method: str = ""  # "171mail" | "mailcom" | "" (auto-detect by suffix)
 
 
 # 全局 Xvfb：所有 auto_login 共享一个 display
@@ -270,13 +271,18 @@ async def add_account(request: Request, body: AddAccountRequest):
     # 确保有 Xvfb 在跑（Chrome CDP 需要 display）
     await _ensure_xvfb()
 
-    proc = await asyncio.create_subprocess_exec(
+    cmd = [
         str(login_py), str(script),
         "--email", email,
         "--token", body.token.strip(),
         "--config-dir", config_dir,
         "--add-to-pool", account_id,
         "--save-token",
+    ]
+    if body.login_method in ("171mail", "mailcom"):
+        cmd.extend(["--login-method", body.login_method])
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
         env={**os.environ, "DISPLAY": ":99", "PYTHONUNBUFFERED": "1"},
     )
