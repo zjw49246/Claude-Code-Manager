@@ -43,8 +43,7 @@ async def send_chat_message(
     if task.shared_from_id is not None:
         return await _send_shared_chat(task, body, db)
     if task.worker_id is not None:
-        # Worker task：代理到 Worker CCM（session 在 worker 上，由 worker 校验）
-        return await _send_worker_chat(task, body, db)
+        return await _send_worker_chat(task, body, db, request)
     if not task.session_id:
         raise HTTPException(400, "No previous session on this task. Run the task first.")
 
@@ -59,8 +58,17 @@ async def send_chat_message(
         unknown_cmd = stripped.split(None, 1)[0]
         raise HTTPException(400, f"未知命令 {unknown_cmd}，输入 $help 查看可用命令")
 
+    # Add user identifier prefix for shared tasks (multiple users may send messages)
+    user_id = getattr(request.state, "user_id", None)
+    message_text = body.message
+    if user_id and task.created_by and user_id != task.created_by:
+        from backend.models.user import User
+        sender = await db.get(User, user_id)
+        if sender:
+            message_text = f"[{sender.name}] {body.message}"
+
     # Build prompt — append secrets, skill instructions, and image paths
-    prompt_parts = [body.message]
+    prompt_parts = [message_text]
     if command:
         # $command detected: inject command prompt and set temporary skills
         prompt_parts.append(command.prompt_template)
@@ -202,18 +210,22 @@ async def _send_shared_chat(task: Task, body: ChatMessage, db: AsyncSession):
     return {"ok": True, "queued": True}
 
 
-async def _send_worker_chat(task: Task, body: ChatMessage, db: AsyncSession):
-    """Worker task 的 chat 代理（elastic-worker 设计 §6.3）。
-
-    顺序很重要：存 user_message → 广播 → 推附件 → 订阅 relay → 转发 →
-    同步 session_id（worker 广播前会 pop session_id，只有 chat 响应里有）。
-    """
+async def _send_worker_chat(task: Task, body: ChatMessage, db: AsyncSession, request: Request | None = None):
+    """Worker task 的 chat 代理。"""
     from backend.main import broadcaster, worker_proxy
     if worker_proxy is None:
         raise HTTPException(503, "Worker 功能未启用")
     if body.secret_ids:
-        # secrets 存在 Manager DB，worker 解析不了 manager 的 secret id
         raise HTTPException(400, "Worker task 暂不支持引用 Secrets（Phase 3）")
+
+    # Add user prefix for shared tasks
+    if request:
+        uid = getattr(request.state, "user_id", None)
+        if uid and task.created_by and uid != task.created_by:
+            from backend.models.user import User
+            sender = await db.get(User, uid)
+            if sender:
+                body.message = f"[{sender.name}] {body.message}"
 
     worker = await worker_proxy.require_ready_worker(task.worker_id)
 
