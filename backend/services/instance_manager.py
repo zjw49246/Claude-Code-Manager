@@ -32,6 +32,7 @@ class InstanceManager:
         self._tasks: dict[int, asyncio.Task] = {}  # instance_id -> consumer task
         self._stopping: set[int] = set()  # instance_ids being intentionally stopped
         self._config_dirs: dict[int, str] = {}  # instance_id -> CLAUDE_CONFIG_DIR used
+        self._container_tasks: dict[int, int] = {}  # instance_id -> project_id (if running in container)
         self._last_stderr: dict[int, str] = {}  # instance_id -> stderr from last run
         self._launch_params: dict[int, dict] = {}  # instance_id -> params for re-launch on rotation
         # instance_id -> consecutive transient-overload retry count. Survives
@@ -171,7 +172,21 @@ class InstanceManager:
             from backend.services.ask_user_settings import ensure_ask_user_hook
             ensure_ask_user_hook(config_dir or os.path.expanduser("~/.claude"))
 
-        if provider == "claude" and self.pty_mode_enabled:
+        # Shared projects skip PTY mode → subprocess + docker container
+        _skip_pty_for_container = False
+        if provider == "claude" and task_id:
+            try:
+                from backend.services.container_manager import is_shared_project, ContainerManager
+                async with self.db_factory() as _db:
+                    from backend.models.task import Task as _Task
+                    _t = await _db.get(_Task, task_id)
+                    if _t and _t.project_id:
+                        if await is_shared_project(_t.project_id, self.db_factory) and ContainerManager.is_docker_available():
+                            _skip_pty_for_container = True
+            except Exception:
+                pass
+
+        if provider == "claude" and self.pty_mode_enabled and not _skip_pty_for_container:
             return await self._launch_pty(
                 instance_id=instance_id,
                 prompt=prompt,
@@ -224,16 +239,44 @@ class InstanceManager:
         if thinking_budget and thinking_budget > 0 and provider == "claude":
             env["MAX_THINKING_TOKENS"] = str(thinking_budget)
 
-        # Claude Code can output very large NDJSON lines (e.g. Read tool with big files).
-        # Default asyncio limit is 64KB which causes LimitOverrunError and kills the consumer.
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=cwd or os.getcwd(),
-            env=env,
-            limit=10 * 1024 * 1024,  # 10MB line buffer
-        )
+        # Check if this task's project is shared → run in Docker container
+        use_container = False
+        container_project_id = None
+        if task_id and provider == "claude":
+            try:
+                from backend.services.container_manager import is_shared_project, ContainerManager
+                async with self.db_factory() as _db:
+                    from backend.models.task import Task as _Task
+                    _task = await _db.get(_Task, task_id)
+                    if _task and _task.project_id:
+                        _shared = await is_shared_project(_task.project_id, self.db_factory)
+                        if _shared and ContainerManager.is_docker_available():
+                            use_container = True
+                            container_project_id = _task.project_id
+            except Exception:
+                logger.debug("Container check failed, falling back to bare process")
+
+        if use_container and container_project_id:
+            from backend.services.container_manager import ContainerManager
+            if not hasattr(self, '_container_mgr'):
+                self._container_mgr = ContainerManager()
+            project_path = cwd or os.getcwd()
+            await self._container_mgr.ensure_container(
+                container_project_id, project_path, config_dir
+            )
+            process = await self._container_mgr.exec_command(
+                container_project_id, cmd, env=env, cwd="/workspace"
+            )
+            self._container_tasks[instance_id] = container_project_id
+        else:
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=cwd or os.getcwd(),
+                env=env,
+                limit=10 * 1024 * 1024,
+            )
 
         self.processes[instance_id] = process
 

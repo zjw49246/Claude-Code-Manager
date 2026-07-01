@@ -201,6 +201,13 @@ async def lifespan(app: FastAPI):
             ))
             await db.commit()
             logger.info("Default admin account created: admin@apexin.ai")
+    # Build Docker sandbox image if Docker is available (for shared project isolation)
+    try:
+        from backend.services.container_manager import ContainerManager, build_sandbox_image
+        if ContainerManager.is_docker_available():
+            asyncio.create_task(build_sandbox_image())
+    except Exception:
+        logger.debug("Docker not available, container isolation disabled")
     # PTY 权限透传：bridge HTTP 线程需要往主循环调度协程
     instance_manager._loop = asyncio.get_running_loop()
     # Apply persisted runtime-settings override (frontend PTY toggle)
