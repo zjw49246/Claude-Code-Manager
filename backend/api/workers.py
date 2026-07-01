@@ -430,9 +430,8 @@ class AssignWorkerBody(_BaseModel):
 @router.put("/{worker_id}/assign", response_model=WorkerResponse)
 async def assign_worker(worker_id: int, body: AssignWorkerBody, request: Request, db: AsyncSession = Depends(get_db)):
     """Assign a worker to a user (admin only). Set owner_user_id=null for public pool."""
-    from backend.api.deps import get_current_user_role
-    if get_current_user_role(request) != "admin":
-        raise HTTPException(403, "Only admin can assign workers")
+    from backend.api.deps import require_admin
+    require_admin(request)
     worker = await db.get(Worker, worker_id)
     if not worker:
         raise HTTPException(404, "Worker not found")

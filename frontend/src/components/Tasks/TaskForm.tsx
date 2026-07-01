@@ -544,19 +544,23 @@ export function TaskForm({ onCreated }: TaskFormProps) {
                   <option value="goal">Goal</option>
                 </select>
 
-                <span className="text-gray-400">Run on</span>
-                <select
-                  className="bg-gray-700 text-foreground rounded px-2 py-1 text-xs"
-                  value={workerId}
-                  onChange={(e) => setWorkerId(e.target.value)}
-                >
-                  <option value="">本机</option>
-                  {workers.map((w) => (
-                    <option key={w.id} value={w.id} disabled={w.status !== 'ready'}>
-                      {w.name}{w.status !== 'ready' ? ` (${w.status})` : ''}
-                    </option>
-                  ))}
-                </select>
+                {(isAdmin || hasWorker) && (
+                  <>
+                    <span className="text-gray-400">Run on</span>
+                    <select
+                      className="bg-gray-700 text-foreground rounded px-2 py-1 text-xs"
+                      value={workerId}
+                      onChange={(e) => setWorkerId(e.target.value)}
+                    >
+                      {isAdmin && <option value="">本机</option>}
+                      {workers.map((w) => (
+                        <option key={w.id} value={w.id} disabled={w.status !== 'ready'}>
+                          {w.name}{w.status !== 'ready' ? ` (${w.status})` : ''}
+                        </option>
+                      ))}
+                    </select>
+                  </>
+                )}
 
                 <span className="text-gray-400">CLI</span>
                 <select
