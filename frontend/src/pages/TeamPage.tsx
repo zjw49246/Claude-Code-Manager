@@ -231,6 +231,8 @@ function TransferModal({
 
 /* ── Team Page ────────────────────────────────────────────────── */
 export default function TeamPage() {
+  const ccUser = JSON.parse(localStorage.getItem('cc_user') || '{}');
+  const isAdmin = ccUser.role === 'admin' || ccUser.role === 'super_admin' || !ccUser.id;
   const [members, setMembers] = useState<OrgMember[]>([]);
   const [teams, setTeams] = useState<OrgTeam[]>([]);
   const [selectedTeamId, setSelectedTeamId] = useState<number | null>(null);
@@ -362,22 +364,24 @@ export default function TeamPage() {
           <h2 className="text-lg font-semibold text-foreground flex items-center gap-2">
             <Users size={20} /> Groups
           </h2>
-          <div className="flex items-center gap-2">
-            {isRegistry && (
+          {isAdmin && (
+            <div className="flex items-center gap-2">
+              {isRegistry && (
+                <button
+                  onClick={() => setShowTransfer(true)}
+                  className="flex items-center gap-1 px-3 py-1.5 text-sm text-gray-400 hover:text-gray-200 border border-gray-600 rounded hover:bg-gray-700"
+                >
+                  Transfer Registry
+                </button>
+              )}
               <button
-                onClick={() => setShowTransfer(true)}
-                className="flex items-center gap-1 px-3 py-1.5 text-sm text-gray-400 hover:text-gray-200 border border-gray-600 rounded hover:bg-gray-700"
+                onClick={() => { setEditingTeam(null); setShowTeamModal(true); }}
+                className="flex items-center gap-1 px-3 py-1.5 text-sm bg-indigo-600 text-white rounded hover:bg-indigo-500"
               >
-                Transfer Registry
+                <Plus size={14} /> New Group
               </button>
-            )}
-            <button
-              onClick={() => { setEditingTeam(null); setShowTeamModal(true); }}
-              className="flex items-center gap-1 px-3 py-1.5 text-sm bg-indigo-600 text-white rounded hover:bg-indigo-500"
-            >
-              <Plus size={14} /> New Group
-            </button>
-          </div>
+            </div>
+          )}
         </div>
 
         {teams.length === 0 ? (
@@ -401,20 +405,22 @@ export default function TeamPage() {
                 >
                   <div className="flex items-center justify-between">
                     <div className="font-medium text-sm text-foreground">{team.name}</div>
-                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                      <button
-                        onClick={(e) => { e.stopPropagation(); setEditingTeam(team); setShowTeamModal(true); }}
-                        className="text-gray-400 hover:text-gray-200 p-1"
-                      >
-                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>
-                      </button>
-                      <button
-                        onClick={(e) => { e.stopPropagation(); handleDeleteTeam(team.id); }}
-                        className="text-gray-400 hover:text-red-400 p-1"
-                      >
-                        <Trash2 size={14} />
-                      </button>
-                    </div>
+                    {isAdmin && (
+                      <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <button
+                          onClick={(e) => { e.stopPropagation(); setEditingTeam(team); setShowTeamModal(true); }}
+                          className="text-gray-400 hover:text-gray-200 p-1"
+                        >
+                          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>
+                        </button>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleDeleteTeam(team.id); }}
+                          className="text-gray-400 hover:text-red-400 p-1"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                    )}
                   </div>
                   {team.description && <div className="text-xs text-gray-400 mt-0.5">{team.description}</div>}
                   <div className="text-xs text-gray-500 mt-1">{team.members?.length || 0} members</div>
@@ -434,12 +440,14 @@ export default function TeamPage() {
                       <p className="text-xs text-gray-400 mt-0.5">{selectedTeam.description}</p>
                     )}
                   </div>
-                  <button
-                    onClick={() => setShowAddMember(true)}
-                    className="flex items-center gap-1 px-3 py-1.5 text-sm bg-indigo-600/20 text-indigo-300 rounded hover:bg-indigo-600/30"
-                  >
-                    <UserPlus size={14} /> Add Member
-                  </button>
+                  {isAdmin && (
+                    <button
+                      onClick={() => setShowAddMember(true)}
+                      className="flex items-center gap-1 px-3 py-1.5 text-sm bg-indigo-600/20 text-indigo-300 rounded hover:bg-indigo-600/30"
+                    >
+                      <UserPlus size={14} /> Add Member
+                    </button>
+                  )}
                 </div>
                 {(!selectedTeam.members || selectedTeam.members.length === 0) ? (
                   <p className="text-gray-500 text-sm">No members in this group yet.</p>
@@ -457,12 +465,14 @@ export default function TeamPage() {
                           )}
                           <span className="text-sm text-foreground">{m.name}</span>
                         </div>
-                        <button
-                          onClick={() => handleRemoveMember(m.feishu_open_id)}
-                          className="text-gray-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity p-1"
-                        >
-                          <X size={14} />
-                        </button>
+                        {isAdmin && (
+                          <button
+                            onClick={() => handleRemoveMember(m.feishu_open_id)}
+                            className="text-gray-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity p-1"
+                          >
+                            <X size={14} />
+                          </button>
+                        )}
                       </div>
                     ))}
                   </div>

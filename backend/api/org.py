@@ -4,7 +4,7 @@ import logging
 from datetime import datetime, timedelta
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,6 +13,7 @@ from backend.config import settings
 from backend.database import get_db
 from backend.models.org import OrgMember, OrgTeam, OrgTeamMember
 from backend.models.global_settings import GlobalSettings
+from backend.api.deps import is_admin
 
 logger = logging.getLogger(__name__)
 
@@ -129,8 +130,10 @@ async def list_members(db: AsyncSession = Depends(get_db)):
 
 
 @router.delete("/members/{open_id}")
-async def delete_member(open_id: str, db: AsyncSession = Depends(get_db)):
+async def delete_member(open_id: str, request: Request, db: AsyncSession = Depends(get_db)):
     """Delete an org member (registry only)."""
+    if not is_admin(request):
+        raise HTTPException(403, "Admin only")
     if not settings.org_registry_enabled:
         raise HTTPException(403, "This CCM is not the org registry")
 
@@ -148,8 +151,10 @@ async def delete_member(open_id: str, db: AsyncSession = Depends(get_db)):
 # ---------- Registry transfer ----------
 
 @router.post("/transfer")
-async def transfer_registry(body: TransferBody, db: AsyncSession = Depends(get_db)):
+async def transfer_registry(body: TransferBody, request: Request, db: AsyncSession = Depends(get_db)):
     """Transfer registry ownership to another CCM."""
+    if not is_admin(request):
+        raise HTTPException(403, "Admin only")
     if not settings.org_registry_enabled:
         raise HTTPException(403, "This CCM is not the org registry")
 
@@ -309,8 +314,10 @@ async def _proxy_or_local(method: str, path: str, db: AsyncSession, json_body=No
 
 
 @router.post("/teams")
-async def create_team(body: TeamCreate, db: AsyncSession = Depends(get_db)):
+async def create_team(body: TeamCreate, request: Request, db: AsyncSession = Depends(get_db)):
     """Create a team."""
+    if not is_admin(request):
+        raise HTTPException(403, "Admin only")
     if not settings.org_registry_enabled:
         proxy = await _proxy_or_local("POST", "/api/org/teams", db, body.model_dump())
         return proxy
@@ -365,8 +372,10 @@ async def list_teams(db: AsyncSession = Depends(get_db)):
 
 
 @router.put("/teams/{team_id}")
-async def update_team(team_id: int, body: TeamUpdate, db: AsyncSession = Depends(get_db)):
+async def update_team(team_id: int, body: TeamUpdate, request: Request, db: AsyncSession = Depends(get_db)):
     """Update a team."""
+    if not is_admin(request):
+        raise HTTPException(403, "Admin only")
     if not settings.org_registry_enabled:
         proxy = await _proxy_or_local("PUT", f"/api/org/teams/{team_id}", db, body.model_dump(exclude_unset=True))
         return proxy
@@ -384,8 +393,10 @@ async def update_team(team_id: int, body: TeamUpdate, db: AsyncSession = Depends
 
 
 @router.delete("/teams/{team_id}")
-async def delete_team(team_id: int, db: AsyncSession = Depends(get_db)):
+async def delete_team(team_id: int, request: Request, db: AsyncSession = Depends(get_db)):
     """Delete a team."""
+    if not is_admin(request):
+        raise HTTPException(403, "Admin only")
     if not settings.org_registry_enabled:
         proxy = await _proxy_or_local("DELETE", f"/api/org/teams/{team_id}", db)
         return proxy
@@ -399,8 +410,10 @@ async def delete_team(team_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/teams/{team_id}/members")
-async def add_team_member(team_id: int, body: TeamMemberAdd, db: AsyncSession = Depends(get_db)):
+async def add_team_member(team_id: int, body: TeamMemberAdd, request: Request, db: AsyncSession = Depends(get_db)):
     """Add a member to a team."""
+    if not is_admin(request):
+        raise HTTPException(403, "Admin only")
     if not settings.org_registry_enabled:
         proxy = await _proxy_or_local("POST", f"/api/org/teams/{team_id}/members", db, body.model_dump())
         return proxy
@@ -426,7 +439,9 @@ async def add_team_member(team_id: int, body: TeamMemberAdd, db: AsyncSession = 
 
 
 @router.delete("/teams/{team_id}/members/{open_id}")
-async def remove_team_member(team_id: int, open_id: str, db: AsyncSession = Depends(get_db)):
+async def remove_team_member(team_id: int, open_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+    if not is_admin(request):
+        raise HTTPException(403, "Admin only")
     """Remove a member from a team."""
     if not settings.org_registry_enabled:
         proxy = await _proxy_or_local("DELETE", f"/api/org/teams/{team_id}/members/{open_id}", db)
