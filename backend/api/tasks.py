@@ -11,7 +11,7 @@ from backend.models.task import Task
 from backend.models.instance import Instance
 from backend.schemas.task import TaskCreate, TaskUpdate, TaskResponse
 from backend.services.task_queue import TaskQueue
-from backend.api.deps import get_current_user_id, get_current_user_role
+from backend.api.deps import get_current_user_id, get_current_user_role, require_task_access, require_admin
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
@@ -282,7 +282,10 @@ async def _stop_task_process(task_id: int, db: AsyncSession) -> bool:
 
 
 @router.delete("/{task_id}")
-async def delete_task(task_id: int, queue: TaskQueue = Depends(_get_queue)):
+async def delete_task(task_id: int, request: Request, queue: TaskQueue = Depends(_get_queue), db: AsyncSession = Depends(get_db)):
+    task = await db.get(Task, task_id)
+    if task:
+        await require_task_access(request, task, db)
     ok = await queue.delete(task_id)
     if not ok:
         raise HTTPException(400, "Cannot delete task (not found or not in deletable state)")
@@ -347,7 +350,10 @@ async def stop_task_session(task_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/{task_id}/cancel", response_model=TaskResponse)
-async def cancel_task(task_id: int, queue: TaskQueue = Depends(_get_queue), db: AsyncSession = Depends(get_db)):
+async def cancel_task(task_id: int, request: Request, queue: TaskQueue = Depends(_get_queue), db: AsyncSession = Depends(get_db)):
+    task = await db.get(Task, task_id)
+    if task:
+        await require_task_access(request, task, db)
     wt = await _worker_task_or_none(db, task_id)
     if wt is not None:
         result = await _proxy(wt, "POST", f"/api/tasks/{task_id}/cancel")
@@ -378,7 +384,10 @@ async def cancel_task(task_id: int, queue: TaskQueue = Depends(_get_queue), db: 
 
 
 @router.post("/{task_id}/retry", response_model=TaskResponse)
-async def retry_task(task_id: int, queue: TaskQueue = Depends(_get_queue), db: AsyncSession = Depends(get_db)):
+async def retry_task(task_id: int, request: Request, queue: TaskQueue = Depends(_get_queue), db: AsyncSession = Depends(get_db)):
+    task = await db.get(Task, task_id)
+    if task:
+        await require_task_access(request, task, db)
     wt = await _worker_task_or_none(db, task_id)
     if wt is not None:
         result = await _proxy(wt, "POST", f"/api/tasks/{task_id}/retry")
@@ -428,11 +437,12 @@ async def get_queue(queue: TaskQueue = Depends(_get_queue)):
 
 
 @router.post("/{task_id}/plan/approve", response_model=TaskResponse)
-async def approve_plan(task_id: int, queue: TaskQueue = Depends(_get_queue)):
+async def approve_plan(task_id: int, request: Request, queue: TaskQueue = Depends(_get_queue), db: AsyncSession = Depends(get_db)):
     """Approve a plan-mode task's plan and queue it for execution."""
     task = await queue.get(task_id)
     if not task:
         raise HTTPException(404, "Task not found")
+    await require_task_access(request, task, db)
     if task.worker_id is not None:
         result = await _proxy(task, "POST", f"/api/tasks/{task_id}/plan/approve")
         # worker 上回到 pending 由 worker 自己的 Dispatcher 接力执行
@@ -444,11 +454,12 @@ async def approve_plan(task_id: int, queue: TaskQueue = Depends(_get_queue)):
 
 
 @router.post("/{task_id}/plan/reject", response_model=TaskResponse)
-async def reject_plan(task_id: int, queue: TaskQueue = Depends(_get_queue)):
+async def reject_plan(task_id: int, request: Request, queue: TaskQueue = Depends(_get_queue), db: AsyncSession = Depends(get_db)):
     """Reject a plan-mode task's plan."""
     task = await queue.get(task_id)
     if not task:
         raise HTTPException(404, "Task not found")
+    await require_task_access(request, task, db)
     if task.worker_id is not None:
         result = await _proxy(task, "POST", f"/api/tasks/{task_id}/plan/reject")
         return await _sync_task_from_worker_response(queue.db, task, result)

@@ -6,7 +6,7 @@ from backend.config import settings
 
 
 class TokenAuthMiddleware(BaseHTTPMiddleware):
-    """Bearer token + JWT authentication middleware."""
+    """Bearer token + JWT authentication middleware with role enforcement."""
 
     PUBLIC_PATHS = {
         "/api/system/health", "/api/auth/login", "/api/auth/register", "/api/auth/send-code",
@@ -15,6 +15,14 @@ class TokenAuthMiddleware(BaseHTTPMiddleware):
         "/api/shared/receive", "/api/shared/revoke",
         "/api/org/register",
     }
+
+    # System-level paths: non-GET requires admin/super_admin
+    ADMIN_ONLY_PREFIXES = (
+        "/api/instances",
+        "/api/dispatcher",
+        "/api/pool",
+        "/api/settings",
+    )
 
     _admin_user_id: int | None = None
     _admin_resolved: bool = False
@@ -50,18 +58,26 @@ class TokenAuthMiddleware(BaseHTTPMiddleware):
             request.state.user_id = self._admin_user_id
             request.state.user_role = "super_admin"
             request.state.auth_type = "token"
-            return await call_next(request)
+        else:
+            # JWT token
+            from backend.api.auth import decode_jwt
+            payload = decode_jwt(token)
+            if payload:
+                request.state.user_id = payload.get("user_id")
+                request.state.user_role = payload.get("role", "member")
+                request.state.auth_type = "jwt"
+            else:
+                return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
 
-        # JWT token
-        from backend.api.auth import decode_jwt
-        payload = decode_jwt(token)
-        if payload:
-            request.state.user_id = payload.get("user_id")
-            request.state.user_role = payload.get("role", "member")
-            request.state.auth_type = "jwt"
-            return await call_next(request)
+        # Enforce admin-only on system-level write operations
+        if request.method != "GET":
+            role = getattr(request.state, "user_role", "member")
+            if role not in ("admin", "super_admin"):
+                for prefix in self.ADMIN_ONLY_PREFIXES:
+                    if path.startswith(prefix):
+                        return JSONResponse(status_code=403, content={"detail": "Admin only"})
 
-        return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+        return await call_next(request)
 
     @classmethod
     async def _resolve_admin_id(cls):
@@ -71,7 +87,7 @@ class TokenAuthMiddleware(BaseHTTPMiddleware):
         try:
             async with async_session() as db:
                 result = await db.execute(
-                    select(User.id).where(User.role == "admin").order_by(User.id).limit(1)
+                    select(User.id).where(User.role.in_(["admin", "super_admin"])).order_by(User.id).limit(1)
                 )
                 cls._admin_user_id = result.scalar_one_or_none()
         except Exception:

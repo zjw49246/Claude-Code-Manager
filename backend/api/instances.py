@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -7,6 +7,7 @@ from backend.models.instance import Instance
 from backend.models.log_entry import LogEntry
 from backend.schemas.instance import InstanceCreate, InstanceResponse
 from backend.schemas.log_entry import LogEntryResponse
+from backend.api.deps import require_admin
 
 router = APIRouter(prefix="/api/instances", tags=["instances"])
 dispatcher_router = APIRouter(prefix="/api/dispatcher", tags=["dispatcher"])
@@ -19,7 +20,8 @@ async def list_instances(db: AsyncSession = Depends(get_db)):
 
 
 @router.post("", response_model=InstanceResponse, status_code=201)
-async def create_instance(body: InstanceCreate, db: AsyncSession = Depends(get_db)):
+async def create_instance(request: Request, body: InstanceCreate, db: AsyncSession = Depends(get_db)):
+    require_admin(request)
     instance = Instance(
         name=body.name,
         config=body.config,
@@ -31,7 +33,8 @@ async def create_instance(body: InstanceCreate, db: AsyncSession = Depends(get_d
 
 
 @router.delete("/cleanup")
-async def cleanup_instances(db: AsyncSession = Depends(get_db)):
+async def cleanup_instances(request: Request, db: AsyncSession = Depends(get_db)):
+    require_admin(request)
     from backend.main import dispatcher, instance_manager
     result = await db.execute(
         select(Instance).where(Instance.status.in_(["error", "stopped"]))
@@ -56,7 +59,8 @@ async def get_instance(instance_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.delete("/{instance_id}")
-async def delete_instance(instance_id: int, db: AsyncSession = Depends(get_db)):
+async def delete_instance(instance_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    require_admin(request)
     from backend.main import instance_manager
     instance = await db.get(Instance, instance_id)
     if not instance:
@@ -181,14 +185,16 @@ async def dispatcher_status():
 
 
 @dispatcher_router.post("/start")
-async def start_dispatcher():
+async def start_dispatcher(request: Request):
+    require_admin(request)
     from backend.main import dispatcher
     await dispatcher.start()
     return {"ok": True, "message": "Dispatcher started"}
 
 
 @dispatcher_router.post("/stop")
-async def stop_dispatcher():
+async def stop_dispatcher(request: Request):
+    require_admin(request)
     from backend.main import dispatcher
     await dispatcher.stop()
     return {"ok": True, "message": "Dispatcher stopped"}

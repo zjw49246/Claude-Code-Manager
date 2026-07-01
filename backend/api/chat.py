@@ -3,7 +3,8 @@ import logging
 import os
 import json
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
+from backend.api.deps import require_task_access
 from pydantic import BaseModel
 from sqlalchemy import and_, not_, select, func  # still used by chat history
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,12 +32,14 @@ class ChatMessage(BaseModel):
 async def send_chat_message(
     task_id: int,
     body: ChatMessage,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
     """Send a follow-up message on a task, resuming its previous session."""
     task = await db.get(Task, task_id)
     if not task:
         raise HTTPException(404, "Task not found")
+    await require_task_access(request, task, db)
     if task.shared_from_id is not None:
         return await _send_shared_chat(task, body, db)
     if task.worker_id is not None:
@@ -483,15 +486,13 @@ class InjectMessage(BaseModel):
 async def inject_message(
     task_id: int,
     body: InjectMessage,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    """Inject a message into the RUNNING turn of a PTY session (PTY-only).
-
-    Unlike /chat (which queues a new turn), this delivers the text into CC's
-    context mid-execution via the channel bridge — CC sees it at the next
-    tool-call boundary. Fails when PTY mode is off or no live session exists.
-    """
+    """Inject a message into the RUNNING turn of a PTY session (PTY-only)."""
     task = await db.get(Task, task_id)
+    if task:
+        await require_task_access(request, task, db)
     if not task:
         raise HTTPException(404, "Task not found")
 
@@ -538,16 +539,15 @@ async def resolve_permission(
     task_id: int,
     request_id: str,
     body: PermissionDecision,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    """权限透传回包：前端卡片的 允许/拒绝 → BridgeHub → CC（PTY-only）。
-
-    CC 侧 channel server 最多等 120s，超时默认 deny——过期请求返回 410。
-    """
     if body.behavior not in ("allow", "deny"):
         raise HTTPException(400, "behavior must be 'allow' or 'deny'")
 
     task = await db.get(Task, task_id)
+    if task:
+        await require_task_access(request, task, db)
     if not task:
         raise HTTPException(404, "Task not found")
 
