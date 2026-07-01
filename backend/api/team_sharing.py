@@ -32,7 +32,7 @@ class UnshareBody(BaseModel):
 
 async def _can_share_project(user_id: int | None, user_role: str, project_id: int, db: AsyncSession) -> bool:
     """Admin can share any project. Worker owner can share projects on their worker."""
-    if user_role == "admin":
+    if user_role in ("admin", "super_admin"):
         return True
     if not user_id:
         return False
@@ -53,7 +53,7 @@ async def _can_share_project(user_id: int | None, user_role: str, project_id: in
 
 async def _can_share_task(user_id: int | None, user_role: str, task: Task, db: AsyncSession) -> bool:
     """Admin can share any task. Creator can share their own task."""
-    if user_role == "admin":
+    if user_role in ("admin", "super_admin"):
         return True
     if not user_id:
         return False
@@ -209,10 +209,38 @@ async def list_users(request: Request, db: AsyncSession = Depends(get_db)):
              "avatar_url": u.avatar_url} for u in users]
 
 
+# --- User role management (super_admin only can promote to admin) ---
+
+class UpdateRoleBody(BaseModel):
+    role: str  # 'admin' | 'member'
+
+
+@router.put("/users/{user_id}/role")
+async def update_user_role(user_id: int, body: UpdateRoleBody, request: Request, db: AsyncSession = Depends(get_db)):
+    from backend.api.deps import is_super_admin, is_admin
+    from backend.models.user import User
+
+    if body.role == "admin" and not is_super_admin(request):
+        raise HTTPException(403, "Only super admin can promote users to admin")
+    if body.role == "member" and not is_admin(request):
+        raise HTTPException(403, "Only admin can change roles")
+    if body.role not in ("admin", "member"):
+        raise HTTPException(400, "Role must be 'admin' or 'member'")
+
+    user = await db.get(User, user_id)
+    if not user:
+        raise HTTPException(404, "User not found")
+    if user.role == "super_admin":
+        raise HTTPException(400, "Cannot change super admin role")
+
+    user.role = body.role
+    await db.commit()
+    return {"ok": True, "user_id": user_id, "role": body.role}
+
+
 # --- User groups (for quick batch sharing) ---
 
 @router.get("/groups")
 async def list_groups(request: Request, db: AsyncSession = Depends(get_db)):
-    from backend.models.user import User
     # TODO: implement UserGroup model. For now return empty.
     return []

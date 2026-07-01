@@ -26,7 +26,7 @@ async def list_projects(request: Request, db: AsyncSession = Depends(get_db)):
     user_id = get_current_user_id(request)
     user_role = get_current_user_role(request)
     stmt = select(Project).order_by(Project.sort_order.asc(), Project.name.asc())
-    if user_role != "admin" and user_id:
+    if user_role not in ("admin", "super_admin") and user_id:
         from backend.models.team_share import TeamProjectShare
         from backend.models.worker import Worker
         from backend.models.task import Task
@@ -80,7 +80,7 @@ async def reorder_projects(
 async def create_project(request: Request, body: ProjectCreate, db: AsyncSession = Depends(get_db)):
     user_id = get_current_user_id(request)
     user_role = get_current_user_role(request)
-    if user_role != "admin" and user_id:
+    if user_role not in ("admin", "super_admin") and user_id:
         from backend.models.worker import Worker
         owned = await db.execute(select(Worker.id).where(Worker.owner_user_id == user_id).limit(1))
         if not owned.scalar_one_or_none():

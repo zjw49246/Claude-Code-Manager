@@ -50,7 +50,7 @@ async def list_workers(request: Request, db: AsyncSession = Depends(get_db)):
     user_id = get_current_user_id(request)
     user_role = get_current_user_role(request)
     stmt = select(Worker).where(Worker.status != "terminated").order_by(desc(Worker.created_at))
-    if user_role != "admin":
+    if user_role not in ("admin", "super_admin"):
         stmt = stmt.where(Worker.owner_user_id == user_id)
     result = await db.execute(stmt)
     return result.scalars().all()

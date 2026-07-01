@@ -13,7 +13,7 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
-    role: Mapped[str] = mapped_column(String(20), nullable=False, default="member")  # admin / member
+    role: Mapped[str] = mapped_column(String(20), nullable=False, default="member")  # super_admin / admin / member
     avatar_url: Mapped[str] = mapped_column(String(500), default="")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     feishu_open_id: Mapped[str] = mapped_column(String(100), default="", index=True)

@@ -147,7 +147,7 @@ async def register(body: RegisterRequest, db: AsyncSession = Depends(get_db)):
         email=body.email,
         name=body.name,
         password_hash=_hash_password(body.password),
-        role="admin" if is_first else "member",
+        role="super_admin" if is_first else "member",
     )
     db.add(user)
     await db.commit()
@@ -245,7 +245,7 @@ async def delete_account(request: Request, db: AsyncSession = Depends(get_db)):
     user = await db.get(User, user_id)
     if not user:
         raise HTTPException(404, "User not found")
-    if user.role == "admin":
+    if user.role in ("admin", "super_admin"):
         raise HTTPException(400, "Admin account cannot be deleted")
     user.is_active = False
     await db.commit()

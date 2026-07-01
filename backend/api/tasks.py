@@ -107,7 +107,7 @@ async def count_tasks(
         archived_only=archived_only,
         project_id=project_id, starred=starred,
         has_unread=has_unread,
-        user_id=user_id if user_role != "admin" else None,
+        user_id=user_id if user_role not in ("admin", "super_admin") else None,
     )
     return {"total": total}
 
@@ -133,7 +133,7 @@ async def list_tasks(
         project_id=project_id, starred=starred,
         has_unread=has_unread,
         limit=limit, offset=offset,
-        user_id=user_id if user_role != "admin" else None,
+        user_id=user_id if user_role not in ("admin", "super_admin") else None,
     )
 
 
@@ -141,7 +141,7 @@ async def list_tasks(
 async def create_task(request: Request, body: TaskCreate, queue: TaskQueue = Depends(_get_queue), db: AsyncSession = Depends(get_db)):
     user_id = get_current_user_id(request)
     user_role = get_current_user_role(request)
-    if user_role != "admin" and user_id:
+    if user_role not in ("admin", "super_admin") and user_id:
         from backend.models.worker import Worker
         from backend.models.team_share import TeamProjectShare
         has_worker = (await db.execute(
@@ -224,7 +224,7 @@ async def update_task(
     # Permission: only creator or admin can modify task config
     user_id = get_current_user_id(request)
     user_role = get_current_user_role(request)
-    if user_role != "admin":
+    if user_role not in ("admin", "super_admin"):
         task = await queue.get(task_id)
         if task and task.created_by != user_id:
             raise HTTPException(403, "Only the task creator or admin can modify task config")

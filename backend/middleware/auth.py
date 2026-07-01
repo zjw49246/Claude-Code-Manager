@@ -48,7 +48,7 @@ class TokenAuthMiddleware(BaseHTTPMiddleware):
             if not self._admin_resolved:
                 await self._resolve_admin_id()
             request.state.user_id = self._admin_user_id
-            request.state.user_role = "admin"
+            request.state.user_role = "super_admin"
             request.state.auth_type = "token"
             return await call_next(request)
 

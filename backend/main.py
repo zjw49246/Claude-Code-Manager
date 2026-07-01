@@ -223,7 +223,7 @@ async def lifespan(app: FastAPI):
                 email="admin@apexin.ai",
                 name="Admin",
                 password_hash=_hash_password("admin123456"),
-                role="admin",
+                role="super_admin",
             ))
             await db.commit()
             logger.info("Default admin account created: admin@apexin.ai")
