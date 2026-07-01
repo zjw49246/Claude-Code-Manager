@@ -1,8 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '../api/client';
 import type { Project, GlobalSettings, TagItem } from '../api/client';
-import { Trash2, RotateCcw, FolderGit2, Globe, HardDrive, Plus, Settings, X, ChevronDown, ChevronUp, GripVertical, Tag, FileKey, Palette, Server, Share2, UserPlus } from 'lucide-react';
-import { ShareModal } from '../components/ShareModal';
+import { Trash2, RotateCcw, FolderGit2, Globe, HardDrive, Plus, Settings, X, ChevronDown, ChevronUp, GripVertical, Tag, FileKey, Palette, Server, UserPlus } from 'lucide-react';
 import { TeamShareModal } from '../components/TeamShareModal';
 import { resolveTagColor, TAG_COLOR_OPTIONS } from '../components/TagColors';
 import { TagManager } from '../components/TagManager';
@@ -663,7 +662,6 @@ export function ProjectsPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [editingGit, setEditingGit] = useState<Project | null>(null);
   const [editingEnvFiles, setEditingEnvFiles] = useState<Project | null>(null);
-  const [sharingProject, setSharingProject] = useState<Project | null>(null);
   const [teamSharingProject, setTeamSharingProject] = useState<Project | null>(null);
   const ccUser = JSON.parse(localStorage.getItem('cc_user') || '{}');
   const isAdmin = ccUser.role === 'admin' || ccUser.role === 'super_admin' || !ccUser.id;
@@ -1101,13 +1099,7 @@ export function ProjectsPage() {
                   </button>
                 )}
 
-                <button
-                  onClick={() => setSharingProject(p)}
-                  className="min-w-[44px] min-h-[44px] flex items-center justify-center text-gray-400 hover:text-blue-400 hover:bg-gray-700 rounded transition-colors"
-                  title="Share project (external)"
-                >
-                  <Share2 size={16} />
-                </button>
+
                 {isAdmin && (
                   <button
                     onClick={() => setTeamSharingProject(p)}
@@ -1155,14 +1147,7 @@ export function ProjectsPage() {
       )}
       {showGlobalGit && <GlobalGitConfigModal onClose={() => setShowGlobalGit(false)} />}
       {showTagManager && <TagManager onClose={() => setShowTagManager(false)} onChanged={refresh} />}
-      {sharingProject && (
-        <ShareModal
-          type="project"
-          itemId={sharingProject.id}
-          itemTitle={sharingProject.name}
-          onClose={() => setSharingProject(null)}
-        />
-      )}
+
       {teamSharingProject && (
         <TeamShareModal
           type="project"

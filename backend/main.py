@@ -35,9 +35,6 @@ from backend.api.pr_monitor import router as pr_monitor_router, webhook_router a
 from backend.api.workers import router as workers_router
 from backend.api.feishu import router as feishu_router
 from backend.api.org import router as org_router
-from backend.api.sharing import router as sharing_router
-from backend.api.shared import router as shared_router
-from backend.api.shared_access import router as shared_access_router
 from backend.api.ask_user import router as ask_user_router
 from backend.api.user_skills import router as user_skills_router
 from backend.api.team_sharing import router as team_sharing_router
@@ -63,8 +60,7 @@ broadcaster = WebSocketBroadcaster()
 broadcaster.db_factory = async_session
 instance_manager = InstanceManager(db_factory=async_session, broadcaster=broadcaster)
 
-from backend.services.shared_relay import SharedRelay
-shared_relay = SharedRelay(db_factory=async_session, broadcaster=broadcaster)
+shared_relay = None
 ralph_loop = RalphLoop(
     db_factory=async_session,
     instance_manager=instance_manager,
@@ -187,28 +183,6 @@ async def _recover_worker_relays():
         logger.exception("worker relay recovery failed")
 
 
-async def _org_heartbeat_loop():
-    """Periodically re-register with the org registry to update last_seen_at."""
-    await asyncio.sleep(30)  # initial delay
-    while True:
-        try:
-            from backend.models.feishu_binding import FeishuUserBinding
-            async with async_session() as db:
-                result = await db.execute(select(FeishuUserBinding).limit(1))
-                binding = result.scalar_one_or_none()
-            if binding:
-                from backend.services.feishu_auth import register_with_org_registry
-                await register_with_org_registry(
-                    binding.feishu_open_id,
-                    binding.feishu_name or "",
-                    binding.avatar_url or "",
-                )
-        except asyncio.CancelledError:
-            return
-        except Exception:
-            logger.debug("org heartbeat failed")
-        await asyncio.sleep(300)  # every 5 minutes
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -251,7 +225,6 @@ async def lifespan(app: FastAPI):
         _asyncio.create_task(_recover_worker_relays())
 
     # Recover shared task relays
-    asyncio.create_task(shared_relay.recover_all())
 
     # Start periodic database backup (optional — requires BACKUP_ENABLED=true in .env)
     backup_svc = None
@@ -280,8 +253,6 @@ async def lifespan(app: FastAPI):
 
     # Org registry heartbeat — periodically re-register with the registry
     heartbeat_task = None
-    if settings.org_registry_url or settings.org_registry_enabled:
-        heartbeat_task = asyncio.create_task(_org_heartbeat_loop())
 
     yield
 
@@ -344,9 +315,6 @@ app.include_router(pr_webhook_router)
 app.include_router(workers_router)
 app.include_router(feishu_router)
 app.include_router(org_router)
-app.include_router(sharing_router)
-app.include_router(shared_router)
-app.include_router(shared_access_router)
 app.include_router(ask_user_router)
 app.include_router(user_skills_router)
 app.include_router(team_sharing_router)

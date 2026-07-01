@@ -13,7 +13,6 @@ import { ChevronLeft, ChevronRight, ChevronDown, Filter, PanelLeftClose, PanelLe
 import { PluginsBadge, SubAgentsBadge } from '../components/Tasks/TaskBadges';
 import { TAG_COLOR_OPTIONS } from '../components/TagColors';
 import { useTaskReorder } from '../hooks/useTaskReorder';
-import { ShareModal } from '../components/ShareModal';
 import { TeamShareModal } from '../components/TeamShareModal';
 
 const PAGE_SIZE = 20;
@@ -37,7 +36,6 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
   const [showArchived, setShowArchived] = useState(false);
   const [tagItems, setTagItems] = useState<TagItem[]>([]);
   const [chatTask, setChatTask] = useState<Task | null>(null);
-  const [sharingTask, setSharingTask] = useState<Task | null>(null);
   const [teamSharingTask, setTeamSharingTask] = useState<Task | null>(null);
   const chatTaskRef = useRef<Task | null>(null);
   chatTaskRef.current = chatTask;
@@ -50,22 +48,13 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
     onChatTaskChange(t?.id ?? null);
   }, [onChatTaskChange]);
 
-  // Listen for share-task events from TaskList menu
   useEffect(() => {
-    const handler = (e: Event) => {
-      const task = (e as CustomEvent).detail?.task;
-      if (task) setSharingTask(task);
-    };
-    window.addEventListener('ccm-share-task', handler);
     const teamHandler = (e: Event) => {
       const task = (e as CustomEvent).detail?.task;
       if (task) setTeamSharingTask(task);
     };
     window.addEventListener('ccm-team-share-task', teamHandler);
-    return () => {
-      window.removeEventListener('ccm-share-task', handler);
-      window.removeEventListener('ccm-team-share-task', teamHandler);
-    };
+    return () => window.removeEventListener('ccm-team-share-task', teamHandler);
   }, []);
 
   const [autoSortOnAccess, setAutoSortOnAccess] = useState(true);
@@ -628,14 +617,6 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
         <div className="flex-1 min-w-0">
           {chatPanel}
         </div>
-        {sharingTask && (
-          <ShareModal
-            type="task"
-            itemId={sharingTask.id}
-            itemTitle={sharingTask.title || `Task #${sharingTask.id}`}
-            onClose={() => setSharingTask(null)}
-          />
-        )}
       </div>
     );
   }
@@ -644,14 +625,7 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
     <div className="space-y-4">
       {taskListContent}
       {chatPanel}
-      {sharingTask && (
-        <ShareModal
-          type="task"
-          itemId={sharingTask.id}
-          itemTitle={sharingTask.title || `Task #${sharingTask.id}`}
-          onClose={() => setSharingTask(null)}
-        />
-      )}
+
       {teamSharingTask && (
         <TeamShareModal
           type="task"
