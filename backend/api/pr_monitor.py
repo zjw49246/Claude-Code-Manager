@@ -52,10 +52,15 @@ async def webhook_info():
 
 
 @router.get("/repos", response_model=list[MonitoredRepoResponse])
-async def list_repos(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(MonitoredRepo).order_by(desc(MonitoredRepo.created_at))
-    )
+async def list_repos(request: Request, db: AsyncSession = Depends(get_db)):
+    user_role = get_current_user_role(request)
+    user_id = get_current_user_id(request)
+    stmt = select(MonitoredRepo).order_by(desc(MonitoredRepo.created_at))
+    if user_role not in ("admin", "super_admin"):
+        from backend.models.worker import Worker
+        owned_worker_ids = select(Worker.id).where(Worker.owner_user_id == user_id)
+        stmt = stmt.where(MonitoredRepo.worker_id.in_(owned_worker_ids))
+    result = await db.execute(stmt)
     return result.scalars().all()
 
 
@@ -84,9 +89,22 @@ async def create_repo(request: Request, body: MonitoredRepoCreate, db: AsyncSess
     if existing.scalar_one_or_none():
         raise HTTPException(409, f"Repository '{body.repo_full_name}' already monitored")
 
+    # Validate worker_id: admin can use NULL (local) or any worker; member only own workers
+    worker_id = getattr(body, 'worker_id', None)
+    user_role = get_current_user_role(request)
+    user_id = get_current_user_id(request)
+    if worker_id is None and user_role not in ("admin", "super_admin"):
+        raise HTTPException(403, "Only admin can create PR monitors on local machine")
+    if worker_id is not None and user_role not in ("admin", "super_admin"):
+        from backend.models.worker import Worker
+        w = await db.get(Worker, worker_id)
+        if not w or w.owner_user_id != user_id:
+            raise HTTPException(403, "You can only create PR monitors on your own Worker")
+
     repo = MonitoredRepo(
         repo_full_name=body.repo_full_name,
         project_id=body.project_id,
+        worker_id=worker_id,
         auto_merge=body.auto_merge,
         review_model=body.review_model,
         default_branch=body.default_branch,

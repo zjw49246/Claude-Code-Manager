@@ -34,8 +34,16 @@ function AddRepoModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =
   const modelOptions = useModelOptions();
   const [defaultBranch, setDefaultBranch] = useState('main');
   const [allowedAuthors, setAllowedAuthors] = useState('');
+  const [workerId, setWorkerId] = useState('');
+  const [workers, setWorkers] = useState<{ id: number; name: string }[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const ccUser = JSON.parse(localStorage.getItem('cc_user') || '{}');
+  const isAdmin = ccUser.role === 'admin' || ccUser.role === 'super_admin' || !ccUser.id;
+
+  useState(() => {
+    api.listWorkers().then(w => setWorkers(w.filter(wk => wk.status !== 'terminated'))).catch(() => {});
+  });
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -49,6 +57,7 @@ function AddRepoModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =
         review_model: reviewModel.trim() || undefined,
         default_branch: defaultBranch.trim() || 'main',
         allowed_authors: authors,
+        worker_id: workerId ? Number(workerId) : undefined,
       });
       onSaved();
       onClose();
@@ -97,6 +106,16 @@ function AddRepoModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =
               className="w-full bg-gray-700 text-foreground text-sm rounded px-3 py-2 outline-none focus:ring-1 focus:ring-indigo-500"
               value={defaultBranch} onChange={(e) => setDefaultBranch(e.target.value)}
             />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">Run on</label>
+            <select
+              className="w-full bg-gray-700 text-foreground text-sm rounded px-3 py-2 outline-none focus:ring-1 focus:ring-indigo-500"
+              value={workerId} onChange={(e) => setWorkerId(e.target.value)}
+            >
+              {isAdmin && <option value="">本机</option>}
+              {workers.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
+            </select>
           </div>
           <div>
             <label className="block text-xs text-gray-400 mb-1">Allowed Authors (comma-separated, empty = all)</label>

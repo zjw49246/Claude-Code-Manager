@@ -10,6 +10,7 @@ class MonitoredRepo(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     repo_full_name: Mapped[str] = mapped_column(String(200), unique=True, nullable=False)
     project_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    worker_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)  # NULL = local, else Worker
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default="1")
     auto_merge: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     webhook_secret: Mapped[str] = mapped_column(String(128), nullable=False)
