@@ -107,17 +107,15 @@ async def send_chat_message(
             "is_image": ext in _IMAGE_EXTS,
         })
 
-    # If this task has active shares, prefix message with sender name
-    display_content = body.message
-    from backend.models.task_share import TaskShare
-    share_check = await db.execute(
-        select(TaskShare.id).where(TaskShare.task_id == task_id, TaskShare.status == "active").limit(1)
-    )
-    if share_check.scalar_one_or_none() is not None:
-        from backend.models.feishu_binding import FeishuUserBinding
-        binding = (await db.execute(select(FeishuUserBinding).limit(1))).scalar_one_or_none()
-        if binding and binding.feishu_name:
-            display_content = f"[{binding.feishu_name}] {body.message}"
+    # Always show sender name in display for multi-user context
+    display_content = message_text  # message_text already has [username] prefix for non-creators
+    user_id_for_display = getattr(request.state, "user_id", None)
+    sender_display_name = None
+    if user_id_for_display:
+        from backend.models.user import User as _User
+        _sender = await db.get(_User, user_id_for_display)
+        if _sender:
+            sender_display_name = _sender.name
 
     # Store user message as a log entry (use instance_id=1 as placeholder)
     user_log = LogEntry(
@@ -135,13 +133,16 @@ async def send_chat_message(
     # Broadcast user message to task channel
     from backend.main import broadcaster
     image_urls = [a["url"] for a in attachments if a.get("is_image")]
-    await broadcaster.broadcast(f"task:{task_id}", {
+    broadcast_data = {
         "event_type": "user_message",
         "role": "user",
         "content": display_content,
         "image_urls": image_urls,
         "attachments": attachments,
-    })
+    }
+    if sender_display_name:
+        broadcast_data["sender_name"] = sender_display_name
+    await broadcaster.broadcast(f"task:{task_id}", broadcast_data)
 
     # Enqueue for serial processing (replaces direct launch)
     from backend.main import dispatcher
