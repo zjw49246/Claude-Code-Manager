@@ -12,14 +12,26 @@ router = APIRouter()
 
 
 def _ws_token_ok(ws: WebSocket) -> bool:
-    """WS 认证：AUTH_TOKEN 配置时校验。浏览器原生 WebSocket 设不了 header，
-    支持 ?token= 查询参数；WorkerRelay（服务端连接）用 Authorization header。"""
+    """WS 认证：AUTH_TOKEN 或 JWT 都接受。"""
     if not settings.auth_token:
         return True
+    # Legacy admin token (header or query param)
     auth = ws.headers.get("authorization", "")
     if auth.startswith("Bearer ") and auth[7:] == settings.auth_token:
         return True
-    return ws.query_params.get("token") == settings.auth_token
+    token = ws.query_params.get("token", "")
+    if token == settings.auth_token:
+        return True
+    # JWT token (query param — browser WS can't set headers)
+    if token:
+        from backend.api.auth import decode_jwt
+        if decode_jwt(token) is not None:
+            return True
+    if auth.startswith("Bearer "):
+        from backend.api.auth import decode_jwt
+        if decode_jwt(auth[7:]) is not None:
+            return True
+    return False
 
 
 @router.websocket("/ws")
