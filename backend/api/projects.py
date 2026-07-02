@@ -42,12 +42,12 @@ async def _require_project_access(request: Request, project_id: int, db: AsyncSe
     )).scalar_one_or_none()
     if shared:
         return
-    owned_worker_ids = select(Worker.id).where(Worker.owner_user_id == uid)
-    worker_proj = (await db.execute(
-        select(Task.id).where(Task.worker_id.in_(owned_worker_ids), Task.project_id == project_id).limit(1)
-    )).scalar_one_or_none()
-    if worker_proj:
-        return
+    # Check if project is on a worker owned by this user
+    proj = await db.get(Project, project_id)
+    if proj and proj.worker_id:
+        w = await db.get(Worker, proj.worker_id)
+        if w and w.owner_user_id == uid:
+            return
     raise HTTPException(403, "No access to this project")
 
 
@@ -60,7 +60,6 @@ async def list_projects(request: Request, db: AsyncSession = Depends(get_db)):
     if user_role not in ("admin", "super_admin") and user_id:
         from backend.models.team_share import TeamProjectShare
         from backend.models.worker import Worker
-        from backend.models.task import Task
         from backend.models.user_group import UserGroupMember
         user_group_ids = select(UserGroupMember.group_id).where(UserGroupMember.user_id == user_id)
         shared_project_ids = select(TeamProjectShare.project_id).where(
@@ -68,35 +67,25 @@ async def list_projects(request: Request, db: AsyncSession = Depends(get_db)):
             | ((TeamProjectShare.target_type == "group") & TeamProjectShare.target_id.in_(user_group_ids))
         )
         owned_worker_ids = select(Worker.id).where(Worker.owner_user_id == user_id)
-        worker_project_ids = select(Task.project_id).where(
-            Task.worker_id.in_(owned_worker_ids), Task.project_id.is_not(None)
-        ).distinct()
         stmt = stmt.where(
             Project.id.in_(shared_project_ids)
-            | Project.id.in_(worker_project_ids)
+            | Project.worker_id.in_(owned_worker_ids)
         )
     result = await db.execute(stmt)
     projects = list(result.scalars().all())
 
-    # Annotate each project with its location (local or worker name)
-    from backend.models.task import Task
+    # Annotate each project with its location using project.worker_id
     from backend.models.worker import Worker as WorkerModel
-    project_worker_map: dict[int, str] = {}
-    if projects:
-        pids = [p.id for p in projects]
-        tw_result = await db.execute(
-            select(Task.project_id, WorkerModel.name)
-            .join(WorkerModel, Task.worker_id == WorkerModel.id)
-            .where(Task.project_id.in_(pids), Task.worker_id.is_not(None))
-            .distinct()
-        )
-        for pid, wname in tw_result:
-            project_worker_map[pid] = wname
+    worker_name_map: dict[int, str] = {}
+    worker_ids = {p.worker_id for p in projects if p.worker_id}
+    if worker_ids:
+        wr = await db.execute(select(WorkerModel.id, WorkerModel.name).where(WorkerModel.id.in_(worker_ids)))
+        worker_name_map = {wid: wname for wid, wname in wr}
 
     out = []
     for p in projects:
         d = ProjectResponse.model_validate(p).model_dump()
-        d["location"] = project_worker_map.get(p.id, "local")
+        d["location"] = worker_name_map.get(p.worker_id, "local") if p.worker_id else "local"
         out.append(d)
     return out
 
@@ -198,12 +187,19 @@ async def create_project(request: Request, body: ProjectCreate, db: AsyncSession
     await db.commit()
     await db.refresh(project)
 
-    global_cfg = await db.get(GlobalSettings, 1)
-    git_config = merge_git_config(_extract_git_config(project), settings_to_dict(global_cfg))
-    if has_remote:
-        asyncio.create_task(_clone_repo(project.id, body.git_url, local_path, body.name, body.default_branch, git_config))
+    # Worker projects: skip local clone — worker_proxy handles remote clone when first task runs
+    if not body.worker_id:
+        global_cfg = await db.get(GlobalSettings, 1)
+        git_config = merge_git_config(_extract_git_config(project), settings_to_dict(global_cfg))
+        if has_remote:
+            asyncio.create_task(_clone_repo(project.id, body.git_url, local_path, body.name, body.default_branch, git_config))
+        else:
+            asyncio.create_task(_init_local_repo(project.id, local_path, body.name, body.default_branch, git_config))
     else:
-        asyncio.create_task(_init_local_repo(project.id, local_path, body.name, body.default_branch, git_config))
+        # Mark as ready immediately — actual clone happens on Worker
+        project.status = "ready"
+        await db.commit()
+        await db.refresh(project)
 
     return project
 
