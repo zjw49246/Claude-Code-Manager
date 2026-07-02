@@ -80,6 +80,7 @@ export interface Project {
 export interface Task {
   id: number;
   worker_id: number | null;
+  created_by: number | null;
   title: string;
   description: string | null;
   status: string;
