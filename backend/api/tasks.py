@@ -145,17 +145,19 @@ async def create_task(request: Request, body: TaskCreate, queue: TaskQueue = Dep
     if user_role not in ("admin", "super_admin") and user_id:
         from backend.models.worker import Worker
         from backend.models.team_share import TeamProjectShare
+        from backend.models.user_group import UserGroupMember
         has_worker = (await db.execute(
             select(Worker.id).where(Worker.owner_user_id == user_id).limit(1)
         )).scalar_one_or_none()
         project_id = body.project_id if hasattr(body, 'project_id') else None
         has_project = False
         if project_id:
+            user_group_ids = select(UserGroupMember.group_id).where(UserGroupMember.user_id == user_id)
             has_project = (await db.execute(
                 select(TeamProjectShare.id).where(
                     TeamProjectShare.project_id == project_id,
-                    TeamProjectShare.target_type == "user",
-                    TeamProjectShare.target_id == user_id,
+                    ((TeamProjectShare.target_type == "user") & (TeamProjectShare.target_id == user_id))
+                    | ((TeamProjectShare.target_type == "group") & TeamProjectShare.target_id.in_(user_group_ids))
                 ).limit(1)
             )).scalar_one_or_none() is not None
         if not has_worker and not has_project:

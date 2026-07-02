@@ -182,11 +182,14 @@ async def send_broadcast_message(
 
 @router.post("/{discussion_id}/agents/{agent_id}/chat")
 async def send_agent_chat(
-    discussion_id: int,
+    discussion_id: int, request: Request,
     agent_id: int,
     data: DiscussionSendMessage,
     db: AsyncSession = Depends(get_db),
 ):
+    disc = await db.get(Discussion, discussion_id)
+    if disc:
+        await _require_discussion_owner(request, disc)
     agent = await db.get(DiscussionAgent, agent_id)
     if not agent or agent.discussion_id != discussion_id:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -202,10 +205,13 @@ async def send_agent_chat(
 
 @router.post("/{discussion_id}/agents/{agent_id}/trigger")
 async def trigger_agent(
-    discussion_id: int,
+    discussion_id: int, request: Request,
     agent_id: int,
     db: AsyncSession = Depends(get_db),
 ):
+    disc = await db.get(Discussion, discussion_id)
+    if disc:
+        await _require_discussion_owner(request, disc)
     agent = await db.get(DiscussionAgent, agent_id)
     if not agent or agent.discussion_id != discussion_id:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -219,9 +225,12 @@ async def trigger_agent(
 
 @router.post("/{discussion_id}/resume-all")
 async def resume_all_agents(
-    discussion_id: int,
+    discussion_id: int, request: Request,
     db: AsyncSession = Depends(get_db),
 ):
+    disc = await db.get(Discussion, discussion_id)
+    if disc:
+        await _require_discussion_owner(request, disc)
     disc = await db.get(Discussion, discussion_id)
     if not disc:
         raise HTTPException(status_code=404, detail="Discussion not found")
@@ -250,9 +259,12 @@ async def resume_all_agents(
 
 @router.post("/{discussion_id}/add-agent")
 async def add_agent(
-    discussion_id: int,
+    discussion_id: int, request: Request,
     db: AsyncSession = Depends(get_db),
 ):
+    disc = await db.get(Discussion, discussion_id)
+    if disc:
+        await _require_discussion_owner(request, disc)
     disc = await db.get(Discussion, discussion_id)
     if not disc:
         raise HTTPException(status_code=404, detail="Discussion not found")
@@ -271,10 +283,13 @@ async def add_agent(
 
 @router.post("/{discussion_id}/agents/{agent_id}/stop")
 async def stop_agent(
-    discussion_id: int,
+    discussion_id: int, request: Request,
     agent_id: int,
     db: AsyncSession = Depends(get_db),
 ):
+    disc = await db.get(Discussion, discussion_id)
+    if disc:
+        await _require_discussion_owner(request, disc)
     agent = await db.get(DiscussionAgent, agent_id)
     if not agent or agent.discussion_id != discussion_id:
         raise HTTPException(status_code=404, detail="Agent not found")

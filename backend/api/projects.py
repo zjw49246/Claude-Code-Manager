@@ -20,6 +20,37 @@ from backend.services.dispatcher import _build_git_env
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
+async def _require_project_access(request: Request, project_id: int, db: AsyncSession):
+    """Check if user has access to this project."""
+    from backend.api.deps import is_admin as _is_admin, get_current_user_id as _get_uid
+    if _is_admin(request):
+        return
+    uid = _get_uid(request)
+    if not uid:
+        raise HTTPException(403, "Not authenticated")
+    from backend.models.team_share import TeamProjectShare
+    from backend.models.worker import Worker
+    from backend.models.task import Task
+    from backend.models.user_group import UserGroupMember
+    user_group_ids = select(UserGroupMember.group_id).where(UserGroupMember.user_id == uid)
+    shared = (await db.execute(
+        select(TeamProjectShare.id).where(
+            TeamProjectShare.project_id == project_id,
+            ((TeamProjectShare.target_type == "user") & (TeamProjectShare.target_id == uid))
+            | ((TeamProjectShare.target_type == "group") & TeamProjectShare.target_id.in_(user_group_ids))
+        ).limit(1)
+    )).scalar_one_or_none()
+    if shared:
+        return
+    owned_worker_ids = select(Worker.id).where(Worker.owner_user_id == uid)
+    worker_proj = (await db.execute(
+        select(Task.id).where(Task.worker_id.in_(owned_worker_ids), Task.project_id == project_id).limit(1)
+    )).scalar_one_or_none()
+    if worker_proj:
+        return
+    raise HTTPException(403, "No access to this project")
+
+
 
 @router.get("")
 async def list_projects(request: Request, db: AsyncSession = Depends(get_db)):
@@ -177,7 +208,8 @@ async def create_project(request: Request, body: ProjectCreate, db: AsyncSession
 
 
 @router.get("/{project_id}", response_model=ProjectResponse)
-async def get_project(project_id: int, db: AsyncSession = Depends(get_db)):
+async def get_project(project_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    await _require_project_access(request, project_id, db)
     project = await db.get(Project, project_id)
     if not project:
         raise HTTPException(404, "Project not found")
@@ -186,8 +218,9 @@ async def get_project(project_id: int, db: AsyncSession = Depends(get_db)):
 
 @router.put("/{project_id}", response_model=ProjectResponse)
 async def update_project(
-    project_id: int, body: ProjectUpdate, db: AsyncSession = Depends(get_db)
+    project_id: int, body: ProjectUpdate, request: Request, db: AsyncSession = Depends(get_db)
 ):
+    await _require_project_access(request, project_id, db)
     project = await db.get(Project, project_id)
     if not project:
         raise HTTPException(404, "Project not found")
@@ -220,7 +253,9 @@ async def update_project(
 
 
 @router.delete("/{project_id}")
-async def delete_project(project_id: int, db: AsyncSession = Depends(get_db)):
+async def delete_project(project_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    from backend.api.deps import require_admin
+    require_admin(request)
     project = await db.get(Project, project_id)
     if not project:
         raise HTTPException(404, "Project not found")
@@ -230,7 +265,8 @@ async def delete_project(project_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/{project_id}/reclone")
-async def reclone_project(project_id: int, db: AsyncSession = Depends(get_db)):
+async def reclone_project(project_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    await _require_project_access(request, project_id, db)
     project = await db.get(Project, project_id)
     if not project:
         raise HTTPException(404, "Project not found")

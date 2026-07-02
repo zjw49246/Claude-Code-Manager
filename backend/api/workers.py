@@ -231,11 +231,13 @@ async def retry_bootstrap(worker_id: int, request: Request, db: AsyncSession = D
 
 
 @router.get("/{worker_id}/pool")
-async def get_worker_pool(worker_id: int, db: AsyncSession = Depends(get_db)):
+async def get_worker_pool(worker_id: int, request: Request, db: AsyncSession = Depends(get_db)):
     """实时拉取 worker 上配置的 CC 账号池状态（转发其 /api/pool/status）。"""
     worker = await db.get(Worker, worker_id)
     if not worker:
         raise HTTPException(404, "Worker not found")
+    from backend.api.deps import require_worker_access as _rwa
+    await _rwa(request, worker)
     if worker.status != "ready" or not worker.private_ip:
         raise HTTPException(409, f"Worker 未就绪（{worker.status}）")
     import httpx
@@ -283,11 +285,13 @@ async def get_worker_pool(worker_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/{worker_id}/pool/add")
-async def add_worker_account(worker_id: int, body: dict, db: AsyncSession = Depends(get_db)):
+async def add_worker_account(worker_id: int, request: Request, body: dict, db: AsyncSession = Depends(get_db)):
     """在 worker 上添加账号（跑 auto_login.py）。body: {email, token}"""
     worker = await db.get(Worker, worker_id)
     if not worker:
         raise HTTPException(404, "Worker not found")
+    from backend.api.deps import require_worker_access as _rwa
+    await _rwa(request, worker)
     if worker.status != "ready" or not worker.private_ip:
         raise HTTPException(409, f"Worker 未就绪（{worker.status}）")
 
@@ -350,11 +354,13 @@ async def worker_add_status(worker_id: int, email: str):
 
 
 @router.delete("/{worker_id}/pool/{account_id}")
-async def delete_worker_account(worker_id: int, account_id: str, db: AsyncSession = Depends(get_db)):
+async def delete_worker_account(worker_id: int, request: Request, account_id: str, db: AsyncSession = Depends(get_db)):
     """从 worker 的号池中删除账号。"""
     worker = await db.get(Worker, worker_id)
     if not worker:
         raise HTTPException(404, "Worker not found")
+    from backend.api.deps import require_worker_access as _rwa
+    await _rwa(request, worker)
     if worker.status != "ready" or not worker.private_ip:
         raise HTTPException(409, f"Worker 未就绪（{worker.status}）")
 
@@ -371,11 +377,13 @@ async def delete_worker_account(worker_id: int, account_id: str, db: AsyncSessio
 
 
 @router.get("/{worker_id}/pool/usage")
-async def get_worker_pool_usage(worker_id: int, db: AsyncSession = Depends(get_db)):
+async def get_worker_pool_usage(worker_id: int, request: Request, db: AsyncSession = Depends(get_db)):
     """拉取 worker 的号池额度（转发 /api/pool/usage，和本机 PoolDrawer 同格式）。"""
     worker = await db.get(Worker, worker_id)
     if not worker:
         raise HTTPException(404, "Worker not found")
+    from backend.api.deps import require_worker_access as _rwa
+    await _rwa(request, worker)
     if worker.status != "ready" or not worker.private_ip:
         raise HTTPException(409, f"Worker 未就绪（{worker.status}）")
     import httpx
@@ -398,10 +406,12 @@ async def get_worker_pool_usage(worker_id: int, db: AsyncSession = Depends(get_d
 
 
 @router.get("/{worker_id}/settings/runtime")
-async def get_worker_runtime_settings(worker_id: int, db: AsyncSession = Depends(get_db)):
+async def get_worker_runtime_settings(worker_id: int, request: Request, db: AsyncSession = Depends(get_db)):
     worker = await db.get(Worker, worker_id)
     if not worker:
         raise HTTPException(404, "Worker not found")
+    from backend.api.deps import require_worker_access as _rwa
+    await _rwa(request, worker)
     if worker.status != "ready" or not worker.private_ip:
         raise HTTPException(409, f"Worker 未就绪（{worker.status}）")
     import httpx
@@ -416,10 +426,12 @@ async def get_worker_runtime_settings(worker_id: int, db: AsyncSession = Depends
 
 
 @router.put("/{worker_id}/settings/runtime")
-async def update_worker_runtime_settings(worker_id: int, body: dict, db: AsyncSession = Depends(get_db)):
+async def update_worker_runtime_settings(worker_id: int, request: Request, body: dict, db: AsyncSession = Depends(get_db)):
     worker = await db.get(Worker, worker_id)
     if not worker:
         raise HTTPException(404, "Worker not found")
+    from backend.api.deps import require_worker_access as _rwa
+    await _rwa(request, worker)
     if worker.status != "ready" or not worker.private_ip:
         raise HTTPException(409, f"Worker 未就绪（{worker.status}）")
     import httpx

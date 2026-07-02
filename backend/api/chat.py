@@ -317,7 +317,7 @@ def _tool_summary(tool_input: str | None) -> str:
 
 @router.get("/{task_id}/chat/history")
 async def get_chat_history(
-    task_id: int,
+    task_id: int, request: Request,
     limit: int = 0,
     before_id: int = 0,
     compact: bool = True,
@@ -334,6 +334,11 @@ async def get_chat_history(
     stale old-version clients must NOT reorder tasks (prod task 68 实录：
     一个旧版前端残留标签页每隔十几分钟轮询一次，任务在列表里来回跳).
     """
+    from backend.models.task import Task as _T2
+    _task_check = await db.get(_T2, task_id)
+    if _task_check:
+        await require_task_access(request, _task_check, db)
+
     task = await db.get(Task, task_id)
     if not task:
         raise HTTPException(404, "Task not found")
@@ -462,8 +467,12 @@ async def get_chat_history(
 async def get_message_detail(
     task_id: int,
     message_id: int,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
+    _t = await db.get(Task, task_id)
+    if _t:
+        await require_task_access(request, _t, db)
     """Get full tool_input/tool_output for a single message (lazy-load on expand)."""
     _TRUNCATE = 20_000
 
@@ -632,9 +641,13 @@ class DistillSaveRequest(BaseModel):
 @router.post("/{task_id}/distill")
 async def distill_task(
     task_id: int,
+    request: Request,
     body: DistillRequest = DistillRequest(),
     db: AsyncSession = Depends(get_db),
 ):
+    _t = await db.get(Task, task_id)
+    if _t:
+        await require_task_access(request, _t, db)
     """Distill a task's conversation into a reusable skill (markdown).
 
     Reads the full conversation history, sends it to Opus for extraction,
@@ -751,7 +764,7 @@ async def distill_task(
 
 @router.post("/{task_id}/distill/save")
 async def save_distilled_skill(
-    task_id: int,
+    task_id: int, request: Request,
     body: DistillSaveRequest,
     db: AsyncSession = Depends(get_db),
 ):
