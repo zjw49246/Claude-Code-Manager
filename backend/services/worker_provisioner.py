@@ -229,6 +229,7 @@ class WorkerProvisioner:
         await run_step("ccm-config", self._step_ccm_config(ssh, worker_id))
         await run_step("account-login", self._step_account_login(ssh, worker_id, accounts))
         await run_step("claude-warmup", self._step_claude_warmup(ssh, worker_id))
+        await run_step("docker-sandbox", self._step_docker_sandbox(ssh, worker_id))
         await run_step("ccm-service", self._step_ccm_service(ssh, worker))
         await run_step("health-check", self._step_health_check(worker_id))
 
@@ -260,7 +261,14 @@ if ! command -v google-chrome >/dev/null; then
   sudo apt-get -f install -y -qq > /dev/null 2>&1 || true
 fi
 pip3 install --break-system-packages websockets > /dev/null 2>&1 || true
-echo "node=$(node --version) uv=$($HOME/.local/bin/uv --version 2>/dev/null || uv --version) claude=$(claude --version 2>/dev/null | head -1) chrome=$(google-chrome --version 2>/dev/null | head -1)"
+# Docker for shared project container isolation
+if ! command -v docker >/dev/null; then
+  sudo apt-get install -y -qq docker.io > /dev/null 2>&1 || true
+  sudo usermod -aG docker ubuntu 2>/dev/null || true
+  sudo systemctl enable docker > /dev/null 2>&1 || true
+  sudo systemctl start docker > /dev/null 2>&1 || true
+fi
+echo "node=$(node --version) uv=$($HOME/.local/bin/uv --version 2>/dev/null || uv --version) claude=$(claude --version 2>/dev/null | head -1) chrome=$(google-chrome --version 2>/dev/null | head -1) docker=$(docker --version 2>/dev/null | head -1)"
 """
         code, out = await ssh.run(script, timeout=900)
         if code != 0:
@@ -348,6 +356,35 @@ uv run python scripts/auto_login.py --email '{email}' --token '{token}' --config
         await self._update(worker_id, accounts=results)
         if all(r["status"] == "failed" for r in results):
             raise BootstrapError("account-login", "全部账号登录失败")
+
+    async def _step_docker_sandbox(self, ssh: SSHExecutor, worker_id: int):
+        """Build ccm-sandbox Docker image on the worker (for shared project isolation)."""
+        await self._log(worker_id, "building ccm-sandbox Docker image...")
+        script = r"""
+if command -v docker >/dev/null; then
+  if ! docker images -q ccm-sandbox:latest 2>/dev/null | grep -q .; then
+    mkdir -p /tmp/ccm-docker-build
+    cat > /tmp/ccm-docker-build/Dockerfile << 'DEOF'
+FROM node:22-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl git ssh-client ca-certificates python3 \
+    && rm -rf /var/lib/apt/lists/*
+RUN npm install -g @anthropic-ai/claude-code
+RUN groupadd -g 1000 sandbox 2>/dev/null; useradd -m -u 1000 -g 1000 sandbox 2>/dev/null; exit 0
+USER 1000
+WORKDIR /workspace
+DEOF
+    docker build -t ccm-sandbox:latest /tmp/ccm-docker-build
+    echo "ccm-sandbox built"
+  else
+    echo "ccm-sandbox already exists"
+  fi
+else
+  echo "docker not available, skipping sandbox build"
+fi
+"""
+        code, out = await ssh.run(script, timeout=600)
+        await self._log(worker_id, f"docker-sandbox: {out.strip()[-200:]}")
 
     async def _step_claude_warmup(self, ssh: SSHExecutor, worker_id: int):
         """Interactive PTY warmup to complete all onboarding dialogs.
