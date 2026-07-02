@@ -587,7 +587,7 @@ export function FilesPage() {
 
         {mode === 'local' && <React.Fragment>
           <div className="flex gap-2 flex-wrap">
-            {projects.filter((p) => p.local_path).length > 0 && (
+            {projects.filter((p) => p.local_path && (!p.location || p.location === 'local')).length > 0 && (
               <select
                 onChange={(e) => {
                   const proj = projects.find((p) => String(p.id) === e.target.value);
@@ -597,7 +597,7 @@ export function FilesPage() {
                 className="bg-gray-700 text-gray-300 text-sm rounded px-2 py-1.5 border border-gray-600 focus:outline-none focus:border-indigo-500"
               >
                 <option value="" disabled>Select project...</option>
-                {projects.filter((p) => p.local_path).map((p) => (
+                {projects.filter((p) => p.local_path && (!p.location || p.location === 'local')).map((p) => (
                   <option key={p.id} value={String(p.id)}>{p.name}</option>
                 ))}
               </select>
@@ -672,7 +672,7 @@ export function FilesPage() {
         {mode === 'git' && (
           <div className="space-y-2">
             <div className="flex gap-2 flex-wrap">
-              {projects.filter((p) => p.local_path).length > 0 && (
+              {projects.filter((p) => p.local_path && (!p.location || p.location === 'local')).length > 0 && (
                 <select
                   onChange={(e) => {
                     const proj = projects.find((p) => String(p.id) === e.target.value);
@@ -682,7 +682,7 @@ export function FilesPage() {
                   className="bg-gray-700 text-gray-300 text-sm rounded px-2 py-1.5 border border-gray-600 focus:outline-none focus:border-indigo-500"
                 >
                   <option value="" disabled>Select project...</option>
-                  {projects.filter((p) => p.local_path).map((p) => (
+                  {projects.filter((p) => p.local_path && (!p.location || p.location === 'local')).map((p) => (
                     <option key={p.id} value={String(p.id)}>{p.name}</option>
                   ))}
                 </select>
