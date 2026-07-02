@@ -799,16 +799,15 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
       }
       if (!fromQueue) fileUpload.clear();
 
-      // Optimistic message for queued sends — WS may miss during rapid turn cycles.
-      // For manual sends WS user_message arrives fast enough, but queue auto-sends
-      // fire right after process_exit when WS may be reconnecting.
-      if (fromQueue && text) {
+      // Optimistic message — show user message immediately without waiting for WS
+      if (text) {
         setMessages(prev => [...prev, {
           id: Date.now() + Math.random(), role: 'user', event_type: 'user_message',
           content: text, tool_name: null, tool_input: null, tool_output: null,
           is_error: false, loop_iteration: null, timestamp: new Date().toISOString(),
           image_urls: null, attachments: null,
         }]);
+        setSending(true);
       }
 
       await api.sendTaskChat(task.id, text || '(files attached)', uploadedPaths, selectedSecretIds.length > 0 ? selectedSecretIds : undefined, modelOverride);
