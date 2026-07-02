@@ -256,6 +256,10 @@ async def update_task(
             # 还缓存着旧 worker_id，必须 expire 否则响应返回迁移前的值
             queue.db.expire_all()
 
+    # "off" sentinel → None (exclude_unset can't distinguish None from unset)
+    if updates.get("system_prompt_mode") == "off":
+        updates["system_prompt_mode"] = None
+
     if not updates:
         task = await queue.get(task_id)
         if not task:
