@@ -226,21 +226,23 @@ async def build_sandbox_image():
 
     logger.info("Building sandbox image %s ...", SANDBOX_IMAGE)
     dockerfile = """\
-FROM ubuntu:22.04
+FROM node:22-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \\
-    curl git ssh-client ca-certificates python3 nodejs npm \\
+    curl git ssh-client ca-certificates python3 \\
     && rm -rf /var/lib/apt/lists/*
 RUN npm install -g @anthropic-ai/claude-code
-RUN groupadd -g 1000 sandbox && useradd -m -u 1000 -g sandbox sandbox
-USER sandbox
+RUN groupadd -g 1000 sandbox 2>/dev/null; useradd -m -u 1000 -g 1000 sandbox 2>/dev/null; exit 0
+USER 1000
 WORKDIR /workspace
 """
-    dockerfile_path = "/tmp/ccm-sandbox-Dockerfile"
+    build_dir = "/tmp/ccm-docker-build"
+    os.makedirs(build_dir, exist_ok=True)
+    dockerfile_path = os.path.join(build_dir, "Dockerfile")
     with open(dockerfile_path, "w") as f:
         f.write(dockerfile)
 
     proc = await asyncio.create_subprocess_exec(
-        "docker", "build", "-t", SANDBOX_IMAGE, "-f", dockerfile_path, "/tmp",
+        "docker", "build", "-t", SANDBOX_IMAGE, build_dir,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
     )
