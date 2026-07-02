@@ -245,6 +245,14 @@ class WorkerProvisioner:
         script = r"""
 set -e
 export DEBIAN_FRONTEND=noninteractive
+# 8GB swap (idempotent)
+if [ ! -f /swapfile ]; then
+  sudo fallocate -l 8G /swapfile
+  sudo chmod 600 /swapfile
+  sudo mkswap /swapfile
+  sudo swapon /swapfile
+  echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+fi
 command -v git >/dev/null || sudo apt-get update -qq
 sudo apt-get install -y -qq git curl rsync python3-venv > /dev/null 2>&1 || true
 if ! command -v node >/dev/null; then

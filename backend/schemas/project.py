@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 class ProjectCreate(BaseModel):
     name: str
+    worker_id: int | None = None  # NULL = local
     git_url: str | None = None
     default_branch: str = "main"
     sort_order: int = 0
@@ -45,6 +46,7 @@ class ProjectReorderItem(BaseModel):
 class ProjectResponse(BaseModel):
     id: int
     name: str
+    worker_id: int | None = None
     git_url: str | None
     has_remote: bool
     local_path: str | None

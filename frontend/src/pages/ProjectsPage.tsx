@@ -348,6 +348,14 @@ function CreateModal({ onClose, onCreated }: { onClose: () => void; onCreated: (
   const [showGit, setShowGit] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [selectedWorkerId, setSelectedWorkerId] = useState('');
+  const [workerList, setWorkerList] = useState<{ id: number; name: string }[]>([]);
+  const ccU = JSON.parse(localStorage.getItem('cc_user') || '{}');
+  const modalIsAdmin = ccU.role === 'admin' || ccU.role === 'super_admin' || !ccU.id;
+
+  useEffect(() => {
+    api.listWorkers().then(w => setWorkerList(w.filter(wk => wk.status !== 'terminated'))).catch(() => {});
+  }, []);
 
   const identityName = form.git_author_name;
   const identityEmail = form.git_author_email;
@@ -363,6 +371,7 @@ function CreateModal({ onClose, onCreated }: { onClose: () => void; onCreated: (
     try {
       await api.createProject({
         name: form.name.trim(),
+        worker_id: selectedWorkerId ? Number(selectedWorkerId) : undefined,
         git_url: form.git_url.trim() || undefined,
         default_branch: form.default_branch.trim() || 'main',
         git_author_name: form.git_author_name.trim() || undefined,
@@ -419,6 +428,21 @@ function CreateModal({ onClose, onCreated }: { onClose: () => void; onCreated: (
               />
             </div>
           </div>
+
+          {/* Worker selection */}
+          {workerList.length > 0 && (
+            <div>
+              <label className="block text-xs text-gray-400 mb-1">Run on</label>
+              <select
+                className="w-full bg-gray-700 text-foreground text-sm rounded px-3 py-2 outline-none focus:ring-1 focus:ring-indigo-500"
+                value={selectedWorkerId}
+                onChange={(e) => setSelectedWorkerId(e.target.value)}
+              >
+                {modalIsAdmin && <option value="">本机</option>}
+                {workerList.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
+              </select>
+            </div>
+          )}
 
           {/* Git config (collapsible) */}
           <div className="border border-gray-700 rounded-lg overflow-hidden">

@@ -539,6 +539,7 @@ export const api = {
   listProjectTags: () => request<string[]>('/api/projects/tags'),
   createProject: (data: {
     name: string;
+    worker_id?: number;
     git_url?: string;
     default_branch?: string;
     sort_order?: number;

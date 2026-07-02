@@ -168,6 +168,7 @@ async def create_project(request: Request, body: ProjectCreate, db: AsyncSession
 
     project = Project(
         name=body.name,
+        worker_id=body.worker_id,
         git_url=body.git_url if has_remote else None,
         has_remote=has_remote,
         default_branch=body.default_branch,

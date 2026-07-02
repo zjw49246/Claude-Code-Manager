@@ -21,6 +21,7 @@ class WorkerResponse(BaseModel):
     name: str
     status: str
     owner_user_id: int | None = None
+    max_tasks: int = 8
     cloud_instance_id: str | None
     private_ip: str | None
     public_ip: str | None

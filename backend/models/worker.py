@@ -22,6 +22,7 @@ class Worker(Base):
 
     # Team CCM: Worker 分配给哪个用户（NULL = 公共池）
     owner_user_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    max_tasks: Mapped[int] = mapped_column(Integer, default=8, server_default="8")
 
     # 云实例信息
     cloud_instance_id: Mapped[str | None] = mapped_column(String(100), nullable=True)

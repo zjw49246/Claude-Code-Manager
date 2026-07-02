@@ -11,6 +11,7 @@ class Project(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False, unique=True)
+    worker_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)  # NULL = local
     git_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     has_remote: Mapped[bool] = mapped_column(Boolean, default=False)
     local_path: Mapped[str | None] = mapped_column(String(500), nullable=True)

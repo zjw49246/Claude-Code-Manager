@@ -164,6 +164,12 @@ async def create_task(request: Request, body: TaskCreate, queue: TaskQueue = Dep
             raise HTTPException(403, "You need a Worker or Project access to create Tasks")
     data = body.model_dump()
     data["created_by"] = user_id
+    # Task inherits worker_id from its Project
+    if data.get("project_id") and not data.get("worker_id"):
+        from backend.models.project import Project as _Proj
+        _proj = await db.get(_Proj, data["project_id"])
+        if _proj and _proj.worker_id:
+            data["worker_id"] = _proj.worker_id
     if data.get("id") is None:
         data.pop("id", None)  # 未指定 → 正常自增；指定 → 用 Manager 分配的全局 ID
     image_paths = data.pop("image_paths", None)

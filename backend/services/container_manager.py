@@ -127,8 +127,6 @@ class ContainerManager:
                 "--read-only",
                 "--tmpfs", "/tmp:size=2g",
                 "--tmpfs", "/home/sandbox:size=1g",
-                "--memory", "4g",
-                "--cpus", "2",
                 "--pids-limit", "200",
                 "-v", f"{project_path}:/workspace",
             ]
