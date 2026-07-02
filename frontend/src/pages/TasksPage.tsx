@@ -61,13 +61,17 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
   useEffect(() => {
     api.getRuntimeSettings().then((s) => setAutoSortOnAccess(s.auto_sort_on_access)).catch(() => {});
   }, []);
+  const refreshRef = useRef<() => void>(() => {});
   const handleSystemWs = useCallback((raw: Record<string, unknown>) => {
     const msg = raw as { channel?: string; data?: Record<string, unknown> };
     if (msg.channel === 'system' && msg.data?.event === 'runtime_settings_changed') {
       setAutoSortOnAccess(Boolean(msg.data.auto_sort_on_access));
     }
+    if (msg.channel === 'tasks' && msg.data?.event === 'status_change') {
+      refreshRef.current();
+    }
   }, []);
-  useWebSocket(['system'], handleSystemWs);
+  useWebSocket(['system', 'tasks'], handleSystemWs);
 
   const [isWide, setIsWide] = useState(() => window.innerWidth >= 1280);
   useEffect(() => {
@@ -134,6 +138,8 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
       console.error('Failed to load tasks:', e);
     }
   }, [statusFilterParam, showArchived, projectFilter, starredFilter, unreadFilter, page, setChatTaskWrapped]);
+
+  refreshRef.current = refresh;
 
   useEffect(() => {
     refresh();
