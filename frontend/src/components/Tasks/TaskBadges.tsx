@@ -362,7 +362,7 @@ export function TaskConfigBadge({ task, onRefresh, openUp, align }: { task: Task
             <select
               className="bg-gray-700 text-foreground rounded px-2 py-1 text-xs"
               value={task.system_prompt_mode || ''}
-              onChange={(e) => update({ system_prompt_mode: e.target.value || null })}
+              onChange={(e) => update({ system_prompt_mode: e.target.value === '' ? 'off' : e.target.value })}
             >
               <option value="">Off</option>
               <option value="append">Fable 5 (Append)</option>
