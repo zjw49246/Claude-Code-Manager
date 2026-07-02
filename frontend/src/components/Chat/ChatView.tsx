@@ -799,11 +799,10 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
       }
       if (!fromQueue) fileUpload.clear();
 
-      // Optimistic message — show immediately, with prefix if non-creator
+      // Optimistic message — show immediately, always with user prefix
       if (text) {
         const ccU = JSON.parse(localStorage.getItem('cc_user') || '{}');
-        const displayText = (ccU.id && task.created_by && ccU.id !== task.created_by && ccU.name)
-          ? `[${ccU.name}] ${text}` : text;
+        const displayText = ccU.name ? `[${ccU.name}] ${text}` : text;
         setMessages(prev => [...prev, {
           id: Date.now() + Math.random(), role: 'user', event_type: 'user_message',
           content: displayText, tool_name: null, tool_input: null, tool_output: null,

@@ -58,10 +58,10 @@ async def send_chat_message(
         unknown_cmd = stripped.split(None, 1)[0]
         raise HTTPException(400, f"未知命令 {unknown_cmd}，输入 $help 查看可用命令")
 
-    # Add user identifier prefix for shared tasks (multiple users may send messages)
+    # Add user identifier prefix to all messages
     user_id = getattr(request.state, "user_id", None)
     message_text = body.message
-    if user_id and task.created_by and user_id != task.created_by:
+    if user_id:
         from backend.models.user import User
         sender = await db.get(User, user_id)
         if sender:
@@ -219,10 +219,10 @@ async def _send_worker_chat(task: Task, body: ChatMessage, db: AsyncSession, req
     if body.secret_ids:
         raise HTTPException(400, "Worker task 暂不支持引用 Secrets（Phase 3）")
 
-    # Add user prefix for shared tasks
+    # Add user prefix to all messages
     if request:
         uid = getattr(request.state, "user_id", None)
-        if uid and task.created_by and uid != task.created_by:
+        if uid:
             from backend.models.user import User
             sender = await db.get(User, uid)
             if sender:
