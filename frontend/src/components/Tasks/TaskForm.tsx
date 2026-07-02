@@ -27,7 +27,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   const [provider, setProvider] = useState('claude');
   // 分布式 Worker：执行位置（'' = 本机）
   const [workerId, setWorkerId] = useState('');
-  const [workers, setWorkers] = useState<{ id: number; name: string; status: string }[]>([]);
+  // workers state removed — Run on moved to Project level
   const [model, setModel] = useState('');
   const [providerOptions, setProviderOptions] = useState<string[]>(['claude', 'codex']);
   const [effort, setEffort] = useState('');
@@ -235,7 +235,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
     !fileUpload.isUploading;
 
   useEffect(() => {
-    api.listWorkers().then(setWorkers).catch(() => {});
+    // workers list removed — Run on moved to Project level
   }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -544,20 +544,11 @@ export function TaskForm({ onCreated }: TaskFormProps) {
                   <option value="goal">Goal</option>
                 </select>
 
-                {(isAdmin || hasWorker) && (
+                {false && (
                   <>
+                    {/* Run on removed — Task inherits from Project */}
                     <span className="text-gray-400">Run on</span>
-                    <select
-                      className="bg-gray-700 text-foreground rounded px-2 py-1 text-xs"
-                      value={workerId}
-                      onChange={(e) => setWorkerId(e.target.value)}
-                    >
-                      {isAdmin && <option value="">本机</option>}
-                      {workers.map((w) => (
-                        <option key={w.id} value={w.id} disabled={w.status !== 'ready'}>
-                          {w.name}{w.status !== 'ready' ? ` (${w.status})` : ''}
-                        </option>
-                      ))}
+                    <select className="hidden" value={workerId} onChange={(e) => setWorkerId(e.target.value)}>
                     </select>
                   </>
                 )}
