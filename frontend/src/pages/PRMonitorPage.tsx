@@ -41,9 +41,9 @@ function AddRepoModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =
   const ccUser = JSON.parse(localStorage.getItem('cc_user') || '{}');
   const isAdmin = ccUser.role === 'admin' || ccUser.role === 'super_admin' || !ccUser.id;
 
-  useState(() => {
+  useEffect(() => {
     api.listWorkers().then(w => setWorkers(w.filter(wk => wk.status !== 'terminated'))).catch(() => {});
-  });
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

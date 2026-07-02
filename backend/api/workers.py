@@ -82,18 +82,22 @@ async def create_worker(body: WorkerCreate, request: Request, db: AsyncSession =
 
 
 @router.get("/{worker_id}", response_model=WorkerResponse)
-async def get_worker(worker_id: int, db: AsyncSession = Depends(get_db)):
+async def get_worker(worker_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    from backend.api.deps import require_worker_access
     worker = await db.get(Worker, worker_id)
     if not worker:
         raise HTTPException(404, "Worker not found")
+    await require_worker_access(request, worker)
     return worker
 
 
 @router.get("/{worker_id}/logs", response_model=WorkerLogsResponse)
-async def get_worker_logs(worker_id: int, db: AsyncSession = Depends(get_db)):
+async def get_worker_logs(worker_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    from backend.api.deps import require_worker_access
     worker = await db.get(Worker, worker_id)
     if not worker:
         raise HTTPException(404, "Worker not found")
+    await require_worker_access(request, worker)
     return WorkerLogsResponse(id=worker.id, bootstrap_log=worker.bootstrap_log)
 
 
@@ -206,8 +210,12 @@ async def _migrate_back_then_destroy(prov, worker_id: int, db_factory=None):
 
 
 @router.post("/{worker_id}/retry", response_model=WorkerResponse)
-async def retry_bootstrap(worker_id: int, db: AsyncSession = Depends(get_db)):
-    """error 状态下重跑创建/bootstrap 流程（实例已存在则等效于收养重 bootstrap）。"""
+async def retry_bootstrap(worker_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    """error 状态下重跑创建/bootstrap 流程。"""
+    from backend.api.deps import require_worker_access
+    worker = await db.get(Worker, worker_id)
+    if worker:
+        await require_worker_access(request, worker)
     prov = _provisioner()
     worker = await _require_worker(db, worker_id, ("error",))
     worker.status = "creating"

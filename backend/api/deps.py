@@ -44,11 +44,13 @@ async def require_task_access(request: Request, task, db):
             return
     from sqlalchemy import select
     from backend.models.team_share import TeamTaskShare, TeamProjectShare
+    from backend.models.user_group import UserGroupMember
+    user_group_ids = select(UserGroupMember.group_id).where(UserGroupMember.user_id == user_id)
+    # Check direct user share or group share on task
     shared = (await db.execute(
         select(TeamTaskShare.id).where(
-            TeamTaskShare.task_id == task.id,
-            TeamTaskShare.target_type == "user",
-            TeamTaskShare.target_id == user_id,
+            ((TeamTaskShare.task_id == task.id) & (TeamTaskShare.target_type == "user") & (TeamTaskShare.target_id == user_id))
+            | ((TeamTaskShare.task_id == task.id) & (TeamTaskShare.target_type == "group") & TeamTaskShare.target_id.in_(user_group_ids))
         ).limit(1)
     )).scalar_one_or_none()
     if shared:
@@ -56,9 +58,8 @@ async def require_task_access(request: Request, task, db):
     if task.project_id:
         proj_shared = (await db.execute(
             select(TeamProjectShare.id).where(
-                TeamProjectShare.project_id == task.project_id,
-                TeamProjectShare.target_type == "user",
-                TeamProjectShare.target_id == user_id,
+                ((TeamProjectShare.project_id == task.project_id) & (TeamProjectShare.target_type == "user") & (TeamProjectShare.target_id == user_id))
+                | ((TeamProjectShare.project_id == task.project_id) & (TeamProjectShare.target_type == "group") & TeamProjectShare.target_id.in_(user_group_ids))
             ).limit(1)
         )).scalar_one_or_none()
         if proj_shared:

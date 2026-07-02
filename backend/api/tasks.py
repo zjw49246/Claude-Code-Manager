@@ -211,10 +211,11 @@ async def create_task(request: Request, body: TaskCreate, queue: TaskQueue = Dep
 
 
 @router.get("/{task_id}", response_model=TaskResponse)
-async def get_task(task_id: int, queue: TaskQueue = Depends(_get_queue)):
+async def get_task(task_id: int, request: Request, queue: TaskQueue = Depends(_get_queue), db: AsyncSession = Depends(get_db)):
     task = await queue.get(task_id)
     if not task:
         raise HTTPException(404, "Task not found")
+    await require_task_access(request, task, db)
     return task
 
 
@@ -320,7 +321,10 @@ async def _sync_task_from_worker_response(db: AsyncSession, task: Task, result):
 
 
 @router.post("/{task_id}/stop-session")
-async def stop_task_session(task_id: int, db: AsyncSession = Depends(get_db)):
+async def stop_task_session(task_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    task = await db.get(Task, task_id)
+    if task:
+        await require_task_access(request, task, db)
     """Stop the running Claude Code session for a task.
 
     Clears pending queued chat messages first so the queue consumer does not
@@ -401,7 +405,10 @@ async def retry_task(task_id: int, request: Request, queue: TaskQueue = Depends(
 
 
 @router.post("/{task_id}/star", response_model=TaskResponse)
-async def star_task(task_id: int, queue: TaskQueue = Depends(_get_queue)):
+async def star_task(task_id: int, request: Request, queue: TaskQueue = Depends(_get_queue), db: AsyncSession = Depends(get_db)):
+    task = await db.get(Task, task_id)
+    if task:
+        await require_task_access(request, task, db)
     task = await queue.star(task_id)
     if not task:
         raise HTTPException(404, "Task not found")
@@ -409,7 +416,10 @@ async def star_task(task_id: int, queue: TaskQueue = Depends(_get_queue)):
 
 
 @router.post("/{task_id}/read", response_model=TaskResponse)
-async def mark_task_read(task_id: int, queue: TaskQueue = Depends(_get_queue)):
+async def mark_task_read(task_id: int, request: Request, queue: TaskQueue = Depends(_get_queue), db: AsyncSession = Depends(get_db)):
+    task = await db.get(Task, task_id)
+    if task:
+        await require_task_access(request, task, db)
     task = await queue.update_task(task_id, has_unread=False)
     if not task:
         raise HTTPException(404, "Task not found")
@@ -417,7 +427,10 @@ async def mark_task_read(task_id: int, queue: TaskQueue = Depends(_get_queue)):
 
 
 @router.post("/{task_id}/unread", response_model=TaskResponse)
-async def mark_task_unread(task_id: int, queue: TaskQueue = Depends(_get_queue)):
+async def mark_task_unread(task_id: int, request: Request, queue: TaskQueue = Depends(_get_queue), db: AsyncSession = Depends(get_db)):
+    task = await db.get(Task, task_id)
+    if task:
+        await require_task_access(request, task, db)
     task = await queue.update_task(task_id, has_unread=True)
     if not task:
         raise HTTPException(404, "Task not found")
@@ -425,7 +438,10 @@ async def mark_task_unread(task_id: int, queue: TaskQueue = Depends(_get_queue))
 
 
 @router.post("/{task_id}/archive", response_model=TaskResponse)
-async def archive_task(task_id: int, queue: TaskQueue = Depends(_get_queue)):
+async def archive_task(task_id: int, request: Request, queue: TaskQueue = Depends(_get_queue), db: AsyncSession = Depends(get_db)):
+    task = await db.get(Task, task_id)
+    if task:
+        await require_task_access(request, task, db)
     task = await queue.archive(task_id)
     if not task:
         raise HTTPException(404, "Task not found")

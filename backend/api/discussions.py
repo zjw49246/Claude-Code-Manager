@@ -129,11 +129,12 @@ async def create_discussion(
 
 @router.get("/{discussion_id}")
 async def get_discussion(
-    discussion_id: int, db: AsyncSession = Depends(get_db)
+    discussion_id: int, request: Request, db: AsyncSession = Depends(get_db)
 ):
     disc = await db.get(Discussion, discussion_id)
     if not disc:
         raise HTTPException(status_code=404, detail="Discussion not found")
+    await _require_discussion_owner(request, disc)
 
     messages = await _get_messages(db, discussion_id)
     agents = await _get_agents(db, discussion_id)

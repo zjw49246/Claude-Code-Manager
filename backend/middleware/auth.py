@@ -53,7 +53,7 @@ class TokenAuthMiddleware(BaseHTTPMiddleware):
 
         # Legacy token → resolve to default admin account
         if token == settings.auth_token:
-            if not self._admin_resolved:
+            if not self._admin_resolved or self._admin_user_id is None:
                 await self._resolve_admin_id()
             request.state.user_id = self._admin_user_id
             request.state.user_role = "super_admin"
