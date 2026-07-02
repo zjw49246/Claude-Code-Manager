@@ -198,7 +198,7 @@ function WorkerCard({ worker, onAction, users, isAdmin }: { worker: Worker; onAc
               title="Assign to user"
             >
               <option value="">Public Pool</option>
-              {users.map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
+              {users.filter(u => u.role === 'member').map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
             </select>
           )}
           {!isAdmin && worker.owner_user_id && (
@@ -208,47 +208,53 @@ function WorkerCard({ worker, onAction, users, isAdmin }: { worker: Worker; onAc
           )}
         </div>
         <div className="flex items-center gap-1 shrink-0">
-          {worker.status === 'ready' && ptyEnabled !== null && (
-            <button
-              title={ptyEnabled ? 'PTY 模式：开（点击关闭）' : 'PTY 模式：关（点击开启）'}
-              disabled={ptySwitching}
-              onClick={async () => {
-                if (ptyEnabled && !window.confirm('关闭 PTY 模式将回退到 claude -p 一次性进程。确定？')) return;
-                setPtySwitching(true);
-                try {
-                  const r = await api.updateWorkerRuntimeSettings(worker.id, { use_pty_mode: !ptyEnabled });
-                  setPtyEnabled(r.use_pty_mode);
-                } catch { /* keep current */ }
-                finally { setPtySwitching(false); }
-              }}
-              className={`flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-semibold ${ptyEnabled ? 'bg-green-600/30 text-green-400' : 'bg-gray-700 text-gray-400'}`}
-            >PTY</button>
-          )}
-          {worker.status === 'ready' && isAdmin && (
-            <button title="Worker 号池额度" onClick={togglePool}
-              className={`flex items-center gap-0.5 px-1.5 py-0.5 rounded ${poolOpen ? 'bg-indigo-600/30 text-indigo-300' : 'bg-gray-700 text-gray-400'} hover:text-indigo-300 text-[10px] font-semibold`}>Pro</button>
-          )}
-          {isAdmin && (
-            <button title="日志" onClick={() => setLogsOpen(true)}
-              className="p-1.5 text-gray-400 hover:text-gray-200"><ScrollText size={15} /></button>
-          )}
-          {isAdmin && worker.status === 'error' && (
-            <button title="重试 bootstrap" onClick={() => act(api.retryWorker)}
-              className="p-1.5 text-gray-400 hover:text-blue-400"><RefreshCw size={15} /></button>
-          )}
-          {isAdmin && worker.status === 'ready' && (
-            <button title="关机（EC2 stop，数据保留）" onClick={() => act(api.stopWorker, `关机 ${shortName(worker)}？数据保留，停机期间不可派发任务。`)}
-              className="p-1.5 text-gray-400 hover:text-yellow-400"><Power size={15} /></button>
-          )}
-          {isAdmin && worker.status === 'stopped' && (
-            <button title="开机" onClick={() => act(api.startWorker)}
-              className="p-1.5 text-gray-400 hover:text-green-400"><Play size={15} /></button>
-          )}
-          {isAdmin && (
-            <button title="销毁（terminate EC2）"
-              onClick={() => act(api.destroyWorker, `销毁 ${shortName(worker)}？EC2 实例将被 terminate，不可恢复！`)}
-              className="p-1.5 text-gray-400 hover:text-red-400"><Trash2 size={15} /></button>
-          )}
+          {(() => {
+            const ccU = JSON.parse(localStorage.getItem('cc_user') || '{}');
+            const canControl = isAdmin || worker.owner_user_id === ccU.id;
+            return (<>
+              {worker.status === 'ready' && ptyEnabled !== null && canControl && (
+                <button
+                  title={ptyEnabled ? 'PTY 模式：开（点击关闭）' : 'PTY 模式：关（点击开启）'}
+                  disabled={ptySwitching}
+                  onClick={async () => {
+                    if (ptyEnabled && !window.confirm('关闭 PTY 模式将回退到 claude -p 一次性进程。确定？')) return;
+                    setPtySwitching(true);
+                    try {
+                      const r = await api.updateWorkerRuntimeSettings(worker.id, { use_pty_mode: !ptyEnabled });
+                      setPtyEnabled(r.use_pty_mode);
+                    } catch { /* keep current */ }
+                    finally { setPtySwitching(false); }
+                  }}
+                  className={`flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-semibold ${ptyEnabled ? 'bg-green-600/30 text-green-400' : 'bg-gray-700 text-gray-400'}`}
+                >PTY</button>
+              )}
+              {worker.status === 'ready' && canControl && (
+                <button title="Worker 号池额度" onClick={togglePool}
+                  className={`flex items-center gap-0.5 px-1.5 py-0.5 rounded ${poolOpen ? 'bg-indigo-600/30 text-indigo-300' : 'bg-gray-700 text-gray-400'} hover:text-indigo-300 text-[10px] font-semibold`}>Pro</button>
+              )}
+              {canControl && (
+                <button title="日志" onClick={() => setLogsOpen(true)}
+                  className="p-1.5 text-gray-400 hover:text-gray-200"><ScrollText size={15} /></button>
+              )}
+              {canControl && worker.status === 'error' && (
+                <button title="重试 bootstrap" onClick={() => act(api.retryWorker)}
+                  className="p-1.5 text-gray-400 hover:text-blue-400"><RefreshCw size={15} /></button>
+              )}
+              {canControl && worker.status === 'ready' && (
+                <button title="关机（EC2 stop，数据保留）" onClick={() => act(api.stopWorker, `关机 ${shortName(worker)}？数据保留，停机期间不可派发任务。`)}
+                  className="p-1.5 text-gray-400 hover:text-yellow-400"><Power size={15} /></button>
+              )}
+              {canControl && worker.status === 'stopped' && (
+                <button title="开机" onClick={() => act(api.startWorker)}
+                  className="p-1.5 text-gray-400 hover:text-green-400"><Play size={15} /></button>
+              )}
+              {isAdmin && (
+                <button title="销毁（terminate EC2）"
+                  onClick={() => act(api.destroyWorker, `销毁 ${shortName(worker)}？EC2 实例将被 terminate，不可恢复！`)}
+                  className="p-1.5 text-gray-400 hover:text-red-400"><Trash2 size={15} /></button>
+              )}
+            </>);
+          })()}
         </div>
       </div>
       {isAdmin && (

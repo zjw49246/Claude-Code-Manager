@@ -108,8 +108,11 @@ async def _require_worker(db: AsyncSession, worker_id: int, allowed_statuses: tu
 
 @router.post("/{worker_id}/stop", response_model=WorkerResponse)
 async def stop_worker(worker_id: int, request: Request, db: AsyncSession = Depends(get_db)):
-    from backend.api.deps import require_admin
-    require_admin(request)
+    from backend.api.deps import require_worker_access
+    worker = await db.get(Worker, worker_id)
+    if not worker:
+        raise HTTPException(404, "Worker not found")
+    await require_worker_access(request, worker)
     prov = _provisioner()
     worker = await _require_worker(db, worker_id, ("ready", "error"))
     # 同步置过渡态：双击/并发请求第二发直接 409，不会起两个后台任务
@@ -122,8 +125,11 @@ async def stop_worker(worker_id: int, request: Request, db: AsyncSession = Depen
 
 @router.post("/{worker_id}/start", response_model=WorkerResponse)
 async def start_worker(worker_id: int, request: Request, db: AsyncSession = Depends(get_db)):
-    from backend.api.deps import require_admin
-    require_admin(request)
+    from backend.api.deps import require_worker_access
+    worker = await db.get(Worker, worker_id)
+    if not worker:
+        raise HTTPException(404, "Worker not found")
+    await require_worker_access(request, worker)
     prov = _provisioner()
     worker = await _require_worker(db, worker_id, ("stopped", "error"))
     worker.status = "starting"

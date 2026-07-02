@@ -3,6 +3,7 @@ import { Palette, Globe, Menu, X, Settings, LogOut } from 'lucide-react';
 import { api, clearToken } from '../../api/client';
 import type { RuntimeSettings } from '../../api/client';
 import { isCapacitor } from '../../config/server';
+import { useWebSocket } from '../../hooks/useWebSocket';
 import { getTheme, setTheme as persistTheme, THEME_OPTIONS, type Theme } from '../../config/theme';
 import { getTimezone, setTimezone, TIMEZONE_OPTIONS } from '../../config/timezone';
 import { PoolDrawer } from './PoolDrawer';
@@ -70,11 +71,16 @@ export function Header({ currentPage, onNavigate }: HeaderProps) {
   const isAdmin = ccUser.role === 'admin' || ccUser.role === 'super_admin' || !ccUser.id;
   const [hasWorker, setHasWorker] = useState(isAdmin);
 
-  useEffect(() => {
+  const refreshWorkerStatus = useCallback(() => {
     if (!isAdmin) {
       api.listWorkers().then(w => setHasWorker(w.length > 0)).catch(() => {});
     }
   }, [isAdmin]);
+
+  useEffect(() => { refreshWorkerStatus(); }, [refreshWorkerStatus]);
+
+  // Refresh nav when worker assignments change
+  useWebSocket(['workers'], () => { refreshWorkerStatus(); });
 
   const allPages = [
     { key: 'dashboard', label: 'Dashboard', show: isAdmin },

@@ -225,27 +225,14 @@ export default function TeamPage() {
                   }`}>
                     {u.role === 'super_admin' ? 'Super Admin' : u.role === 'admin' ? 'Admin' : 'Member'}
                   </span>
-                  <select
-                    value={workers.find(w => w.owner_user_id === u.id)?.id ?? ''}
-                    onChange={async (e) => {
-                      const wid = e.target.value ? Number(e.target.value) : null;
-                      const old = workers.find(w => w.owner_user_id === u.id);
-                      if (old && old.id !== wid) {
-                        try { await api.assignWorker(old.id, null); } catch {}
-                      }
-                      if (wid) {
-                        try { await api.assignWorker(wid, u.id); } catch {}
-                      }
-                      fetchAll();
-                    }}
-                    className="text-[10px] bg-gray-700 text-gray-300 rounded px-1 py-0.5 border border-gray-600"
-                    title="Assign Worker"
-                  >
-                    <option value="">No Worker</option>
-                    {workers.filter(w => !w.owner_user_id || w.owner_user_id === u.id).map(w => (
-                      <option key={w.id} value={w.id}>{w.name}</option>
-                    ))}
-                  </select>
+                  {(() => {
+                    const count = workers.filter(w => w.owner_user_id === u.id).length;
+                    return count > 0 ? (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-600/20 text-green-400">
+                        {count} Worker{count > 1 ? 's' : ''}
+                      </span>
+                    ) : null;
+                  })()}
                   {isSuperAdmin && u.role !== 'super_admin' && (
                     <button
                       onClick={async () => {
