@@ -2076,6 +2076,14 @@ const MessageBubble = memo(function MessageBubble({ message, taskId }: { message
         </div>
       );
     }
+    if (message.pty_cold_start) {
+      return (
+        <div className="flex items-center justify-center gap-2 text-xs text-yellow-500/70 py-2">
+          <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg>
+          {content}
+        </div>
+      );
+    }
     const label = message.event_type === 'system_init'
       ? '— Session started —'
       : message.event_type === 'process_exit'

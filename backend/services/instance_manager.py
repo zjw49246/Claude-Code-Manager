@@ -393,6 +393,17 @@ class InstanceManager:
         so everything downstream (DB, WebSocket, dispatcher wait) is
         unchanged.
         """
+        is_cold_start = resume_session_id and not any(
+            s.is_alive and s.session_id == resume_session_id
+            for s in self._pty_backend._sessions.values()
+        )
+        if is_cold_start and task_id:
+            await self.broadcaster.broadcast(f"task:{task_id}", {
+                "event_type": "system_event",
+                "content": "正在恢复 PTY 会话，请稍候...",
+                "pty_cold_start": True,
+            })
+
         # If container wrapper exists, monkey-patch build_config to use it
         _original_build_config = None
         if claude_binary_override:
