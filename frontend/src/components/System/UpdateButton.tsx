@@ -250,8 +250,10 @@ export function UpdateButton() {
               {/* Confirm phase */}
               {phase === 'confirming' && dryRunResult && (
                 <div className="space-y-3">
-                  {!(dryRunResult.has_updates as boolean) ? (
+                  {!(dryRunResult.has_updates as boolean) && !(dryRunResult.needs_restart as boolean) ? (
                     <p className="text-sm text-gray-300">已是最新版本，无需更新。</p>
+                  ) : !(dryRunResult.has_updates as boolean) && (dryRunResult.needs_restart as boolean) ? (
+                    <p className="text-sm text-yellow-300">代码已是最新，但服务正在运行旧版本，需要重启。</p>
                   ) : (
                     <>
                       <div className="text-sm text-gray-300 space-y-1">
@@ -360,13 +362,15 @@ export function UpdateButton() {
 
             {/* Footer */}
             <div className="flex justify-end gap-2 px-4 py-3 border-t border-gray-700">
-              {phase === 'confirming' && dryRunResult && (dryRunResult.has_updates as boolean) && (
+              {phase === 'confirming' && dryRunResult && ((dryRunResult.has_updates as boolean) || (dryRunResult.needs_restart as boolean)) && (
                 <>
                   <button onClick={handleClose} className="px-3 py-1.5 text-xs rounded bg-gray-800 text-gray-300 hover:bg-gray-700">取消</button>
-                  <button onClick={handleConfirm} className="px-3 py-1.5 text-xs rounded bg-indigo-600 text-white hover:bg-indigo-500">确认更新</button>
+                  <button onClick={handleConfirm} className="px-3 py-1.5 text-xs rounded bg-indigo-600 text-white hover:bg-indigo-500">
+                    {(dryRunResult.has_updates as boolean) ? '确认更新' : '重启服务'}
+                  </button>
                 </>
               )}
-              {phase === 'confirming' && dryRunResult && !(dryRunResult.has_updates as boolean) && (
+              {phase === 'confirming' && dryRunResult && !(dryRunResult.has_updates as boolean) && !(dryRunResult.needs_restart as boolean) && (
                 <button onClick={handleClose} className="px-3 py-1.5 text-xs rounded bg-gray-800 text-gray-300 hover:bg-gray-700">关闭</button>
               )}
               {phase === 'completed' && (
