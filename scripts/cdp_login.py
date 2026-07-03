@@ -22,9 +22,15 @@ async def cdp_eval(ws, expr, timeout=10):
             continue
     return None
 
+def _ensure_display(env: dict) -> dict:
+    """Ensure DISPLAY is set for Xvfb."""
+    if not env.get("DISPLAY"):
+        return {**env, "DISPLAY": ":99"}
+    return env
+
 async def xdotool_click(x, y):
     p = await asyncio.create_subprocess_exec("xdotool", "mousemove", str(x), str(y), "click", "1",
-        env={**os.environ}, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        env=_ensure_display(dict(os.environ)), stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
     await p.wait()
 
 async def handle_cf(ws, ctx, timeout=60):
@@ -48,6 +54,8 @@ async def cdp_login(email: str, token: str, config_dir: str, oauth_url: str = ""
     """
     # 1. Kill old chrome and clean profile
     subprocess.run(["pkill", "-f", "chrome.*remote-debugging"], capture_output=True)
+    await asyncio.sleep(2)
+    subprocess.run(["pkill", "-9", "-f", "chrome.*remote-debugging"], capture_output=True)
     await asyncio.sleep(1)
     shutil.rmtree("/tmp/chrome-test-login", ignore_errors=True)
 
@@ -55,12 +63,14 @@ async def cdp_login(email: str, token: str, config_dir: str, oauth_url: str = ""
     # --disable-dev-shm-usage 必带：小机型（t3.medium 等）/dev/shm 太小，
     # 不加会让渲染进程因共享内存不足直接崩溃 → CDP 9222 端口起不来，
     # 后面连 http://127.0.0.1:9222/json 报 ConnectError（登录整段失败）。
+    chrome_env = _ensure_display(dict(os.environ))
     chrome = subprocess.Popen(["google-chrome", "--no-sandbox", "--disable-gpu",
         "--disable-dev-shm-usage", "--disable-software-rasterizer",
         "--no-first-run", "--disable-extensions", "--window-size=1365,900",
         f"--remote-debugging-port={CDP_PORT}", "--user-data-dir=/tmp/chrome-test-login",
-        "about:blank"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=os.environ)
-    await asyncio.sleep(6)
+        "about:blank"], stdout=subprocess.DEVNULL,
+        stderr=open("/tmp/chrome-cdp-stderr.log", "w"), env=chrome_env)
+    await asyncio.sleep(10)
     print(f"Chrome pid={chrome.pid}")
 
     # 3. Connect CDP
