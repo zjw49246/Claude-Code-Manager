@@ -70,13 +70,26 @@ async def cdp_login(email: str, token: str, config_dir: str, oauth_url: str = ""
         f"--remote-debugging-port={CDP_PORT}", "--user-data-dir=/tmp/chrome-test-login",
         "about:blank"], stdout=subprocess.DEVNULL,
         stderr=open("/tmp/chrome-cdp-stderr.log", "w"), env=chrome_env)
-    await asyncio.sleep(10)
     print(f"Chrome pid={chrome.pid}")
 
-    # 3. Connect CDP
-    async with httpx.AsyncClient() as c:
-        r = await c.get(f"http://127.0.0.1:{CDP_PORT}/json")
-        tabs = r.json()
+    # 3. Connect CDP (poll until ready)
+    tabs = None
+    for _attempt in range(15):
+        await asyncio.sleep(2)
+        if chrome.poll() is not None:
+            print(f"  Chrome exited early (code={chrome.returncode})")
+            return None
+        try:
+            async with httpx.AsyncClient() as c:
+                r = await c.get(f"http://127.0.0.1:{CDP_PORT}/json", timeout=3)
+                tabs = r.json()
+                break
+        except Exception:
+            pass
+    if not tabs:
+        print("  Chrome CDP not ready after 30s")
+        chrome.kill()
+        return None
     ws_url = next(t["webSocketDebuggerUrl"] for t in tabs if t["type"] == "page")
 
     try:
