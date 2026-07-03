@@ -1180,6 +1180,13 @@ class GlobalDispatcher:
                 )
                 return
 
+            # PTY proactive pool switch: turn finished OK but an actionable
+            # rate_limit_event was observed → migrate session to a healthy
+            # account before judging success (next retry/turn uses fresh quota).
+            if self.instance_manager.pty_rate_limit_seen(instance_id):
+                await self.instance_manager._try_proactive_pool_switch(instance_id, task.id)
+                self.instance_manager._pty_rate_limit_seen.discard(instance_id)
+
             if exit_code != 0:
                 from backend.services.claude_pool import is_transient_overload
                 combined = await self._collect_failure_output(instance_id, task.id)
@@ -2831,6 +2838,19 @@ class GlobalDispatcher:
                     if process:
                         await self._wait_process(process, task, "Chat transient retry")
                 self.instance_manager._transient_attempts.pop(inst_id, None)
+
+            # PTY proactive pool switch: if this turn saw an actionable
+            # rate_limit_event, migrate the session to a healthy account so the
+            # next message uses fresh quota. In -p subprocess mode this is
+            # handled by _try_proactive_pool_switch in _consume_output; PTY
+            # mode needs it here because the process stays alive (exit_code 0).
+            if (
+                inst_id is not None
+                and self.instance_manager.pty_mode_enabled
+                and self.instance_manager.pty_rate_limit_seen(inst_id)
+            ):
+                await self.instance_manager._try_proactive_pool_switch(inst_id, task_id)
+                self.instance_manager._pty_rate_limit_seen.discard(inst_id)
         finally:
             # Phase 3: remove temporarily added skills (must run even on crash)
             if has_temp_skills:

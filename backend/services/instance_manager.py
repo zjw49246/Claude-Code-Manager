@@ -44,6 +44,10 @@ class InstanceManager:
         # _process_event. The reliable signal in PTY mode, where the aborted
         # turn still reports exit_code 0.
         self._transient_seen: set[int] = set()
+        # PTY rate-limit detection: instance_ids whose current turn saw an
+        # actionable rate_limit_event. Turn-scoped: reset at launch(), checked
+        # after _wait_process in the chat path so dispatcher can rotate.
+        self._pty_rate_limit_seen: set[int] = set()
         # PTY 权限透传：request_id -> {session_id, task_id, tool_name, expires_at}
         # bridge HTTP 线程收到 CC 的权限请求后经 _loop 调度进事件循环
         self._pty_permissions: dict[str, dict] = {}
@@ -158,8 +162,9 @@ class InstanceManager:
         """
         provider = (provider or "claude").lower()
 
-        # New turn → clear the per-turn transient-overload flag.
+        # New turn → clear per-turn flags.
         self._transient_seen.discard(instance_id)
+        self._pty_rate_limit_seen.discard(instance_id)
 
         mcp_config_path = None
         if provider == "claude" and task_id:
@@ -1325,6 +1330,25 @@ class InstanceManager:
             if is_transient_overload(event.get("content") or ""):
                 self._transient_seen.add(instance_id)
 
+        # PTY rate-limit detection: actionable rate_limit_event during this turn
+        if (
+            event.get("event_type") == "rate_limit_event"
+            and not event.get("orphan")
+            and not event.get("autonomous")
+        ):
+            from backend.services.claude_pool import rate_limit_event_is_actionable
+            info = event.get("rate_limit_info")
+            if info is None:
+                raw = event.get("raw_json")
+                if raw:
+                    import json as _json
+                    try:
+                        info = (_json.loads(raw) if isinstance(raw, str) else raw).get("rate_limit_info")
+                    except (ValueError, TypeError):
+                        info = None
+            if rate_limit_event_is_actionable(info):
+                self._pty_rate_limit_seen.add(instance_id)
+
         # Mark task as unread when assistant produces a message or result
         if task_id and event.get("role") == "assistant" and event["event_type"] in ("message", "result"):
             async with self.db_factory() as db:
@@ -1748,6 +1772,11 @@ class InstanceManager:
         """True if the instance's most recent turn emitted a transient
         server-side 429/overload error (turn-scoped; reset at next launch)."""
         return instance_id in self._transient_seen
+
+    def pty_rate_limit_seen(self, instance_id: int) -> bool:
+        """True if the instance's most recent PTY turn saw an actionable
+        rate_limit_event (turn-scoped; reset at next launch)."""
+        return instance_id in self._pty_rate_limit_seen
 
     async def get_recent_log_contents(self, task_id: int, limit: int = 10) -> list[str]:
         """Fetch recent log entry contents for a task (for rate-limit detection)."""
