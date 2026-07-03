@@ -173,6 +173,7 @@ export interface ChatMessage {
   tool_input: string | null;
   tool_output: string | null;
   is_error: boolean;
+  pty_cold_start?: boolean;
   loop_iteration: number | null;
   timestamp: string | null;
   image_urls: string[] | null;
