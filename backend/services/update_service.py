@@ -150,6 +150,8 @@ class UpdateService:
         self._lock = asyncio.Lock()
         self._current: UpdateState | None = None
         self._status_file = Path(f"/tmp/ccm-update-status-{port}.json")
+        from backend.config import settings
+        self._service_name = settings.service_name
         self._tools = {
             "git": _find_tool("git"),
             "uv": _find_tool("uv"),
@@ -203,6 +205,38 @@ class UpdateService:
             return self._current.to_dict()
         return {"status": "idle"}
 
+    async def _needs_restart(self) -> bool:
+        """Check if the running service is older than the code on disk."""
+        try:
+            systemctl = self._tools["systemctl"]
+            result = await self._run_cmd(
+                [systemctl, "--user", "show", self._service_name,
+                 "-p", "ActiveEnterTimestamp", "--value"],
+            )
+            ts_str = result["stdout"].strip()
+            if not ts_str:
+                return False
+            from email.utils import parsedate_to_datetime
+            try:
+                service_started = datetime.fromisoformat(ts_str)
+            except ValueError:
+                service_started = parsedate_to_datetime(ts_str)
+            commit_result = await self._run_cmd(
+                ["git", "log", "-1", "--format=%cI"],
+            )
+            commit_ts = commit_result["stdout"].strip()
+            if not commit_ts:
+                return False
+            commit_time = datetime.fromisoformat(commit_ts)
+            if service_started.tzinfo is None:
+                service_started = service_started.replace(tzinfo=timezone.utc)
+            if commit_time.tzinfo is None:
+                commit_time = commit_time.replace(tzinfo=timezone.utc)
+            return commit_time > service_started
+        except Exception:
+            logger.debug("_needs_restart check failed", exc_info=True)
+            return False
+
     async def dry_run(self) -> dict[str, Any]:
         """Check for available updates without applying them."""
         result = await self._run_cmd(["git", "fetch", "origin", "main"], timeout=60)
@@ -213,8 +247,10 @@ class UpdateService:
         origin = (await self._run_cmd(["git", "rev-parse", "origin/main"]))["stdout"].strip()
 
         if head == origin:
+            needs_restart = await self._needs_restart()
             return {
                 "has_updates": False,
+                "needs_restart": needs_restart,
                 "current_commit": head[:7],
                 "latest_commit": origin[:7],
             }
@@ -299,7 +335,7 @@ class UpdateService:
 
             systemctl = self._tools["systemctl"]
             subprocess.Popen(
-                [self._tools["bash"], "-c", f"sleep 2 && {systemctl} --user restart ccm.service"],
+                [self._tools["bash"], "-c", f"sleep 2 && {systemctl} --user restart {self._service_name}"],
                 stdout=open(f"/tmp/ccm-restart-{self.port}.log", "w"),
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
@@ -369,6 +405,16 @@ class UpdateService:
         state.new_commit = (await self._run_cmd(["git", "rev-parse", "HEAD"]))["stdout"].strip()
 
         if state.old_commit == state.new_commit and not force:
+            needs_restart = await self._needs_restart()
+            if needs_restart:
+                step.message = "代码已是最新，但服务需要重启"
+                await self._complete_step(step)
+                for s in state.steps[1:9]:
+                    s.status = "skipped"
+                    s.message = "无需更新"
+                    await self._broadcast_step(s)
+                await self._fast_restart_path(state)
+                return
             step.message = "已是最新版本"
             await self._complete_step(step)
             state.status = "completed"
@@ -516,6 +562,7 @@ class UpdateService:
                 state.backup_file,
                 str(self.port),
                 str(self.db_path),
+                self._service_name,
             ],
             stdout=open(log_file, "a"),
             stderr=subprocess.STDOUT,
@@ -551,7 +598,7 @@ class UpdateService:
 
         systemctl = self._tools["systemctl"]
         subprocess.Popen(
-            [self._tools["bash"], "-c", f"sleep 2 && {systemctl} --user restart ccm.service"],
+            [self._tools["bash"], "-c", f"sleep 2 && {systemctl} --user restart {self._service_name}"],
             stdout=open(f"/tmp/ccm-restart-{self.port}.log", "w"),
             stderr=subprocess.STDOUT,
             start_new_session=True,
