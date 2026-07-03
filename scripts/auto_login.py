@@ -745,17 +745,22 @@ async def perform_login(
     token_171: str,
     config_dir: str,
     use_xvfb: bool = True,
+    provider: str | None = None,
 ) -> bool:
     """统一登录流程（Chrome CDP，不用 Playwright/mitmproxy）。
 
     171mail 域：API 拿 cookies → 注入 Chrome → OAuth Authorize
     mail.com 域：Chrome 打开 claude.ai → 输入邮箱 → MailCatcher 接码 → magic link → OAuth Authorize
     两者共享 Step 2-4（CLI auth login + Chrome CDP OAuth + code#state 交给 CLI）。
+    provider: 显式指定 "171mail" 或 "mailcom"，None 则按邮箱域名自动判断。
     """
     config_path = Path(config_dir).expanduser()
     config_path.mkdir(parents=True, exist_ok=True)
 
-    _use_mailcatcher = is_mailcom_domain(email)
+    if provider:
+        _use_mailcatcher = provider == "mailcom"
+    else:
+        _use_mailcatcher = is_mailcom_domain(email)
 
     # Backup old credentials — only delete after successful login to avoid
     # leaving the account in a "no credentials" state if login fails.
@@ -846,11 +851,15 @@ def main():
     if not email:
         email = input("Email: ").strip()
 
-    # 按 --login-method 参数或邮箱后缀判断登录方式
+    # 按 --login-method 参数 → saved provider → 邮箱后缀 判断登录方式
     if args.login_method:
         use_webmail = args.login_method == "mailcom"
     else:
-        use_webmail = is_mailcom_domain(email)
+        saved_provider = (load_email_tokens().get(email) or {}).get("provider")
+        if saved_provider:
+            use_webmail = saved_provider == "mailcom"
+        else:
+            use_webmail = is_mailcom_domain(email)
 
     # token: 171mail 的接码 token，或 mail.com 的邮箱密码
     saved = load_email_tokens().get(email)
@@ -872,11 +881,11 @@ def main():
         provider_label = "mailcom" if use_webmail else "171mail"
         save_email_token(email, token, provider=provider_label)
 
-    # 统一走 perform_login（CLI OAuth），按域名自动选择接码方式
     ok = asyncio.run(perform_login(
         email=email,
         token_171=token,
         config_dir=config_dir,
+        provider="mailcom" if use_webmail else "171mail",
     ))
 
     if ok and args.add_to_pool:
