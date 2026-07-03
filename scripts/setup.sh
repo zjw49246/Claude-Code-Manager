@@ -21,12 +21,17 @@ if [ ${#MISSING[@]} -gt 0 ]; then
 fi
 
 # ── 2. Google Chrome（CDP 登录使用系统 Chrome）─────────────────────
-echo "[2/5] 安装 Google Chrome..."
-if ! command -v google-chrome &>/dev/null; then
-    wget -q -O /tmp/google-chrome.deb \
-        https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb
+# 固定 Chrome 149：150+ 在 Xvfb 上 renderer crash（导航 claude.ai 时崩溃）
+CHROME_VERSION="149.0.7827.53-1"
+CHROME_DEB_URL="https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_${CHROME_VERSION}_amd64.deb"
+echo "[2/5] 安装 Google Chrome ${CHROME_VERSION}..."
+INSTALLED_CHROME=$(google-chrome --version 2>/dev/null | grep -oP '[\d.]+' || echo "none")
+if [ "$INSTALLED_CHROME" != "149.0.7827.53" ]; then
+    wget -q -O /tmp/google-chrome.deb "$CHROME_DEB_URL"
     sudo dpkg -i /tmp/google-chrome.deb 2>/dev/null || sudo apt-get install -f -y
     rm -f /tmp/google-chrome.deb
+    # 阻止 apt 自动升级 Chrome
+    sudo apt-mark hold google-chrome-stable 2>/dev/null || true
 fi
 echo "  Chrome: $(google-chrome --version)"
 

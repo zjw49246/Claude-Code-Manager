@@ -8,7 +8,7 @@ OLD_COMMIT="$2"
 BACKUP_FILE="$3"
 PORT="$4"
 DB_FILE="${5:-claude_manager.db}"
-SERVICE_NAME="ccm.service"
+SERVICE_NAME="${6:-ccm.service}"
 STATUS_FILE="/tmp/ccm-update-status-${PORT}.json"
 LOG_FILE="/tmp/ccm-update-migrate-${PORT}.log"
 
