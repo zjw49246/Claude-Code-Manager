@@ -312,9 +312,9 @@ class InstanceManager:
         so everything downstream (DB, WebSocket, dispatcher wait) is
         unchanged.
         """
-        is_cold_start = resume_session_id and not any(
-            s.is_alive and s.session_id == resume_session_id
-            for s in self._pty_backend._sessions.values()
+        is_cold_start = (
+            resume_session_id
+            and not self._pty_backend._sessions
         )
         if is_cold_start and task_id:
             await self.broadcaster.broadcast(f"task:{task_id}", {
