@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '../api/client';
 import { useWebSocket } from '../hooks/useWebSocket';
 import type { Worker, TeamUser } from '../api/client';
-import { Plus, X, RefreshCw, Trash2, Power, Play, Server, ScrollText } from 'lucide-react';
+import { Plus, X, RefreshCw, Trash2, Power, Play, Server, ScrollText, Pencil } from 'lucide-react';
 
 const STATUS_COLORS: Record<string, string> = {
   creating: 'bg-blue-500/20 text-blue-400',
@@ -150,7 +150,30 @@ function WorkerCard({ worker, onAction, users, isAdmin }: { worker: Worker; onAc
   const [poolErr, setPoolErr] = useState<string | null>(null);
   const [ptyEnabled, setPtyEnabled] = useState<boolean | null>(null);
   const [ptySwitching, setPtySwitching] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [editName, setEditName] = useState(worker.name);
+  const editRef = useRef<HTMLInputElement>(null);
   const busy = BUSY.has(worker.status);
+
+  const ccU = JSON.parse(localStorage.getItem('cc_user') || '{}');
+  const canControl = isAdmin || worker.owner_user_id === ccU.id;
+
+  useEffect(() => {
+    if (editing && editRef.current) editRef.current.focus();
+  }, [editing]);
+
+  const saveRename = async () => {
+    const trimmed = editName.trim();
+    if (!trimmed || trimmed === worker.name) { setEditing(false); setEditName(worker.name); return; }
+    try {
+      await api.renameWorker(worker.id, trimmed);
+      onAction();
+    } catch (e) {
+      window.alert(String(e));
+      setEditName(worker.name);
+    }
+    setEditing(false);
+  };
 
   useEffect(() => {
     if (worker.status !== 'ready') return;
@@ -183,7 +206,25 @@ function WorkerCard({ worker, onAction, users, isAdmin }: { worker: Worker; onAc
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 min-w-0">
           <Server size={16} className="text-indigo-400 shrink-0" />
-          <span className="text-foreground font-medium truncate" title={worker.name}>{shortName(worker)}</span>
+          {editing ? (
+            <input
+              ref={editRef}
+              className="bg-gray-700 text-foreground text-sm font-medium rounded px-2 py-0.5 outline-none focus:ring-1 focus:ring-indigo-500 min-w-0"
+              value={editName}
+              onChange={(e) => setEditName(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') saveRename(); if (e.key === 'Escape') { setEditing(false); setEditName(worker.name); } }}
+              onBlur={saveRename}
+            />
+          ) : (
+            <span
+              className={`text-foreground font-medium truncate ${canControl ? 'cursor-pointer hover:text-indigo-300 group' : ''}`}
+              title={canControl ? 'Click to rename' : worker.name}
+              onClick={() => { if (canControl) { setEditName(worker.name); setEditing(true); } }}
+            >
+              {shortName(worker)}
+              {canControl && <Pencil size={11} className="inline ml-1 opacity-0 group-hover:opacity-60" />}
+            </span>
+          )}
           <span className={`text-xs px-2 py-0.5 rounded-full shrink-0 ${STATUS_COLORS[worker.status] || 'bg-gray-500/20 text-gray-400'}`}>
             {worker.status}{busy && worker.bootstrap_step ? `: ${worker.bootstrap_step}` : ''}
           </span>
@@ -209,8 +250,6 @@ function WorkerCard({ worker, onAction, users, isAdmin }: { worker: Worker; onAc
         </div>
         <div className="flex items-center gap-1 shrink-0">
           {(() => {
-            const ccU = JSON.parse(localStorage.getItem('cc_user') || '{}');
-            const canControl = isAdmin || worker.owner_user_id === ccU.id;
             return (<>
               {worker.status === 'ready' && ptyEnabled !== null && canControl && (
                 <button

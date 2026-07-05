@@ -117,6 +117,22 @@ async def unshare_project(project_id: int, body: UnshareBody, request: Request, 
         )
     )
     await db.commit()
+    # Notify via Feishu (only for user targets, skip self-revoke)
+    if body.target_type == "user" and body.target_id != user_id:
+        try:
+            from backend.services.feishu_notify import notify_project_unshared
+            from backend.models.user import User
+            revoker = await db.get(User, user_id) if user_id else None
+            proj = await db.get(Project, project_id)
+            if proj:
+                import asyncio
+                asyncio.create_task(notify_project_unshared(
+                    revoker.name if revoker else "Admin",
+                    proj.name,
+                    body.target_id,
+                ))
+        except Exception:
+            pass
     return {"ok": True}
 
 
@@ -206,6 +222,20 @@ async def unshare_task(task_id: int, body: UnshareBody, request: Request, db: As
         )
     )
     await db.commit()
+    # Notify via Feishu (only for user targets, skip self-revoke)
+    if body.target_type == "user" and body.target_id != user_id:
+        try:
+            from backend.services.feishu_notify import notify_task_unshared
+            from backend.models.user import User
+            revoker = await db.get(User, user_id) if user_id else None
+            import asyncio
+            asyncio.create_task(notify_task_unshared(
+                revoker.name if revoker else "Admin",
+                task.title or f"Task #{task_id}",
+                body.target_id,
+            ))
+        except Exception:
+            pass
     return {"ok": True}
 
 

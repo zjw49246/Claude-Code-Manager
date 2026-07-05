@@ -124,3 +124,24 @@ async def notify_worker_assigned(admin_name: str, worker_name: str, target_user_
         target_user_id,
         f"🖥 {admin_name} 给你分配了 Worker「{worker_name}」\n你现在可以在上面创建项目和任务了。",
     )
+
+
+async def notify_project_unshared(revoker_name: str, project_name: str, target_user_id: int) -> bool:
+    return await notify_user_by_id(
+        target_user_id,
+        f"📂 {revoker_name} 取消了你对项目「{project_name}」的访问权限。",
+    )
+
+
+async def notify_task_unshared(revoker_name: str, task_title: str, target_user_id: int) -> bool:
+    return await notify_user_by_id(
+        target_user_id,
+        f"📋 {revoker_name} 取消了你对任务「{task_title}」的访问权限。",
+    )
+
+
+async def notify_worker_unassigned(admin_name: str, worker_name: str, target_user_id: int) -> bool:
+    return await notify_user_by_id(
+        target_user_id,
+        f"🖥 {admin_name} 取消了你对 Worker「{worker_name}」的分配。",
+    )

@@ -446,9 +446,49 @@ async def update_worker_runtime_settings(worker_id: int, request: Request, body:
     return r.json()
 
 
-# --- Team CCM: Worker assignment ---
+# --- Team CCM: Worker rename ---
 
 from pydantic import BaseModel as _BaseModel
+
+
+class RenameWorkerBody(_BaseModel):
+    name: str
+
+
+@router.patch("/{worker_id}/rename", response_model=WorkerResponse)
+async def rename_worker(worker_id: int, body: RenameWorkerBody, request: Request, db: AsyncSession = Depends(get_db)):
+    """Rename a worker (DB + AWS Name tag if cloud_instance_id exists)."""
+    from backend.api.deps import require_worker_access
+    worker = await db.get(Worker, worker_id)
+    if not worker:
+        raise HTTPException(404, "Worker not found")
+    await require_worker_access(request, worker)
+    new_name = body.name.strip()
+    if not new_name:
+        raise HTTPException(400, "Worker 名称不能为空")
+    worker.name = new_name
+    await db.commit()
+    await db.refresh(worker)
+    # Update AWS Name tag (best-effort)
+    if worker.cloud_instance_id:
+        try:
+            from backend.services.cloud_provider import AWSProvider
+            cloud = AWSProvider()
+            await cloud.update_instance_tags(worker.cloud_instance_id, {"Name": new_name})
+        except Exception:
+            logger.warning("Failed to update AWS Name tag for %s", worker.cloud_instance_id, exc_info=True)
+    # Broadcast
+    from backend.main import broadcaster
+    if broadcaster:
+        await broadcaster.broadcast("workers", {
+            "event_type": "worker_update",
+            "worker_id": worker.id,
+            "status": worker.status,
+        })
+    return worker
+
+
+# --- Team CCM: Worker assignment ---
 
 
 class AssignWorkerBody(_BaseModel):
@@ -463,21 +503,36 @@ async def assign_worker(worker_id: int, body: AssignWorkerBody, request: Request
     worker = await db.get(Worker, worker_id)
     if not worker:
         raise HTTPException(404, "Worker not found")
+    prev_owner = worker.owner_user_id
     worker.owner_user_id = body.owner_user_id
     await db.commit()
     await db.refresh(worker)
+    from backend.api.deps import get_current_user_id
+    from backend.models.user import User
+    admin_id = get_current_user_id(request)
+    # Notify new owner
     if body.owner_user_id:
         try:
             from backend.services.feishu_notify import notify_worker_assigned
-            from backend.api.deps import get_current_user_id
-            from backend.models.user import User
-            admin_id = get_current_user_id(request)
             admin = await db.get(User, admin_id) if admin_id else None
             import asyncio
             asyncio.create_task(notify_worker_assigned(
                 admin.name if admin else "Admin",
                 worker.name,
                 body.owner_user_id,
+            ))
+        except Exception:
+            pass
+    # Notify previous owner (if changed and not self-revoke)
+    if prev_owner and prev_owner != body.owner_user_id and prev_owner != admin_id:
+        try:
+            from backend.services.feishu_notify import notify_worker_unassigned
+            admin = await db.get(User, admin_id) if admin_id else None
+            import asyncio
+            asyncio.create_task(notify_worker_unassigned(
+                admin.name if admin else "Admin",
+                worker.name,
+                prev_owner,
             ))
         except Exception:
             pass

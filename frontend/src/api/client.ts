@@ -913,6 +913,8 @@ export const api = {
   startWorker: (id: number) => request<Worker>(`/api/workers/${id}/start`, { method: 'POST' }),
   destroyWorker: (id: number) => request<Worker>(`/api/workers/${id}/destroy`, { method: 'POST' }),
   retryWorker: (id: number) => request<Worker>(`/api/workers/${id}/retry`, { method: 'POST' }),
+  renameWorker: (id: number, name: string) =>
+    request<Worker>(`/api/workers/${id}/rename`, { method: 'PATCH', body: JSON.stringify({ name }) }),
   assignWorker: (id: number, ownerUserId: number | null) =>
     request<Worker>(`/api/workers/${id}/assign`, { method: 'PUT', body: JSON.stringify({ owner_user_id: ownerUserId }) }),
 
