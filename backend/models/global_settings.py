@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, Integer, String
+from sqlalchemy import Boolean, Integer, JSON, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.database import Base
@@ -23,3 +23,6 @@ class GlobalSettings(Base):
     auto_sort_on_access: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     # Org registry URL override (set via registry-changed callback, takes precedence over env)
     org_registry_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # Default skills/plugins selection for new tasks
+    default_enabled_plugins: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    default_enabled_user_skills: Mapped[list | None] = mapped_column(JSON, nullable=True)

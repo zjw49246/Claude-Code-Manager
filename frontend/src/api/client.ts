@@ -599,6 +599,9 @@ export const api = {
   getGitSettings: () => request<GlobalSettings>('/api/settings/git'),
   updateGitSettings: (data: Partial<GlobalSettings>) =>
     request<GlobalSettings>('/api/settings/git', { method: 'PUT', body: JSON.stringify(data) }),
+  getDefaultSkills: () => request<{ default_enabled_plugins: Record<string, boolean> | null; default_enabled_user_skills: number[] | null }>('/api/settings/default-skills'),
+  setDefaultSkills: (plugins: Record<string, boolean> | null, userSkills: number[] | null) =>
+    request<{ default_enabled_plugins: Record<string, boolean> | null; default_enabled_user_skills: number[] | null }>('/api/settings/default-skills', { method: 'PUT', body: JSON.stringify({ default_enabled_plugins: plugins, default_enabled_user_skills: userSkills }) }),
 
   // Secrets
   listSecrets: () => request<Secret[]>('/api/secrets'),

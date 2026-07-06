@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { api } from '../../api/client';
 import type { Project, TagItem, Task } from '../../api/client';
-import { Plus, Paperclip, X, Star, Wrench, Settings, Loader2, AlertCircle } from 'lucide-react';
+import { Plus, Paperclip, X, Star, Wrench, Settings, Loader2, AlertCircle, Pin } from 'lucide-react';
 import { ProjectSelect } from '../ProjectSelect';
 import { VoiceButton } from '../Voice/VoiceButton';
 import { SecretPicker } from '../Secrets/SecretPicker';
@@ -111,10 +111,41 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   const [enabledUserSkills, setEnabledUserSkills] = useState<Record<number, boolean>>({});
   const [showSkillsDropdown, setShowSkillsDropdown] = useState(false);
   const skillsRef = useRef<HTMLDivElement>(null);
+  const [skillsDefaultSaved, setSkillsDefaultSaved] = useState(false);
   useEffect(() => {
     api.listUserSkills().then((list: any[]) => setUserSkills(list.map((s) => ({ id: s.id, name: s.name, description: s.description })))).catch(() => {});
   }, []);
   const enabledUserSkillCount = Object.values(enabledUserSkills).filter(Boolean).length;
+
+  // Load default skills/plugins from server on mount
+  useEffect(() => {
+    api.getDefaultSkills().then((defaults) => {
+      if (defaults.default_enabled_plugins) {
+        setEnabledPlugins(defaults.default_enabled_plugins);
+      }
+      if (defaults.default_enabled_user_skills) {
+        const map: Record<number, boolean> = {};
+        for (const id of defaults.default_enabled_user_skills) map[id] = true;
+        setEnabledUserSkills(map);
+      }
+    }).catch(() => {});
+  }, []);
+
+  const saveSkillsAsDefault = () => {
+    const pluginSelection = Object.entries(enabledPlugins)
+      .filter(([, v]) => v)
+      .reduce((acc, [k]) => ({ ...acc, [k]: true }), {} as Record<string, boolean>);
+    const userSkillIds = Object.entries(enabledUserSkills)
+      .filter(([, v]) => v)
+      .map(([k]) => Number(k));
+    api.setDefaultSkills(
+      Object.keys(pluginSelection).length > 0 ? pluginSelection : null,
+      userSkillIds.length > 0 ? userSkillIds : null,
+    ).then(() => {
+      setSkillsDefaultSaved(true);
+      setTimeout(() => setSkillsDefaultSaved(false), 2000);
+    }).catch(() => {});
+  };
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -702,6 +733,17 @@ export function TaskForm({ onCreated }: TaskFormProps) {
                     {skill.name}
                   </label>
                 ))}
+                <div className="border-t border-gray-700 px-3 py-1.5">
+                  <button
+                    type="button"
+                    onClick={saveSkillsAsDefault}
+                    className="flex items-center gap-1 text-xs text-gray-400 hover:text-indigo-300 transition-colors"
+                    title="Save current Skills & Plugins selection as default for new tasks"
+                  >
+                    <Pin size={11} />
+                    {skillsDefaultSaved ? '已保存为默认' : '设为默认'}
+                  </button>
+                </div>
               </div>
             )}
           </div>
@@ -742,6 +784,17 @@ export function TaskForm({ onCreated }: TaskFormProps) {
                     </label>
                   );
                 })}
+                <div className="border-t border-gray-700 px-3 py-1.5">
+                  <button
+                    type="button"
+                    onClick={saveSkillsAsDefault}
+                    className="flex items-center gap-1 text-xs text-gray-400 hover:text-indigo-300 transition-colors"
+                    title="Save current Skills & Plugins selection as default for new tasks"
+                  >
+                    <Pin size={11} />
+                    {skillsDefaultSaved ? '已保存为默认' : '设为默认'}
+                  </button>
+                </div>
               </div>
             )}
           </div>
