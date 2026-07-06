@@ -254,11 +254,11 @@ export function PoolDrawer() {
       .catch(() => setPoolEnabled(false)); // pool 未启用时后端返回 404
   }, []);
 
-  const loadUsage = useCallback(async () => {
+  const loadUsage = useCallback(async (force?: boolean) => {
     setLoading(true);
     setError(null);
     try {
-      setStatus(await api.getPoolUsage());
+      setStatus(await api.getPoolUsage(force));
     } catch (e) {
       setError(e instanceof Error ? e.message : '加载失败');
     } finally {
@@ -353,7 +353,7 @@ export function PoolDrawer() {
                   <Plus size={14} />
                 </button>
                 <button
-                  onClick={loadUsage}
+                  onClick={() => loadUsage(true)}
                   disabled={loading}
                   className="p-1.5 rounded text-gray-400 hover:text-foreground hover:bg-gray-800 disabled:opacity-50"
                   title="刷新"
@@ -381,7 +381,7 @@ export function PoolDrawer() {
                   onClearCooldown={handleClearCooldown}
                   onSetPreferred={handleSetPreferred}
                   onRelogin={handleRelogin}
-                  onRetryUsage={loadUsage}
+                  onRetryUsage={() => loadUsage(true)}
                   reloginState={relogin[a.id]}
                 />
               ))}

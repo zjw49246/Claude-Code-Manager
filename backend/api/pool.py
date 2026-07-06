@@ -32,11 +32,15 @@ async def pool_status():
 
 
 @router.get("/usage")
-async def pool_usage():
-    """Pool status merged with per-account quota utilization (OAuth usage API)."""
+async def pool_usage(force: bool = False):
+    """Pool status merged with per-account quota utilization (OAuth usage API).
+
+    Pass ``?force=true`` to bypass the 60s usage cache (e.g. after a manual
+    token refresh via the retry button).
+    """
     pool = _get_pool()
     status = pool.status()
-    usage_by_id = {u["id"]: u for u in await pool.fetch_usage()}
+    usage_by_id = {u["id"]: u for u in await pool.fetch_usage(force=force)}
     for account in status["accounts"]:
         u = usage_by_id.get(account["id"], {})
         account["subscription_type"] = u.get("subscription_type")
