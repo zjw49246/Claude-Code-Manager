@@ -164,7 +164,7 @@ DEFAULT_CONFIG_PATH = Path.home() / ".claude-pool" / "accounts.json"
 DEFAULT_COOLDOWN_SECONDS = 300  # 5 minutes
 USAGE_API_URL = "https://api.anthropic.com/api/oauth/usage"
 USAGE_CACHE_TTL = 60  # seconds
-OAUTH_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
+OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"  # Claude Code 公开 client_id
 # Cloudflare 拦默认 python UA（403 error 1010），必须用 CLI 形态的 UA
 OAUTH_USER_AGENT = "claude-cli/2.1.0 (external, cli)"
