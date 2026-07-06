@@ -452,3 +452,19 @@ cloudflared tunnel run <tunnel-name>
 - **子 Agent 系统**：Monitor 是第一个子 Agent 类型，持久 Claude 子进程拥有独立 MCP server，通过 HTTP API 与系统通信，架构为后续子 Agent 类型预留
 - **进程管理**：`asyncio.create_subprocess_exec` 启动，必须 unset `CLAUDECODE` 环境变量避免嵌套检测
 - **停止机制**：SIGTERM → 等待 10s → SIGKILL
+
+## 分布式 Worker
+
+CCM 支持将任务分发到远程 EC2 Worker 节点执行，突破单机并发瓶颈。每个 Worker 运行完整的 CCM 服务并拥有独立的 Claude 账号池，Manager 通过 VPC 内网统一管理。
+
+**核心能力：**
+- **一键创建** — Workers 页面点 +，自动创建 EC2、部署代码、安装依赖、启动服务（配置从 Manager 自身继承，无需手动填写 AMI/机型/子网）
+- **任务转发** — 创建任务或修改已有任务时选择执行 Worker，所有 Chat/Stop/Retry/Plan 操作自动代理，前端零感知
+- **实时迁移** — 任务可随时在本机和 Worker 之间迁移，session 文件和工作目录自动同步，`--resume` 无缝衔接
+- **WebSocket 中继** — 每个 Worker 一条 WS 连接，日志实时中继到 Manager 并存储副本，断线自动重连+补全
+- **生命周期管理** — 支持关机（保留数据）/开机/销毁（自动迁回全部任务），健康检查每 30s 自动恢复降级 Worker
+- **版本锁定** — Worker 通过 rsync 部署与 Manager 完全一致的代码版本，健康检查校验 commit 一致性
+
+**前置条件：** Manager 运行在 EC2 + IAM Role 有 EC2 权限 + `.env` 配置 `WORKER_SSH_KEY_PATH`。
+
+详细部署步骤见 [分布式 Worker 部署指南](docs/worker-deployment-guide.md)。
