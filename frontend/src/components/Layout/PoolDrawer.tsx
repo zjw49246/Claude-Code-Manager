@@ -124,15 +124,15 @@ function AccountCard({ account, preferred, lastSelected, onClearCooldown, onSetP
           <UsageBar label="Opus" window={account.usage.seven_day_opus} />
         </div>
       ) : (
-        <div className="text-xs text-red-400 space-y-1">
+        <div className={`text-xs space-y-1 ${account.usage_error === 'token_expired' ? 'text-yellow-400' : 'text-red-400'}`}>
           <div className="flex items-center gap-2">
             <span>
               {account.usage_error === 'no_credentials' && '未找到凭据文件'}
-              {account.usage_error === 'token_expired' && 'Token 刷新失败，需重新登录'}
+              {account.usage_error === 'token_expired' && 'Token 过期，将在使用时自动刷新'}
               {account.usage_error && !['no_credentials', 'token_expired'].includes(account.usage_error) && `额度获取失败: ${account.usage_error}`}
             </span>
             {account.usage_error && (() => {
-              const needsRelogin = ['no_credentials', 'token_expired'].includes(account.usage_error!);
+              const needsRelogin = account.usage_error === 'no_credentials';
               return (<>
                 {needsRelogin ? (<>
                   <button
