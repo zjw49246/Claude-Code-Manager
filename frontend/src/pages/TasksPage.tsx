@@ -219,8 +219,8 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
 
   const visibleProjects = projects.filter((p) => p.show_in_selector);
 
-  // Collect all unique tags from visible projects
-  const allProjectTags = Array.from(new Set(visibleProjects.flatMap((p) => p.tags))).sort();
+  // Collect all unique tags from visible projects + tag registry
+  const allProjectTags = Array.from(new Set([...visibleProjects.flatMap((p) => p.tags), ...tagItems.map((t) => t.name)])).sort();
 
   // Build tag color map
   const tagColorMap: Record<string, string> = {};
