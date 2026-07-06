@@ -100,7 +100,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   const [availableSkills, setAvailableSkills] = useState<{ key: string; label: string; description: string }[]>([]);
   useEffect(() => {
     if (provider !== 'claude') { setAvailableSkills([]); return; }
-    api.listSkills()
+    api.listSkillsCached()
       .then((skills) => setAvailableSkills(skills.map((s) => ({ key: s.key, label: s.label, description: s.description }))))
       .catch(() => setAvailableSkills([{ key: 'monitor', label: 'Monitor', description: 'Background monitoring sub-agents' }]));
   }, [provider]);
@@ -113,7 +113,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   const skillsRef = useRef<HTMLDivElement>(null);
   const [skillsDefaultSaved, setSkillsDefaultSaved] = useState(false);
   useEffect(() => {
-    api.listUserSkills().then((list: any[]) => setUserSkills(list.map((s) => ({ id: s.id, name: s.name, description: s.description })))).catch(() => {});
+    api.listUserSkillsCached().then((list: any[]) => setUserSkills(list.map((s) => ({ id: s.id, name: s.name, description: s.description })))).catch(() => {});
   }, []);
   const enabledUserSkillCount = Object.values(enabledUserSkills).filter(Boolean).length;
 

@@ -576,16 +576,20 @@ class ClaudePool:
             logger.info("pool %s: OAuth token refreshed", account.id)
             return creds
 
-    async def fetch_usage(self) -> list[dict]:
+    async def fetch_usage(self, *, force: bool = False) -> list[dict]:
         """Per-account quota utilization from the Anthropic OAuth usage API.
 
         Reads each account's OAuth access token from
         ``<config_dir>/.credentials.json`` and queries the usage endpoint.
-        Results are cached for USAGE_CACHE_TTL seconds.
+        Results are cached for USAGE_CACHE_TTL seconds.  Pass ``force=True``
+        to bypass the cache (e.g. after a manual token refresh).
         """
         import asyncio
 
         import httpx
+
+        if force:
+            self._usage_cache = None
 
         now = time.time()
         if self._usage_cache is not None and now - self._usage_cache_at < USAGE_CACHE_TTL:

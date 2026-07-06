@@ -484,6 +484,29 @@ export interface OrgTeam {
   members?: OrgMember[];
 }
 
+// ---------------------------------------------------------------------------
+// Skills / User-Skills cache (avoid re-fetching on every TaskForm mount)
+// ---------------------------------------------------------------------------
+let _skillsCache: { key: string; label: string; description: string; always: boolean; priority: number; tags: string[] }[] | null = null;
+let _userSkillsCache: any[] | null = null;
+
+export function invalidateSkillsCache() { _skillsCache = null; }
+export function invalidateUserSkillsCache() { _userSkillsCache = null; }
+
+async function listSkillsCached() {
+  if (_skillsCache) return _skillsCache;
+  const result = await request<{ key: string; label: string; description: string; always: boolean; priority: number; tags: string[] }[]>('/api/system/skills');
+  _skillsCache = result;
+  return result;
+}
+
+async function listUserSkillsCached() {
+  if (_userSkillsCache) return _userSkillsCache;
+  const result = await request<any[]>('/api/user-skills');
+  _userSkillsCache = result;
+  return result;
+}
+
 export const api = {
   // Feishu
   getFeishuAuthUrl: () => request<{ url: string }>('/api/feishu/auth-url'),
@@ -579,7 +602,7 @@ export const api = {
 
   // Claude Pool
   getPoolStatus: () => request<PoolUsageStatus>('/api/pool/status'),
-  getPoolUsage: () => request<PoolUsageStatus>('/api/pool/usage'),
+  getPoolUsage: (force?: boolean) => request<PoolUsageStatus>('/api/pool/usage' + (force ? '?force=true' : '')),
   clearPoolCooldown: (accountId: string) =>
     request<{ ok: boolean }>(`/api/pool/accounts/${accountId}/clear-cooldown`, { method: 'POST' }),
   setPoolPreferred: (accountId: string | null) =>
@@ -976,4 +999,6 @@ export const api = {
   stats: () => request<{ tasks: Record<string, number>; running_instances: number }>('/api/system/stats'),
   config: () => request<{ default_provider: string; provider_options: string[]; default_model: string; model_options: string[]; default_codex_model: string; codex_model_options: string[]; default_effort: string; effort_options: string[]; codex_effort_options: string[] }>('/api/system/config'),
   listSkills: () => request<{ key: string; label: string; description: string; always: boolean; priority: number; tags: string[] }[]>('/api/system/skills'),
+  listSkillsCached: () => listSkillsCached(),
+  listUserSkillsCached: () => listUserSkillsCached(),
 };
