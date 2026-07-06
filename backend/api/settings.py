@@ -1,4 +1,7 @@
+from typing import Any
+
 from fastapi import APIRouter, Depends
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
@@ -93,4 +96,41 @@ async def update_runtime_settings(
         use_pty_mode=instance_manager.pty_mode_enabled,
         pty_available=_pty_available(),
         auto_sort_on_access=auto_sort,
+    )
+
+
+# --- Default Skills ---
+
+
+class DefaultSkillsResponse(BaseModel):
+    default_enabled_plugins: dict[str, bool] | None = None
+    default_enabled_user_skills: list[int] | None = None
+
+
+class DefaultSkillsUpdate(BaseModel):
+    default_enabled_plugins: dict[str, bool] | None = None
+    default_enabled_user_skills: list[int] | None = None
+
+
+@router.get("/default-skills", response_model=DefaultSkillsResponse)
+async def get_default_skills(db: AsyncSession = Depends(get_db)):
+    row = await _get_or_create(db)
+    return DefaultSkillsResponse(
+        default_enabled_plugins=row.default_enabled_plugins,
+        default_enabled_user_skills=row.default_enabled_user_skills,
+    )
+
+
+@router.put("/default-skills", response_model=DefaultSkillsResponse)
+async def update_default_skills(
+    body: DefaultSkillsUpdate, db: AsyncSession = Depends(get_db)
+):
+    row = await _get_or_create(db)
+    row.default_enabled_plugins = body.default_enabled_plugins
+    row.default_enabled_user_skills = body.default_enabled_user_skills
+    await db.commit()
+    await db.refresh(row)
+    return DefaultSkillsResponse(
+        default_enabled_plugins=row.default_enabled_plugins,
+        default_enabled_user_skills=row.default_enabled_user_skills,
     )
