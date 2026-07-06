@@ -131,29 +131,25 @@ function AccountCard({ account, preferred, lastSelected, onClearCooldown, onSetP
               {account.usage_error === 'token_expired' && 'Token 过期，将在使用时自动刷新'}
               {account.usage_error && !['no_credentials', 'token_expired'].includes(account.usage_error) && `额度获取失败: ${account.usage_error}`}
             </span>
-            {account.usage_error && (() => {
-              const needsRelogin = account.usage_error === 'no_credentials';
-              return (<>
-                {needsRelogin ? (<>
-                  <button
-                    onClick={() => onRelogin(account.id)}
-                    disabled={reloginState?.status === 'running'}
-                    className="shrink-0 text-[10px] px-1.5 py-0.5 rounded border border-red-500/50 text-red-300 hover:bg-red-600/20 disabled:opacity-50"
-                    title="先尝试刷新 OAuth token；刷新失败则后台跑 auto_login 重新登录"
-                  >
-                    {reloginState?.status === 'running' ? '登录中…' : '重新登录'}
-                  </button>
-                </>) : (
-                  <button
-                    onClick={onRetryUsage}
-                    className="shrink-0 text-[10px] px-1.5 py-0.5 rounded border border-yellow-500/50 text-yellow-300 hover:bg-yellow-600/20"
-                    title="临时错误，重新拉取额度"
-                  >
-                    重试
-                  </button>
-                )}
-              </>);
-            })()}
+            {account.usage_error === 'no_credentials' && (
+              <button
+                onClick={() => onRelogin(account.id)}
+                disabled={reloginState?.status === 'running'}
+                className="shrink-0 text-[10px] px-1.5 py-0.5 rounded border border-red-500/50 text-red-300 hover:bg-red-600/20 disabled:opacity-50"
+                title="先尝试刷新 OAuth token；刷新失败则后台跑 auto_login 重新登录"
+              >
+                {reloginState?.status === 'running' ? '登录中…' : '重新登录'}
+              </button>
+            )}
+            {account.usage_error && !['no_credentials', 'token_expired'].includes(account.usage_error) && (
+              <button
+                onClick={onRetryUsage}
+                className="shrink-0 text-[10px] px-1.5 py-0.5 rounded border border-yellow-500/50 text-yellow-300 hover:bg-yellow-600/20"
+                title="临时错误，重新拉取额度"
+              >
+                重试
+              </button>
+            )}
           </div>
           {reloginState?.message && (
             <div className="text-[10px] text-gray-400 whitespace-pre-wrap break-all">{reloginState.message}</div>
