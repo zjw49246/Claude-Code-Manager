@@ -105,6 +105,10 @@ export function ProjectTodoList({ projectId }: ProjectTodoListProps) {
   };
 
   const saveEdit = async (todoId: number) => {
+    if (!editDraft.title.trim() || !editDraft.prompt.trim()) {
+      setError('Title and prompt are required.');
+      return;
+    }
     startBusy(todoId);
     setError('');
     try {
@@ -194,18 +198,18 @@ export function ProjectTodoList({ projectId }: ProjectTodoListProps) {
   };
 
   return (
-    <div className="mt-3 border-t border-border pt-3">
+    <div className="mt-3 border-t border-gray-700 pt-3">
       <div className="flex items-center justify-between gap-2">
         <button
           type="button"
           onClick={() => setExpanded((value) => !value)}
-          className="flex h-8 min-w-0 items-center gap-2 rounded px-2 text-sm text-muted hover:bg-surface-hover hover:text-foreground"
+          className="flex h-8 min-w-0 items-center gap-2 rounded px-2 text-sm text-gray-300 hover:bg-gray-700 hover:text-foreground"
           title={expanded ? 'Collapse todos' : 'Expand todos'}
         >
           {expanded ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
           <span className="font-medium">To-dos</span>
           {hasLoaded && (
-            <span className="rounded bg-surface-hover px-1.5 py-0.5 text-xs text-muted">{openCount}</span>
+            <span className="rounded bg-gray-700 px-1.5 py-0.5 text-xs text-gray-300">{openCount}</span>
           )}
         </button>
         <div className="flex items-center gap-2">
@@ -214,7 +218,7 @@ export function ProjectTodoList({ projectId }: ProjectTodoListProps) {
               type="button"
               onClick={() => setShowArchived((value) => !value)}
               className={`flex h-8 items-center gap-1.5 rounded px-2.5 text-xs ${
-                showArchived ? 'bg-surface-hover text-muted' : 'text-subtle hover:bg-surface-hover hover:text-muted'
+                showArchived ? 'bg-gray-700 text-gray-300' : 'text-gray-500 hover:bg-gray-700 hover:text-gray-300'
               }`}
               title={showArchived ? 'Hide archived todos' : 'Show archived todos'}
             >
@@ -224,7 +228,7 @@ export function ProjectTodoList({ projectId }: ProjectTodoListProps) {
           <button
             type="button"
             onClick={openCreateModal}
-            className="flex h-8 items-center gap-1.5 rounded bg-input px-2.5 text-sm text-muted hover:bg-surface-hover hover:text-foreground"
+            className="flex h-8 items-center gap-1.5 rounded bg-gray-700 px-2.5 text-sm text-gray-300 hover:bg-gray-700 hover:text-foreground"
             title="Add todo"
           >
             <Plus size={14} /> Add
@@ -234,12 +238,12 @@ export function ProjectTodoList({ projectId }: ProjectTodoListProps) {
 
       {expanded && (
         <div className="mt-2 space-y-2">
-          {error && <div className="rounded bg-red-500/15 px-3 py-2 text-xs text-danger">{error}</div>}
+          {error && <div className="rounded bg-red-500/15 px-3 py-2 text-xs text-red-400">{error}</div>}
 
           {loading ? (
-            <div className="px-2 py-3 text-sm text-subtle">Loading...</div>
+            <div className="px-2 py-3 text-sm text-gray-500">Loading...</div>
           ) : todos.length === 0 ? (
-            !error && <div className="px-2 py-3 text-sm text-subtle">No to-dos.</div>
+            !error && <div className="px-2 py-3 text-sm text-gray-500">No to-dos.</div>
           ) : (
             <div className="space-y-1.5">
               {todos.map((todo) => {
@@ -250,17 +254,17 @@ export function ProjectTodoList({ projectId }: ProjectTodoListProps) {
                   return (
                     <div
                       key={todo.id}
-                      className="flex items-center gap-2 rounded border border-border bg-surface-raised/30 px-2.5 py-1.5"
+                      className="flex items-center gap-2 rounded border border-gray-700 bg-gray-900/30 px-2.5 py-1.5"
                     >
-                      <span className="min-w-0 flex-1 truncate text-xs text-subtle line-through">{todo.title}</span>
-                      <span className="shrink-0 rounded bg-surface-hover px-1.5 py-0.5 text-[10px] text-subtle">
+                      <span className="min-w-0 flex-1 truncate text-xs text-gray-500 line-through">{todo.title}</span>
+                      <span className="shrink-0 rounded bg-gray-700 px-1.5 py-0.5 text-[10px] text-gray-500">
                         archived
                       </span>
                       <button
                         type="button"
                         onClick={() => restoreTodo(todo)}
                         disabled={isBusy}
-                        className="h-7 w-7 rounded text-subtle hover:bg-surface-hover hover:text-info disabled:opacity-60"
+                        className="h-7 w-7 rounded text-gray-500 hover:bg-gray-700 hover:text-blue-400 disabled:opacity-60"
                         title="Restore todo"
                       >
                         <RotateCcw size={14} />
@@ -269,7 +273,7 @@ export function ProjectTodoList({ projectId }: ProjectTodoListProps) {
                         type="button"
                         onClick={() => deleteTodo(todo)}
                         disabled={isBusy}
-                        className="h-7 w-7 rounded text-subtle hover:bg-surface-hover hover:text-danger disabled:opacity-60"
+                        className="h-7 w-7 rounded text-gray-500 hover:bg-gray-700 hover:text-red-400 disabled:opacity-60"
                         title="Delete permanently"
                       >
                         <Trash2 size={14} />
@@ -279,26 +283,26 @@ export function ProjectTodoList({ projectId }: ProjectTodoListProps) {
                 }
 
                 return (
-                  <div key={todo.id} className="rounded border border-border bg-surface-raised/40 px-2.5 py-2">
+                  <div key={todo.id} className="rounded border border-gray-700 bg-gray-900/40 px-2.5 py-2">
                     {isEditing ? (
                       <div className="space-y-2">
                         <input
                           value={editDraft.title}
                           onChange={(e) => setEditDraft((prev) => ({ ...prev, title: e.target.value }))}
-                          className="w-full rounded border border-input-border bg-input px-2 py-1.5 text-sm text-foreground outline-none focus:border-focus"
+                          className="w-full rounded border border-gray-600 bg-gray-700 px-2 py-1.5 text-sm text-foreground outline-none focus:border-indigo-500"
                           placeholder="Title"
                         />
                         <textarea
                           value={editDraft.prompt}
                           onChange={(e) => setEditDraft((prev) => ({ ...prev, prompt: e.target.value }))}
-                          className="min-h-24 w-full resize-y rounded border border-input-border bg-input px-2 py-1.5 text-sm text-foreground outline-none focus:border-focus"
+                          className="min-h-24 w-full resize-y rounded border border-gray-600 bg-gray-700 px-2 py-1.5 text-sm text-foreground outline-none focus:border-indigo-500"
                           placeholder="Prompt"
                         />
                         <div className="flex justify-end gap-2">
                           <button
                             type="button"
                             onClick={() => setEditingId(null)}
-                            className="flex h-8 items-center gap-1.5 rounded px-2.5 text-sm text-muted hover:bg-surface-hover"
+                            className="flex h-8 items-center gap-1.5 rounded px-2.5 text-sm text-gray-300 hover:bg-gray-700"
                           >
                             <X size={14} /> Cancel
                           </button>
@@ -306,7 +310,7 @@ export function ProjectTodoList({ projectId }: ProjectTodoListProps) {
                             type="button"
                             onClick={() => saveEdit(todo.id)}
                             disabled={isBusy}
-                            className="flex h-8 items-center gap-1.5 rounded bg-accent px-2.5 text-sm text-accent-foreground hover:bg-accent-hover disabled:opacity-60"
+                            className="flex h-8 items-center gap-1.5 rounded bg-indigo-600 px-2.5 text-sm text-white hover:bg-indigo-500 disabled:opacity-60"
                           >
                             <Save size={14} /> Save
                           </button>
@@ -318,22 +322,22 @@ export function ProjectTodoList({ projectId }: ProjectTodoListProps) {
                           type="button"
                           onClick={() => toggleDone(todo)}
                           disabled={isBusy}
-                          className="mt-0.5 h-7 w-7 shrink-0 rounded text-subtle hover:bg-surface-hover hover:text-success disabled:opacity-60"
+                          className="mt-0.5 h-7 w-7 shrink-0 rounded text-gray-500 hover:bg-gray-700 hover:text-green-400 disabled:opacity-60"
                           title={todo.status === 'done' ? 'Mark open' : 'Mark done'}
                         >
                           {todo.status === 'done' ? <CheckCircle2 size={17} /> : <Circle size={17} />}
                         </button>
                         <div className="min-w-0 flex-1">
-                          <div className={`truncate text-sm font-medium ${todo.status === 'done' ? 'text-subtle line-through' : 'text-foreground'}`}>
+                          <div className={`truncate text-sm font-medium ${todo.status === 'done' ? 'text-gray-500 line-through' : 'text-foreground'}`}>
                             {todo.title}
                           </div>
-                          <div className="mt-0.5 line-clamp-2 whitespace-pre-wrap text-xs text-subtle">{todo.prompt}</div>
+                          <div className="mt-0.5 line-clamp-2 whitespace-pre-wrap text-xs text-gray-500">{todo.prompt}</div>
                         </div>
                         <div className="flex shrink-0 items-center gap-1">
                           <button
                             type="button"
                             onClick={() => openTaskModal(todo)}
-                            className="h-8 w-8 rounded text-subtle hover:bg-surface-hover hover:text-success"
+                            className="h-8 w-8 rounded text-gray-500 hover:bg-gray-700 hover:text-green-400"
                             title={todo.created_task_id ? 'Run again (already spawned a task)' : 'Create task'}
                           >
                             <Play size={15} />
@@ -341,7 +345,7 @@ export function ProjectTodoList({ projectId }: ProjectTodoListProps) {
                           <button
                             type="button"
                             onClick={() => startEdit(todo)}
-                            className="h-8 w-8 rounded text-subtle hover:bg-surface-hover hover:text-info"
+                            className="h-8 w-8 rounded text-gray-500 hover:bg-gray-700 hover:text-blue-400"
                             title="Edit todo"
                           >
                             <Pencil size={15} />
@@ -350,7 +354,7 @@ export function ProjectTodoList({ projectId }: ProjectTodoListProps) {
                             type="button"
                             onClick={() => archiveTodo(todo)}
                             disabled={isBusy}
-                            className="h-8 w-8 rounded text-subtle hover:bg-surface-hover hover:text-warning disabled:opacity-60"
+                            className="h-8 w-8 rounded text-gray-500 hover:bg-gray-700 hover:text-yellow-400 disabled:opacity-60"
                             title="Archive todo"
                           >
                             <Archive size={15} />
@@ -433,50 +437,50 @@ function TodoModal({
         aria-label={title}
         onSubmit={onSubmit}
         onClick={(e) => e.stopPropagation()}
-        className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl bg-surface shadow-2xl"
+        className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl bg-gray-800 shadow-2xl"
       >
-        <div className="flex items-center justify-between border-b border-border px-5 py-4">
+        <div className="flex items-center justify-between border-b border-gray-700 px-5 py-4">
           <h3 className="font-semibold text-foreground">{title}</h3>
-          <button type="button" onClick={onClose} className="text-subtle hover:text-foreground">
+          <button type="button" onClick={onClose} className="text-gray-500 hover:text-foreground">
             <X size={18} />
           </button>
         </div>
         <div className="space-y-4 overflow-y-auto p-5">
           <label className="block space-y-1.5">
-            <span className="text-sm text-muted">Title</span>
+            <span className="text-sm text-gray-300">Title</span>
             <input
               value={draft.title}
               onChange={(e) => setDraft({ ...draft, title: e.target.value })}
-              className="w-full rounded border border-input-border bg-input px-3 py-2 text-sm text-foreground outline-none focus:border-focus"
+              className="w-full rounded border border-gray-600 bg-gray-700 px-3 py-2 text-sm text-foreground outline-none focus:border-indigo-500"
               autoFocus
               required
             />
           </label>
           <label className="block space-y-1.5">
-            <span className="text-sm text-muted">Prompt</span>
+            <span className="text-sm text-gray-300">Prompt</span>
             <textarea
               value={draft.prompt}
               onChange={(e) => setDraft({ ...draft, prompt: e.target.value })}
-              className="min-h-44 w-full resize-y rounded border border-input-border bg-input px-3 py-2 text-sm text-foreground outline-none focus:border-focus"
+              className="min-h-44 w-full resize-y rounded border border-gray-600 bg-gray-700 px-3 py-2 text-sm text-foreground outline-none focus:border-indigo-500"
               required
             />
           </label>
           {error && (
-            <div className="rounded bg-red-500/15 px-3 py-2 text-xs text-danger">{error}</div>
+            <div className="rounded bg-red-500/15 px-3 py-2 text-xs text-red-400">{error}</div>
           )}
         </div>
-        <div className="flex justify-end gap-2 border-t border-border px-5 py-4">
+        <div className="flex justify-end gap-2 border-t border-gray-700 px-5 py-4">
           <button
             type="button"
             onClick={onClose}
-            className="rounded px-3 py-2 text-sm text-muted hover:bg-surface-hover"
+            className="rounded px-3 py-2 text-sm text-gray-300 hover:bg-gray-700"
           >
             Cancel
           </button>
           <button
             type="submit"
             disabled={saving}
-            className="rounded bg-accent px-3 py-2 text-sm text-accent-foreground hover:bg-accent-hover disabled:opacity-60"
+            className="rounded bg-indigo-600 px-3 py-2 text-sm text-white hover:bg-indigo-500 disabled:opacity-60"
           >
             {saving ? 'Saving...' : submitLabel}
           </button>
