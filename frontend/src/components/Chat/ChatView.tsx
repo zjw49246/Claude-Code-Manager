@@ -457,29 +457,72 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
       return;
     }
 
-    if (eventType === 'monitor_check') {
+    // CCM Sub-Agent progress: show in chat as system_event, update panel
+    if (eventType === 'sub_agent_progress') {
       api.listMonitorSessions(task.id).then(setMonitorSessions).catch(() => {});
       const summary = msg.data.summary as string;
-      const monitorSessionId = msg.data.monitor_session_id as number;
-      const checkNumber = msg.data.check_number as number;
+      const saSessionId = msg.data.sub_agent_session_id as number;
+      const description = msg.data.description as string;
       if (summary) {
         const entry: ChatMessage = {
           id: Date.now() + Math.random(),
           role: 'system',
           event_type: 'system_event',
-          content: `[Monitor #${monitorSessionId}] Check #${checkNumber}: ${summary}`,
+          content: `[Sub-Agent #${saSessionId}: ${description}] ${summary}`,
           tool_name: null,
           tool_input: null,
           tool_output: null,
-          is_error: (msg.data.status as string) === 'failed',
+          is_error: false,
           loop_iteration: null,
           timestamp: new Date().toISOString(),
           image_urls: null,
           attachments: null,
-          source: 'monitor',
+          source: 'sub-agent',
         };
         setMessages((prev) => [...prev, entry]);
       }
+      return;
+    }
+
+    // Sub-Agent session status change: just refresh panel
+    if (eventType === 'sub_agent_session_status' || eventType === 'sub_agent_session_created') {
+      api.listMonitorSessions(task.id).then(setMonitorSessions).catch(() => {});
+      return;
+    }
+
+    if (eventType === 'monitor_check') {
+      // Always refresh panel data
+      api.listMonitorSessions(task.id).then(setMonitorSessions).catch(() => {});
+      // Dedup: don't insert into chat flow. If chat_injected=true, a separate
+      // user_message event will arrive. If false, it's a non-important check
+      // that only belongs in MonitorPanel. Legacy events (chat_injected
+      // missing) get a muted card for backward compat.
+      const chatInjected = msg.data.chat_injected;
+      if (chatInjected === undefined) {
+        // Legacy data without chat_injected field — render muted card
+        const summary = msg.data.summary as string;
+        const monitorSessionId = msg.data.monitor_session_id as number;
+        const checkNumber = msg.data.check_number as number;
+        if (summary) {
+          const entry: ChatMessage = {
+            id: Date.now() + Math.random(),
+            role: 'system',
+            event_type: 'system_event',
+            content: `[Monitor #${monitorSessionId}] Check #${checkNumber}: ${summary}`,
+            tool_name: null,
+            tool_input: null,
+            tool_output: null,
+            is_error: (msg.data.status as string) === 'failed',
+            loop_iteration: null,
+            timestamp: new Date().toISOString(),
+            image_urls: null,
+            attachments: null,
+            source: 'monitor',
+          };
+          setMessages((prev) => [...prev, entry]);
+        }
+      }
+      // chat_injected true/false: do NOT insert into chat flow
       return;
     }
 
@@ -2085,16 +2128,18 @@ const MessageBubble = memo(function MessageBubble({ message, taskId }: { message
 
   if (message.event_type === 'system_init' || message.event_type === 'process_exit' || message.event_type === 'system_event') {
     const content = message.content || 'system';
-    const isMonitor = content.startsWith('[Monitor') || content.startsWith('[Agent');
+    const isMonitor = content.startsWith('[Monitor') || content.startsWith('[Agent') || content.startsWith('[Sub-Agent');
     if (isMonitor) {
+      // Legacy monitor/agent system_events: render with reduced opacity
+      // (new messages arrive as user_message with source=monitor/sub-agent)
       return (
-        <div className="bg-gray-800/50 border border-gray-700 rounded-lg px-3 py-2 my-1 text-xs text-gray-400">
-          <div className="markdown-body text-xs">
+        <div className="border-l-2 border-gray-600 pl-2 py-1 my-0.5 opacity-50">
+          <div className="markdown-body text-xs text-gray-500">
             <ReactMarkdown remarkPlugins={remarkPlugins} components={markdownComponents}>
               {content}
             </ReactMarkdown>
           </div>
-          {message.timestamp && <MessageTimestamp timestamp={message.timestamp} className="mt-1" />}
+          {message.timestamp && <MessageTimestamp timestamp={message.timestamp} className="mt-0.5" />}
         </div>
       );
     }
@@ -2140,6 +2185,7 @@ const MessageBubble = memo(function MessageBubble({ message, taskId }: { message
   }
 
   const isMonitor = message.source === 'monitor';
+  const isSubAgent = message.source === 'sub-agent' || message.source === 'sub-agent:result';
   // 仅用户消息标注注入；回复不标注
   const isInjected = message.source === 'inject' && isUser;
 
@@ -2149,6 +2195,11 @@ const MessageBubble = memo(function MessageBubble({ message, taskId }: { message
         {isMonitor && !isUser && (
           <div className="flex items-center gap-1 mb-0.5 pl-1">
             <span className="text-xs bg-teal-600/30 text-teal-300 px-1.5 py-0.5 rounded">Monitor</span>
+          </div>
+        )}
+        {isSubAgent && !isUser && (
+          <div className="flex items-center gap-1 mb-0.5 pl-1">
+            <span className="text-xs bg-amber-600/30 text-amber-300 px-1.5 py-0.5 rounded">Sub-Agent</span>
           </div>
         )}
         {isInjected && (
@@ -2162,7 +2213,9 @@ const MessageBubble = memo(function MessageBubble({ message, taskId }: { message
               ? 'bg-indigo-600 text-white rounded-br-md whitespace-pre-wrap'
               : isMonitor
                 ? 'bg-teal-900/40 text-gray-200 rounded-bl-md border border-teal-700/30'
-                : 'bg-gray-800 text-gray-200 rounded-bl-md'
+                : isSubAgent
+                  ? 'bg-amber-900/40 text-gray-200 rounded-bl-md border border-amber-700/30'
+                  : 'bg-gray-800 text-gray-200 rounded-bl-md'
           }`}
         >
           {isUser ? (

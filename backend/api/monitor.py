@@ -200,62 +200,28 @@ async def create_monitor_check(
     await db.commit()
     await db.refresh(check)
 
-    # Persist every check as a system_event log entry (like "Session started")
-    from backend.models.log_entry import LogEntry
-    import json as _json
-    monitor_log = LogEntry(
-        instance_id=1,
-        task_id=task_id,
-        event_type="system_event",
-        role="system",
-        content=f"[Monitor #{session_id}] Check #{new_checks_done}: {body.summary}",
-        raw_json=_json.dumps({"source": "monitor", "monitor_session_id": session_id,
-                              "check_number": new_checks_done, "is_important": body.is_important}),
-        is_error=False,
-    )
-    db.add(monitor_log)
-    await db.commit()
-
     from backend.main import dispatcher
-    await dispatcher.broadcaster.broadcast(
-        f"task:{task_id}",
-        {
-            "event": "monitor_check",
-            "monitor_session_id": session_id,
-            "check_number": new_checks_done,
-            "status": body.status,
-            "summary": body.summary,
-            "is_important": body.is_important,
-            "source": "monitor",
-        },
-    )
+    import json as _json
 
-    if auto_complete:
-        await dispatcher.broadcaster.broadcast(
-            f"task:{task_id}",
-            {"event": "monitor_session_status", "monitor_session_id": session_id, "status": "completed"},
-        )
-        # Notify main agent that monitoring is complete
-        from backend.services.dispatcher import PRIORITY_MONITOR_COMPLETE
-        complete_prompt = (
-            f"[Monitor #{session_id} 完成] 已达最大检查次数（{ms.max_checks}次）。最后状态: {body.summary}\n\n"
-            "请向用户简要转达监控结果。"
-        )
-        await dispatcher.enqueue_message(
-            task_id=task_id,
-            prompt=complete_prompt,
-            priority=PRIORITY_MONITOR_COMPLETE,
-            source="monitor:complete",
-            user_message_text=f"[Monitor #{session_id}] 监控完成: {body.summary}",
-        )
-        # Kill the sub-agent process since it's no longer needed
-        sub_proc = dispatcher._monitor_processes.get(session_id)
-        if sub_proc and sub_proc.returncode is None:
-            sub_proc.kill()
-            await sub_proc.wait()
+    chat_injected = False
 
-    # Enqueue important reports to main agent
+    # Only persist LogEntry and enqueue for important checks (dedup: avoid
+    # triple-rendering of the same info as card + bubble + agent reply).
     if body.is_important and not auto_complete:
+        from backend.models.log_entry import LogEntry
+        monitor_log = LogEntry(
+            instance_id=1,
+            task_id=task_id,
+            event_type="system_event",
+            role="system",
+            content=f"[Monitor #{session_id}] Check #{new_checks_done}: {body.summary}",
+            raw_json=_json.dumps({"source": "monitor", "monitor_session_id": session_id,
+                                  "check_number": new_checks_done, "is_important": body.is_important}),
+            is_error=False,
+        )
+        db.add(monitor_log)
+        await db.commit()
+
         from backend.services.dispatcher import PRIORITY_MONITOR_IMPORTANT
         report_prompt = (
             f"[Monitor #{session_id} 汇报] {body.summary}\n\n"
@@ -267,7 +233,65 @@ async def create_monitor_check(
             priority=PRIORITY_MONITOR_IMPORTANT,
             source="monitor:report",
             user_message_text=f"[Monitor #{session_id}] {body.summary}",
+            monitor_session_id=session_id,
         )
+        chat_injected = True
+
+    # Always broadcast monitor_check for panel updates; chat_injected tells
+    # frontend whether a user_message will also arrive (so it can skip
+    # inserting a duplicate card into the chat flow).
+    await dispatcher.broadcaster.broadcast(
+        f"task:{task_id}",
+        {
+            "event": "monitor_check",
+            "monitor_session_id": session_id,
+            "check_number": new_checks_done,
+            "status": body.status,
+            "summary": body.summary,
+            "is_important": body.is_important,
+            "chat_injected": chat_injected,
+            "source": "monitor",
+        },
+    )
+
+    if auto_complete:
+        await dispatcher.broadcaster.broadcast(
+            f"task:{task_id}",
+            {"event": "monitor_session_status", "monitor_session_id": session_id, "status": "completed"},
+        )
+        # Notify main agent that monitoring is complete
+        from backend.services.dispatcher import PRIORITY_MONITOR_COMPLETE
+        from backend.models.log_entry import LogEntry
+        complete_log = LogEntry(
+            instance_id=1,
+            task_id=task_id,
+            event_type="system_event",
+            role="system",
+            content=f"[Monitor #{session_id}] 监控完成: {body.summary}",
+            raw_json=_json.dumps({"source": "monitor", "monitor_session_id": session_id,
+                                  "check_number": new_checks_done, "is_important": True}),
+            is_error=False,
+        )
+        db.add(complete_log)
+        await db.commit()
+
+        complete_prompt = (
+            f"[Monitor #{session_id} 完成] 已达最大检查次数（{ms.max_checks}次）。最后状态: {body.summary}\n\n"
+            "请向用户简要转达监控结果。"
+        )
+        await dispatcher.enqueue_message(
+            task_id=task_id,
+            prompt=complete_prompt,
+            priority=PRIORITY_MONITOR_COMPLETE,
+            source="monitor:complete",
+            user_message_text=f"[Monitor #{session_id}] 监控完成: {body.summary}",
+            monitor_session_id=session_id,
+        )
+        # Kill the sub-agent process since it's no longer needed
+        sub_proc = dispatcher._monitor_processes.get(session_id)
+        if sub_proc and sub_proc.returncode is None:
+            sub_proc.kill()
+            await sub_proc.wait()
 
     return check
 
@@ -301,6 +325,10 @@ async def complete_monitor_session(
     await db.commit()
 
     from backend.main import dispatcher
+    import json as _json
+
+    chat_injected = False
+
     await dispatcher.broadcaster.broadcast(
         f"task:{task_id}",
         {
@@ -310,7 +338,8 @@ async def complete_monitor_session(
             "status": "completed",
             "summary": body.reason,
             "is_important": False,
-            "is_monitor": True,
+            "chat_injected": False,
+            "source": "monitor",
         },
     )
     await dispatcher.broadcaster.broadcast(
@@ -322,7 +351,6 @@ async def complete_monitor_session(
     # (is_important=True). Only skip if the MOST RECENT check was important,
     # not any historical one.
     from backend.models.log_entry import LogEntry
-    import json as _json
     last_report_log = await db.scalar(
         select(LogEntry.raw_json)
         .where(
@@ -341,6 +369,19 @@ async def complete_monitor_session(
             pass
     if not already_notified:
         from backend.services.dispatcher import PRIORITY_MONITOR_COMPLETE
+        complete_log = LogEntry(
+            instance_id=1,
+            task_id=task_id,
+            event_type="system_event",
+            role="system",
+            content=f"[Monitor #{session_id}] 监控完成: {body.reason}",
+            raw_json=_json.dumps({"source": "monitor", "monitor_session_id": session_id,
+                                  "check_number": ms.checks_done, "is_important": True}),
+            is_error=False,
+        )
+        db.add(complete_log)
+        await db.commit()
+
         complete_prompt = (
             f"[Monitor #{session_id} 完成] {body.reason}\n\n"
             "请向用户简要转达监控结果。"
@@ -351,6 +392,7 @@ async def complete_monitor_session(
             priority=PRIORITY_MONITOR_COMPLETE,
             source="monitor:complete",
             user_message_text=f"[Monitor #{session_id}] 监控完成: {body.reason}",
+            monitor_session_id=session_id,
         )
 
     return {"ok": True, "message": "Session completed. Your task is done — stop all activity now."}
