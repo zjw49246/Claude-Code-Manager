@@ -314,7 +314,7 @@ class InstanceManager:
         """
         is_cold_start = (
             resume_session_id
-            and not self._pty_backend._sessions
+            and resume_session_id not in self._pty_backend._pool._sessions
         )
         if is_cold_start and task_id:
             await self.broadcaster.broadcast(f"task:{task_id}", {
