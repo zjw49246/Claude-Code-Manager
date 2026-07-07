@@ -30,6 +30,7 @@ from backend.api.files import router as files_router
 from backend.api.pool import router as pool_router
 from backend.api.monitor import router as monitor_router
 from backend.api.sub_agents import router as sub_agents_router
+from backend.api.sub_agent_tasks import router as sub_agent_tasks_router
 from backend.api.discussions import router as discussions_router
 from backend.api.quick_phrases import router as quick_phrases_router
 from backend.api.pr_monitor import router as pr_monitor_router, webhook_router as pr_webhook_router
@@ -326,6 +327,7 @@ app.include_router(discussions_router)
 app.include_router(quick_phrases_router)
 app.include_router(monitor_router)
 app.include_router(sub_agents_router)
+app.include_router(sub_agent_tasks_router)
 app.include_router(pr_monitor_router)
 app.include_router(pr_webhook_router)
 app.include_router(workers_router)

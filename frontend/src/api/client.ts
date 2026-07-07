@@ -881,7 +881,18 @@ export const api = {
   deleteMonitorSession: (taskId: number, sessionId: number) =>
     request<{ ok: boolean }>(`/api/tasks/${taskId}/monitor-sessions/${sessionId}`, { method: 'DELETE' }),
 
-  // Sub-Agents
+  // Sub-Agent Sessions (one-shot tasks)
+  createSubAgentSession: (taskId: number, body: { name: string; prompt: string; context?: string; model?: string | null }) =>
+    request<MonitorSession>(`/api/tasks/${taskId}/sub-agent-sessions`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  listSubAgentSessions: (taskId: number) =>
+    request<MonitorSession[]>(`/api/tasks/${taskId}/sub-agent-sessions`),
+  deleteSubAgentSession: (taskId: number, sessionId: number) =>
+    request<{ ok: boolean }>(`/api/tasks/${taskId}/sub-agent-sessions/${sessionId}`, { method: 'DELETE' }),
+
+  // Permissions / Sub-Agents (legacy)
   resolvePermission: (taskId: number, requestId: string, behavior: 'allow' | 'deny') =>
     request<{ ok: boolean; behavior: string }>(`/api/tasks/${taskId}/permissions/${requestId}`, {
       method: 'POST',

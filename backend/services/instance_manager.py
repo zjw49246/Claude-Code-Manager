@@ -409,6 +409,9 @@ class InstanceManager:
             if not enable_workflows:
                 disallowed.append("Workflow")
             disallowed.extend(get_skill_disallowed_tools(skills, enabled_skills))
+            # Sub-Agent skill: force-disable native Agent/Task tools
+            if enabled_skills and enabled_skills.get("sub-agent"):
+                disallowed.extend(["Agent", "Task"])
             if disallowed:
                 cmd.extend(["--disallowedTools", ",".join(sorted(set(disallowed)))])
             if mcp_config_path and Path(mcp_config_path).exists():

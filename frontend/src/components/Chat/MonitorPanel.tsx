@@ -24,19 +24,26 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
-/** 类别小徽章：monitor（$命令）/ native-agent / native-monitor（模型自己开的） */
+/** 类别小徽章：monitor / sub_agent / native-agent / native-monitor */
 function TypeChip({ agentType, source }: { agentType: string; source: string }) {
   const isNative = source === 'native';
+  const isSubAgent = agentType === 'sub_agent';
   return (
     <span
       className={`px-1 py-0.5 text-[10px] rounded border shrink-0 ${
         isNative
           ? 'bg-purple-900/40 text-purple-300 border-purple-700'
-          : 'bg-teal-900/40 text-teal-300 border-teal-700'
+          : isSubAgent
+            ? 'bg-amber-900/40 text-amber-300 border-amber-700'
+            : 'bg-teal-900/40 text-teal-300 border-teal-700'
       }`}
-      title={isNative ? '模型原生子 agent（PTY 观测）' : 'CCM $monitor 子 agent'}
+      title={
+        isNative ? '模型原生子 agent（PTY 观测）'
+          : isSubAgent ? 'CCM Sub-Agent（一次性任务）'
+            : 'CCM $monitor 子 agent'
+      }
     >
-      {agentType}
+      {agentType === 'sub_agent' ? 'sub-agent' : agentType}
     </span>
   );
 }
@@ -85,7 +92,9 @@ function MonitorSessionRow({ session, taskId, onStopped }: { session: MonitorSes
           <div className="text-xs text-gray-500 mt-0.5">
             {isNative
               ? (session.checks_done > 0 ? `${session.checks_done} updates` : null)
-              : `${session.checks_done}/${session.max_checks} checks`}
+              : session.agent_type === 'sub_agent'
+                ? (session.checks_done > 0 ? `${session.checks_done} progress updates` : 'running...')
+                : `${session.checks_done}/${session.max_checks} checks`}
             {session.last_summary && (
               <span className="ml-2 text-gray-400">— {session.last_summary}</span>
             )}

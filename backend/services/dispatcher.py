@@ -75,6 +75,9 @@ class QueuedMessage:
     command_skills: dict | None = field(compare=False, default=None)
     # One-shot model override for this message only (not persisted to task)
     model_override: str | None = field(compare=False, default=None)
+    # Source monitor/sub-agent session ID for dedup (frontend uses this to
+    # render [Monitor] / [Sub-Agent] badges on injected user_message bubbles)
+    monitor_session_id: int | None = field(compare=False, default=None)
 
 
 def _binary_available(binary: str) -> bool:
@@ -251,6 +254,11 @@ class GlobalDispatcher:
         self._monitor_tasks: dict[int, asyncio.Task] = {}           # monitor_session_id -> asyncio task
         self._monitor_processes: dict[int, asyncio.subprocess.Process] = {}  # monitor_session_id -> subprocess
         self._monitor_log_fhs: dict[int, object] = {}  # monitor_session_id -> log file handle
+
+        # Sub-agent (one-shot tasks) lifecycle — parallel to monitor
+        self._sub_agent_tasks: dict[int, asyncio.Task] = {}      # session_id -> asyncio task
+        self._sub_agent_processes: dict[int, asyncio.subprocess.Process] = {}
+        self._sub_agent_log_fhs: dict[int, object] = {}
 
         # Per-task message queue for serialized chat/monitor messages
         self._task_queues: dict[int, asyncio.PriorityQueue] = {}
@@ -2435,6 +2443,214 @@ class GlobalDispatcher:
         return "\n".join(parts)
 
     # -----------------------------------------------------------------------
+    # Sub-Agent Session lifecycle (one-shot tasks)
+    # -----------------------------------------------------------------------
+
+    def start_sub_agent_session(self, session):
+        task = asyncio.create_task(
+            self._sub_agent_session_lifecycle(session.id)
+        )
+        self._sub_agent_tasks[session.id] = task
+
+    async def _sub_agent_session_lifecycle(self, session_id: int):
+        """Run a one-shot sub-agent subprocess.
+
+        Simpler than monitor: no interval loop, just launch → wait → handle exit.
+        """
+        from backend.models.sub_agent import SubAgentSession
+        from backend.services.mcp_config import (
+            generate_sub_agent_mcp_config,
+            cleanup_sub_agent_mcp_config,
+        )
+
+        task_id: int | None = None
+        SUB_AGENT_TIMEOUT = 7200  # 2 hours
+
+        try:
+            async with self.db_factory() as db:
+                sa = await db.get(SubAgentSession, session_id)
+                if not sa:
+                    return
+                task = await db.get(Task, sa.task_id)
+                if not task:
+                    return
+                task_id = sa.task_id
+                sa_description = sa.description
+                sa_context = sa.monitor_context
+                sa_prompt_text = sa.last_summary  # stored prompt
+                model = sa.model
+                task_cwd = task.last_cwd or task.target_repo or os.getcwd()
+
+            prompt = self._build_sub_agent_prompt(
+                description=sa_prompt_text or sa_description,
+                context=sa_context,
+            )
+
+            mcp_config_path = generate_sub_agent_mcp_config(
+                session_id=session_id,
+                task_id=task_id,
+            )
+
+            proc = await self._launch_sub_agent(
+                prompt=prompt,
+                cwd=task_cwd,
+                model=model,
+                session_id=session_id,
+                mcp_config_path=mcp_config_path,
+            )
+
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=SUB_AGENT_TIMEOUT)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"Sub-agent session {session_id} timed out after {SUB_AGENT_TIMEOUT}s, killing"
+                )
+                proc.kill()
+                await proc.wait()
+
+            # If session still running after exit, sub-agent didn't call submit_result
+            async with self.db_factory() as db:
+                sa = await db.get(SubAgentSession, session_id)
+                if sa and sa.status == "running":
+                    sa.status = "failed"
+                    sa.completed_at = datetime.utcnow()
+                    sa.last_summary = f"进程退出 (rc={proc.returncode}) 未提交结果"
+                    await db.commit()
+                    await self.broadcaster.broadcast(
+                        f"task:{task_id}",
+                        {
+                            "event": "sub_agent_session_status",
+                            "sub_agent_session_id": session_id,
+                            "status": "failed",
+                        },
+                    )
+                    # Notify main agent of failure
+                    await self.enqueue_message(
+                        task_id=task_id,
+                        prompt=f"[Sub-Agent: {sa_description}] 执行失败: 进程退出 (exit_code={proc.returncode})",
+                        priority=PRIORITY_MONITOR_COMPLETE,
+                        source="sub-agent:result",
+                        user_message_text=f"[Sub-Agent: {sa_description}] 执行失败 (exit_code={proc.returncode})",
+                        monitor_session_id=session_id,
+                    )
+                    logger.warning(
+                        f"Sub-agent session {session_id} process exited "
+                        f"(rc={proc.returncode}) without submitting result, marked failed"
+                    )
+
+        except asyncio.CancelledError:
+            proc = self._sub_agent_processes.get(session_id)
+            if proc and proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+        except Exception:
+            logger.exception(f"Sub-agent session {session_id} failed unexpectedly")
+            try:
+                async with self.db_factory() as db:
+                    sa = await db.get(SubAgentSession, session_id)
+                    if sa and sa.status == "running":
+                        sa.status = "failed"
+                        sa.completed_at = datetime.utcnow()
+                        await db.commit()
+                        await self.broadcaster.broadcast(
+                            f"task:{sa.task_id}",
+                            {"event": "sub_agent_session_status", "sub_agent_session_id": sa.id, "status": "failed"},
+                        )
+            except Exception:
+                pass
+        finally:
+            cleanup_sub_agent_mcp_config(session_id)
+            log_fh = self._sub_agent_log_fhs.pop(session_id, None)
+            if log_fh:
+                try:
+                    log_fh.close()
+                except Exception:
+                    pass
+            self._sub_agent_tasks.pop(session_id, None)
+            self._sub_agent_processes.pop(session_id, None)
+
+    async def _launch_sub_agent(
+        self,
+        prompt: str,
+        cwd: str,
+        model: str | None,
+        session_id: int,
+        mcp_config_path: Path,
+    ) -> asyncio.subprocess.Process:
+        """Launch a Claude subprocess for a one-shot sub-agent task."""
+        cmd = [
+            settings.claude_binary,
+            "-p", prompt,
+            "--output-format", "stream-json",
+            "--verbose",
+            "--dangerously-skip-permissions",
+            "--disallowedTools", "Agent,Task,Monitor",
+            "--mcp-config", str(mcp_config_path),
+        ]
+        if model:
+            cmd.extend(["--model", model])
+        elif settings.default_model:
+            cmd.extend(["--model", settings.default_model])
+
+        env = {k: v for k, v in os.environ.items()
+               if k.upper() not in ("CLAUDECODE", "CLAUDE_CODE")}
+
+        if self.pool:
+            config_dir = await self._pool_select()
+            if config_dir:
+                env["CLAUDE_CONFIG_DIR"] = config_dir
+
+        log_path = Path(f"/tmp/ccm_sub_agent_{session_id}.log")
+        log_fh = open(log_path, "wb")
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=log_fh,
+                stderr=log_fh,
+                cwd=cwd,
+                env=env,
+                start_new_session=True,
+            )
+        except Exception:
+            log_fh.close()
+            raise
+        self._sub_agent_log_fhs[session_id] = log_fh
+        self._sub_agent_processes[session_id] = process
+        logger.info(
+            f"Sub-agent launched: session={session_id} pid={process.pid} log={log_path}"
+        )
+        return process
+
+    def _build_sub_agent_prompt(self, description: str, context: str | None) -> str:
+        """Build the system prompt for a one-shot sub-agent."""
+        parts = [
+            "你是一个自主执行任务的 Sub-Agent。完成任务后用 submit_result 提交结果。",
+            "",
+            "## 任务",
+            description,
+        ]
+        if context:
+            parts.append("")
+            parts.append("## 上下文")
+            parts.append(context)
+        parts.append("")
+        parts.append("""\
+## 你的 MCP 工具
+- report_progress(summary): 报告当前进度，让主 session 实时看到
+- submit_result(result, success): 提交最终结果并结束。result 用 Markdown 格式
+- get_context(): 获取任务上下文（项目信息、task 描述等）
+
+## 行为准则
+1. 先用 get_context() 了解项目背景
+2. 执行过程中定期用 report_progress() 汇报进度
+3. 完成后用 submit_result() 提交最终结果，然后停止所有活动
+4. 如果任务失败，调用 submit_result(result="失败原因", success=False)
+5. 【禁止】不要使用内置的 Agent 工具
+6. 【禁止】不要使用 Monitor 工具
+7. 【关键】必须在合理时间内完成任务并调用 submit_result""")
+        return "\n".join(parts)
+
+    # -----------------------------------------------------------------------
     # Per-task message queue (chat + monitor reports)
     # -----------------------------------------------------------------------
 
@@ -2468,6 +2684,7 @@ class GlobalDispatcher:
         user_message_text: str | None = None,
         command_skills: dict | None = None,
         model_override: str | None = None,
+        monitor_session_id: int | None = None,
     ):
         """Enqueue a message for the main agent of a task.
 
@@ -2482,6 +2699,7 @@ class GlobalDispatcher:
             user_message_text=user_message_text,
             command_skills=command_skills,
             model_override=model_override,
+            monitor_session_id=monitor_session_id,
         )
         await q.put(msg)
         self._ensure_queue_worker(task_id)
@@ -2743,27 +2961,34 @@ class GlobalDispatcher:
             )
             inst_id = inst.id
 
-            # Write a log entry for monitor-sourced messages so frontend can track source
-            if msg.source and msg.source.startswith("monitor:"):
+            # Write a log entry for monitor/sub-agent sourced messages so frontend can track source
+            if msg.source and (msg.source.startswith("monitor:") or msg.source.startswith("sub-agent:")):
                 import json as _json
+                src_label = "monitor" if msg.source.startswith("monitor:") else "sub-agent"
+                log_raw: dict = {"source": src_label}
+                if msg.monitor_session_id:
+                    log_raw["monitor_session_id"] = msg.monitor_session_id
                 monitor_log = LogEntry(
                     instance_id=inst.id,
                     task_id=task_id,
                     event_type="user_message",
                     role="user",
                     content=msg.user_message_text or msg.prompt,
-                    raw_json=_json.dumps({"source": "monitor"}),
+                    raw_json=_json.dumps(log_raw),
                     is_error=False,
                 )
                 db.add(monitor_log)
                 await db.flush()
 
-                await self.broadcaster.broadcast(f"task:{task_id}", {
+                broadcast_data: dict = {
                     "event_type": "user_message",
                     "role": "user",
                     "content": msg.user_message_text or msg.prompt,
-                    "source": "monitor",
-                })
+                    "source": src_label,
+                }
+                if msg.monitor_session_id:
+                    broadcast_data["monitor_session_id"] = msg.monitor_session_id
+                await self.broadcaster.broadcast(f"task:{task_id}", broadcast_data)
 
             task.status = "executing"
             task.completed_at = None

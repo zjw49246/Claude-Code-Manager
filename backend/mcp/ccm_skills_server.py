@@ -409,6 +409,109 @@ async def stop_monitor(monitor_id: int) -> str:
         return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
 
 
+@mcp.tool()
+async def create_sub_agent(
+    task_description: str,
+    context: str = "",
+    readonly: bool = False,
+    model: str | None = None,
+) -> str:
+    """创建一个 Sub-Agent 执行一次性任务。Sub-Agent 是独立的 Claude 子进程，
+    会自主完成任务并将结果返回给你。你可以继续工作，稍后用 check_sub_agents 查看进度。
+
+    Args:
+        task_description: 任务描述（如"审查 src/ 下所有文件的 SQL 注入风险"）
+        context: 额外上下文（可选，附加到 prompt 前）
+        readonly: 是否只读模式（默认 False，只读时禁止编辑文件）
+        model: 使用的模型（可选，默认跟随 task 配置）
+    """
+    try:
+        # Use task_description as name (truncated) and full prompt
+        name = task_description[:60].strip()
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                _api_url("/sub-agent-sessions"),
+                headers=_headers(),
+                json={
+                    "name": name,
+                    "prompt": task_description,
+                    "context": context,
+                    "model": model,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return json.dumps({
+                "success": True,
+                "sub_agent_id": data["id"],
+                "status": "created",
+                "message": f"Sub-Agent '{name}' (#{data['id']}) 已创建，正在执行任务。用 check_sub_agents() 查看进度。",
+            }, ensure_ascii=False)
+    except httpx.HTTPStatusError as e:
+        detail = ""
+        try:
+            detail = e.response.json().get("detail", "")
+        except Exception:
+            detail = e.response.text
+        return json.dumps({"success": False, "error": detail or str(e)}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+
+
+@mcp.tool()
+async def check_sub_agents() -> str:
+    """查看当前所有 Sub-Agent 的状态、进度和结果。
+
+    返回每个 Sub-Agent 的: id, 名称, 状态, 最新进度, 最终结果。
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                _api_url("/sub-agent-sessions"),
+                headers=_headers(),
+                params={"agent_type": "sub_agent"},
+            )
+            resp.raise_for_status()
+            sessions = resp.json()
+            if not sessions:
+                return json.dumps({"success": True, "sub_agents": [], "message": "当前没有 Sub-Agent。"}, ensure_ascii=False)
+            summary = []
+            for s in sessions:
+                summary.append({
+                    "sub_agent_id": s["id"],
+                    "name": s["description"],
+                    "status": s["status"],
+                    "progress_count": s["checks_done"],
+                    "last_progress": s.get("last_summary"),
+                })
+            return json.dumps({"success": True, "sub_agents": summary}, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+
+
+@mcp.tool()
+async def stop_sub_agent(sub_agent_id: int) -> str:
+    """停止一个正在运行的 Sub-Agent。
+
+    Args:
+        sub_agent_id: 要停止的 Sub-Agent ID（从 create_sub_agent 或 check_sub_agents 获取）
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.delete(
+                _api_url(f"/sub-agent-sessions/{sub_agent_id}"),
+                headers=_headers(),
+            )
+            resp.raise_for_status()
+            return json.dumps({
+                "success": True,
+                "status": "stopped",
+                "message": f"Sub-Agent #{sub_agent_id} 已停止。",
+            }, ensure_ascii=False)
+    except Exception as e:
+        return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="CCM Skills MCP Server")
     parser.add_argument("--task-id", type=int, required=True)
