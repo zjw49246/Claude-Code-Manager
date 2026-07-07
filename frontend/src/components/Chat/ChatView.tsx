@@ -33,6 +33,28 @@ type MessageGroup =
   | { type: 'tool-group'; messages: ChatMessage[] }
   | { type: 'single'; message: ChatMessage };
 
+/** Deduplicate consecutive system events with the same event_type AND content.
+ *  In -p mode, retries cause duplicate "Session started" / task_started /
+ *  task_notification entries. This keeps the first of each run. */
+function deduplicateSystemEvents(messages: ChatMessage[]): ChatMessage[] {
+  const systemDedup = new Set(['system_init', 'system_event']);
+  const result: ChatMessage[] = [];
+  for (const msg of messages) {
+    if (systemDedup.has(msg.event_type)) {
+      const prev = result[result.length - 1];
+      if (
+        prev &&
+        prev.event_type === msg.event_type &&
+        prev.content === msg.content
+      ) {
+        continue; // skip duplicate
+      }
+    }
+    result.push(msg);
+  }
+  return result;
+}
+
 function groupMessages(messages: ChatMessage[]): MessageGroup[] {
   const groups: MessageGroup[] = [];
   let toolBuf: ChatMessage[] = [];
@@ -667,7 +689,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
     [monitorSessions]
   );
 
-  const grouped = useMemo(() => groupMessages(messages), [messages]);
+  const grouped = useMemo(() => groupMessages(deduplicateSystemEvents(messages)), [messages]);
 
   // Reset scroll flag when switching tasks
   const hasScrolledRef = useRef(false);
