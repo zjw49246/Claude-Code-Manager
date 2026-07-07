@@ -49,7 +49,8 @@ class StreamParser:
         elif event_type == "system":
             subtype = data.get("subtype", "system")
             # Skip noisy telemetry subtypes that flood the chat UI
-            _SKIP_SUBTYPES = {"thinking_tokens", "token_usage", "api_request", "api_response"}
+            _SKIP_SUBTYPES = {"thinking_tokens", "token_usage", "api_request", "api_response",
+                              "task_started", "task_notification"}
             if subtype in _SKIP_SUBTYPES:
                 return []
             event = _base_event()
