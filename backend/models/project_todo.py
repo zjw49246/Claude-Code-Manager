@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.database import Base
@@ -15,6 +15,12 @@ def _utcnow() -> datetime:
 
 class ProjectTodo(Base):
     __tablename__ = "project_todos"
+    # Composite index backing the per-project list query
+    # (WHERE project_id [AND status != 'archived'] ORDER BY sort_order). Declared
+    # here so the model matches the migration and autogenerate stays clean.
+    __table_args__ = (
+        Index("ix_project_todos_project_status_sort", "project_id", "status", "sort_order"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     project_id: Mapped[int] = mapped_column(

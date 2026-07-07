@@ -27,8 +27,8 @@ def upgrade() -> None:
         sa.Column("sort_order", sa.Integer(), nullable=False, server_default="0"),
         # Soft provenance link to the spawned task (no FK; SQLite FKs are off).
         sa.Column("created_task_id", sa.Integer(), nullable=True),
-        sa.Column("created_at", sa.DateTime(), nullable=True),
-        sa.Column("updated_at", sa.DateTime(), nullable=True),
+        sa.Column("created_at", sa.DateTime(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(), nullable=False),
     )
     op.create_index("ix_project_todos_project_id", "project_todos", ["project_id"])
     op.create_index(
