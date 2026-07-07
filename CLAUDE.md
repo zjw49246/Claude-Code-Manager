@@ -29,6 +29,7 @@ claude-manager/
 │   │   ├── chat.py              # 多轮对话 (基于 task, --resume)
 │   │   ├── instances.py         # 实例 CRUD + Ralph Loop 控制 + Dispatcher 端点
 │   │   ├── projects.py          # Project CRUD + git clone
+│   │   ├── project_todos.py     # 项目 Todo 清单 CRUD (prompt 模板 → 一键建 task)
 │   │   ├── monitor.py           # Monitor Session CRUD + 子 agent checks/complete endpoints
 │   │   ├── pool.py              # Claude 账号池 status/usage/reload/clear-cooldown
 │   │   ├── pr_monitor.py       # PR Monitor CRUD + GitHub webhook endpoint
@@ -43,6 +44,7 @@ claude-manager/
 │   │   ├── task.py              # Task (含 session_id, last_cwd, project_id, enabled_skills)
 │   │   ├── instance.py          # Claude Code 实例
 │   │   ├── project.py           # Project (name, git_url, local_path)
+│   │   ├── project_todo.py      # ProjectTodo (per-project prompt 模板/清单, status open/done/archived, created_task_id 溯源)
 │   │   ├── sub_agent.py         # SubAgentSession + SubAgentReport (通用子 agent 表, agent_type 分类)
 │   │   ├── monitor_session.py   # 兼容 shim: MonitorSession/MonitorCheck = sub_agent 别名
 │   │   ├── pr_monitor.py       # MonitoredRepo + PRReview (PR 自动审核)
@@ -136,6 +138,7 @@ claude-manager/
 - **任务生命周期**: pending → in_progress → executing → completed（失败回 pending 重试）
 - **项目**: `Project` 模型管理 git repo，支持 clone 已有仓库（has_remote=True）和本地 git init（has_remote=False）
 - **Task.project_id**: 可选关联 Project，dispatcher 自动解析为 target_repo
+- **Project Todo（清单）**: 每个 Project 挂一个 prompt 模板清单（`project_todos` 表）。前端 `ProjectTodoList`（Project 卡片内可折叠）「▶ Run」以 `{title, description=prompt, project_id}` 建 task（默认配置，target_repo 由 dispatcher 从 project 补全）→ 跳 chat，并把 todo 标 `done` + 记 `created_task_id`（溯源）。状态 open/done/archived（软归档，DELETE 才是永久删除）。清单语义：建 task 即划掉；非模板库，故只存 prompt 不存 task 配置
 
 ## 任务生命周期（9 步）
 
