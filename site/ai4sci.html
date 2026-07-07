@@ -1,0 +1,1955 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>AI4Sci · Apex Research · AI4Sci-Bench · AgenticFigure · CCM</title>
+<style>
+  :root{
+    --bg:#eef1f8; --surface:#ffffff; --surface2:#f6f8fd;
+    --ink:#101a33; --muted:#5c6680; --line:#e1e6f0;
+    --a:#2f6bff; --b:#10a37f; --c:#d98309; --d:#7b4dff; --r:#e5484d;
+    --a-soft:#bcd0ff;
+    --grad:linear-gradient(120deg,#2f6bff,#10a37f);
+    --grad2:linear-gradient(120deg,#7b4dff,#2f6bff);
+    --sh:0 1px 2px rgba(16,26,51,.04), 0 8px 22px rgba(16,26,51,.06);
+    --sh2:0 14px 44px rgba(16,26,51,.12);
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth;scroll-snap-type:y proximity}
+  body{margin:0;background:
+      radial-gradient(1100px 700px at 88% -8%,#e7edff 0%,transparent 55%),
+      radial-gradient(900px 600px at -5% 12%,#eafaf3 0%,transparent 45%),
+      var(--bg);
+    color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    line-height:1.6;-webkit-font-smoothing:antialiased}
+  a{color:var(--a);text-decoration:none}
+  .wrap{width:100%;max-width:1180px;margin:0 auto;padding:0 32px}
+
+  /* full-screen slides */
+  section{min-height:100vh;scroll-snap-align:start;display:flex;flex-direction:column;
+    justify-content:center;padding:74px 0 96px;position:relative;border-bottom:1px solid var(--line)}
+
+  .eyebrow{display:inline-block;font-size:12px;letter-spacing:3px;text-transform:uppercase;
+    color:var(--a);font-weight:700;margin-bottom:14px}
+  .wordmark{font-size:13px;letter-spacing:6px;font-weight:800;color:var(--a);margin-bottom:26px}
+  h1{font-size:54px;line-height:1.08;margin:.1em 0 .3em;font-weight:850;letter-spacing:-1px}
+  h2{font-size:34px;margin:.1em 0 .5em;font-weight:800;letter-spacing:-.5px}
+  h3{font-size:20px;margin:.2em 0 .4em;font-weight:750}
+  p.lead{font-size:19px;color:var(--muted);max-width:760px}
+  .gradtext{background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .gradtext2{background:var(--grad2);-webkit-background-clip:text;background-clip:text;color:transparent}
+
+  /* deep bands for depth */
+  .band{background:linear-gradient(160deg,#0b1430 0%,#15234e 58%,#0b1430 100%);
+    color:#eaf0ff;position:relative;overflow:hidden}
+  .band:before{content:"";position:absolute;inset:0;pointer-events:none;
+    background:radial-gradient(820px 520px at 85% -12%,rgba(60,120,255,.32),transparent 60%),
+               radial-gradient(620px 420px at 6% 120%,rgba(16,163,127,.20),transparent 60%)}
+  .band .wrap{position:relative;z-index:1}
+  .band .eyebrow,.band .wordmark{color:#86b2ff}
+  .band h1,.band h2,.band h3{color:#fff}
+  .band p.lead{color:#b3bedd}
+  .band .tiny{color:#8d98ba}
+  .band .stat{background:rgba(255,255,255,.055);border:1px solid rgba(255,255,255,.13);
+    backdrop-filter:blur(4px);box-shadow:none}
+  .band .stat .l{color:#c7d0ea}
+  .band .stat .s{color:#909bbd}
+
+  .grid{display:grid;gap:18px}
+  .g2{grid-template-columns:repeat(2,1fr)}
+  .g3{grid-template-columns:repeat(3,1fr)}
+  .g4{grid-template-columns:repeat(4,1fr)}
+  @media(max-width:900px){.g2,.g3,.g4{grid-template-columns:1fr}}
+
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:16px;padding:22px;box-shadow:var(--sh)}
+  .card.tight{padding:18px}
+  .card h3{margin-top:0}
+  .card .role{font-size:12px;letter-spacing:2px;text-transform:uppercase;color:var(--muted)}
+  .pill{display:inline-block;font-size:12px;padding:3px 10px;border-radius:999px;
+    border:1px solid var(--line);color:var(--muted);background:var(--surface2);margin:0 6px 6px 0}
+  .pill.a{color:var(--a);border-color:#bcd0ff;background:#eef4ff}
+  .pill.b{color:var(--b);border-color:#a8e6d3;background:#e9faf4}
+  .pill.c{color:var(--c);border-color:#f0d49a;background:#fcf4e3}
+  .pill.d{color:var(--d);border-color:#d2bdff;background:#f3eeff}
+
+  .stat{background:linear-gradient(180deg,#ffffff,var(--surface2));border:1px solid var(--line);
+    border-radius:16px;padding:22px;text-align:center;box-shadow:var(--sh)}
+  .stat .n{font-size:46px;font-weight:850;letter-spacing:-1px;line-height:1}
+  .stat .l{color:var(--muted);font-size:13px;margin-top:8px}
+  .stat .s{color:#8893ab;font-size:11px;margin-top:4px}
+
+  .muted{color:var(--muted)}
+  .small{font-size:13px}
+  .tiny{font-size:11.5px;color:var(--muted)}
+  ul.clean{list-style:none;padding:0;margin:.4em 0}
+  ul.clean li{padding:6px 0 6px 22px;position:relative;color:var(--muted)}
+  ul.clean li:before{content:"▸";position:absolute;left:0;color:var(--a)}
+  ul.clean li b{color:var(--ink)}
+
+  /* flow diagram */
+  .flow{display:flex;align-items:stretch;gap:0;flex-wrap:wrap}
+  .stage{flex:1;min-width:200px;background:var(--surface);border:1px solid var(--line);
+    border-radius:16px;padding:18px;position:relative;margin:8px;box-shadow:var(--sh)}
+  .stage .tag{font-size:11px;letter-spacing:2px;text-transform:uppercase;color:var(--a);font-weight:700}
+  .stage h3{margin:.3em 0}
+  .arrow{display:flex;align-items:center;justify-content:center;color:#9aa6c2;font-size:26px;padding:0 2px}
+
+  /* iterate-by-review loop */
+  .loopwrap{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:8px}
+  .loopstage{background:var(--surface);border:1px solid var(--line);border-radius:16px;
+    padding:20px 18px;text-align:center;box-shadow:var(--sh);min-width:118px}
+  .loopstage .tag{font-size:11px;letter-spacing:2px;text-transform:uppercase;color:var(--a);font-weight:700}
+  .loopstage h3{margin:.3em 0 0}
+  .loopcore{flex:1;min-width:330px;border:2px dashed var(--a-soft);border-radius:20px;
+    padding:30px 16px 20px;position:relative;background:linear-gradient(180deg,#ffffff,#eef4ff);box-shadow:var(--sh)}
+  .loopbadge{position:absolute;top:-14px;left:50%;transform:translateX(-50%);
+    background:var(--grad);color:#fff;font-size:12.5px;font-weight:750;padding:6px 16px;
+    border-radius:999px;white-space:nowrap;box-shadow:0 6px 16px rgba(47,107,255,.35)}
+  .loopnodes{display:flex;align-items:center;justify-content:center;gap:8px;flex-wrap:wrap}
+  .lnode{background:#fff;border:1px solid var(--line);border-radius:13px;padding:12px 16px;
+    font-weight:750;box-shadow:var(--sh);text-align:center;min-width:96px}
+  .lnode small{display:block;font-weight:500;color:var(--muted);font-size:11px;margin-top:3px}
+  .lnode.r{border-color:#f1c2c6;background:#fff6f6}
+  .lnode.e{border-color:#a8e6d3;background:#f3fcf8}
+  .lnode.p{border-color:#d2bdff;background:#f8f5ff}
+  .cyc{color:var(--a);font-size:24px;font-weight:800;line-height:1}
+  .loopfeed{text-align:center;margin-top:14px;color:var(--muted);font-size:12.5px}
+  .loopfeed b{color:var(--ink)}
+
+  /* triangle */
+  .tri{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+  @media(max-width:900px){.tri{grid-template-columns:1fr}}
+  .agentcard{border-radius:16px;padding:20px;border:1px solid var(--line);background:var(--surface);box-shadow:var(--sh)}
+  .agentcard.dir{border-top:4px solid var(--a)}
+  .agentcard.exe{border-top:4px solid var(--b)}
+  .agentcard.rev{border-top:4px solid var(--r)}
+  .agentcard .ic{width:40px;height:40px;border-radius:11px;display:flex;align-items:center;
+    justify-content:center;font-size:19px;font-weight:850;color:#fff;letter-spacing:0}
+  .agentcard.dir .ic{background:var(--a)}
+  .agentcard.exe .ic{background:var(--b)}
+  .agentcard.rev .ic{background:var(--r)}
+  .vs{display:flex;align-items:center;justify-content:center;gap:10px;color:var(--muted);
+    font-size:13px;margin:14px 0;letter-spacing:1px}
+  .vs span{height:1px;background:var(--line);flex:1}
+
+  /* bar chart (fixed) */
+  .chart{display:flex;align-items:flex-end;gap:18px;height:260px;margin-top:10px}
+  .col2{flex:1;height:100%;display:flex;flex-direction:column;align-items:center}
+  .col2 .track{flex:1;width:100%;display:flex;flex-direction:column;justify-content:flex-end;align-items:center}
+  .col2 .v{font-weight:850;font-size:17px;margin-bottom:8px}
+  .col2 .bar2{width:78%;border-radius:11px 11px 0 0;background:var(--grad);
+    box-shadow:0 8px 18px rgba(47,107,255,.20);transition:height .6s ease}
+  .col2 .bar2.green{background:linear-gradient(180deg,#10a37f,#0b7a5f);box-shadow:0 8px 18px rgba(16,163,127,.22)}
+  .col2 .lab{font-size:12.5px;color:var(--muted);text-align:center;margin-top:10px;min-height:30px}
+
+  table{width:100%;border-collapse:collapse;font-size:14px;margin-top:10px}
+  th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line)}
+  th{color:var(--muted);font-weight:600;font-size:12px;letter-spacing:.5px;text-transform:uppercase}
+  td b{color:var(--ink)}
+  .sc35{color:var(--b)} .schi{color:var(--a)}
+
+  .callout{border-left:4px solid var(--a);background:#eef4ff;border-radius:0 12px 12px 0;
+    padding:14px 18px;margin:14px 0;color:#3e485f}
+  .callout b{color:var(--ink)}
+  .callout.b{border-color:var(--b);background:#e9faf4}
+  .callout.c{border-color:var(--c);background:#fcf4e3}
+
+  .kv{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px dashed var(--line);font-size:14px}
+  .kv:last-child{border-bottom:0}
+  .kv b{color:var(--ink)}
+
+  .footnote{font-size:11.5px;color:#8893ab;margin-top:10px}
+  code{background:#eef2fb;border:1px solid var(--line);border-radius:6px;padding:1px 6px;font-size:12.5px;color:#33406b}
+
+  .ribbon{display:inline-flex;gap:8px;align-items:center;font-size:12px;color:var(--b);
+    border:1px solid #a8e6d3;background:#e9faf4;border-radius:999px;padding:5px 12px}
+  .hidden-note{font-size:11px;color:#9aa3b8}
+
+  .aws{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:900px){.aws{grid-template-columns:1fr}}
+  .layer{border:1px solid var(--line);border-radius:14px;padding:16px;background:var(--surface2)}
+  .layer h4{margin:0 0 8px;font-size:14px;letter-spacing:1px;text-transform:uppercase;color:var(--a)}
+  .svc{display:inline-block;font-size:12px;padding:5px 10px;border-radius:8px;background:#eef2fb;
+    border:1px solid var(--line);margin:4px 4px 0 0;color:#46506a}
+
+  .cta{background:linear-gradient(160deg,#0b1430 0%,#15234e 60%,#0b1430 100%);color:#fff;
+    border-radius:22px;padding:44px 30px;text-align:center;position:relative;overflow:hidden;box-shadow:var(--sh2)}
+  .cta:before{content:"";position:absolute;inset:0;
+    background:radial-gradient(700px 380px at 80% -20%,rgba(60,120,255,.4),transparent 60%)}
+  .cta>*{position:relative;z-index:1}
+  .cta h2{color:#fff;margin:.2em 0}
+  .cta .muted{color:#b3bedd}
+  .thanks{margin-top:22px;font-size:15px;color:#9aa6c8;letter-spacing:3px}
+
+  /* down / up nav button */
+  .nav-dot{position:absolute;bottom:26px;left:50%;transform:translateX(-50%);z-index:5;
+    width:46px;height:46px;border-radius:50%;background:#fff;border:1px solid var(--line);
+    box-shadow:var(--sh2);display:flex;align-items:center;justify-content:center;
+    color:var(--a);font-size:22px;line-height:1;animation:bob 1.8s ease-in-out infinite;cursor:pointer}
+  .nav-dot:hover{color:#fff;background:var(--a);border-color:var(--a)}
+  @keyframes bob{0%,100%{transform:translateX(-50%) translateY(0)}50%{transform:translateX(-50%) translateY(6px)}}
+  .pagetag{position:absolute;top:24px;right:32px;font-size:12px;letter-spacing:1px;color:#9aa3b8;z-index:5}
+  .band .pagetag{color:#7d88aa}
+
+  .afnum{display:inline-flex;width:34px;height:34px;border-radius:9px;align-items:center;justify-content:center;color:#fff;font-weight:800;font-size:14px;background:var(--grad);flex:none}
+  .pill.bad{color:var(--r);border-color:#f1c2c6;background:#fff1f1}
+  .cmpgrid{display:grid;grid-template-columns:repeat(2,1fr);gap:18px;margin-top:18px}
+  @media(max-width:900px){.cmpgrid{grid-template-columns:1fr}}
+  .cmpcard{background:var(--surface);border:1px solid var(--line);border-radius:16px;overflow:hidden;box-shadow:var(--sh);transition:.2s}
+  .cmpcard:hover{box-shadow:var(--sh2);transform:translateY(-2px)}
+  .cmptitle{padding:12px 18px;font-size:13.5px;font-weight:700;background:var(--surface2);border-bottom:1px solid var(--line);text-align:center}
+  .cmppair{display:grid;grid-template-columns:1fr 1fr;min-height:190px}
+  .cmpside{display:flex;flex-direction:column;border-left:1px solid var(--line)}
+  .cmpside:first-child{border-left:0}
+  .cmplabel{padding:7px 10px;font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase;text-align:center}
+  .cmpside.pb .cmplabel{background:#fcf4e3;color:var(--c)}
+  .cmpside.af .cmplabel{background:#eef4ff;color:var(--a)}
+  .cmpside .imglink{display:block;cursor:zoom-in;flex:1}
+  .cmpside img{width:100%;height:auto;display:block;padding:10px;object-fit:contain}
+  .zoom-backdrop{display:none;position:fixed;inset:0;z-index:9998;background:rgba(8,16,35,.55);backdrop-filter:blur(4px);cursor:pointer}
+  .zoom-backdrop.active{display:block}
+  .zoom-popup{display:none;position:fixed;z-index:9999;top:50%;left:50%;transform:translate(-50%,-50%);background:#fff;border-radius:14px;padding:12px;box-shadow:var(--sh2);max-width:82vw;max-height:86vh}
+  .zoom-popup.active{display:block}
+  .zoom-popup img{display:block;max-width:100%;max-height:calc(86vh - 50px);border-radius:8px;object-fit:contain}
+  .zoom-label{text-align:center;font-size:13px;font-weight:600;color:var(--muted);padding-top:8px}
+
+.benchwrap{
+  --bg: #ffffff;
+  --bg2: #f8f9fa;
+  --bg3: #f1f3f5;
+  --card: #ffffff;
+  --border: #e2e5e9;
+  --border2: #d0d5db;
+  --text: #1a1a2e;
+  --text2: #4a5568;
+  --text3: #718096;
+  --accent: #2563eb;
+  --accent2: #7c3aed;
+  --green: #059669;
+  --orange: #d97706;
+  --red: #dc2626;
+  --cyan: #0891b2;
+}
+.benchwrap *{ margin: 0; padding: 0; box-sizing: border-box; }
+.benchwrap{ scroll-behavior: smooth; scroll-snap-type: y mandatory; }
+.benchwrap{ background: var(--bg); color: var(--text); font-family: 'Inter', 'Noto Sans SC', sans-serif; }
+.benchwrap .slide{
+  width: 100vw;
+  min-height: 100vh;
+  scroll-snap-align: start;
+  padding: 48px 80px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  position: relative;
+  border-bottom: 1px solid var(--border);
+}
+.benchwrap .slide.compact{ padding: 36px 80px; }
+.benchwrap .slide-num{
+  position: absolute;
+  bottom: 16px;
+  right: 32px;
+  font-size: 12px;
+  color: var(--text3);
+  font-family: 'JetBrains Mono', monospace;
+}
+.benchwrap .nav{ position: fixed; right: 20px; top: 50%; transform: translateY(-50%); z-index: 100; display: flex; flex-direction: column; gap: 8px; }
+.benchwrap .nav a{ width: 8px; height: 8px; border-radius: 50%; background: #ccc; display: block; transition: all 0.3s; }
+.benchwrap .nav a:hover, .benchwrap .nav a.active{ background: var(--accent); transform: scale(1.5); }
+.benchwrap h1.title{
+  font-size: 52px; font-weight: 900; color: var(--text); letter-spacing: -1.5px; line-height: 1.15; margin-bottom: 12px;
+}
+.benchwrap h1.title em{ font-style: normal; color: var(--accent); }
+.benchwrap h2.stitle{
+  font-size: 28px; font-weight: 800; color: var(--text); margin-bottom: 6px; letter-spacing: -0.5px;
+}
+.benchwrap h2.stitle em{ font-style: normal; color: var(--accent); }
+.benchwrap h3.sub{ font-size: 18px; font-weight: 600; color: var(--text); margin: 24px 0 10px; }
+.benchwrap .desc{ font-size: 15px; color: var(--text2); line-height: 1.7; margin-bottom: 20px; max-width: 960px; }
+.benchwrap .desc strong{ color: var(--text); }
+.benchwrap .small-note{ font-size: 12px; color: var(--text3); margin-top: 8px; line-height: 1.6; }
+.benchwrap .hero-stats{
+  display: flex; gap: 56px; margin-top: 40px;
+}
+.benchwrap .hero-stat .num{
+  font-size: 64px; font-weight: 900; font-family: 'JetBrains Mono', monospace; line-height: 1;
+}
+.benchwrap .hero-stat .label{ font-size: 14px; color: var(--text2); margin-top: 4px; font-weight: 500; }
+.benchwrap table.data{
+  width: 100%; border-collapse: collapse; font-size: 13px; margin: 8px 0 12px;
+}
+.benchwrap table.data thead th{
+  background: var(--bg2); font-weight: 600; text-align: center; padding: 8px 10px;
+  border: 1px solid var(--border); font-size: 12px; color: var(--text2); text-transform: uppercase; letter-spacing: 0.5px;
+}
+.benchwrap table.data thead th:first-child{ text-align: left; }
+.benchwrap table.data tbody td{
+  padding: 6px 10px; border: 1px solid var(--border); text-align: center;
+}
+.benchwrap table.data tbody td:first-child{ text-align: left; font-weight: 500; }
+.benchwrap table.data tfoot td{
+  padding: 8px 10px; border: 1px solid var(--border2); text-align: center;
+  font-weight: 700; background: var(--bg2);
+}
+.benchwrap table.data tfoot td:first-child{ text-align: left; }
+.benchwrap .zero{ color: #ccc; }
+.benchwrap .high{ color: var(--green); font-weight: 700; }
+.benchwrap .blocked{ background: #fef3c7; color: #92400e; font-style: italic; font-size: 11px; }
+.benchwrap .best-row td{ background: #f0fdf4; }
+.benchwrap .lb{ width: 100%; border-collapse: separate; border-spacing: 0 4px; }
+.benchwrap .lb th{ font-size: 11px; font-weight: 600; color: var(--text3); text-transform: uppercase; letter-spacing: 0.8px; padding: 6px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+.benchwrap .lb th.r{ text-align: right; }
+.benchwrap .lb td{ padding: 10px 12px; font-size: 14px; background: var(--bg2); border: none; }
+.benchwrap .lb tr td:first-child{ border-radius: 6px 0 0 6px; }
+.benchwrap .lb tr td:last-child{ border-radius: 0 6px 6px 0; }
+.benchwrap .lb .rank{ font-family: 'JetBrains Mono', monospace; font-weight: 800; font-size: 16px; width: 36px; text-align: center; }
+.benchwrap .lb .rank.g{ color: #ca8a04; }
+.benchwrap .lb .rank.s{ color: #6b7280; }
+.benchwrap .lb .rank.b{ color: #b45309; }
+.benchwrap .lb .mname{ font-weight: 600; color: var(--text); }
+.benchwrap .lb .tag{ display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 3px; background: #e0e7ff; color: var(--accent); margin-left: 6px; font-weight: 500; }
+.benchwrap .lb .score{ font-family: 'JetBrains Mono', monospace; font-weight: 700; text-align: right; font-size: 15px; }
+.benchwrap .lb .score.top{ color: var(--green); }
+.benchwrap .bar-cell{ width: 180px; }
+.benchwrap .bar-bg{ width: 100%; height: 6px; background: #e5e7eb; border-radius: 3px; overflow: hidden; }
+.benchwrap .bar-fill{ height: 100%; border-radius: 3px; }
+.benchwrap .domains{ display: grid; grid-template-columns: repeat(5, 1fr); gap: 12px; margin: 12px 0; }
+.benchwrap .dcard{ border: 1px solid var(--border); border-radius: 8px; padding: 16px; background: var(--card); }
+.benchwrap .dcard .dname{ font-size: 15px; font-weight: 700; margin-bottom: 4px; }
+.benchwrap .dcard .dname span{ font-size: 12px; color: var(--text3); font-weight: 400; margin-left: 4px; }
+.benchwrap .dcard .dtasks{ font-size: 12px; color: var(--text2); line-height: 1.7; }
+.benchwrap .dcard .dcount{ font-size: 12px; font-weight: 600; color: var(--accent); margin-top: 8px; }
+.benchwrap .dcard-top{ height: 3px; border-radius: 8px 8px 0 0; margin: -16px -16px 12px; }
+.benchwrap .astro .dcard-top{ background: #818cf8; }
+.benchwrap .bio .dcard-top{ background: #34d399; }
+.benchwrap .chem .dcard-top{ background: #fb923c; }
+.benchwrap .math .dcard-top{ background: #38bdf8; }
+.benchwrap .phys .dcard-top{ background: #f472b6; }
+.benchwrap .arch-box{ display: inline-block; padding: 8px 16px; border-radius: 6px; font-size: 13px; font-weight: 600; text-align: center; margin: 4px; }
+.benchwrap .arch-row{ display: flex; align-items: center; gap: 12px; margin: 8px 0; flex-wrap: wrap; }
+.benchwrap .arch-label{ font-size: 11px; font-weight: 600; color: var(--text3); text-transform: uppercase; letter-spacing: 1px; width: 100px; flex-shrink: 0; }
+.benchwrap .arch-box.task{ background: #eff6ff; border: 1px solid #bfdbfe; color: #1e40af; }
+.benchwrap .arch-box.harness{ background: #f0fdf4; border: 1px solid #bbf7d0; color: #166534; }
+.benchwrap .arch-box.model{ background: #faf5ff; border: 1px solid #e9d5ff; color: #6b21a8; }
+.benchwrap .arch-box.infra{ background: #fff7ed; border: 1px solid #fed7aa; color: #9a3412; }
+.benchwrap .arch-arrow{ color: #9ca3af; font-size: 20px; }
+.benchwrap .insights{ display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin: 12px 0; }
+.benchwrap .icard{ border: 1px solid var(--border); border-radius: 8px; padding: 20px; background: var(--card); }
+.benchwrap .icard .inum{ font-size: 32px; font-weight: 800; font-family: 'JetBrains Mono', monospace; line-height: 1; }
+.benchwrap .icard .ilabel{ font-size: 13px; color: var(--text3); margin: 4px 0 8px; }
+.benchwrap .icard .idesc{ font-size: 12px; color: var(--text2); line-height: 1.6; }
+.benchwrap .cols2{ display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+.benchwrap .cols23{ display: grid; grid-template-columns: 2fr 3fr; gap: 24px; }
+.benchwrap .roadmap{ display: flex; gap: 0; margin: 24px 0; position: relative; }
+.benchwrap .roadmap::before{ content: ''; position: absolute; top: 24px; left: 60px; right: 60px; height: 2px; background: linear-gradient(90deg, var(--accent), var(--accent2), var(--cyan)); }
+.benchwrap .rm-item{ flex: 1; text-align: center; position: relative; padding-top: 40px; }
+.benchwrap .rm-dot{ position: absolute; top: 16px; left: 50%; transform: translateX(-50%); width: 16px; height: 16px; border-radius: 50%; border: 2px solid #fff; z-index: 1; }
+.benchwrap .rm-dot.done{ background: var(--green); }
+.benchwrap .rm-dot.now{ background: var(--accent); box-shadow: 0 0 0 4px rgba(37,99,235,0.2); }
+.benchwrap .rm-dot.later{ background: #d1d5db; }
+.benchwrap .rm-phase{ font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: var(--text3); margin-bottom: 4px; }
+.benchwrap .rm-title{ font-size: 17px; font-weight: 800; color: var(--text); margin-bottom: 6px; }
+.benchwrap .rm-desc{ font-size: 12px; color: var(--text2); line-height: 1.6; padding: 0 12px; }
+.benchwrap .prompt-table{ width: auto; min-width: 600px; }
+.benchwrap .kv-grid{ display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px 24px; margin: 8px 0; }
+.benchwrap .kv-item{ display: flex; justify-content: space-between; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.benchwrap .kv-item .k{ color: var(--text2); }
+.benchwrap .kv-item .v{ font-weight: 600; }
+.benchwrap .code-fold{ border: 1px solid var(--border); border-radius: 8px; background: var(--card); overflow: hidden; }
+.benchwrap .code-fold summary{
+  display: flex; align-items: center; gap: 8px; padding: 10px 14px; cursor: pointer;
+  font-size: 13px; background: var(--bg2); user-select: none; list-style: none;
+  border-bottom: 1px solid transparent; transition: background 0.15s;
+}
+.benchwrap .code-fold summary:hover{ background: var(--bg3); }
+.benchwrap .code-fold summary::-webkit-details-marker{ display: none; }
+.benchwrap .code-fold[open] summary{ border-bottom: 1px solid var(--border); }
+.benchwrap .code-fold[open] summary .cf-arrow{ transform: rotate(90deg); }
+.benchwrap .cf-icon{ font-size: 16px; flex-shrink: 0; }
+.benchwrap .cf-title{ font-weight: 700; color: var(--text); }
+.benchwrap .cf-meta{ font-size: 11px; color: var(--text3); margin-left: auto; }
+.benchwrap .cf-arrow{ font-size: 10px; color: var(--text3); transition: transform 0.2s; flex-shrink: 0; }
+.benchwrap .cf-code{
+  margin: 0; padding: 12px 16px; font-size: 11px; line-height: 1.65;
+  font-family: 'JetBrains Mono', monospace; color: var(--text2);
+  background: #fafbfc; overflow-x: auto; max-height: 280px; overflow-y: auto;
+  white-space: pre-wrap; word-break: break-word;
+}
+.benchwrap .cf-code code{ font-family: inherit; }
+@media (max-width: 1200px){.benchwrap .slide{ padding: 32px 40px; }
+.benchwrap .domains{ grid-template-columns: repeat(3, 1fr); }
+.benchwrap .cols2, .benchwrap .cols23{ grid-template-columns: 1fr; }
+.benchwrap .insights{ grid-template-columns: 1fr 1fr; }
+}
+
+/* ---- AI4Sci-Bench reskin overrides ---- */
+.benchwrap{ --bg:transparent; --bg2:#f6f8fd; --bg3:#eef1f8; --accent:#2f6bff; --accent2:#7c3aed; --green:#10a37f; --border:#e1e6f0; background:transparent; color:#1a1a2e; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif; }
+.benchwrap .slide{ width:100%; border-bottom:1px solid var(--line); padding:64px 56px; }
+.benchwrap .slide-num{ top:24px; right:32px; bottom:auto; font-size:12px; color:#9aa3b8; }
+.benchwrap #b-s1{ background:linear-gradient(160deg,#0b1430 0%,#15234e 58%,#0b1430 100%); color:#eaf0ff; }
+.benchwrap #b-s1 h1.title{ color:#fff; }
+.benchwrap #b-s1 h1.title em{ color:#7dd3fc; }
+.benchwrap #b-s1 .desc, .benchwrap #b-s1 .desc strong{ color:#cdd7ef; }
+.benchwrap #b-s1 .hero-stat .label{ color:#c7d0ea; }
+.benchwrap #b-s1 .slide-num{ color:#7d88aa; }
+
+</style>
+</head>
+<body>
+
+<!-- ============ 01 · COVER ============ -->
+<section id="hero" class="band">
+  <span class="pagetag">01</span>
+  <div class="wrap">
+    <div class="wordmark">APEX&nbsp;RESEARCH</div>
+    <div class="eyebrow">自主科研 · Autonomous ML Research</div>
+    <h1>让 AI 团队<span class="gradtext">自己做研究、写论文、上榜</span></h1>
+    <p class="lead">一个多 Agent、多阶段的自主科研系统。Director 决策方向，Agent 调度执行，Reviewer 独立审查——三 Agent 对抗，执行与审稿反复穿插迭代，从 Idea 到投稿全链路闭环；底层由自建 SaaS 平台在 AWS 集群上弹性调度。</p>
+    <div class="grid g4" style="margin-top:38px">
+      <div class="stat"><div class="n gradtext">120<span style="font-size:26px">+</span></div><div class="l">累计立项研究项目</div><div class="s">峰值约 150 · 经 MVP 早筛</div></div>
+      <div class="stat"><div class="n gradtext">59</div><div class="l">已投稿文章</div><div class="s">40（EMNLP+CoRL）+ 19（NeurIPS）</div></div>
+      <div class="stat"><div class="n gradtext">40</div><div class="l">单批次并行项目</div><div class="s">34 EMNLP + 6 CoRL</div></div>
+      <div class="stat"><div class="n gradtext">3</div><div class="l">完整跑通的 Benchmark</div><div class="s">训练算法 / 训练速度 / 算子</div></div>
+    </div>
+  </div>
+  <a class="nav-dot" href="#overview" aria-label="下一页">⌄</a>
+</section>
+
+<!-- ============ 02 · OVERVIEW ============ -->
+<section id="overview">
+  <span class="pagetag">02</span>
+  <div class="wrap">
+    <div class="eyebrow">谁在做研究</div>
+    <h2>三个 AI 角色对抗，<span class="gradtext">一个人类掌控全局</span></h2>
+    <p class="lead">日常的执行、审查、写作交给三个职责互斥的 Agent；人不做体力活，只做最关键的决策——定方向、批资源、控节奏。这套分工既保证产出，又保证可控。</p>
+
+    <div class="tri" style="margin-top:26px">
+      <div class="agentcard dir">
+        <div class="ic">PI</div><div class="role" style="margin-top:10px">Principal Investigator</div>
+        <h3>Director</h3>
+        <p class="muted small">方向决策、资源/GPU 管理、审批实验。<b>不能自己跑实验</b>——把自己当成"带一支 AI 团队的 PI"，按团队速度排程。</p>
+      </div>
+      <div class="agentcard exe">
+        <div class="ic">EX</div><div class="role" style="margin-top:10px">Executor</div>
+        <h3>Main Agent</h3>
+        <p class="muted small">调度 + 轻量规划。<b>自己不做 SSH / 写代码 / 读日志</b>——重活派给一次性 Worker，实验 registry 为唯一事实来源。</p>
+      </div>
+      <div class="agentcard rev">
+        <div class="ic">RV</div><div class="role" style="margin-top:10px">Independent Auditor</div>
+        <h3>Reviewer</h3>
+        <p class="muted small"><b>只读权限</b>，与执行并行穿插。独立复核每个结论，返回 info / warning / <span style="color:var(--r)">critical</span>，critical 直接暂停项目。</p>
+      </div>
+    </div>
+
+    <div class="grid g2" style="margin-top:18px">
+      <div class="card" style="border-top:4px solid var(--c)">
+        <span class="pill c">Human-in-control · 人掌控全局</span><h3>人是"PI 的 PI"，不是旁观者</h3>
+        <p class="muted small">系统不是失控黑箱：<strong>立项与方向</strong>由人提出与拍板；动用 <strong>实验、GPU、密钥</strong>等关键资源必须<strong>人工审批</strong>；<strong>预算与节奏</strong>由人掌控，可随时介入、暂停或要求 pivot——全程在看板/群里可见、可干预。</p>
+      </div>
+      <div class="card" style="border-top:4px solid var(--a)">
+        <span class="pill a">为什么"对抗式"</span><h3>产出与验证，物理隔离</h3>
+        <p class="muted small">执行体和审查体是<strong>两个不同进程、不同工具权限、不同 prompt</strong>。执行 Agent 无法伪造审查 Reviewer 看到的东西——Reviewer 独立读取原始 <code>nvidia-smi</code>、训练日志与 W&B 指标。这是系统可信度的根基。</p>
+      </div>
+    </div>
+  </div>
+  <a class="nav-dot" href="#arch" aria-label="下一页">⌄</a>
+</section>
+
+<!-- ============ 03 · ARCHITECTURE ============ -->
+<section id="arch">
+  <span class="pagetag">03</span>
+  <div class="wrap">
+    <div class="eyebrow">研究流程</div>
+    <h2>研究全流程：一个<span class="gradtext">由审稿驱动的迭代大循环</span></h2>
+    <p class="lead">Idea 定方向、过 MVP 闸之后，执行与审稿在一个闭环里反复穿插，直到论文被打磨到可投水位，再进入投稿。</p>
+
+    <div class="loopwrap" style="margin-top:26px">
+      <div class="loopstage"><div class="tag">Start</div><h3>Idea<br/>想法生成</h3></div>
+      <div class="arrow">→</div>
+      <div class="loopstage" style="border:1px solid #f0d49a;background:#fffaf0">
+        <div class="tag" style="color:var(--c)">Gate</div>
+        <h3>MVP 闸</h3>
+        <div class="tiny" style="margin-top:2px">最小验证<br/>通不过即淘汰</div>
+      </div>
+      <div class="arrow">→</div>
+      <div class="loopcore">
+        <div class="loopbadge">↻ 反复审稿驱动迭代 · 平均 17 轮</div>
+        <div class="loopnodes">
+          <div class="lnode e">实验执行<small>Agent + Worker</small></div>
+          <div class="cyc">⇄</div>
+          <div class="lnode r">独立审稿<small>Reviewer / 盲审</small></div>
+          <div class="cyc">⇄</div>
+          <div class="lnode p">论文修订<small>Paper Agent</small></div>
+        </div>
+        <div class="loopfeed">Reviewer 全程并行 · <b>critical 即暂停回炉</b> · Paper Agent 对抗 Reviewer 自我精修最多 5 轮 · Review 阶段可开 fresh round 再打回</div>
+      </div>
+      <div class="arrow">→</div>
+      <div class="loopstage"><div class="tag">Ship</div><h3>投稿<br/>Submit</h3></div>
+    </div>
+
+    <div class="grid g3" style="margin-top:36px">
+      <div class="card tight"><span class="pill b">穿插，不是串行</span><h3>审稿全程并行</h3>
+        <p class="muted small">Reviewer 只读复核与执行<strong>同时进行</strong>，不等实验全部跑完才介入——问题越早发现，越省算力、越快收敛。</p>
+      </div>
+      <div class="card tight"><span class="pill d">critical 即回炉</span><h3>致命问题立即打回</h3>
+        <p class="muted small">Reviewer 返回 <span style="color:var(--r)">critical</span> 直接<strong>暂停项目</strong>、退回执行端重做；Review 阶段还能开 fresh round 再次把意见打回。</p>
+      </div>
+      <div class="card tight"><span class="pill a">对抗式收敛</span><h3>平均 17 轮迭代到可投</h3>
+        <p class="muted small">Paper Agent 对抗 Reviewer 自我精修最多 5 轮；整条链路<strong>平均约 17 轮审稿</strong>，论文随每一轮收敛到可投水位。</p>
+      </div>
+    </div>
+  </div>
+  <a class="nav-dot" href="#dream" aria-label="下一页">⌄</a>
+</section>
+
+<!-- ============ 04 · HARNESS / DREAM ============ -->
+<section id="dream">
+  <span class="pagetag">04</span>
+  <div class="wrap">
+    <div class="eyebrow">Harness 护城河 · 前瞻能力（1 / 3）</div>
+    <h2>Dream：让系统拥有<span class="gradtext">"预见结果"的前瞻能力</span></h2>
+    <p class="lead">普通 Agent 只能"跑完才知道好坏"。Dream 让系统在开跑之前，就异步推演一条研究路线会走到哪——预见结局、预见审稿意见，从而带着前瞻去规划，而不是被动地等结果出来再反应。</p>
+
+    <div class="grid g2" style="margin-top:24px">
+      <div class="card" style="border-top:4px solid var(--b)">
+        <span class="pill b">怎么做到的</span>
+        <h3>两阶段"想象" → 写成论文 → 真盲审</h3>
+        <div style="margin-top:6px">
+          <div class="kv"><b>① Tier 定义</b><span class="tiny">一次推理切出 best / median / worst 三档结局</span></div>
+          <div class="kv"><b>② 逐档 elaboration</b><span class="tiny">顺序细化成"想象中的实验设置与数字"</span></div>
+          <div class="kv"><b>③ 写成完整论文</b><span class="tiny">Paper Agent 据此产出整篇 LaTeX</span></div>
+          <div class="kv"><b>④ 送进真实盲审</b><span class="tiny">哈希软链接藏掉档位名，审稿人不知在读"最好情况"</span></div>
+        </div>
+        <p class="tiny" style="margin-top:12px">带 simple / full 两档 review、跨次趋势追踪、SHA-256 智能跳过（无新信息不重算）；数据落 per-project YAML。</p>
+      </div>
+      <div class="card" style="border-top:4px solid var(--a)">
+        <span class="pill a">前瞻性带来什么</span>
+        <h3>从"事后反应"升级到"事前规划"</h3>
+        <ul class="clean small">
+          <li><b>预见结局：</b>开跑前就看清这条路的 best / median / worst 大概落在什么水位</li>
+          <li><b>预见审稿意见：</b>提前知道审稿人会卡在哪（novelty / 严谨性…），据此调整 framing 与路线</li>
+          <li><b>主动规划而非被动等结果：</b>Director 拿着这份"预测"排兵布阵，决定主攻哪条线、哪条线先放一放</li>
+          <li><b>已被实测验证：</b>Dream 的预测与最终真实审稿高度吻合——simgate 项目 Dream 早就点出 novelty 是瓶颈，最终 EMNLP 两位审稿人独立给出的瓶颈完全一致</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="callout b" style="margin-top:18px">
+      <b>一句话：</b>别人的 Agent 只能"跑完才知道结果"；我们的系统<strong>能预见结果</strong>——开跑之前就拿到一份"预测 + 模拟审稿"，让研究有了前瞻和规划，而不是盲目试错。（算力省下来只是顺带的红利。）
+    </div>
+  </div>
+  <a class="nav-dot" href="#distill" aria-label="下一页">⌄</a>
+</section>
+
+<!-- ============ 05 · HARNESS / DISTILL ============ -->
+<section id="distill">
+  <span class="pagetag">05</span>
+  <div class="wrap">
+    <div class="eyebrow">Harness 护城河 · 领域知识（2 / 3）</div>
+    <h2>蒸馏体系：给系统注入一个领域的<span class="gradtext">"内行知识"</span></h2>
+    <p class="lead">AI 不天然知道某个子领域的人怎么做 baseline、怎么画图、怎么讲故事。蒸馏体系把一个领域的文献与过往经验，提炼成系统可复用、可累积的领域知识。</p>
+
+    <div class="grid g2" style="margin-top:24px">
+      <div class="card" style="border-top:4px solid var(--c)">
+        <span class="pill c">第一层 · 项目级文献蒸馏</span>
+        <h3>逐篇深读 + 跨篇归纳</h3>
+        <ul class="clean small">
+          <li>沿 <b>Semantic Scholar 引用图谱</b>采集子领域文献（文献图谱 + 关键词 + 推荐 + 前后向引用）</li>
+          <li>对核心论文做 <b>全文 + 配图深读</b>（最多 8 篇，结构化成 YAML）</li>
+          <li>跨篇归纳出两套范式：<b>研究方法范式</b>（baseline/指标/数据/消融）+ <b>写作范式</b>（叙事结构/Figure-1/主结果表）</li>
+          <li>落成项目专属、带版本的 skill；每条模式带 <b>支持度（N/M 篇）+ 来源 + 置信度</b>——是<strong>归纳，不是摘要</strong></li>
+        </ul>
+      </div>
+      <div class="card" style="border-top:4px solid var(--d)">
+        <span class="pill d">第二层 · 知识代谢引擎（Distill Hub）</span>
+        <h3>跨项目累积，越用越厚</h3>
+        <ul class="clean small">
+          <li>把每个项目跑出的经验沉淀成四级抽象：<code>事件 → 观察 → 模式 → 技能</code></li>
+          <li>按 <b>project → domain → global</b> 逐级提升（一个模式在 ≥3 个项目复现→升 domain；≥2 个 domain→升 global）</li>
+          <li>新项目启动即<b>继承前人沉淀</b>，跨方法论 / 写作 / 工程 / 文献四个维度复用</li>
+          <li>双环飞轮：内环 执行→事件→反思→技能→执行；外环 轨迹分析→训练数据→微调</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="callout c" style="margin-top:18px">
+      <b>为什么是护城河：</b>领域知识是<strong>越跑越厚的累积资产</strong>——跑的项目越多，沉淀的"内行经验"越多，后来的项目起点越高。规模本身构成壁垒。
+    </div>
+  </div>
+  <a class="nav-dot" href="#longloop" aria-label="下一页">⌄</a>
+</section>
+
+<!-- ============ 06 · HARNESS / LONG-LOOP ============ -->
+<section id="longloop">
+  <span class="pagetag">06</span>
+  <div class="wrap">
+    <div class="eyebrow">Harness 护城河 · 长程自主（3 / 3）</div>
+    <h2>长任务循环：让 AI 真能<span class="gradtext">连续工作数天</span>而不掉线</h2>
+    <p class="lead">一个研究项目要跑数天。让一群 Agent 在数天里不卡死、不因上下文写满而"失忆"，是工程上最难的部分。两个机制兜住它。</p>
+
+    <div class="grid g2" style="margin-top:24px">
+      <div class="card" style="border-top:4px solid var(--a)">
+        <span class="pill a">机制一 · 催促 / Keepalive</span>
+        <h3>自主 PI 看门狗：不让 GPU 空烧</h3>
+        <p class="muted small">Director 跑在后台、输出对用户不可见；一旦它发呆，几十张 GPU 就在空转烧钱。守护进程检测到静默后：</p>
+        <ul class="clean small">
+          <li>自动收集实时健康信号：失败 Worker / 待审批 / 卡住 cron / GPU 空闲</li>
+          <li>按 <code>鼓励 → 提醒 → 审计 → 告警</code> 分级，生成一条带上下文的催促</li>
+          <li>逼 Director 用 <code>ACK / WAIT / BLOCKED</code> 明确回应</li>
+          <li>连续两次不理会，自动升级到运维群叫人</li>
+        </ul>
+      </div>
+      <div class="card" style="border-top:4px solid var(--d)">
+        <span class="pill d">机制二 · Ralph Loop</span>
+        <h3>上下文轮转：近乎无界的自主时长</h3>
+        <p class="muted small">单个上下文窗口装不下数天的工作，且会随写满逐渐"退化变笨"。Ralph Loop 做上下文轮转：</p>
+        <ul class="clean small">
+          <li>触顶（硬限 1000 消息 / 32h）时，Director 批准重置</li>
+          <li>旧会话写一封 <strong>"给下一个自己的交接信"</strong></li>
+          <li>新会话带 交接信 + 从 memory 抽取的关键约束 + "先读实时 registry" 冷启动</li>
+          <li>全程 append-only 时间线落盘，<b>重启不丢 loop 计数</b></li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="callout" style="margin-top:18px">
+      <b>一句话：</b>这两个机制是"<strong>7×24 运转的 AI 研究团队</strong>"能成立的底层保证——没有它们，长项目会因卡死或失忆而中途崩掉。
+    </div>
+  </div>
+  <a class="nav-dot" href="#work" aria-label="下一页">⌄</a>
+</section>
+
+<!-- ============ 07 · COMPLETED WORK ============ -->
+<section id="work">
+  <span class="pagetag">07</span>
+  <div class="wrap">
+    <div class="eyebrow">已完成的工作</div>
+    <h2>两轮投稿 · 三个会议 · 内部严格审稿</h2>
+    <p class="lead">内部审稿采用"无情严格"标准（对标 NeurIPS 真实分制），并贯穿整个执行过程。即便如此严苛，仍有 15 个项目达到了 accept 水平。</p>
+
+    <div class="grid g2" style="margin-top:24px">
+      <div class="card">
+        <span class="pill a">第一轮 · 约 2026-05</span>
+        <h3>NeurIPS 2026 战役</h3>
+        <ul class="clean">
+          <li><b>19 篇投稿 NeurIPS 2026</b></li>
+          <li><b>近千次实验</b>的完整科研战役（平均单项目并行 4 张卡）</li>
+          <li>首次验证三 Agent 对抗内核在真实投稿压力下可跑通</li>
+        </ul>
+      </div>
+      <div class="card">
+        <span class="pill b">第二轮 · 2026-05/06</span>
+        <h3>EMNLP 2026 + CoRL 2026</h3>
+        <ul class="clean">
+          <li><b>40 个研究项目并行</b>，人均同时参与 3–5 个</li>
+          <li><b>40 篇投稿</b>：34 EMNLP + 6 CoRL（机器人方向）</li>
+          <li>这种规模化并行，<b>在纯人工模式下不可能</b></li>
+        </ul>
+      </div>
+    </div>
+
+    <h3 style="margin-top:34px">内部严格审稿下的成绩</h3>
+    <div class="grid g2" style="margin-top:8px">
+      <div class="stat"><div class="n schi">15</div><div class="l">项目达到内部审稿 accept 水平</div><div class="s">内审采用"无情严格"标准</div></div>
+      <div class="stat"><div class="n schi">17</div><div class="l">平均审稿轮次</div><div class="s">反复迭代直到收敛</div></div>
+    </div>
+
+    <div class="callout c" style="margin-top:18px">
+      <b>我们对内部审稿的要求很严格。</b> 独立 Reviewer 在 <strong>40 个项目中抓出 22 个的致命 confound</strong>，<strong>55% 的项目通过 pivot 被救回</strong>到可发表水位。系统能独立核实自己的实验结论、并在出错时自我纠错，而不是一味追求"把稿子投出去"。
+    </div>
+  </div>
+  <a class="nav-dot" href="#data" aria-label="下一页">⌄</a>
+</section>
+
+<!-- ============ 08 · DATA ============ -->
+<section id="data">
+  <span class="pagetag">08</span>
+  <div class="wrap">
+    <div class="eyebrow">数据统计</div>
+    <h2>规模化的真实产出</h2>
+
+    <div class="grid g2" style="margin-top:26px">
+      <div class="card">
+        <h3>MVP 漏斗：立项 → 早筛 → 投稿</h3>
+        <div class="chart">
+          <div class="col2"><div class="track"><div class="v gradtext">120+</div><div class="bar2" style="height:200px"></div></div><div class="lab">累计立项</div></div>
+          <div class="col2"><div class="track"><div class="v gradtext">~86</div><div class="bar2" style="height:142px"></div></div><div class="lab">通过 MVP 进研究</div></div>
+          <div class="col2"><div class="track"><div class="v gradtext">59</div><div class="bar2" style="height:98px"></div></div><div class="lab">已投稿（40+19）</div></div>
+        </div>
+        <p class="footnote">立项 120–150 经 MVP 最小验证早筛，约 86 个进入完整研究，最终 59 篇投稿——MVP 把算力省在有希望的项目上。</p>
+      </div>
+
+      <div class="card">
+        <h3>算力 · 实验体量（第二轮 40 项目）</h3>
+        <div style="margin-top:8px">
+          <div class="kv"><span>累计实验次数</span><b class="gradtext" style="font-size:18px">8,352</b></div>
+          <div class="kv"><span>峰值同时在跑 GPU 卡数</span><b class="gradtext" style="font-size:18px">200+ 张</b></div>
+          <div class="kv"><span>单轮并行项目</span><b class="gradtext" style="font-size:18px">40 个</b></div>
+          <div class="kv"><span>单项目最大实验量</span><b>1,423 次实验</b></div>
+          <div class="kv"><span>跨服务器 / 多账户并行</span><b>多机房 SSH 调度</b></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="callout" style="margin-top:18px">
+      <b>一句话：</b>这是一台真在大规模跑的科研引擎——峰值同时在跑 <strong>200+ 张 GPU 卡</strong>、单轮 <strong>40 个项目并行</strong>、累计 <strong>8 千余次实验</strong>。
+    </div>
+  </div>
+  <a class="nav-dot" href="#traj" aria-label="下一页">⌄</a>
+</section>
+
+<!-- ============ 09 · TRAJECTORY → TRAINING DATA ============ -->
+<section id="traj">
+  <span class="pagetag">09</span>
+  <div class="wrap">
+    <div class="eyebrow">数据飞轮 · 轨迹 → 训练数据</div>
+    <h2>40 个项目的多 Agent 轨迹，<span class="gradtext2">蒸馏成可微调的训练数据</span></h2>
+    <p class="lead">蒸馏体系的"外环飞轮"已经落地：把第二轮 40 个 EMNLP + CoRL 项目跑出的多 Agent 轨迹，经 ETL、打分、智能拆分、再过滤，提炼成可迁移"研究推理能力"的训练数据——用来微调我们自己的模型。</p>
+
+    <div class="grid g4" style="margin-top:30px">
+      <div class="stat"><div class="n gradtext2">40</div><div class="l">研究项目</div><div class="s">轨迹来源</div></div>
+      <div class="stat"><div class="n gradtext2">~64K</div><div class="l">原始 session</div><div class="s">S3 落盘</div></div>
+      <div class="stat"><div class="n gradtext2">48,290</div><div class="l">ETL 输出样本</div><div class="s">去重、过滤后</div></div>
+      <div class="stat"><div class="n gradtext2">43,485</div><div class="l">训练样本</div><div class="s">72B 规模</div></div>
+    </div>
+
+    <div class="grid g2" style="margin-top:18px">
+      <div class="card">
+        <span class="pill d">处理结果 · 逐级过滤</span>
+        <h3>从原始轨迹到训练语料的流水线</h3>
+        <table>
+          <thead><tr><th>阶段</th><th>样本数</th><th>说明</th></tr></thead>
+          <tbody>
+            <tr><td>原始 session 文件</td><td><b>~64,000</b></td><td class="tiny">S3 上 40 个项目</td></tr>
+            <tr><td>ETL 输出</td><td><b>48,290</b></td><td class="tiny">去重、过滤后</td></tr>
+            <tr><td>打分后 (keep+boost)</td><td><b>19,544</b></td><td class="tiny">丢弃 28,746（59.5%）</td></tr>
+            <tr><td>智能拆分后</td><td><b>59,299</b></td><td class="tiny">每条 ≤ 16K tokens</td></tr>
+            <tr><td>重新打分过滤</td><td><b class="gradtext2" style="font-size:16px">43,485</b></td><td class="tiny">过滤 17,245 垃圾 chunk</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="card">
+        <span class="pill b">分层加权 · 好样本上采样</span>
+        <h3>三档质量分层与训练权重</h3>
+        <table>
+          <thead><tr><th>Tier</th><th>样本数</th><th>占比</th><th>训练权重</th></tr></thead>
+          <tbody>
+            <tr><td><b class="sc35">boost</b></td><td><b>1,042</b></td><td>1.8%</td><td class="tiny">×2–3（上采样）</td></tr>
+            <tr><td><b class="schi">keep</b></td><td><b>41,012</b></td><td>69.2%</td><td class="tiny">×1</td></tr>
+            <tr><td><b style="color:var(--r)">drop</b></td><td><b>17,245</b></td><td>29.1%</td><td class="tiny">丢弃</td></tr>
+          </tbody>
+        </table>
+        <p class="footnote">最高质量的 boost 段位上采样 2–3 倍，让"内行操作"在训练里占更高权重；垃圾 chunk 直接丢弃。</p>
+      </div>
+    </div>
+
+    <div class="callout" style="margin-top:18px">
+      <b>为什么关键：</b>这条飞轮把"<strong>做研究的过程本身</strong>"变成了可复用资产——跑的项目越多，沉淀的高质量轨迹越多，可微调出的"<strong>会做研究的模型</strong>"就越强。数据不是副产品，而是系统越跑越强的复利来源。
+    </div>
+  </div>
+  <a class="nav-dot" href="#modes" aria-label="下一页">⌄</a>
+</section>
+
+<!-- ============ 10 · MODES ============ -->
+<section id="modes">
+  <span class="pagetag">10</span>
+  <div class="wrap">
+    <div class="eyebrow">三种运行模式</div>
+    <h2>同一内核，三种产品形态</h2>
+
+    <div class="grid g3" style="margin-top:26px">
+      <div class="card">
+        <span class="pill a">核心 · 旗舰</span>
+        <h3>Apex Research 模式</h3>
+        <p class="muted small"><b>自动产出论文。</b>从 Idea 到投稿全自动闭环，Paper Agent 跑完整 5 步流水线。面向"会议投稿"的旗舰形态。</p>
+        <ul class="clean small"><li>产物：可投会议的完整论文 + 实验</li><li>典型用户：研究团队 / 实验室</li></ul>
+      </div>
+      <div class="card">
+        <span class="pill b">内部利器</span>
+        <h3>Research 模式</h3>
+        <p class="muted small"><b>方向性探索 / 实验，不必跑完整论文。</b>产物多样化——技术报告、消融结论、可行性判断。团队内部用它跑实验<strong>已经非常实用</strong>。</p>
+        <ul class="clean small"><li>产物：技术报告 / 结论 / 决策依据</li><li>剥离论文写作工具，专注实验</li></ul>
+      </div>
+      <div class="card">
+        <span class="pill c">能力证明</span>
+        <h3>Benchmark 模式</h3>
+        <p class="muted small"><b>在公认 Benchmark 上自主调优。</b>瘦身成紧凑单 Agent 优化循环，直连 SSH 执行权，配合严谨核验闸——证明 BE 核心模块的调优能力。</p>
+        <ul class="clean small"><li>产物：可独立核验的榜单成绩</li><li>已完整跑通 3 个 Benchmark</li></ul>
+      </div>
+    </div>
+    <div class="callout b" style="margin-top:20px">
+      <b>工程上的优雅：</b>三种模式不是三套代码，而是同一套 ~25 个角色，通过对工具集合做"加减法"派生——Benchmark 模式剥离论文工具、给 Agent 直连执行权；Research 模式剥离写作工具。零 prompt 重复。
+    </div>
+  </div>
+  <a class="nav-dot" href="#bench" aria-label="下一页">⌄</a>
+</section>
+
+<!-- ============ 11 · BENCHMARK ============ -->
+<section id="bench">
+  <span class="pagetag">11</span>
+  <div class="wrap">
+    <div class="eyebrow">Benchmark 架构</div>
+    <h2>调优 <span class="gradtext">Benchmark</span></h2>
+
+    <div class="card" style="margin-top:24px">
+      <h3>三个已跑通的 Benchmark</h3>
+      <div class="kv"><span><b>NanoChat</b> · 更好的训练算法</span><span class="tiny">单卡 · 300s · min val_bpb</span></div>
+      <div class="kv"><span><b>NanoGPT Speedrun</b> · 更快的训练</span><span class="tiny">8×H100 · min 墙钟秒</span></div>
+      <div class="kv"><span><b>SOL-ExecBench</b> · 更快的算子</span><span class="tiny">B200 · 235 算子 · max SOL</span></div>
+      <div class="ribbon" style="margin-top:14px">✓ 容器化 · sha 锁定 · 隔离重算 · 反作弊棘轮</div>
+    </div>
+
+    <div class="card" style="margin-top:16px;border-top:4px solid var(--a)">
+      <span class="pill a">头条能力</span>
+      <h3 style="margin-top:6px">NanoGPT Speedrun：自主跑到 SOTA 前沿</h3>
+      <div class="grid g3" style="margin-top:6px">
+        <div class="stat"><div class="n schi">45<span style="font-size:22px">min</span></div><div class="l">官方起点</div><div class="s">llm.c baseline · 8×H100</div></div>
+        <div class="stat"><div class="n schi">79.2<span style="font-size:22px">s</span></div><div class="l">官方 SOTA</div><div class="s">record #84</div></div>
+        <div class="stat"><div class="n gradtext">79.188<span style="font-size:20px">s</span></div><div class="l">我们拿到的</div><div class="s">canonical 计时</div></div>
+      </div>
+      <p class="muted small" style="margin-top:12px">这个 speedrun 跑了约两年、被社区刷新 <b>83 次纪录</b>，把训练时间<b>从 45 分钟一路压到 79.2 秒</b>——已几乎卷到头。我们的 agent 在 8×H100 上自主跑到 <b>79.188s</b>，落在 SOTA 前沿；仅在统计显著的 val_loss 门限上以微弱差距未达标。证明 BE 核心模块的调优能力<strong>已摸到全球顶尖水平的边界</strong>。</p>
+    </div>
+  </div>
+  <a class="nav-dot" href="#next" aria-label="下一页">⌄</a>
+</section>
+
+<!-- ============ 12 · NEXT / CLOSE ============ -->
+<section id="next" style="border-bottom:0">
+  <span class="pagetag">12</span>
+  <div class="wrap">
+    <div class="eyebrow">下一步</div>
+    <h2>首要任务：开展内测</h2>
+    <div class="grid g3" style="margin-top:24px">
+      <div class="card"><span class="pill a">Now</span><h3>内测上线</h3><p class="muted small">SaaS 平台已部署在 AWS，控制面 + 数据面就绪；邀请首批研究团队上手 Research / Apex Research 模式。</p></div>
+      <div class="card"><span class="pill b">闭环</span><h3>Benchmark 自动上榜</h3><p class="muted small">补齐"命中门限即自动独立核验"的最后两根接线，让 Benchmark 模式全自动上榜，持续证明调优硬实力。</p></div>
+      <div class="card"><span class="pill d">Scale</span><h3>规模化扩容</h3><p class="muted small">租户配额与 BE 上限均为软旋钮，随内测需求线性放大；预留 N 路并行探索接口。</p></div>
+    </div>
+
+    <div class="cta" style="margin-top:32px">
+      <div class="wordmark" style="color:#86b2ff">APEX&nbsp;RESEARCH</div>
+      <h2 style="margin:.2em 0">一支 7×24 运转、不会自欺的 AI 研究团队<br/><span class="gradtext">已经在跑，正在规模化。</span></h2>
+      <p class="muted">三 Agent 对抗内核 · 执行与审稿穿插迭代 · 三种产品形态 · 已部署的多租户 AWS 平台</p>
+      <div class="thanks">感谢观看 · Thank you</div>
+    </div>
+    <p class="footnote" style="text-align:center;margin-top:18px">内部审稿分为系统模拟审稿分，非会议真实录用结果；Benchmark 成绩以 canonical 独立核验为准。</p>
+  </div>
+  <a class="nav-dot" href="#b-s1" aria-label="下一页">⌄</a>
+</section>
+
+
+<!-- ============ DECK 2 · AI4Sci-Bench ============ -->
+<div class="benchwrap">
+
+
+
+<!-- ============================================================ -->
+<!-- S1: Hero -->
+<!-- ============================================================ -->
+<section class="slide" id="b-s1">
+  <div>
+    <p style="font-size:13px; font-weight:600; color:var(--accent); letter-spacing:2px; text-transform:uppercase; margin-bottom:12px;">AI for Science Benchmark</p>
+    <h1 class="title"><em>AI4Sci-Bench</em><br>科学计算智能体评测基准</h1>
+    <p class="desc" style="margin-top:16px;">
+      面向 AI for Science 领域的 <strong>项目级科学计算任务</strong>评测框架。由各学科领域研究人员构建真实科研任务，系统性衡量 AI Agent 在数学、物理、化学、生物、计算机科学、机器人学、材料、地球科学、电子工程、金融、医学等 <strong>13 个学科领域</strong>中的编程实现与科学推理能力。支持 Claude Code CLI、OpenHands、CodeWhale、Hermes、Codex CLI、Kimi Code CLI、Antigravity CLI 等 <strong>7 种主流 Agent Harness</strong>。
+    </p>
+    <div class="hero-stats">
+      <div class="hero-stat">
+        <div class="num" style="color:var(--accent);">97</div>
+        <div class="label">专家级科学任务</div>
+      </div>
+      <div class="hero-stat">
+        <div class="num" style="color:var(--accent2);">13</div>
+        <div class="label">学科领域覆盖</div>
+      </div>
+      <div class="hero-stat">
+        <div class="num" style="color:var(--cyan);">388</div>
+        <div class="label">评测实例 (×4 prompt levels)</div>
+      </div>
+      <div class="hero-stat">
+        <div class="num" style="color:var(--green);">7</div>
+        <div class="label">Agent Harness 框架支持</div>
+      </div>
+    </div>
+  </div>
+  <div class="slide-num">01</div>
+</section>
+
+<!-- ============================================================ -->
+<!-- S2: Framework architecture (moved up, expanded) -->
+<!-- ============================================================ -->
+<section class="slide compact" id="b-s2">
+  <div>
+    <h2 class="stitle"><em>项目概览</em>：AI4Sci-Bench 是什么</h2>
+    <p class="desc">
+      AI4Sci-Bench 是面向 AI for Science 领域的<strong>项目级科学计算任务评测基准</strong>。区别于 HumanEval、SWE-bench 等聚焦软件工程的 benchmark，AI4Sci-Bench 专注于评估 AI Agent 在<strong>真实科研场景</strong>中的算法实现、数值计算与科学推理能力。覆盖从天文学到机器人学的 <strong>13 个学科领域</strong>，包含 <strong>97 个专家级任务</strong>，支持 <strong>7 种主流 Agent Harness</strong> 的即插即用接入。
+    </p>
+
+    <!-- Architecture SVG diagram: Model → Harness → Scoring → Tasks -->
+    <svg width="100%" viewBox="0 0 1200 530" fill="none" xmlns="http://www.w3.org/2000/svg" style="max-width:1100px; margin: 8px 0 12px;">
+      <defs>
+        <linearGradient id="gm" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#7c3aed"/><stop offset="100%" stop-color="#6366f1"/></linearGradient>
+        <linearGradient id="gh" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#059669"/><stop offset="100%" stop-color="#0891b2"/></linearGradient>
+        <linearGradient id="ge" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#d97706"/><stop offset="100%" stop-color="#f59e0b"/></linearGradient>
+        <filter id="shadow"><feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#000" flood-opacity="0.06"/></filter>
+      </defs>
+
+      <!-- Layer labels -->
+      <text x="16" y="42" fill="#6b7280" font-size="10" font-weight="700" letter-spacing="2" font-family="Inter, sans-serif">MODEL LAYER</text>
+      <text x="16" y="152" fill="#6b7280" font-size="10" font-weight="700" letter-spacing="2" font-family="Inter, sans-serif">HARNESS LAYER</text>
+      <text x="16" y="282" fill="#6b7280" font-size="10" font-weight="700" letter-spacing="2" font-family="Inter, sans-serif">SCORING ENGINE</text>
+      <text x="16" y="380" fill="#6b7280" font-size="10" font-weight="700" letter-spacing="2" font-family="Inter, sans-serif">TASK LAYER</text>
+
+      <!-- ===== MODEL LAYER (top) — show representative models ===== -->
+      <g filter="url(#shadow)"><rect x="120" y="18" width="120" height="48" rx="8" fill="#faf5ff" stroke="#e9d5ff" stroke-width="1.5"/>
+        <text x="180" y="38" text-anchor="middle" fill="#6b21a8" font-size="11" font-weight="700" font-family="Inter, sans-serif">Claude</text>
+        <text x="180" y="52" text-anchor="middle" fill="#9333ea" font-size="9" font-family="Inter, sans-serif">Opus / Fable / Sonnet</text></g>
+      <g filter="url(#shadow)"><rect x="258" y="18" width="110" height="48" rx="8" fill="#faf5ff" stroke="#e9d5ff" stroke-width="1.5"/>
+        <text x="313" y="38" text-anchor="middle" fill="#6b21a8" font-size="11" font-weight="700" font-family="Inter, sans-serif">Gemini</text>
+        <text x="313" y="52" text-anchor="middle" fill="#9333ea" font-size="9" font-family="Inter, sans-serif">3.1 Pro</text></g>
+      <g filter="url(#shadow)"><rect x="386" y="18" width="100" height="48" rx="8" fill="#faf5ff" stroke="#e9d5ff" stroke-width="1.5"/>
+        <text x="436" y="38" text-anchor="middle" fill="#6b21a8" font-size="11" font-weight="700" font-family="Inter, sans-serif">GLM</text>
+        <text x="436" y="52" text-anchor="middle" fill="#9333ea" font-size="9" font-family="Inter, sans-serif">5.1 / 5.2</text></g>
+      <g filter="url(#shadow)"><rect x="504" y="18" width="110" height="48" rx="8" fill="#faf5ff" stroke="#e9d5ff" stroke-width="1.5"/>
+        <text x="559" y="38" text-anchor="middle" fill="#6b21a8" font-size="11" font-weight="700" font-family="Inter, sans-serif">DeepSeek</text>
+        <text x="559" y="52" text-anchor="middle" fill="#9333ea" font-size="9" font-family="Inter, sans-serif">V4 Pro</text></g>
+      <g filter="url(#shadow)"><rect x="632" y="18" width="100" height="48" rx="8" fill="#faf5ff" stroke="#e9d5ff" stroke-width="1.5"/>
+        <text x="682" y="38" text-anchor="middle" fill="#6b21a8" font-size="11" font-weight="700" font-family="Inter, sans-serif">Kimi</text>
+        <text x="682" y="52" text-anchor="middle" fill="#9333ea" font-size="9" font-family="Inter, sans-serif">K2.6 / K2.7</text></g>
+      <g filter="url(#shadow)"><rect x="750" y="18" width="100" height="48" rx="8" fill="#faf5ff" stroke="#e9d5ff" stroke-width="1.5"/>
+        <text x="800" y="38" text-anchor="middle" fill="#6b21a8" font-size="11" font-weight="700" font-family="Inter, sans-serif">MiMo</text>
+        <text x="800" y="52" text-anchor="middle" fill="#9333ea" font-size="9" font-family="Inter, sans-serif">V2.5 Pro</text></g>
+      <g filter="url(#shadow)"><rect x="868" y="18" width="100" height="48" rx="8" fill="#faf5ff" stroke="#e9d5ff" stroke-width="1.5"/>
+        <text x="918" y="38" text-anchor="middle" fill="#6b21a8" font-size="11" font-weight="700" font-family="Inter, sans-serif">MiniMax</text>
+        <text x="918" y="52" text-anchor="middle" fill="#9333ea" font-size="9" font-family="Inter, sans-serif">M3</text></g>
+      <g filter="url(#shadow)"><rect x="986" y="18" width="100" height="48" rx="8" fill="#faf5ff" stroke="#e9d5ff" stroke-width="1.5"/>
+        <text x="1036" y="38" text-anchor="middle" fill="#6b21a8" font-size="11" font-weight="700" font-family="Inter, sans-serif">GPT</text>
+        <text x="1036" y="52" text-anchor="middle" fill="#9333ea" font-size="9" font-family="Inter, sans-serif">4o / o3 ...</text></g>
+
+      <!-- Connectors Model→Harness (fan lines) -->
+      <g opacity="0.35" stroke="#c4b5fd" stroke-width="1">
+        <line x1="180" y1="66" x2="210" y2="128"/><line x1="313" y1="66" x2="400" y2="128"/><line x1="436" y1="66" x2="400" y2="128"/>
+        <line x1="559" y1="66" x2="400" y2="128"/><line x1="559" y1="66" x2="595" y2="128"/>
+        <line x1="682" y1="66" x2="400" y2="128"/><line x1="682" y1="66" x2="790" y2="128"/>
+        <line x1="800" y1="66" x2="400" y2="128"/><line x1="800" y1="66" x2="595" y2="128"/>
+        <line x1="918" y1="66" x2="400" y2="128"/><line x1="1036" y1="66" x2="985" y2="128"/>
+      </g>
+
+      <!-- ===== HARNESS LAYER (7 harnesses) ===== -->
+      <g filter="url(#shadow)"><rect x="120" y="128" width="165" height="52" rx="9" fill="#f0fdf4" stroke="#86efac" stroke-width="1.5"/>
+        <rect x="120" y="128" width="165" height="3" rx="9" fill="url(#gh)" opacity="0.7"/>
+        <text x="202" y="152" text-anchor="middle" fill="#065f46" font-size="12" font-weight="700" font-family="Inter, sans-serif">Claude Code CLI</text>
+        <text x="202" y="167" text-anchor="middle" fill="#059669" font-size="9" font-family="Inter, sans-serif">Anthropic 原生</text></g>
+      <g filter="url(#shadow)"><rect x="302" y="128" width="165" height="52" rx="9" fill="#f0fdf4" stroke="#86efac" stroke-width="1.5"/>
+        <rect x="302" y="128" width="165" height="3" rx="9" fill="url(#gh)" opacity="0.7"/>
+        <text x="384" y="152" text-anchor="middle" fill="#065f46" font-size="12" font-weight="700" font-family="Inter, sans-serif">OpenHands</text>
+        <text x="384" y="167" text-anchor="middle" fill="#059669" font-size="9" font-family="Inter, sans-serif">开源 Agent Framework</text></g>
+      <g filter="url(#shadow)"><rect x="484" y="128" width="165" height="52" rx="9" fill="#f0fdf4" stroke="#86efac" stroke-width="1.5"/>
+        <rect x="484" y="128" width="165" height="3" rx="9" fill="url(#gh)" opacity="0.7"/>
+        <text x="566" y="152" text-anchor="middle" fill="#065f46" font-size="12" font-weight="700" font-family="Inter, sans-serif">CodeWhale</text>
+        <text x="566" y="167" text-anchor="middle" fill="#059669" font-size="9" font-family="Inter, sans-serif">鲸码科技</text></g>
+      <g filter="url(#shadow)"><rect x="666" y="128" width="165" height="52" rx="9" fill="#f0fdf4" stroke="#86efac" stroke-width="1.5"/>
+        <rect x="666" y="128" width="165" height="3" rx="9" fill="url(#gh)" opacity="0.7"/>
+        <text x="748" y="152" text-anchor="middle" fill="#065f46" font-size="12" font-weight="700" font-family="Inter, sans-serif">Kimi Code CLI</text>
+        <text x="748" y="167" text-anchor="middle" fill="#059669" font-size="9" font-family="Inter, sans-serif">月之暗面原生</text></g>
+      <g filter="url(#shadow)"><rect x="120" y="192" width="165" height="52" rx="9" fill="#f0fdf4" stroke="#86efac" stroke-width="1.5"/>
+        <rect x="120" y="192" width="165" height="3" rx="9" fill="url(#gh)" opacity="0.7"/>
+        <text x="202" y="216" text-anchor="middle" fill="#065f46" font-size="12" font-weight="700" font-family="Inter, sans-serif">Hermes</text>
+        <text x="202" y="231" text-anchor="middle" fill="#059669" font-size="9" font-family="Inter, sans-serif">通用 Agent Harness</text></g>
+      <g filter="url(#shadow)"><rect x="302" y="192" width="165" height="52" rx="9" fill="#f0fdf4" stroke="#86efac" stroke-width="1.5"/>
+        <rect x="302" y="192" width="165" height="3" rx="9" fill="url(#gh)" opacity="0.7"/>
+        <text x="384" y="216" text-anchor="middle" fill="#065f46" font-size="12" font-weight="700" font-family="Inter, sans-serif">Codex CLI</text>
+        <text x="384" y="231" text-anchor="middle" fill="#059669" font-size="9" font-family="Inter, sans-serif">OpenAI 原生</text></g>
+      <g filter="url(#shadow)"><rect x="484" y="192" width="165" height="52" rx="9" fill="#f0fdf4" stroke="#86efac" stroke-width="1.5"/>
+        <rect x="484" y="192" width="165" height="3" rx="9" fill="url(#gh)" opacity="0.7"/>
+        <text x="566" y="216" text-anchor="middle" fill="#065f46" font-size="12" font-weight="700" font-family="Inter, sans-serif">Antigravity CLI</text>
+        <text x="566" y="231" text-anchor="middle" fill="#059669" font-size="9" font-family="Inter, sans-serif">Google Gemini 原生</text></g>
+      <!-- more harness placeholder -->
+      <g filter="url(#shadow)"><rect x="666" y="192" width="165" height="52" rx="9" fill="#f8fafc" stroke="#d1d5db" stroke-width="1.5" stroke-dasharray="4 3"/>
+        <text x="748" y="216" text-anchor="middle" fill="#9ca3af" font-size="12" font-weight="600" font-family="Inter, sans-serif">+ 更多 Harness</text>
+        <text x="748" y="231" text-anchor="middle" fill="#9ca3af" font-size="9" font-family="Inter, sans-serif">即插即用扩展</text></g>
+
+      <!-- Connectors Harness→Scoring -->
+      <g opacity="0.3" stroke="#86efac" stroke-width="1">
+        <line x1="300" y1="244" x2="400" y2="268"/><line x1="450" y1="244" x2="500" y2="268"/>
+        <line x1="600" y1="244" x2="580" y2="268"/><line x1="748" y1="180" x2="660" y2="268"/>
+      </g>
+
+      <!-- ===== SCORING ENGINE ===== -->
+      <g filter="url(#shadow)">
+        <rect x="340" y="268" width="400" height="42" rx="8" fill="#fffbeb" stroke="#fcd34d" stroke-width="1.5"/>
+        <rect x="340" y="268" width="400" height="3" rx="8" fill="url(#ge)" opacity="0.8"/>
+        <text x="440" y="294" text-anchor="middle" fill="#92400e" font-size="12" font-weight="700" font-family="Inter, sans-serif">Gate 检查 (文件/格式)</text>
+        <text x="540" y="290" text-anchor="middle" fill="#d1d5db" font-size="14">|</text>
+        <text x="640" y="294" text-anchor="middle" fill="#92400e" font-size="12" font-weight="700" font-family="Inter, sans-serif">Metric 评分 (0-100)</text>
+      </g>
+
+      <!-- Connectors Scoring→Tasks -->
+      <g opacity="0.3" stroke="#fbbf24" stroke-width="1">
+        <line x1="380" y1="310" x2="140" y2="360"/><line x1="430" y1="310" x2="290" y2="360"/>
+        <line x1="480" y1="310" x2="430" y2="360"/><line x1="520" y1="310" x2="560" y2="360"/>
+        <line x1="560" y1="310" x2="700" y2="360"/><line x1="620" y1="310" x2="840" y2="360"/>
+        <line x1="680" y1="310" x2="970" y2="360"/>
+      </g>
+
+      <!-- ===== TASK LAYER: 13 domains ===== -->
+      <!-- Row 1 -->
+      <g filter="url(#shadow)"><rect x="60" y="360" width="130" height="60" rx="8" fill="#eff6ff" stroke="#93c5fd" stroke-width="1.2"/>
+        <rect x="60" y="360" width="130" height="3" rx="8" fill="#818cf8"/>
+        <text x="125" y="382" text-anchor="middle" fill="#1e40af" font-size="11" font-weight="700" font-family="Inter, sans-serif">Astronomy</text>
+        <text x="125" y="396" text-anchor="middle" fill="#3b82f6" font-size="9" font-family="Inter, sans-serif">4 tasks</text>
+        <text x="125" y="410" text-anchor="middle" fill="#93c5fd" font-size="8" font-family="Inter, sans-serif">N-body · 行星 · 白矮星</text></g>
+      <g filter="url(#shadow)"><rect x="205" y="360" width="130" height="60" rx="8" fill="#f0fdf4" stroke="#86efac" stroke-width="1.2"/>
+        <rect x="205" y="360" width="130" height="3" rx="8" fill="#34d399"/>
+        <text x="270" y="382" text-anchor="middle" fill="#065f46" font-size="11" font-weight="700" font-family="Inter, sans-serif">Biology</text>
+        <text x="270" y="396" text-anchor="middle" fill="#059669" font-size="9" font-family="Inter, sans-serif">6 tasks</text>
+        <text x="270" y="410" text-anchor="middle" fill="#6ee7b7" font-size="8" font-family="Inter, sans-serif">DNA · scRNA · 蛋白折叠</text></g>
+      <g filter="url(#shadow)"><rect x="350" y="360" width="130" height="60" rx="8" fill="#fff7ed" stroke="#fdba74" stroke-width="1.2"/>
+        <rect x="350" y="360" width="130" height="3" rx="8" fill="#fb923c"/>
+        <text x="415" y="382" text-anchor="middle" fill="#9a3412" font-size="11" font-weight="700" font-family="Inter, sans-serif">Chemistry</text>
+        <text x="415" y="396" text-anchor="middle" fill="#c2410c" font-size="9" font-family="Inter, sans-serif">8 tasks</text>
+        <text x="415" y="410" text-anchor="middle" fill="#fdba74" font-size="8" font-family="Inter, sans-serif">Marcus · VRI · KMC</text></g>
+      <g filter="url(#shadow)"><rect x="495" y="360" width="130" height="60" rx="8" fill="#ecfeff" stroke="#67e8f9" stroke-width="1.2"/>
+        <rect x="495" y="360" width="130" height="3" rx="8" fill="#22d3ee"/>
+        <text x="560" y="382" text-anchor="middle" fill="#155e75" font-size="11" font-weight="700" font-family="Inter, sans-serif">Mathematics</text>
+        <text x="560" y="396" text-anchor="middle" fill="#0891b2" font-size="9" font-family="Inter, sans-serif">19 tasks</text>
+        <text x="560" y="410" text-anchor="middle" fill="#67e8f9" font-size="8" font-family="Inter, sans-serif">PDE · 优化 · 统计推断</text></g>
+      <g filter="url(#shadow)"><rect x="640" y="360" width="130" height="60" rx="8" fill="#fdf2f8" stroke="#f9a8d4" stroke-width="1.2"/>
+        <rect x="640" y="360" width="130" height="3" rx="8" fill="#f472b6"/>
+        <text x="705" y="382" text-anchor="middle" fill="#831843" font-size="11" font-weight="700" font-family="Inter, sans-serif">Physics</text>
+        <text x="705" y="396" text-anchor="middle" fill="#be185d" font-size="9" font-family="Inter, sans-serif">14 tasks</text>
+        <text x="705" y="410" text-anchor="middle" fill="#f9a8d4" font-size="8" font-family="Inter, sans-serif">CFD · 电磁 · 统计力学</text></g>
+      <g filter="url(#shadow)"><rect x="785" y="360" width="130" height="60" rx="8" fill="#fefce8" stroke="#fde68a" stroke-width="1.2"/>
+        <rect x="785" y="360" width="130" height="3" rx="8" fill="#facc15"/>
+        <text x="850" y="382" text-anchor="middle" fill="#713f12" font-size="11" font-weight="700" font-family="Inter, sans-serif">Computer Sci</text>
+        <text x="850" y="396" text-anchor="middle" fill="#a16207" font-size="9" font-family="Inter, sans-serif">14 tasks</text>
+        <text x="850" y="410" text-anchor="middle" fill="#fde68a" font-size="8" font-family="Inter, sans-serif">ML · 因果 · 隐私</text></g>
+      <g filter="url(#shadow)"><rect x="930" y="360" width="130" height="60" rx="8" fill="#f5f3ff" stroke="#c4b5fd" stroke-width="1.2"/>
+        <rect x="930" y="360" width="130" height="3" rx="8" fill="#a78bfa"/>
+        <text x="995" y="382" text-anchor="middle" fill="#4c1d95" font-size="11" font-weight="700" font-family="Inter, sans-serif">Robotics</text>
+        <text x="995" y="396" text-anchor="middle" fill="#7c3aed" font-size="9" font-family="Inter, sans-serif">9 tasks</text>
+        <text x="995" y="410" text-anchor="middle" fill="#c4b5fd" font-size="8" font-family="Inter, sans-serif">EKF · 轨迹 · ICP</text></g>
+      <!-- Row 2 -->
+      <g filter="url(#shadow)"><rect x="60" y="432" width="130" height="48" rx="8" fill="#fef2f2" stroke="#fca5a5" stroke-width="1.2"/>
+        <rect x="60" y="432" width="130" height="3" rx="8" fill="#f87171"/>
+        <text x="125" y="454" text-anchor="middle" fill="#7f1d1d" font-size="11" font-weight="700" font-family="Inter, sans-serif">Materials</text>
+        <text x="125" y="468" text-anchor="middle" fill="#dc2626" font-size="9" font-family="Inter, sans-serif">6 tasks · Ising · XRD</text></g>
+      <g filter="url(#shadow)"><rect x="205" y="432" width="130" height="48" rx="8" fill="#f0f9ff" stroke="#7dd3fc" stroke-width="1.2"/>
+        <rect x="205" y="432" width="130" height="3" rx="8" fill="#38bdf8"/>
+        <text x="270" y="454" text-anchor="middle" fill="#0c4a6e" font-size="11" font-weight="700" font-family="Inter, sans-serif">Earth Sci</text>
+        <text x="270" y="468" text-anchor="middle" fill="#0284c7" font-size="9" font-family="Inter, sans-serif">4 tasks · 水文 · 碳循环</text></g>
+      <g filter="url(#shadow)"><rect x="350" y="432" width="130" height="48" rx="8" fill="#fff7ed" stroke="#fed7aa" stroke-width="1.2"/>
+        <rect x="350" y="432" width="130" height="3" rx="8" fill="#f97316"/>
+        <text x="415" y="454" text-anchor="middle" fill="#7c2d12" font-size="11" font-weight="700" font-family="Inter, sans-serif">Elec Eng</text>
+        <text x="415" y="468" text-anchor="middle" fill="#ea580c" font-size="9" font-family="Inter, sans-serif">5 tasks · CMOS · 信道</text></g>
+      <g filter="url(#shadow)"><rect x="495" y="432" width="130" height="48" rx="8" fill="#ecfdf5" stroke="#6ee7b7" stroke-width="1.2"/>
+        <rect x="495" y="432" width="130" height="3" rx="8" fill="#10b981"/>
+        <text x="560" y="454" text-anchor="middle" fill="#064e3b" font-size="11" font-weight="700" font-family="Inter, sans-serif">Finance</text>
+        <text x="560" y="468" text-anchor="middle" fill="#059669" font-size="9" font-family="Inter, sans-serif">5 tasks · CDS · 期权</text></g>
+      <g filter="url(#shadow)"><rect x="640" y="432" width="130" height="48" rx="8" fill="#fdf4ff" stroke="#e9d5ff" stroke-width="1.2"/>
+        <rect x="640" y="432" width="130" height="3" rx="8" fill="#c084fc"/>
+        <text x="705" y="454" text-anchor="middle" fill="#581c87" font-size="11" font-weight="700" font-family="Inter, sans-serif">Medicine</text>
+        <text x="705" y="468" text-anchor="middle" fill="#9333ea" font-size="9" font-family="Inter, sans-serif">2 tasks · 诊断 · 伦理</text></g>
+      <g filter="url(#shadow)"><rect x="785" y="432" width="130" height="48" rx="8" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.2"/>
+        <rect x="785" y="432" width="130" height="3" rx="8" fill="#94a3b8"/>
+        <text x="850" y="454" text-anchor="middle" fill="#334155" font-size="11" font-weight="700" font-family="Inter, sans-serif">Biostat</text>
+        <text x="850" y="468" text-anchor="middle" fill="#64748b" font-size="9" font-family="Inter, sans-serif">1 task · 扰动收敛</text></g>
+
+      <!-- Summary bar -->
+      <g filter="url(#shadow)">
+        <rect x="200" y="496" width="700" height="32" rx="6" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1.5"/>
+        <text x="550" y="516" text-anchor="middle" fill="#334155" font-size="12" font-weight="700" font-family="Inter, sans-serif">13 Domains &times; 97 Tasks &times; 4 Prompt Levels = 388 Instances &nbsp;&nbsp;|&nbsp;&nbsp; 7+ Harness &times; N Models = 无限组合</text>
+      </g>
+    </svg>
+
+    <p class="small-note" style="margin-top:4px;">* 架构图自上而下：模型层可接入任意 LLM → Harness 层支持 7 种主流 Agent 框架（厂商原生 + 开源）→ 统一评分引擎 → 13 个学科领域 97 个专家级任务。所有层级完全解耦，新增 Harness 或新增 Task 无需修改其他层代码。</p>
+  </div>
+  <div class="slide-num">02</div>
+</section>
+
+<!-- ============================================================ -->
+<!-- S3: Task coverage detail (expanded to 13 domains) -->
+<!-- ============================================================ -->
+<section class="slide compact" id="b-s3">
+  <div>
+    <h2 class="stitle"><em>任务体系</em>：13 大领域 × 97 个专家级任务</h2>
+    <p class="desc">每个任务由对应学科的研究人员设计，源自真实科研场景。任务粒度为<strong>项目级</strong>（非单题 QA），要求 Agent 完成完整的算法实现、数据处理、数值计算流程。4 级 prompt 难度（B1 最详尽 → B4 最简指令）测试模型自主推理能力。</p>
+
+    <table class="data" style="font-size:12px;">
+      <thead><tr><th style="width:140px;">领域</th><th style="width:50px;">Tasks</th><th>代表性任务</th></tr></thead>
+      <tbody>
+        <tr><td><strong style="color:#4338ca;">Mathematics</strong></td><td><strong>19</strong></td><td>Beyn 特征值求解 · gRBF-FD PDE 求解 · Homotopy 多项式根 · 病态逆问题 · Monte Carlo 多层次方法 · 辛积分器 · Toeplitz 矩阵 · Spike-Slab EM · MVD 诊断 · NNLS 去模糊 · 共形映射 · Levin 积分 ...</td></tr>
+        <tr><td><strong style="color:#be185d;">Physics</strong></td><td><strong>14</strong></td><td>Sod 激波管 · DP 接触过程 · Fizeau 拖曳效应 · KS 各向异性 · KT 2D XY 相变 · LBM 方柱绕流 · 盖驱动腔流 · Poisson 电容器场 · 超表面波束偏转 · 纳米棒负折射 ...</td></tr>
+        <tr><td><strong style="color:#ca8a04;">Computer Science</strong></td><td><strong>14</strong></td><td>因果注意力机制 · 扩散模型审计 · DP 隐私会计 · GMM-EM 协方差正则化 · HMC Neal Funnel · VAE KL 坍塌审计 · 曲率矩阵失配 · Muon 优化器审计 · 部署预测集 ...</td></tr>
+        <tr><td><strong style="color:#7c3aed;">Robotics</strong></td><td><strong>9</strong></td><td>Dubins 最短路径 · EKF 定位 · IMU 捷联导航 · 最小 Snap 轨迹 · 多区域 ICP 退化 · 粒子滤波 · 刚体四元数动力学 · RNEA 逆动力学 · UKF 纯方位跟踪</td></tr>
+        <tr><td><strong style="color:#c2410c;">Chemistry</strong></td><td><strong>8</strong></td><td>Marcus 电子转移重组能 · 反应路径分叉 VRI · BSSE 基组重叠校正 · 隐式溶剂 PB/GB · KMC CO 氧化 · 元动力学二肽 · SAPT 水二聚体 · VTST 隧穿校正</td></tr>
+        <tr><td><strong style="color:#059669;">Biology</strong></td><td><strong>6</strong></td><td>DNA 区域映射 · Gillespie SSA (Michaelis-Menten) · 基因网络时序 · 蛋白折叠 Go 模型 · 钙离子 IP3 振荡 · scRNA-seq 分析</td></tr>
+        <tr><td><strong style="color:#dc2626;">Materials</strong></td><td><strong>6</strong></td><td>Ising 畴生长 · 多相 XRD 物相鉴定 · Nosé-Hoover 遍历性失效 · PFC 晶界 · 声子色散 · 弛豫模式恢复</td></tr>
+        <tr><td><strong style="color:#ea580c;">Elec Engineering</strong></td><td><strong>5</strong></td><td>CMOS 运放设计 · 有损传输线趋肤效应 · Polar SCL 译码 · SerDes 均衡 · Smith 圆图匹配</td></tr>
+        <tr><td><strong style="color:#0891b2;">Finance</strong></td><td><strong>5</strong></td><td>CDS ISDA 定价约定 · FX 期权 Delta 约定 · Heston 分支切割 · 隐含波动率 Newton 失效 · IRS 约定栈</td></tr>
+        <tr><td><strong style="color:#1e40af;">Astronomy</strong></td><td><strong>4</strong></td><td>N-body 近距交汇 · 行星活动信号分离 · 白矮星稀疏推断 · GL 引力透镜</td></tr>
+        <tr><td><strong style="color:#0284c7;">Earth Science</strong></td><td><strong>4</strong></td><td>土壤碳氮循环 · Farquhar-Ball-Berry 光合作用 · Richards-TOPMODEL 水文 · 三层积雪压实</td></tr>
+        <tr><td><strong style="color:#9333ea;">Medicine</strong></td><td><strong>2</strong></td><td>伦理披露诊断 · 恶性肿瘤影像诊断</td></tr>
+        <tr><td><strong style="color:#64748b;">Biostatistics</strong></td><td><strong>1</strong></td><td>扰动收敛性检验</td></tr>
+      </tbody>
+      <tfoot>
+        <tr><td><strong>合计</strong></td><td><strong>97</strong></td><td>× 4 prompt levels = <strong>388 评测实例</strong></td></tr>
+      </tfoot>
+    </table>
+    <p class="small-note">* 所有任务由各学科在读研究生/博士设计并 review。任务持续扩展中，目标 1,000+ tasks。</p>
+  </div>
+  <div class="slide-num">03</div>
+</section>
+
+<!-- ============================================================ -->
+<!-- S4: 4 B-Level Prompt Difficulty -->
+<!-- ============================================================ -->
+<section class="slide" id="b-s4">
+  <div>
+    <h2 class="stitle"><em>四级 Prompt 难度</em>：B1 → B4 渐进式信息削减</h2>
+    <p class="desc">每个任务配备 4 个难度等级的 prompt，从完整算法说明到裸需求描述再到含干扰项的测试。不只是"题目变短"，而是系统性地考察 Agent 的不同认知能力。</p>
+
+    <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:16px; margin:16px 0;">
+      <!-- B1 -->
+      <div style="border:1.5px solid #93c5fd; border-radius:10px; padding:20px; background:#eff6ff; position:relative;">
+        <div style="position:absolute; top:-12px; left:16px; background:var(--accent); color:#fff; font-size:11px; font-weight:700; padding:2px 10px; border-radius:4px; letter-spacing:1px;">B1 · DETAILED</div>
+        <div style="font-size:36px; font-weight:900; font-family:'JetBrains Mono',monospace; color:var(--accent); margin:8px 0 4px;">100%</div>
+        <div style="font-size:12px; color:var(--text3); margin-bottom:12px;">信息量（基线）</div>
+        <div style="font-size:13px; color:var(--text2); line-height:1.7;">
+          <strong style="color:var(--text);">完整的算法说明书</strong><br>
+          包含显式数学公式、伪代码、离散化方案、求解器选项、参数范围、验证指标。
+        </div>
+        <div style="margin-top:12px; padding:10px; background:#fff; border-radius:6px; font-size:11px; color:var(--text3); font-family:'JetBrains Mono',monospace; line-height:1.6;">
+          例：物理任务 274 行<br>含 13 步积分流程 + 核函数导数 + Poisson 离散格式 + 边界条件
+        </div>
+      </div>
+      <!-- B2 -->
+      <div style="border:1.5px solid #c4b5fd; border-radius:10px; padding:20px; background:#f5f3ff; position:relative;">
+        <div style="position:absolute; top:-12px; left:16px; background:var(--accent2); color:#fff; font-size:11px; font-weight:700; padding:2px 10px; border-radius:4px; letter-spacing:1px;">B2 · INTERMEDIATE</div>
+        <div style="font-size:36px; font-weight:900; font-family:'JetBrains Mono',monospace; color:var(--accent2); margin:8px 0 4px;">~60%</div>
+        <div style="font-size:12px; color:var(--text3); margin-bottom:12px;">信息量</div>
+        <div style="font-size:13px; color:var(--text2); line-height:1.7;">
+          <strong style="color:var(--text);">高层流程概述</strong><br>
+          保留步骤名称和方法选择，但移除所有显式公式、参数细节和实现提示。
+        </div>
+        <div style="margin-top:12px; padding:10px; background:#fff; border-radius:6px; font-size:11px; color:var(--text3); font-family:'JetBrains Mono',monospace; line-height:1.6;">
+          例：同一物理任务 59 行<br>12 步流程名 + 无公式 + 无核函数定义
+        </div>
+      </div>
+      <!-- B3 -->
+      <div style="border:1.5px solid #fbbf24; border-radius:10px; padding:20px; background:#fffbeb; position:relative;">
+        <div style="position:absolute; top:-12px; left:16px; background:#d97706; color:#fff; font-size:11px; font-weight:700; padding:2px 10px; border-radius:4px; letter-spacing:1px;">B3 · MINIMAL</div>
+        <div style="font-size:36px; font-weight:900; font-family:'JetBrains Mono',monospace; color:#d97706; margin:8px 0 4px;">~40%</div>
+        <div style="font-size:12px; color:var(--text3); margin-bottom:12px;">信息量</div>
+        <div style="font-size:13px; color:var(--text2); line-height:1.7;">
+          <strong style="color:var(--text);">裸需求 + 输出契约</strong><br>
+          只给问题描述和输出文件格式，不暴露任何方法提示。Agent 必须自主选择算法。
+        </div>
+        <div style="margin-top:12px; padding:10px; background:#fff; border-radius:6px; font-size:11px; color:var(--text3); font-family:'JetBrains Mono',monospace; line-height:1.6;">
+          例：同一物理任务 33 行<br>仅概念名 + 输出规格 + 无任何流程指引
+        </div>
+      </div>
+      <!-- B4 -->
+      <div style="border:1.5px solid #f87171; border-radius:10px; padding:20px; background:#fef2f2; position:relative;">
+        <div style="position:absolute; top:-12px; left:16px; background:var(--red); color:#fff; font-size:11px; font-weight:700; padding:2px 10px; border-radius:4px; letter-spacing:1px;">B4 · DISTRACTOR</div>
+        <div style="font-size:36px; font-weight:900; font-family:'JetBrains Mono',monospace; color:var(--red); margin:8px 0 4px;">B3 + noise</div>
+        <div style="font-size:12px; color:var(--text3); margin-bottom:12px;">信息量</div>
+        <div style="font-size:13px; color:var(--text2); line-height:1.7;">
+          <strong style="color:var(--text);">B3 全文 + 干扰段落</strong><br>
+          附加事实正确但与解题无关的背景知识，模拟真实论文中的信息噪声。
+        </div>
+        <div style="margin-top:12px; padding:10px; background:#fff; border-radius:6px; font-size:11px; color:var(--text3); font-family:'JetBrains Mono',monospace; line-height:1.6;">
+          例：同一物理任务 53 行<br>B3 + 历史综述(1931) + 竞争方法(FLIP/MPM)
+        </div>
+      </div>
+    </div>
+
+    <div class="cols2" style="margin-top:12px;">
+      <div>
+        <h3 class="sub" style="margin-top:0;">为什么需要 4 个 Level</h3>
+        <div style="font-size:13px; color:var(--text2); line-height:1.8;">
+          <p><strong style="color:var(--text);">1. 测试不同认知能力</strong></p>
+          <p style="margin-bottom:10px;">B1 测<strong>实现能力</strong>（照着食谱做菜），B3 测<strong>科学推理</strong>（只知道要做什么菜、自己想做法）。两者是完全不同的能力维度。一个模型可能 B1 高分但 B3 崩溃——说明它擅长执行但不会推理。</p>
+          <p><strong style="color:var(--text);">2. 量化 Prompt 敏感性</strong></p>
+          <p style="margin-bottom:10px;">B1→B3 分差揭示模型对指令依赖程度。Opus 4.8 衰减仅 -0.3，Gemini 3.1 Pro 衰减 -13.5。<strong>顶级模型的标志是对 prompt 详细程度不敏感</strong>。</p>
+          <p><strong style="color:var(--text);">3. 抗干扰能力检验</strong></p>
+          <p>B4 模拟科研人员的真实工作环境——论文里充斥着相关但无用的信息。模型需要从噪声中提取关键约束，而非被旁枝末节带偏。</p>
+        </div>
+      </div>
+      <div>
+        <h3 class="sub" style="margin-top:0;">实际效果：Prompt Level 衰减对比</h3>
+        <table class="data" style="font-size:12px;">
+          <thead><tr><th>模型</th><th>B1</th><th>B3</th><th>B4</th><th>B1→B3 衰减</th><th>解读</th></tr></thead>
+          <tbody>
+            <tr><td>Opus 4.8</td><td>46.4</td><td>36.7</td><td>46.1</td><td style="color:var(--green);">-9.7</td><td>自主推理强，B4 干扰无影响</td></tr>
+            <tr><td>Fable 5</td><td>57.9</td><td>43.7</td><td>51.5</td><td style="color:var(--orange);">-14.2</td><td>顶分高但依赖指令</td></tr>
+            <tr><td>Gemini 3.1</td><td>43.4</td><td>33.0</td><td>29.9</td><td style="color:var(--red);">-10.4</td><td>衰减持续，B4 干扰加剧</td></tr>
+            <tr><td>GLM-5.2</td><td>35.6</td><td>26.9</td><td>25.6</td><td style="color:var(--red);">-8.7</td><td>基线低 + 持续衰减</td></tr>
+            <tr><td>MiniMax M3</td><td>20.7</td><td>12.5</td><td>22.2</td><td style="color:var(--red);">-8.2</td><td>B3 最低，B4 干扰反而有帮助</td></tr>
+          </tbody>
+        </table>
+        <div style="margin-top:12px; padding:14px; background:var(--bg2); border-radius:8px; border:1px solid var(--border); font-size:13px; color:var(--text2); line-height:1.7;">
+          <strong style="color:var(--text);">核心发现：</strong>4 级 prompt 系统能精准区分"会做"和"会想"。同一任务 B1 得 100 分的模型，B4 可能直接掉到 0——例如 Gemini 3.1 Pro 在 spike_slab 任务 B2/B3 拿 100，B4 直接归零。
+        </div>
+      </div>
+    </div>
+
+    <!-- Collapsible prompt examples: real prompt text + Chinese translation -->
+    <div style="margin-top:10px;">
+      <div style="font-size:12px; font-weight:700; color:var(--text); margin-bottom:6px;">实例对照：<span style="color:var(--accent);">physics.lid_driven_cavity_flow</span>（2D 盖驱动腔流）四级 Prompt 原文 + 中文翻译</div>
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px;">
+
+        <!-- B1: Full recipe -->
+        <details class="code-fold">
+          <summary>
+            <span class="cf-icon" style="font-size:12px;">🔵</span>
+            <span class="cf-title" style="font-size:12px;">B1 · 完整算法说明（77 行）</span>
+            <span class="cf-meta">给公式、给参数、给求解流程</span>
+            <span class="cf-arrow">▶</span>
+          </summary>
+          <pre class="cf-code" style="max-height:280px;"><code><b style="color:#1e40af;">── 英文原文（关键段落摘录）──</b>
+
+The hidden physical problem is the steady 2D
+incompressible lid-driven cavity on a square domain.
+- bc_primary.npy is the full-grid horizontal
+  boundary-velocity array.
+- The moving lid is encoded by nonzero horizontal
+  velocity values on the top wall.
+
+Numerical guidance:
+- Solve laplacian(psi) = -omega with homogeneous
+  Dirichlet boundary conditions on psi.
+- Recover velocity: u = dpsi/dy, v = -dpsi/dx.
+- Use the Ghia-style wall-vorticity closure:
+  omega_wall = -(4*psi_adj - 0.5*psi_next)/h^2
+  omega_top  = ... - 3*U_lid/h
+- Use second-order upwind convection discretization,
+  with RK2-style update.
+- Conservative time step (CFL + diffusion).
+- Use coarse-to-fine initialization and Reynolds
+  continuation before the final solve.
+
+<b style="color:#1e40af;">── 中文翻译 ──</b>
+
+隐含物理问题是正方形区域上的<b>稳态二维
+不可压缩盖驱动腔流</b>。
+- bc_primary.npy 是全网格水平边界速度数组。
+- 移动盖板由顶壁的非零水平速度编码。
+
+数值指引：
+- 求解 laplacian(ψ) = -ω，ψ 上施齐次
+  Dirichlet 边界条件。
+- 速度恢复：u = ∂ψ/∂y，v = -∂ψ/∂x。
+- 使用 Ghia 格式的壁面涡量闭合：
+  ω_wall = -(4·ψ_adj - 0.5·ψ_next) / h²
+  ω_top  = ... - 3·U_lid / h
+- 二阶迎风对流离散 + RK2 时间推进。
+- 保守时间步长（CFL + 扩散约束）。
+- 粗到细初始化 + Reynolds 延续 (Re=1000)。
+
+<b style="color:var(--green);">✓ Agent 只需"照着食谱做菜"即可</b></code></pre>
+        </details>
+
+        <!-- B2: Intermediate -->
+        <details class="code-fold">
+          <summary>
+            <span class="cf-icon" style="font-size:12px;">🟣</span>
+            <span class="cf-title" style="font-size:12px;">B2 · 高层流程（50 行）</span>
+            <span class="cf-meta">告诉方法名，不给公式</span>
+            <span class="cf-arrow">▶</span>
+          </summary>
+          <pre class="cf-code" style="max-height:280px;"><code><b style="color:#6b21a8;">── 英文原文（关键段落摘录）──</b>
+
+Use an appropriate streamfunction-vorticity
+finite-difference method for the steady 2D
+lid-driven cavity problem on the square domain
+described by the data.
+
+High-level guidance:
+- The two full-grid arrays encode the wall
+  driving data.
+- The boolean mask distinguishes active interior
+  cells from the outer boundary ring.
+- report_a.npy: horizontal velocity sampled along
+  the vertical centerline.
+- field_a.npy: interior-grid vorticity field.
+- field_b.npy: interior-grid streamfunction field.
+
+Choose your own numerical settings and convergence
+target from the physics and grid spacing.
+
+<b style="color:#6b21a8;">── 中文翻译 ──</b>
+
+对数据描述的正方形区域上的稳态 2D 盖驱动腔
+问题，使用适当的<b>流函数-涡量有限差分法</b>。
+
+高层指引：
+- 两个全网格数组编码壁面驱动数据。
+- 布尔掩码区分活跃内部单元和外边界环。
+- report_a.npy：沿垂直中心线采样的水平速度。
+- field_a.npy：内部网格涡量场。
+- field_b.npy：内部网格流函数场。
+
+自行从物理参数和网格间距<b>选择数值设置
+和收敛目标</b>。
+
+<b style="color:#d97706;">⚠ 没给 Ghia 公式、没给时间步策略、
+没提 Reynolds 延续 — Agent 需自己知道</b></code></pre>
+        </details>
+
+        <!-- B3: Minimal -->
+        <details class="code-fold">
+          <summary>
+            <span class="cf-icon" style="font-size:12px;">🟡</span>
+            <span class="cf-title" style="font-size:12px;">B3 · 裸需求（36 行）</span>
+            <span class="cf-meta">只说"做什么"，不说"怎么做"</span>
+            <span class="cf-arrow">▶</span>
+          </summary>
+          <pre class="cf-code" style="max-height:280px;"><code><b style="color:#92400e;">── 英文原文（关键段落摘录）──</b>
+
+Reconstruct a steady two-dimensional incompressible
+square-cavity flow state from the provided
+boundary-condition arrays.
+
+- field_a.npy should contain the primary transported
+  interior state field for the steady solution.
+- field_b.npy should contain the associated scalar
+  interior state field used to derive the velocity
+  reports.
+- report_a.npy should contain the first midline
+  velocity report.
+- report_c.npy should contain the top-wall-adjacent
+  trace of field_a.npy.
+
+<b style="color:#92400e;">── 中文翻译 ──</b>
+
+从给定的边界条件数组<b>重建稳态二维
+不可压缩方腔流动状态</b>。
+
+- field_a.npy 应包含稳态解的
+  「<u>主要输运内部状态场</u>」。
+- field_b.npy 应包含用于推导速度报告的
+  「<u>关联标量内部状态场</u>」。
+- report_a.npy 应包含第一条中线速度报告。
+- report_c.npy 应包含 field_a 在顶壁
+  附近的迹线。
+
+<b style="color:var(--red);">✗ 不提"涡量"、不提"流函数"、不提任何
+数值方法名 — Agent 必须自主判断 field_a
+到底是涡量还是别的、该用什么求解器</b></code></pre>
+        </details>
+
+        <!-- B4: Distractor -->
+        <details class="code-fold">
+          <summary>
+            <span class="cf-icon" style="font-size:12px;">🔴</span>
+            <span class="cf-title" style="font-size:12px;">B4 · B3 + 干扰噪声（44 行）</span>
+            <span class="cf-meta">同 B3 + 模拟真实混乱场景</span>
+            <span class="cf-arrow">▶</span>
+          </summary>
+          <pre class="cf-code" style="max-height:280px;"><code><b style="color:#991b1b;">── 前 36 行与 B3 完全相同（省略）──</b>
+
+<b style="color:#991b1b;">── 第 37 行起：干扰段落英文原文 ──</b>
+
+I am sending this over in a pretty bad state
+because the week got messy and I kept delaying
+the handoff. Yesterday I barely slept, this
+morning I was already behind, and then I managed
+to spill coffee on my notes before I had even
+finished checking the input files.
+
+Someone asked whether the figure should look
+"cleaner" for a presentation, another person was
+talking about lunch plans, and I got distracted
+trying to remember whether I had already replied
+to an email. None of that helped me finish the
+task.
+
+I also had one of those annoying moments where I
+was convinced I remembered a tricky edge case from
+an older discussion, then realized I could not
+remember the actual detail.
+
+<b style="color:#991b1b;">── 中文翻译 ──</b>
+
+我在一个很糟糕的状态下把这个发过来，因为
+这周太乱了我一直拖着交接。昨晚几乎没睡，
+今早就已经落后了，然后我还把<b>咖啡洒在了
+笔记上</b>……
+
+有人问图表是不是该做得「更干净」好用来做
+报告，另一个人在聊<b>午饭吃什么</b>，我还在想
+一封邮件是不是已经回过了……这些都没帮我
+完成任务。
+
+我还碰到了那种烦人的时刻——确信自己记得
+之前讨论过一个棘手的边界情况，结果发现
+<b>根本想不起具体细节了</b>。
+
+<b style="color:var(--red);">✗ 全部事实正确但与解题完全无关
+→ 模拟真实科研中的信息噪声
+→ Agent 必须从废话中提取关键约束</b></code></pre>
+        </details>
+      </div>
+    </div>
+  </div>
+  <div class="slide-num">05</div>
+</section>
+
+<!-- ============================================================ -->
+<!-- S5: Leaderboard（模型测试结果）-->
+<!-- ============================================================ -->
+<section class="slide compact" id="b-s5">
+  <div>
+    <h2 class="stitle"><em>全量评测排行</em>：10+ 模型 × 7 Harness，已验证 20 种组合</h2>
+    <p class="desc">按均分降序排列。涵盖厂商原生 CLI、开源框架、通用 Agent 等多种 Harness。Claude 系列因安全管控，部分生物/化学任务零分（非能力问题），均分基于有效任务计算。</p>
+
+    <table class="lb" style="font-size:12px;">
+      <thead><tr><th>#</th><th>Model</th><th>Harness</th><th class="r">B1</th><th class="r">B2</th><th class="r">B3</th><th class="r">B4</th><th class="r">均分</th><th style="width:120px"></th><th style="width:50px;font-size:10px;">Tasks</th></tr></thead>
+      <tbody>
+        <tr class="best-row"><td class="rank g">1</td><td class="mname">Claude Fable 5</td><td><span class="tag">CC-CLI</span></td><td class="score">57.9</td><td class="score">42.2</td><td class="score">43.7</td><td class="score">51.5</td><td class="score top">48.8</td><td class="bar-cell"><div class="bar-bg"><div class="bar-fill" style="width:97.6%;background:var(--green)"></div></div></td><td style="font-size:10px;color:var(--text3);text-align:center;">9*</td></tr>
+        <tr><td class="rank s">2</td><td class="mname">Claude Opus 4.8</td><td><span class="tag">CC-CLI</span></td><td class="score">46.4</td><td class="score">53.1</td><td class="score">36.7</td><td class="score">46.1</td><td class="score top">45.6</td><td class="bar-cell"><div class="bar-bg"><div class="bar-fill" style="width:91.2%;background:var(--green)"></div></div></td><td style="font-size:10px;color:var(--text3);text-align:center;">9*</td></tr>
+        <tr><td class="rank b">3</td><td class="mname">Gemini 3.1 Pro</td><td><span class="tag">OpenHands</span></td><td class="score">43.4</td><td class="score">36.5</td><td class="score">33.0</td><td class="score">29.9</td><td class="score">35.7</td><td class="bar-cell"><div class="bar-bg"><div class="bar-fill" style="width:71.4%;background:var(--accent)"></div></div></td><td style="font-size:10px;color:var(--text3);text-align:center;">13</td></tr>
+        <tr><td class="rank">4</td><td class="mname">Kimi K2.7</td><td><span class="tag">Kimi CLI</span></td><td class="score">34.7</td><td class="score">38.4</td><td class="score">35.9</td><td class="score">23.3</td><td class="score">33.1</td><td class="bar-cell"><div class="bar-bg"><div class="bar-fill" style="width:66.2%;background:var(--orange)"></div></div></td><td style="font-size:10px;color:var(--text3);text-align:center;">13</td></tr>
+        <tr><td class="rank">5</td><td class="mname">GLM-5.2</td><td><span class="tag" style="background:#e0f2fe;color:#0369a1;">ZCode</span></td><td class="score">30.2</td><td class="score">37.0</td><td class="score">26.0</td><td class="score">35.2</td><td class="score">32.1</td><td class="bar-cell"><div class="bar-bg"><div class="bar-fill" style="width:64.2%;background:var(--orange)"></div></div></td><td style="font-size:10px;color:var(--text3);text-align:center;">13</td></tr>
+        <tr><td class="rank">6</td><td class="mname">Kimi K2.6</td><td><span class="tag">Kimi CLI</span></td><td class="score">36.3</td><td class="score">32.5</td><td class="score">32.5</td><td class="score">23.8</td><td class="score">31.3</td><td class="bar-cell"><div class="bar-bg"><div class="bar-fill" style="width:62.6%;background:var(--orange)"></div></div></td><td style="font-size:10px;color:var(--text3);text-align:center;">13</td></tr>
+        <tr><td class="rank">7</td><td class="mname">Kimi K2.7</td><td><span class="tag" style="background:#fce7f3;color:#be185d;">OpenHands</span></td><td class="score">36.4</td><td class="score">31.4</td><td class="score">15.1</td><td class="score">27.9</td><td class="score">27.7</td><td class="bar-cell"><div class="bar-bg"><div class="bar-fill" style="width:55.4%;background:var(--accent2)"></div></div></td><td style="font-size:10px;color:var(--text3);text-align:center;">13</td></tr>
+        <tr><td class="rank">8</td><td class="mname">GLM-5.2</td><td><span class="tag" style="background:#fce7f3;color:#be185d;">OpenHands</span></td><td class="score">35.6</td><td class="score">19.3</td><td class="score">26.9</td><td class="score">25.6</td><td class="score">27.2</td><td class="bar-cell"><div class="bar-bg"><div class="bar-fill" style="width:54.4%;background:#9ca3af"></div></div></td><td style="font-size:10px;color:var(--text3);text-align:center;">13</td></tr>
+        <tr><td class="rank">8</td><td class="mname">MiMo V2.5 Pro</td><td><span class="tag" style="background:#f3e8ff;color:#6b21a8;">MiMo Code</span></td><td class="score">37.2</td><td class="score">32.3</td><td class="score">19.6</td><td class="score">19.7</td><td class="score">27.2</td><td class="bar-cell"><div class="bar-bg"><div class="bar-fill" style="width:54.4%;background:#9ca3af"></div></div></td><td style="font-size:10px;color:var(--text3);text-align:center;">13</td></tr>
+        <tr><td class="rank">10</td><td class="mname">MiMo V2.5 Pro</td><td><span class="tag" style="background:#f3e8ff;color:#6b21a8;">MiMo Compose</span></td><td class="score">37.9</td><td class="score">22.5</td><td class="score">22.1</td><td class="score">25.5</td><td class="score">27.0</td><td class="bar-cell"><div class="bar-bg"><div class="bar-fill" style="width:54%;background:#9ca3af"></div></div></td><td style="font-size:10px;color:var(--text3);text-align:center;">13</td></tr>
+        <tr><td class="rank">11</td><td class="mname">DeepSeek V4 Pro</td><td><span class="tag" style="background:#fce7f3;color:#be185d;">OpenHands</span></td><td class="score">34.3</td><td class="score">24.6</td><td class="score">17.5</td><td class="score">23.1</td><td class="score">24.9</td><td class="bar-cell"><div class="bar-bg"><div class="bar-fill" style="width:49.8%;background:#9ca3af"></div></div></td><td style="font-size:10px;color:var(--text3);text-align:center;">13</td></tr>
+        <tr><td class="rank">12</td><td class="mname">GLM-5.1</td><td><span class="tag" style="background:#fce7f3;color:#be185d;">OpenHands</span></td><td class="score">28.9</td><td class="score">25.9</td><td class="score">18.4</td><td class="score">24.7</td><td class="score">24.5</td><td class="bar-cell"><div class="bar-bg"><div class="bar-fill" style="width:49%;background:#9ca3af"></div></div></td><td style="font-size:10px;color:var(--text3);text-align:center;">13</td></tr>
+        <tr><td class="rank">13</td><td class="mname">Kimi K2.6</td><td><span class="tag" style="background:#fce7f3;color:#be185d;">OpenHands</span></td><td class="score">28.2</td><td class="score">17.8</td><td class="score">19.3</td><td class="score">24.4</td><td class="score">22.4</td><td class="bar-cell"><div class="bar-bg"><div class="bar-fill" style="width:44.8%;background:#d1d5db"></div></div></td><td style="font-size:10px;color:var(--text3);text-align:center;">13</td></tr>
+        <tr><td class="rank">14</td><td class="mname">MiMo V2.5 Pro</td><td><span class="tag" style="background:#fce7f3;color:#be185d;">OpenHands</span></td><td class="score">22.8</td><td class="score">31.6</td><td class="score">9.9</td><td class="score">20.2</td><td class="score">21.1</td><td class="bar-cell"><div class="bar-bg"><div class="bar-fill" style="width:42.2%;background:#d1d5db"></div></div></td><td style="font-size:10px;color:var(--text3);text-align:center;">13</td></tr>
+        <tr><td class="rank">15</td><td class="mname">MiniMax M3</td><td><span class="tag" style="background:#fce7f3;color:#be185d;">OpenHands</span></td><td class="score">20.7</td><td class="score">16.7</td><td class="score">12.5</td><td class="score">22.2</td><td class="score">18.0</td><td class="bar-cell"><div class="bar-bg"><div class="bar-fill" style="width:36%;background:#d1d5db"></div></div></td><td style="font-size:10px;color:var(--text3);text-align:center;">13</td></tr>
+      </tbody>
+    </table>
+    <p class="small-note">* Claude 系列因安全管控跳过 4 个 biology/chemistry 任务，均分基于 9 个有效任务计算。覆盖 <strong>10 个模型 × 6 种 Harness = 15 种有完整 B-level 数据的组合</strong>。头尾分差 30.8，无天花板效应。同一模型换 Harness 均分可差 10+ 分。</p>
+  </div>
+  <div class="slide-num">06</div>
+</section>
+
+<!-- ============================================================ -->
+<!-- S6: Results Analysis（结果分析）-->
+<!-- ============================================================ -->
+<section class="slide compact" id="b-s6">
+  <div>
+    <h2 class="stitle"><em>结果分析</em>：闭源领跑，国产追近，Harness 决定下限</h2>
+    <p class="desc">从 15 种"模型 × Harness"组合的均分中可以读出三条清晰的信号：闭源旗舰仍处于第一梯队，但优势并不绝对；国产模型在原生 Harness 加持下已能贴近第二梯队上沿；Harness/Adapter 的选择对最终分数的影响，往往不亚于换模型本身。</p>
+
+    <div style="display:grid; grid-template-columns: 1fr 1fr 1fr; gap:18px; margin-top:16px;">
+
+      <div style="border:1px solid var(--border); border-radius:10px; padding:18px 20px; background:#fafbff;">
+        <div style="font-size:13px; color:var(--text3); font-weight:600; letter-spacing:0.5px; margin-bottom:8px;">第一梯队 · 闭源旗舰</div>
+        <div style="font-size:22px; font-weight:800; color:var(--green); margin-bottom:8px;">48.8 / 45.6 / 35.7</div>
+        <p style="font-size:13px; line-height:1.65; color:var(--text2); margin:0;">
+          Claude <strong>Fable 5</strong> 与 <strong>Opus 4.8</strong> 在 CC-CLI 上分别拿到 <strong>48.8</strong> / <strong>45.6</strong>，<strong>Gemini 3.1 Pro</strong> 在 OpenHands 上达到 <strong>35.7</strong>，三个闭源旗舰占据榜单前三。Claude 系列在 9 个非管控任务上接近天花板，但 4 个 biology/chemistry 任务因安全管控直接归零——<strong>能力没问题，是 policy 问题</strong>。
+        </p>
+      </div>
+
+      <div style="border:1px solid var(--border); border-radius:10px; padding:18px 20px; background:#fff7ed;">
+        <div style="font-size:13px; color:var(--text3); font-weight:600; letter-spacing:0.5px; margin-bottom:8px;">第二梯队 · 国产追近</div>
+        <div style="font-size:22px; font-weight:800; color:var(--orange); margin-bottom:8px;">33.1 / 32.1 / 31.3</div>
+        <p style="font-size:13px; line-height:1.65; color:var(--text2); margin:0;">
+          <strong>Kimi K2.7 + Kimi CLI</strong>（<strong>33.1</strong>）已超过 Gemini 与 GLM-5.2 之外的所有 OpenHands 配置，仅与 Gemini 3.1 Pro 差 2.6 分。<strong>GLM-5.2 + ZCode</strong>（<strong>32.1</strong>）、<strong>Kimi K2.6 + Kimi CLI</strong>（<strong>31.3</strong>）紧随其后。在 <strong>原生 CLI Harness</strong> 加持下，国产模型与闭源第二梯队的差距已缩到 <strong>3 分以内</strong>，部分维度反超（如 K2.7 B2 比 GLM-5.2 B2 高 12.1 分）。
+        </p>
+      </div>
+
+      <div style="border:1px solid var(--border); border-radius:10px; padding:18px 20px; background:#f5f3ff;">
+        <div style="font-size:13px; color:var(--text3); font-weight:600; letter-spacing:0.5px; margin-bottom:8px;">关键发现 · Harness 即放大器</div>
+        <div style="font-size:22px; font-weight:800; color:var(--accent); margin-bottom:8px;">+10.7 分</div>
+        <p style="font-size:13px; line-height:1.65; color:var(--text2); margin:0;">
+          同一个 <strong>Kimi K2.6</strong>，从 OpenHands 换到原生 Kimi CLI，均分从 <strong>22.4 → 31.3</strong>，<strong>纯换 Harness 涨 8.9 分</strong>；K2.7 从 OpenHands 27.7 → Kimi CLI 33.1，再升 5.4 分。<strong>15 种组合中头尾相差 30.8 分</strong>，其中"换 Harness"贡献的差值时常超过"换模型"。这是 ASI4Sci-Bench 与其他 benchmark 不一样的地方——<strong>它评的是「模型 × Agent 框架」整体，而不是孤立的模型能力</strong>。
+        </p>
+      </div>
+
+    </div>
+
+    <div style="margin-top:18px; padding:14px 18px; border-left:3px solid var(--accent); background:#f8fafc; border-radius:0 8px 8px 0;">
+      <p style="font-size:13px; line-height:1.7; color:var(--text2); margin:0;">
+        <strong>一句话总结：</strong>当下 AI for Science 评测呈现"<strong style="color:var(--green);">闭源旗舰领先</strong>、<strong style="color:var(--orange);">国产模型贴身追赶</strong>、<strong style="color:var(--accent);">Harness 主导下限</strong>"的三层格局。国产代表（Kimi K2.7、GLM-5.2、MiMo V2.5 Pro）在搭配自家原生 CLI 时表现并不逊色，差距正在被工程层面的优化（原生工具调用、上下文管理、思考链格式）持续抹平。
+      </p>
+    </div>
+  </div>
+  <div class="slide-num">07</div>
+</section>
+
+<!-- ============================================================ -->
+<!-- S7: Roadmap -->
+<!-- ============================================================ -->
+<section class="slide" id="b-s7">
+  <div>
+    <h2 class="stitle"><em>发展路线图</em></h2>
+    <p class="desc">从高质量种子数据集出发，逐步扩展任务规模，最终形成评测-轨迹-训练的数据飞轮。</p>
+
+    <div class="roadmap">
+      <div class="rm-item">
+        <div class="rm-dot done"></div>
+        <div class="rm-phase">Phase 1 · 已完成</div>
+        <div class="rm-title">种子基准</div>
+        <div class="rm-desc">
+          97 个专家级任务，13 大学科<br>
+          9 个前沿模型完成评测<br>
+          7 种 Harness 框架验证<br>
+          零分诊断系统上线<br>
+          <strong>已产出完整对比报告</strong>
+        </div>
+      </div>
+      <div class="rm-item">
+        <div class="rm-dot now"></div>
+        <div class="rm-phase">Phase 2 · 进行中</div>
+        <div class="rm-title">规模扩展至 1,000+ Tasks</div>
+        <div class="rm-desc">
+          扩展至更多细分学科<br>
+          引入更多 Harness（Gemini CLI、ZCode 等）<br>
+          建设社区贡献通道<br>
+          优化评分引擎与自动化流程<br>
+          <strong>建立持续评测 pipeline</strong>
+        </div>
+      </div>
+      <div class="rm-item">
+        <div class="rm-dot later"></div>
+        <div class="rm-phase">Phase 3 · 规划中</div>
+        <div class="rm-title">轨迹收集 & 模型训练</div>
+        <div class="rm-desc">
+          收集模型运行的内部轨迹数据<br>
+          构建高质量 trajectory 数据集<br>
+          用于 Science-Agent 微调训练<br>
+          形成"评测→轨迹→训练→评测"闭环<br>
+          <strong>打造 AI4Sci 核心数据资产</strong>
+        </div>
+      </div>
+    </div>
+
+    <div style="margin-top:24px; padding:20px; background:var(--bg2); border-radius:8px; border:1px solid var(--border);">
+      <h3 class="sub" style="margin-top:0;">为什么是现在</h3>
+      <div style="font-size:13px; color:var(--text2); line-height:1.8; columns:2; column-gap:40px;">
+        <p>AI for Science 正在从论文验证走向真实科研工具。各大厂商的 Coding Agent 能力突飞猛进，但<strong>没有人在系统性地评估它们在科学计算场景下的真实能力</strong>。现有 benchmark（HumanEval、SWE-bench 等）聚焦软件工程，无法覆盖科学计算的核心挑战：数值精度、物理约束、算法收敛性。AI4Sci-Bench 填补了这个空白。</p>
+      </div>
+    </div>
+  </div>
+  <div class="slide-num">08</div>
+</section>
+
+<!-- ============================================================ -->
+<!-- S8: Self-Evolving Flywheel -->
+<!-- ============================================================ -->
+<section class="slide" id="b-s8">
+  <div>
+    <h2 class="stitle"><em>自进化闭环</em>：评测 → 轨迹 → 训练 → 再评测</h2>
+    <p class="desc">AI4Sci-Bench 不只是一个 benchmark，而是一套<strong>自成体系的科学智能体进化环境</strong>。模型在任务中产生轨迹，优质轨迹训练出更强模型，更强模型解锁更多任务、产出更好轨迹——每一轮迭代都让系统整体变强。</p>
+
+    <div style="display:flex; align-items:flex-start; gap:40px; margin-top:8px;">
+      <!-- Circular flywheel SVG -->
+      <svg width="460" height="460" viewBox="0 0 460 460" fill="none" xmlns="http://www.w3.org/2000/svg" style="flex-shrink:0;">
+        <defs>
+          <linearGradient id="fc1" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#2563eb"/><stop offset="100%" stop-color="#3b82f6"/></linearGradient>
+          <linearGradient id="fc2" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#059669"/><stop offset="100%" stop-color="#10b981"/></linearGradient>
+          <linearGradient id="fc3" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#7c3aed"/><stop offset="100%" stop-color="#a78bfa"/></linearGradient>
+          <linearGradient id="fc4" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#d97706"/><stop offset="100%" stop-color="#f59e0b"/></linearGradient>
+          <filter id="fs"><feDropShadow dx="0" dy="3" stdDeviation="6" flood-color="#000" flood-opacity="0.08"/></filter>
+          <marker id="ah1" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto"><path d="M1,1 L7,4 L1,7" fill="#2563eb"/></marker>
+          <marker id="ah2" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto"><path d="M1,1 L7,4 L1,7" fill="#059669"/></marker>
+          <marker id="ah3" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto"><path d="M1,1 L7,4 L1,7" fill="#7c3aed"/></marker>
+          <marker id="ah4" markerWidth="8" markerHeight="8" refX="4" refY="4" orient="auto"><path d="M1,1 L7,4 L1,7" fill="#d97706"/></marker>
+        </defs>
+
+        <!-- Outer ring track -->
+        <circle cx="230" cy="230" r="175" fill="none" stroke="#e5e7eb" stroke-width="2.5" stroke-dasharray="6 4" opacity="0.6"/>
+
+        <!-- Curved arrows between nodes (clockwise: top→right→bottom→left) -->
+        <path d="M 320,100 Q 400,160 385,260" fill="none" stroke="#2563eb" stroke-width="2.5" marker-end="url(#ah1)" opacity="0.5"/>
+        <path d="M 370,330 Q 320,410 220,400" fill="none" stroke="#059669" stroke-width="2.5" marker-end="url(#ah2)" opacity="0.5"/>
+        <path d="M 140,370 Q 60,310 70,210" fill="none" stroke="#7c3aed" stroke-width="2.5" marker-end="url(#ah3)" opacity="0.5"/>
+        <path d="M 90,130 Q 140,50 240,60" fill="none" stroke="#d97706" stroke-width="2.5" marker-end="url(#ah4)" opacity="0.5"/>
+
+        <!-- Node 1: TOP — 评测 (Evaluate) -->
+        <g filter="url(#fs)">
+          <circle cx="230" cy="62" r="50" fill="white" stroke="#2563eb" stroke-width="2.5"/>
+          <circle cx="230" cy="62" r="46" fill="#eff6ff"/>
+          <text x="230" y="50" text-anchor="middle" fill="#1e40af" font-size="11" font-weight="800" font-family="Inter, sans-serif" letter-spacing="1">EVALUATE</text>
+          <text x="230" y="64" text-anchor="middle" fill="#2563eb" font-size="20" font-family="Inter, sans-serif">🔬</text>
+          <text x="230" y="80" text-anchor="middle" fill="#3b82f6" font-size="9" font-weight="600" font-family="Inter, sans-serif">97 Tasks × 4 Levels</text>
+        </g>
+
+        <!-- Node 2: RIGHT — 轨迹收集 (Collect) -->
+        <g filter="url(#fs)">
+          <circle cx="398" cy="230" r="50" fill="white" stroke="#059669" stroke-width="2.5"/>
+          <circle cx="398" cy="230" r="46" fill="#ecfdf5"/>
+          <text x="398" y="218" text-anchor="middle" fill="#065f46" font-size="11" font-weight="800" font-family="Inter, sans-serif" letter-spacing="1">COLLECT</text>
+          <text x="398" y="232" text-anchor="middle" fill="#059669" font-size="20" font-family="Inter, sans-serif">📊</text>
+          <text x="398" y="248" text-anchor="middle" fill="#10b981" font-size="9" font-weight="600" font-family="Inter, sans-serif">优质轨迹数据</text>
+        </g>
+
+        <!-- Node 3: BOTTOM — 训练 (Train) -->
+        <g filter="url(#fs)">
+          <circle cx="230" cy="398" r="50" fill="white" stroke="#7c3aed" stroke-width="2.5"/>
+          <circle cx="230" cy="398" r="46" fill="#f5f3ff"/>
+          <text x="230" y="386" text-anchor="middle" fill="#4c1d95" font-size="11" font-weight="800" font-family="Inter, sans-serif" letter-spacing="1">TRAIN</text>
+          <text x="230" y="400" text-anchor="middle" fill="#7c3aed" font-size="20" font-family="Inter, sans-serif">🧠</text>
+          <text x="230" y="416" text-anchor="middle" fill="#8b5cf6" font-size="9" font-weight="600" font-family="Inter, sans-serif">微调 Science Agent</text>
+        </g>
+
+        <!-- Node 4: LEFT — 再评测 (Re-evaluate) -->
+        <g filter="url(#fs)">
+          <circle cx="62" cy="230" r="50" fill="white" stroke="#d97706" stroke-width="2.5"/>
+          <circle cx="62" cy="230" r="46" fill="#fffbeb"/>
+          <text x="62" y="218" text-anchor="middle" fill="#92400e" font-size="10" font-weight="800" font-family="Inter, sans-serif" letter-spacing="0.5">RE-EVALUATE</text>
+          <text x="62" y="232" text-anchor="middle" fill="#d97706" font-size="20" font-family="Inter, sans-serif">🔄</text>
+          <text x="62" y="248" text-anchor="middle" fill="#b45309" font-size="9" font-weight="600" font-family="Inter, sans-serif">发现新短板</text>
+        </g>
+
+        <!-- Center: AI4Sci-Bench core -->
+        <g filter="url(#fs)">
+          <circle cx="230" cy="230" r="68" fill="white" stroke="#e2e5e9" stroke-width="2"/>
+          <circle cx="230" cy="230" r="62" fill="#f8fafc"/>
+          <text x="230" y="218" text-anchor="middle" fill="#1a1a2e" font-size="13" font-weight="900" font-family="Inter, sans-serif">AI4Sci</text>
+          <text x="230" y="236" text-anchor="middle" fill="#1a1a2e" font-size="13" font-weight="900" font-family="Inter, sans-serif">Bench</text>
+          <text x="230" y="256" text-anchor="middle" fill="#6b7280" font-size="9" font-weight="500" font-family="Inter, sans-serif">自进化引擎</text>
+        </g>
+
+        <!-- Edge labels -->
+        <g font-family="Inter, sans-serif" font-size="9" font-weight="600">
+          <text x="345" y="152" fill="#2563eb" transform="rotate(30,345,152)">模型跑 Task</text>
+          <text x="340" y="345" fill="#059669" transform="rotate(-30,340,345)">筛选高分轨迹</text>
+          <text x="105" y="345" fill="#7c3aed" transform="rotate(30,105,345)">SFT / RLHF</text>
+          <text x="110" y="152" fill="#d97706" transform="rotate(-30,110,152)">更强模型上线</text>
+        </g>
+
+        <!-- Iteration badge -->
+        <g filter="url(#fs)">
+          <rect x="350" y="15" width="100" height="28" rx="14" fill="#1a1a2e"/>
+          <text x="400" y="34" text-anchor="middle" fill="#fff" font-size="10" font-weight="700" font-family="JetBrains Mono, monospace">∞ 自迭代</text>
+        </g>
+      </svg>
+
+      <!-- Right side: detailed explanation -->
+      <div style="flex:1; min-width:0;">
+        <h3 class="sub" style="margin-top:0;">四步闭环：每一轮都让系统变强</h3>
+        <div style="font-size:13px; color:var(--text2); line-height:1.8;">
+          <div style="display:flex; gap:12px; margin-bottom:14px; align-items:flex-start;">
+            <div style="flex-shrink:0; width:28px; height:28px; border-radius:50%; background:#eff6ff; border:2px solid #2563eb; display:flex; align-items:center; justify-content:center; font-size:13px; font-weight:800; color:#2563eb;">1</div>
+            <div><strong style="color:var(--text);">评测（Evaluate）</strong><br>将当前模型接入 AI4Sci-Bench，在 97+ 个科学任务 × 4 个 prompt 等级上全量评测。评分引擎自动产出每任务、每 B-level 的精细得分。</div>
+          </div>
+          <div style="display:flex; gap:12px; margin-bottom:14px; align-items:flex-start;">
+            <div style="flex-shrink:0; width:28px; height:28px; border-radius:50%; background:#ecfdf5; border:2px solid #059669; display:flex; align-items:center; justify-content:center; font-size:13px; font-weight:800; color:#059669;">2</div>
+            <div><strong style="color:var(--text);">轨迹收集（Collect）</strong><br>所有模型运行过程中的<strong>完整轨迹</strong>（思考链、工具调用、代码生成、调试过程）被自动录制。筛选高分 run 的轨迹作为优质训练数据，低分 run 的轨迹用于错误分析。</div>
+          </div>
+          <div style="display:flex; gap:12px; margin-bottom:14px; align-items:flex-start;">
+            <div style="flex-shrink:0; width:28px; height:28px; border-radius:50%; background:#f5f3ff; border:2px solid #7c3aed; display:flex; align-items:center; justify-content:center; font-size:13px; font-weight:800; color:#7c3aed;">3</div>
+            <div><strong style="color:var(--text);">模型训练（Train）</strong><br>用优质轨迹对模型做 SFT / RLHF 微调，<strong>针对性增强</strong>科学推理、数值计算、算法实现能力。训练信号直接来自真实科研任务，而非合成数据。</div>
+          </div>
+          <div style="display:flex; gap:12px; margin-bottom:14px; align-items:flex-start;">
+            <div style="flex-shrink:0; width:28px; height:28px; border-radius:50%; background:#fffbeb; border:2px solid #d97706; display:flex; align-items:center; justify-content:center; font-size:13px; font-weight:800; color:#d97706;">4</div>
+            <div><strong style="color:var(--text);">再评测（Re-evaluate）</strong><br>训练后的新模型重新跑全量评测。与上一轮对比，精确定位哪些学科、哪些任务类型获得了提升，哪些仍是短板——然后<strong>进入下一轮循环</strong>。</div>
+          </div>
+        </div>
+
+        <div style="padding:16px; background:linear-gradient(135deg, #eff6ff, #f5f3ff); border-radius:8px; border:1px solid #c4b5fd; margin-top:4px;">
+          <div style="font-size:13px; color:var(--text); line-height:1.7;">
+            <strong>为什么这是一个「自进化」系统：</strong>传统 benchmark 是<span style="color:var(--text3);">静态的</span>——出题、测试、结束。AI4Sci-Bench 是<strong style="color:var(--accent);">动态的</strong>——评测本身产出训练数据，训练产出更强的模型，更强的模型解锁更难的任务、产出更高质量的轨迹。<strong>系统的每一个组件都在让其他组件变强。</strong>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="slide-num">09</div>
+  <a class="nav-dot" href="#af-hero" aria-label="下一页">⌄</a>
+</section>
+
+
+
+
+
+</div>
+
+<!-- ============ DECK 3 · AGENTICFIGURE ============ -->
+<section id="af-hero" class="band"><span class="pagetag">01</span><div class="wrap">
+    <div class="wordmark">AGENTICFIGURE</div>
+    <div class="eyebrow">科研可视化 · Editable Scientific Figures</div>
+    <h1>让 AI 自己画出<span class="gradtext">可编辑的科研图</span></h1>
+    <p class="lead">AgenticFigure 是一套面向科研可视化的多智能体矢量图生成系统。它读懂论文方法，自动产出原生 SVG 图——每个文字、模块框、箭头都可二次编辑；7 个专业化 Agent 协作、三个独立 Critic 对抗盲审，保证图既好看又忠实于原文。</p>
+    <div class="grid g4" style="margin-top:38px">
+      <div class="stat"><div class="n gradtext">7</div><div class="l">专业化 Agent</div><div class="s">Harness 按需编排</div></div>
+      <div class="stat"><div class="n gradtext">&ge;85%</div><div class="l">原生矢量元素</div><div class="s">附可编辑性证明</div></div>
+      <div class="stat"><div class="n gradtext">3</div><div class="l">独立 Critic 盲审</div><div class="s">语义 / 视觉 / 布局</div></div>
+      <div class="stat"><div class="n gradtext">12</div><div class="l">可插拔学科领域</div><div class="s">Skill 插件化</div></div>
+    </div></div>
+  <a class="nav-dot" href="#af-vs" aria-label="下一页">⌄</a></section>
+<section id="af-vs"><span class="pagetag">02</span><div class="wrap">
+    <div class="eyebrow">对比分析 · PaperBanana vs AgenticFigure</div>
+    <h2>同一件事，<span class="gradtext">我们做得更对</span></h2>
+    <p class="lead">PaperBanana（北京大学 &amp; Google Cloud AI Research, 2026）是该领域的代表性工作。三个维度看架构级差异。</p>
+    <div style="margin-top:22px"><h3 style="display:flex;align-items:center;gap:12px"><span class="afnum">01</span> 输出格式：光栅图 vs 可编辑矢量图</h3>
+      <div class="grid g2" style="margin-top:10px">
+        <div class="card tight" style="border-top:4px solid var(--r)"><span class="pill bad">PaperBanana</span><h3>PNG 光栅图，不可编辑</h3><p class="muted small">最终产物是 PNG。想改个箭头方向、换个标签？<b>只能整图重新生成</b>。作者提出 "OCR + SAM3 分割 → 重组" 的后处理，但只是补丁。</p></div>
+        <div class="card tight" style="border-top:4px solid var(--b)"><span class="pill b">AgenticFigure</span><h3>原生 SVG，每个元素可编辑</h3><p class="muted small">文本是 &lt;text&gt;、框是 &lt;rect&gt;、箭头是 &lt;path&gt;。直接拖进 Inkscape / Illustrator 改任意元素，要求 <b>&ge;85% 原生矢量</b> 并附 ElementGraph 证明。</p></div>
+      </div></div>
+    <div style="margin-top:18px"><h3 style="display:flex;align-items:center;gap:12px"><span class="afnum">02</span> 架构范式：固定流水线 vs 自适应多智能体</h3>
+      <div class="grid g2" style="margin-top:10px">
+        <div class="card tight" style="border-top:4px solid var(--r)"><span class="pill bad">PaperBanana</span><h3>5 步硬编码流水线，Critic 自检盲区</h3><p class="muted small">五个 Agent 固定顺序执行，<b>Critic 与生成器共享上下文</b>——本质是"自己检查自己的作业"。Faithfulness 仅 <b>45.8%</b>。</p></div>
+        <div class="card tight" style="border-top:4px solid var(--b)"><span class="pill b">AgenticFigure</span><h3>7 Agent 自适应 + 对抗式盲审</h3><p class="muted small"><b>7 个专业化智能体</b>由 Harness 按需编排。三个独立 Critic（语义/视觉/布局）<b>并行且互相隔离</b>，如同真正盲审；未过只回流 issue 列表，防投机修复。</p></div>
+      </div></div>
+    <div style="margin-top:18px"><h3 style="display:flex;align-items:center;gap:12px"><span class="afnum">03</span> 领域覆盖：仅限 CS vs 可扩展多领域</h3>
+      <div class="grid g2" style="margin-top:10px">
+        <div class="card tight" style="border-top:4px solid var(--r)"><span class="pill bad">PaperBanana</span><h3>仅针对计算机科学论文</h3><p class="muted small">训练与评测集均来自 CS 论文，<b>没有领域扩展机制</b>，面对基因通路图、晶体结构图等无法适配。</p></div>
+        <div class="card tight" style="border-top:4px solid var(--b)"><span class="pill b">AgenticFigure</span><h3>可插拔领域 Skill，覆盖多学科</h3><p class="muted small"><b>Skill 插件化架构</b>，自动识别论文领域并加载对应视觉范式——新增一个领域只需写一个 Skill，无需重训。</p><div style="margin-top:10px"><span class="pill b">Agent & Reasoning</span><span class="pill b">Vision & Perception</span><span class="pill b">Generative Models</span><span class="pill b">Bioinformatics</span><span class="pill b">Physics & Materials</span><span class="pill b">Robotics</span><span class="pill b">NLP</span><span class="pill b">Geoscience</span><span class="pill b">Chemistry</span><span class="pill b">Circuit & Hardware</span><span class="pill b">Security</span><span class="pill b">Systems & Infra</span></div></div>
+      </div></div>
+  </div><a class="nav-dot" href="#af-gallery" aria-label="下一页">⌄</a></section>
+<section id="af-gallery"><span class="pagetag">03</span><div class="wrap">
+    <div class="eyebrow">效果对比 · 同论文生成结果</div>
+    <h2>同一篇论文，<span class="gradtext">两种系统的产出</span></h2>
+    <p class="lead">以下六组对比均基于同一篇论文的方法描述，分别由 PaperBanana 与 AgenticFigure 生成。点击任意图片可放大查看。</p>
+    <div class="cmpgrid">
+      <div class="cmpcard"><div class="cmptitle">KL Distillation for Contextual Sparsity</div><div class="cmppair">
+          <div class="cmpside pb"><div class="cmplabel">PaperBanana</div><div class="imglink"><img src="showcase_assets/kl_sparsity/paperbanana.jpg" alt="PaperBanana"></div></div>
+          <div class="cmpside af"><div class="cmplabel">AgenticFigure</div><div class="imglink"><img src="showcase_assets/kl_sparsity/agenticfigure.png" alt="AgenticFigure"></div></div>
+        </div></div>
+      <div class="cmpcard"><div class="cmptitle">Controlled Style Decomposition (CSD)</div><div class="cmppair">
+          <div class="cmpside pb"><div class="cmplabel">PaperBanana</div><div class="imglink"><img src="showcase_assets/csd/paperbanana.jpg" alt="PaperBanana"></div></div>
+          <div class="cmpside af"><div class="cmplabel">AgenticFigure</div><div class="imglink"><img src="showcase_assets/csd/agenticfigure.png" alt="AgenticFigure"></div></div>
+        </div></div>
+      <div class="cmpcard"><div class="cmptitle">Spectral Early Warning Signals</div><div class="cmppair">
+          <div class="cmpside pb"><div class="cmplabel">PaperBanana</div><div class="imglink"><img src="showcase_assets/spectral_ews/paperbanana.jpg" alt="PaperBanana"></div></div>
+          <div class="cmpside af"><div class="cmplabel">AgenticFigure</div><div class="imglink"><img src="showcase_assets/spectral_ews/agenticfigure.png" alt="AgenticFigure"></div></div>
+        </div></div>
+      <div class="cmpcard"><div class="cmptitle">RASP Recovery Architecture</div><div class="cmppair">
+          <div class="cmpside pb"><div class="cmplabel">PaperBanana</div><div class="imglink"><img src="showcase_assets/rasp_recovery/paperbanana.jpg" alt="PaperBanana"></div></div>
+          <div class="cmpside af"><div class="cmplabel">AgenticFigure</div><div class="imglink"><img src="showcase_assets/rasp_recovery/agenticfigure.png" alt="AgenticFigure"></div></div>
+        </div></div>
+      <div class="cmpcard"><div class="cmptitle">Exposure Bias in Auxiliary Attention</div><div class="cmppair">
+          <div class="cmpside pb"><div class="cmplabel">PaperBanana</div><div class="imglink"><img src="showcase_assets/exposure_bias/paperbanana.jpg" alt="PaperBanana"></div></div>
+          <div class="cmpside af"><div class="cmplabel">AgenticFigure</div><div class="imglink"><img src="showcase_assets/exposure_bias/agenticfigure.png" alt="AgenticFigure"></div></div>
+        </div></div>
+      <div class="cmpcard"><div class="cmptitle">Detect-and-Reweight Pipeline</div><div class="cmppair">
+          <div class="cmpside pb"><div class="cmplabel">PaperBanana</div><div class="imglink"><img src="showcase_assets/detect_reweight/paperbanana.jpg" alt="PaperBanana"></div></div>
+          <div class="cmpside af"><div class="cmplabel">AgenticFigure</div><div class="imglink"><img src="showcase_assets/detect_reweight/agenticfigure.png" alt="AgenticFigure"></div></div>
+        </div></div>
+    </div></div>
+  <a class="nav-dot" href="#c-hero" aria-label="下一页">⌄</a></section>
+
+<!-- ============ DECK 4 · CCM ============ -->
+
+
+<!-- ============ 01 · COVER ============ -->
+<section id="c-hero" class="band">
+  <span class="pagetag">01</span>
+  <div class="wrap">
+    <div class="wordmark">CCM&nbsp;·&nbsp;CLAUDE&nbsp;CODE&nbsp;MANAGER</div>
+    <div class="eyebrow">内部研发效率平台 · Autonomous Coding Fleet</div>
+    <h1>一个人，指挥<span class="gradtext">一支 AI 工程师团队</span></h1>
+    <p class="lead">CCM 是我们自研的编码智能体编排平台。它让团队成员从"手动操作一个 AI 助手"，升级为"同时指挥多个自主智能体并行干活"——人只下达目标，一群 Claude Code 自动认领、编码、测试、合并、复盘，把每个人的有效产能成倍放大。</p>
+    <div class="grid g4" style="margin-top:38px">
+      <div class="stat"><div class="n gradtext">1,376</div><div class="l">任务自主交付</div><div class="s">共 1,470 · 94% 完成率</div></div>
+      <div class="stat"><div class="n gradtext">20</div><div class="l">人均同时推进项目</div><div class="s">单人并行项目数</div></div>
+      <div class="stat"><div class="n gradtext">25</div><div class="l">峰值并行智能体</div><div class="s">全部署同一时刻</div></div>
+      <div class="stat"><div class="n gradtext">62</div><div class="l">工作实例统一管理</div><div class="s">本机 + 云端</div></div>
+    </div>
+  </div>
+  <a class="nav-dot" href="#c-why" aria-label="下一页">⌄</a>
+</section>
+
+<!-- ============ 02 · PROBLEM ============ -->
+<section id="c-why">
+  <span class="pagetag">02</span>
+  <div class="wrap">
+    <div class="eyebrow">我们要解决的问题</div>
+    <h2>AI 已经会写代码，但<span class="gradtext">"一个人能管好几个 AI"</span>还没人帮我们解决</h2>
+    <p class="lead">编码智能体这一年能力突飞猛进，但团队里大多数人还停留在"开一个窗口、问一句、等一句"的用法。真正的瓶颈，已经从"模型够不够强"，变成了"一个人到底能同时驱动多少个智能体"。CCM 就是为补上这块短板而生的内部工具。</p>
+
+    <div class="grid g2" style="margin-top:24px">
+      <div class="card" style="border-top:4px solid var(--r)">
+        <span class="pill c">现状的四个痛点</span>
+        <h3>串行、值守、排队、不沉淀</h3>
+        <ul class="clean small">
+          <li><b>串行使用，能力闲置：</b>一次只盯一个对话，智能体大量时间在等人，强大的模型能力被白白浪费。</li>
+          <li><b>人工搬运，全程值守：</b>建分支、跑测试、合并、解决冲突、写记录——每步都要人手动衔接，注意力被切碎。</li>
+          <li><b>无法并行，项目排队：</b>多个项目只能一个一个推进，个人产能被锁死在"单线程"。</li>
+          <li><b>经验不沉淀，重复踩坑：</b>每次从零开始，上次的教训这次又踩一遍，团队知识无法累积。</li>
+        </ul>
+      </div>
+      <div class="card" style="border-top:4px solid var(--a)">
+        <span class="pill a">同一个人 · 同一时刻能驱动多少智能体</span>
+        <h3>从 1 个，到一支舰队</h3>
+        <div style="margin-top:10px">
+          <div class="kv"><span>传统方式 · 串行盯 1 个对话</span><b style="color:#9aa0bb">1 个</b></div>
+          <div class="kv"><span>使用 CCM · 单人单部署实测峰值</span><b class="gradtext" style="font-size:18px">14 个</b></div>
+          <div class="kv"><span>使用 CCM · 三台部署同时并行峰值</span><b class="gradtext" style="font-size:18px">25 个</b></div>
+        </div>
+        <div class="callout" style="margin-top:14px">把人的角色，从一线执行者升级为 <b>团队指挥官</b>。灵感源自胡渊鸣的文章"我给 10 个 Claude Code 打工"。</div>
+      </div>
+    </div>
+  </div>
+  <a class="nav-dot" href="#c-flow" aria-label="下一页">⌄</a>
+</section>
+
+<!-- ============ 03 · WORKFLOW ============ -->
+<section id="c-flow">
+  <span class="pagetag">03</span>
+  <div class="wrap">
+    <div class="eyebrow">工作流程</div>
+    <h2>你给目标，它<span class="gradtext">全程自主交付</span></h2>
+    <p class="lead">每个任务，智能体都独立完成从"认领"到"复盘"的完整闭环。人只在两端出现——开头定义要做什么，结尾验收做得好不好，中间的全部工程流程不需要盯。</p>
+
+    <div class="loopwrap" style="margin-top:26px">
+      <div class="loopstage"><div class="tag">Input</div><h3>人 · 下目标</h3><div class="tiny" style="margin-top:2px">扔进任务队列<br/>设好优先级</div></div>
+      <div class="arrow">→</div>
+      <div class="loopcore">
+        <div class="loopbadge">↻ 9 步自主闭环 · 无需人工介入</div>
+        <div class="loopnodes">
+          <div class="lnode e">认领 · 建区<small>调度 + 隔离工作区</small></div>
+          <div class="cyc">⇄</div>
+          <div class="lnode p">编码 · 测试<small>实现 + 提交 + 跑测试</small></div>
+          <div class="cyc">⇄</div>
+          <div class="lnode r">合并 · 沉淀<small>合主干 + 清理 + 记经验</small></div>
+        </div>
+        <div class="loopfeed">完整 9 步：认领 → 建工作区 → 实现 → 提交 → 集成测试 → 合并主干 → 更新文档 → 清理收尾 → <b>经验沉淀</b>（冲突自行解决）</div>
+      </div>
+      <div class="arrow">→</div>
+      <div class="loopstage"><div class="tag">Output</div><h3>人 · 验收</h3><div class="tiny" style="margin-top:2px">看结果<br/>可追问/打回</div></div>
+    </div>
+
+    <div class="grid g3" style="margin-top:36px">
+      <div class="card tight"><span class="pill a">全自主</span><h3>中间环节全自动闭环</h3>
+        <p class="muted small">人只负责"定义要做什么"和"验收做得好不好"，9 步工程流程由智能体自己跑完。</p>
+      </div>
+      <div class="card tight"><span class="pill b">工作区隔离</span><h3>多任务并行不打架</h3>
+        <p class="muted small">每个任务在物理隔离的独立工作区里操作，并行也不会互相污染——这是"敢让它自主合并主干"的前提。</p>
+      </div>
+      <div class="card tight"><span class="pill d">经验沉淀</span><h3>同样的错不犯第二次</h3>
+        <p class="muted small">每次踩的坑与解法都写进知识库，新任务自动受益，团队经验越攒越厚。</p>
+      </div>
+    </div>
+  </div>
+  <a class="nav-dot" href="#c-data" aria-label="下一页">⌄</a>
+</section>
+
+<!-- ============ 04 · REAL DATA ============ -->
+<section id="c-data">
+  <span class="pagetag">04</span>
+  <div class="wrap">
+    <div class="eyebrow">真实运行数据</div>
+    <h2>不是设想，是<span class="gradtext">已经跑出来的成绩</span></h2>
+    <p class="lead">以下全部来自 CCM <b>三台独立生产部署</b>的真实运行记录——在最长约 4 个月的实际使用中（最早自 2026-02-27），平台已经实打实地交付了这些工作量。</p>
+
+    <div class="grid g4" style="margin-top:24px">
+      <div class="stat"><div class="n gradtext">1,376</div><div class="l">任务自主交付</div><div class="s">共 1,470 · 94% 完成率</div></div>
+      <div class="stat"><div class="n gradtext">20</div><div class="l">人均同时推进项目</div><div class="s">单人并行项目数</div></div>
+      <div class="stat"><div class="n gradtext">25</div><div class="l">峰值并行智能体</div><div class="s">全部署同一时刻</div></div>
+      <div class="stat"><div class="n gradtext">327</div><div class="l">子智能体 / 监控会话</div><div class="s">自主派生、自主汇报</div></div>
+    </div>
+
+    <div class="grid g2" style="margin-top:18px">
+      <div class="card">
+        <h3>全部署并行度的增长</h3>
+        <div class="chart">
+          <div class="col2"><div class="track"><div class="v gradtext">3</div><div class="bar2" style="height:26px"></div></div><div class="lab">3 月初<br/>起步</div></div>
+          <div class="col2"><div class="track"><div class="v gradtext">4</div><div class="bar2" style="height:34px"></div></div><div class="lab">4 月<br/>稳步</div></div>
+          <div class="col2"><div class="track"><div class="v gradtext">12</div><div class="bar2" style="height:101px"></div></div><div class="lab">5 月中<br/>提速</div></div>
+          <div class="col2"><div class="track"><div class="v gradtext">21</div><div class="bar2" style="height:176px"></div></div><div class="lab">5 月底<br/>放量</div></div>
+          <div class="col2"><div class="track"><div class="v gradtext">25</div><div class="bar2 green" style="height:210px"></div></div><div class="lab">6 月<br/>峰值</div></div>
+        </div>
+        <p class="footnote">三台部署"同时运行的智能体数量"逐周峰值之和——从每周 1～4 个，爬升到全部署同时 25 个并行。</p>
+      </div>
+      <div class="card">
+        <h3>规模化的真实体量</h3>
+        <div style="margin-top:8px">
+          <div class="kv"><span>累计自主工具调用</span><b class="gradtext" style="font-size:18px">351,370</b></div>
+          <div class="kv"><span>执行日志全程留痕</span><b class="gradtext" style="font-size:18px">1,194,251</b></div>
+          <div class="kv"><span>工作实例统一管理</span><b style="font-size:16px">62 个</b></div>
+          <div class="kv"><span>单人单部署并行峰值</span><b style="font-size:16px">14 个</b></div>
+          <div class="kv"><span>运行跨度</span><b>~4 个月（自 2026-02）</b></div>
+        </div>
+        <div class="ribbon" style="margin-top:14px">✓ 三台生产部署 · 实时数据库统计 · 可溯源</div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:18px">
+      <h3>三台生产部署的分项成绩</h3>
+      <table>
+        <thead><tr><th>部署</th><th>完成任务</th><th>推进项目</th><th>工作实例</th><th>单机并行峰值</th></tr></thead>
+        <tbody>
+          <tr><td><b>部署 A</b></td><td><b>46</b></td><td>22</td><td>13</td><td>9</td></tr>
+          <tr><td><b>部署 B</b></td><td><b>621</b></td><td>54</td><td>17</td><td>10</td></tr>
+          <tr><td><b>部署 C</b></td><td><b>709</b></td><td>44</td><td>32</td><td class="schi"><b>14</b></td></tr>
+        </tbody>
+      </table>
+      <p class="footnote">统计区间 2026-02-27 至 2026-06-23；部署名称已匿名化。</p>
+    </div>
+
+    <div class="callout" style="margin-top:14px">
+      <b>关键的一条：</b>全部署峰值有 <strong>25 个智能体在同一时刻并行干活</strong>，单台部署单人也能稳定驱动 14 个——这正是"一个人指挥一支团队"最直接的证据。
+    </div>
+  </div>
+  <a class="nav-dot" href="#c-evolve" aria-label="下一页">⌄</a>
+</section>
+
+<!-- ============ 05 · EVOLUTION ============ -->
+<section id="c-evolve">
+  <span class="pagetag">05</span>
+  <div class="wrap">
+    <div class="eyebrow">平台纵深与演进</div>
+    <h2>从单机，到舰队，<span class="gradtext">再到团队</span></h2>
+    <p class="lead">CCM 的能力边界还在快速扩张。三件正在发生的事，决定了它能走多远——一个已成规模、一个初见雏形、一个蓄势待发。</p>
+
+    <div class="tri" style="margin-top:26px">
+      <div class="agentcard dir">
+        <div class="ic">W</div><div class="role" style="margin-top:10px">已具备 · 规模化底座</div>
+        <h3>弹性 Worker 系统</h3>
+        <p class="muted small">CCM 从不局限于一台机器。它能按需在云端自动拉起一批 <b>Worker 工作机</b>，组成可弹性伸缩的执行集群——任务在 Manager 与 Worker 之间自动分发、迁移、回收，单机算力上限不再是天花板。</p>
+        <p class="tiny" style="margin-top:10px">本次数据中的 <b>62 个工作实例、25 路同时并行</b>，正是这套弹性系统撑起来的。</p>
+      </div>
+      <div class="agentcard exe">
+        <div class="ic">H</div><div class="role" style="margin-top:10px">初步落地 · 向上生长</div>
+        <h3>可搭建 Harness 框架</h3>
+        <p class="muted small">CCM 已具备搭建自定义 <b>Harness（智能体运行框架）</b>的能力，目前已有初步实现。这让平台不被单一形态绑定，未来可承载更多类型的智能体与运行模式。</p>
+        <p class="tiny" style="margin-top:10px">从"编排现成智能体"，走向"<b>定义智能体如何运行</b>"。</p>
+      </div>
+      <div class="agentcard rev" style="border-top-color:var(--d)">
+        <div class="ic" style="background:var(--d)">T</div><div class="role" style="margin-top:10px">规划中 · 下一站</div>
+        <h3>Team CCM 团队版</h3>
+        <p class="muted small">下一站是团队版本 <b>Team CCM</b>：把"一个人指挥一支智能体团队"，升级为"<b>一个团队共享一支更大的智能体舰队</b>"——多人协作、统一调度、共享技能与算力池。</p>
+        <p class="tiny" style="margin-top:10px">个人提效 → <b>团队提效</b>，量级再上一层。</p>
+      </div>
+    </div>
+
+    <div class="callout b" style="margin-top:18px">
+      <b>一句话：</b>底座（弹性 Worker）已成规模、地基（Harness）已经动工、方向（Team CCM）已经清晰——CCM 不只是能用，而且<strong>越走越宽</strong>。
+    </div>
+  </div>
+  <a class="nav-dot" href="#c-close" aria-label="下一页">⌄</a>
+</section>
+
+<!-- ============ 06 · CLOSE ============ -->
+<section id="c-close" style="border-bottom:0">
+  <span class="pagetag">06</span>
+  <div class="wrap">
+    <div class="cta">
+      <div class="wordmark" style="color:#86b2ff">CCM&nbsp;·&nbsp;CLAUDE&nbsp;CODE&nbsp;MANAGER</div>
+      <h2 style="margin:.2em 0">一个人，指挥一支 AI 工程师团队<br/><span class="gradtext">已经在跑，正在变强。</span></h2>
+      <p class="muted">多智能体并行 · 全流程自主交付 · 弹性 Worker 集群 · 可搭建 Harness · 三台生产部署实测</p>
+      <div class="grid g4" style="margin-top:30px">
+        <div class="stat"><div class="n gradtext">1,376</div><div class="l">任务自主交付</div></div>
+        <div class="stat"><div class="n gradtext">20</div><div class="l">人均同时推进项目</div></div>
+        <div class="stat"><div class="n gradtext">25</div><div class="l">峰值并行智能体</div></div>
+        <div class="stat"><div class="n gradtext">Team CCM</div><div class="l">下一站 · 团队版</div></div>
+      </div>
+      <div class="thanks">感谢观看 · Thank you</div>
+    </div>
+    <p class="footnote" style="text-align:center;margin-top:18px">运行数据来自三台 CCM 生产部署数据库实时统计（2026-02-27 至 2026-06-23），部署名称已匿名化。</p>
+  </div>
+  <a class="nav-dot" href="#hero" aria-label="回到顶部" style="animation:none">⌃</a>
+</section>
+
+
+
+<div class="zoom-backdrop" id="zoomBackdrop"></div>
+<div class="zoom-popup" id="zoomPopup"><img id="zoomImg" src="" alt=""><div class="zoom-label" id="zoomLabel"></div></div>
+<script>
+(function(){var b=document.getElementById('zoomBackdrop'),p=document.getElementById('zoomPopup'),zi=document.getElementById('zoomImg'),zl=document.getElementById('zoomLabel');
+document.querySelectorAll('.cmpside .imglink').forEach(function(l){l.addEventListener('click',function(e){e.stopPropagation();var img=this.querySelector('img'),card=this.closest('.cmpcard'),t=card?card.querySelector('.cmptitle').textContent:'',s=this.closest('.cmpside'),lb=s?s.querySelector('.cmplabel').textContent:'';zi.src=img.src;zl.textContent=t+' — '+lb;b.classList.add('active');p.classList.add('active');});});
+function c(){b.classList.remove('active');p.classList.remove('active');}b.addEventListener('click',c);p.addEventListener('click',c);document.addEventListener('keydown',function(e){if(e.key==='Escape')c();});})();
+</script>
+
+</body>
+</html>

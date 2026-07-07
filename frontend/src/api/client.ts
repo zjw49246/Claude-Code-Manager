@@ -91,6 +91,20 @@ export interface ProjectTodo {
   updated_at: string;
 }
 
+export type ProjectTodoStatus = 'open' | 'done' | 'archived';
+
+export interface ProjectTodo {
+  id: number;
+  project_id: number;
+  title: string;
+  prompt: string;
+  status: ProjectTodoStatus;
+  sort_order: number;
+  created_task_id: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface Task {
   id: number;
   worker_id: number | null;

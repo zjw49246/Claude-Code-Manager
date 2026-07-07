@@ -1,7 +1,7 @@
 """add default skills to global settings
 
 Revision ID: 38ec16bd42e6
-Revises: d010371017ae
+Revises: a2628601782f
 Create Date: 2026-07-06 11:58:50.270601
 
 """
@@ -13,7 +13,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = '38ec16bd42e6'
-down_revision: Union[str, None] = 'd010371017ae'
+down_revision: Union[str, None] = 'a2628601782f'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

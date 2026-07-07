@@ -724,7 +724,9 @@ export function ProjectsPage() {
     try {
       const [list, tags, tagList] = await Promise.all([api.listProjects(), api.listProjectTags(), api.listTags()]);
       setProjects(list);
-      setAllTags(tags);
+      // Merge tags from both sources: tags table (authoritative registry) + project assignments (backward compat)
+      const merged = new Set([...tags, ...tagList.map((t) => t.name)]);
+      setAllTags(Array.from(merged).sort());
       setTagItems(tagList);
       setError(null);
       if (!isAdmin) api.listWorkers().then(w => setHasWorker(w.length > 0)).catch(() => {});
