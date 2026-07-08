@@ -111,6 +111,7 @@ claude-manager/
 - **Effort Level**: 默认 `medium`，支持 `low/medium/high/xhigh/max`。优先级链：Task.effort_level → Instance.effort_level → settings.default_effort。通过 CLI `--effort` 参数传递
 - **Extended Thinking 预算**: Instance 上的 `thinking_budget` 字段 → 子进程 `MAX_THINKING_TOKENS` env var；NULL = 用 CLI 默认
 - **Thinking 解析**: stream_parser 兼容多种字段名（`thinking` / `text` / 嵌套 content blocks）；加密 thinking 显示为 `[encrypted thinking ...]` 标记
+- **上下文自动压缩**: 会话 context 利用率达阈值 → dispatcher 自动摘要换新 session，并写入/广播 system_event 在聊天中提示用户。阈值优先级：GlobalSettings.context_compact_threshold（前端 Header 齿轮「压缩阈值」可改，PUT /api/settings/runtime）→ settings.context_compact_threshold（env 默认 0.80）。**别设回 0.9**：超大 context 请求在服务端易挂起（2026-07-08 task 22/27 连环 stall 均发生在 ~90% 区间）
 - **Workflows 开关**: Task.enable_workflows（默认 False）→ CLI `--disallowedTools Workflow`；关闭时 Workflow 工具不可用，节省 token
 - **Skills 系统**: Task.enabled_skills（JSON dict，如 `{"monitor": true}`）控制注入哪些 MCP 工具。创建 task 时勾选 Skills，dispatcher 根据 enabled_skills 动态生成 MCP config 并通过 `--mcp-config` 注入 Claude CLI
 - **Monitor Skill**: 后台监控子 session，主 Agent 通过 MCP 工具（create_monitor / check_monitors / stop_monitor）创建和管理。子 session 是**持久 Claude 子 Agent 进程**，拥有自己的 MCP server（`ccm_monitor_agent_server.py`），通过 report_status / mark_complete / get_context 工具自主与系统通信。每 task 最多 5 个并发 monitor

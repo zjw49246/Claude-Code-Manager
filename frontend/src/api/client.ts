@@ -42,6 +42,8 @@ export interface RuntimeSettings {
   use_pty_mode: boolean;
   pty_available: boolean;
   auto_sort_on_access: boolean;
+  /** 会话上下文利用率达到该比例自动压缩换新 session（0-1，有效值） */
+  context_compact_threshold: number;
 }
 
 export interface GlobalSettings {
@@ -627,7 +629,7 @@ export const api = {
 
   // Global Settings
   getRuntimeSettings: () => request<RuntimeSettings>('/api/settings/runtime'),
-  updateRuntimeSettings: (data: Partial<Pick<RuntimeSettings, 'use_pty_mode' | 'auto_sort_on_access'>>) =>
+  updateRuntimeSettings: (data: Partial<Pick<RuntimeSettings, 'use_pty_mode' | 'auto_sort_on_access' | 'context_compact_threshold'>>) =>
     request<RuntimeSettings>('/api/settings/runtime', { method: 'PUT', body: JSON.stringify(data) }),
   getGitSettings: () => request<GlobalSettings>('/api/settings/git'),
   updateGitSettings: (data: Partial<GlobalSettings>) =>

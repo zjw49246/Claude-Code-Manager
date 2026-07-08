@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class GlobalSettingsUpdate(BaseModel):
@@ -25,8 +25,11 @@ class RuntimeSettingsResponse(BaseModel):
     use_pty_mode: bool
     pty_available: bool
     auto_sort_on_access: bool
+    # Effective value (DB override, else env default)
+    context_compact_threshold: float
 
 
 class RuntimeSettingsUpdate(BaseModel):
     use_pty_mode: bool | None = None
     auto_sort_on_access: bool | None = None
+    context_compact_threshold: float | None = Field(default=None, ge=0.3, le=0.95)

@@ -66,6 +66,17 @@ export function Header({ currentPage, onNavigate }: HeaderProps) {
     }
   }, [runtime, switching]);
 
+  const changeCompactThreshold = useCallback(async (value: number) => {
+    if (!runtime || switching) return;
+    setSwitching(true);
+    try {
+      const updated = await api.updateRuntimeSettings({ context_compact_threshold: value });
+      setRuntime(updated);
+    } catch { /* keep previous state */ } finally {
+      setSwitching(false);
+    }
+  }, [runtime, switching]);
+
   const pages = [
     { key: 'dashboard', label: 'Dashboard' },
     { key: 'tasks', label: 'Tasks' },
@@ -224,6 +235,28 @@ export function Header({ currentPage, onNavigate }: HeaderProps) {
                         }`}
                       />
                     </button>
+                  </div>
+                )}
+                {runtime && (
+                  <div className="flex items-center justify-between gap-3">
+                    <span
+                      className="text-xs text-gray-400"
+                      title="会话上下文利用率达到该比例时自动压缩摘要并换新 session。过高会让超大 context 的请求在服务端易挂起"
+                    >
+                      压缩阈值
+                    </span>
+                    <select
+                      value={Math.round(runtime.context_compact_threshold * 100)}
+                      onChange={(e) => changeCompactThreshold(Number(e.target.value) / 100)}
+                      disabled={switching}
+                      className="bg-gray-700 text-gray-200 text-xs rounded px-2 py-1 border border-gray-600 focus:outline-none focus:ring-1 focus:ring-indigo-500 cursor-pointer disabled:opacity-50"
+                    >
+                      {Array.from(new Set([60, 70, 75, 80, 85, 90, Math.round(runtime.context_compact_threshold * 100)]))
+                        .sort((a, b) => a - b)
+                        .map((pct) => (
+                          <option key={pct} value={pct}>{pct}%</option>
+                        ))}
+                    </select>
                   </div>
                 )}
                 {/* Feishu binding */}

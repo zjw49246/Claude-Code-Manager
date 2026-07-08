@@ -708,6 +708,7 @@ curl -X POST http://localhost:8000/api/github/webhook \
 | `backend/models/monitor_session.py` | `backend/tests/test_monitor_models.py` |
 | `backend/services/mcp_config.py` | `backend/tests/test_mcp_config.py` |
 | `backend/api/monitor.py` | `backend/tests/test_api_monitor.py` |
+| `backend/api/settings.py` (runtime) | `backend/tests/test_api_settings_runtime.py`（含 context_compact_threshold 默认/更新/越界拒绝） |
 | `backend/services/dispatcher.py` (monitor) | `backend/tests/test_monitor_dispatcher.py` |
 | `backend/mcp/ccm_monitor_agent_server.py` | 集成测试（见「子 Agent 系统集成测试」） |
 | `backend/api/sub_agents.py` | 集成测试（见「子 Agent 系统集成测试」） |

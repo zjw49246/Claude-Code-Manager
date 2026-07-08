@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.config import settings
 from backend.database import get_db
 from backend.models.global_settings import GlobalSettings
 from backend.schemas.global_settings import (
@@ -49,6 +50,12 @@ def _pty_available() -> bool:
         return False
 
 
+def _effective_compact_threshold(row: GlobalSettings) -> float:
+    if row.context_compact_threshold is not None:
+        return row.context_compact_threshold
+    return settings.context_compact_threshold
+
+
 @router.get("/runtime", response_model=RuntimeSettingsResponse)
 async def get_runtime_settings(db: AsyncSession = Depends(get_db)):
     from backend.main import instance_manager
@@ -57,6 +64,7 @@ async def get_runtime_settings(db: AsyncSession = Depends(get_db)):
         use_pty_mode=instance_manager.pty_mode_enabled,
         pty_available=_pty_available(),
         auto_sort_on_access=row.auto_sort_on_access if row.auto_sort_on_access is not None else True,
+        context_compact_threshold=_effective_compact_threshold(row),
     )
 
 
@@ -82,20 +90,26 @@ async def update_runtime_settings(
     if body.auto_sort_on_access is not None:
         row.auto_sort_on_access = body.auto_sort_on_access
 
+    if body.context_compact_threshold is not None:
+        row.context_compact_threshold = body.context_compact_threshold
+
     await db.commit()
 
     auto_sort = row.auto_sort_on_access if row.auto_sort_on_access is not None else True
+    compact_threshold = _effective_compact_threshold(row)
 
     from backend.main import broadcaster
     await broadcaster.broadcast("system", {
         "event": "runtime_settings_changed",
         "use_pty_mode": instance_manager.pty_mode_enabled,
         "auto_sort_on_access": auto_sort,
+        "context_compact_threshold": compact_threshold,
     })
     return RuntimeSettingsResponse(
         use_pty_mode=instance_manager.pty_mode_enabled,
         pty_available=_pty_available(),
         auto_sort_on_access=auto_sort,
+        context_compact_threshold=compact_threshold,
     )
 
 

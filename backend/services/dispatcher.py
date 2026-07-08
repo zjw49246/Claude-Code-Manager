@@ -2913,7 +2913,7 @@ class GlobalDispatcher:
                 task.enabled_skills = effective_skills
                 await db.commit()
 
-            # 上下文超 90% 时自动摘要 + 新 session（无限续聊）
+            # 上下文超阈值时自动摘要 + 新 session（无限续聊）
             if task.session_id and task.context_window_usage:
                 usage = task.context_window_usage
                 total_input = (usage.get("input_tokens") or 0) + (usage.get("cache_read_input_tokens") or 0) + (usage.get("cache_creation_input_tokens") or 0)
@@ -2923,7 +2923,14 @@ class GlobalDispatcher:
                 if "[1m]" in model_lower or "fable" in model_lower:
                     window = max(window, 1_000_000)
                 utilization = total_input / window if window else 0
-                if utilization >= 0.90:
+                # 阈值：GlobalSettings 覆盖 > env 默认（前端运行时设置可改）
+                gs = await db.get(GlobalSettings, 1)
+                compact_threshold = (
+                    gs.context_compact_threshold
+                    if gs and gs.context_compact_threshold is not None
+                    else settings.context_compact_threshold
+                )
+                if utilization >= compact_threshold:
                     logger.info(
                         "Task %d context at %.0f%% (%d/%d), compacting session...",
                         task_id, utilization * 100, total_input, window,
@@ -2934,7 +2941,26 @@ class GlobalDispatcher:
                         # 清空 session_id → 下次 launch 开新 session，prompt 带摘要
                         task.session_id = None
                         task.context_window_usage = None
+                        # 在聊天里给用户留一条可见的压缩提示（落库 + 实时广播）
+                        notice = (
+                            f"⚡ 上下文已达 {utilization * 100:.0f}%"
+                            f"（{total_input:,}/{window:,} tokens，阈值 {compact_threshold * 100:.0f}%），"
+                            f"已自动压缩摘要并开启新会话延续上下文"
+                        )
+                        db.add(LogEntry(
+                            instance_id=inst.id,
+                            task_id=task_id,
+                            event_type="system_event",
+                            role="system",
+                            content=notice,
+                            is_error=False,
+                        ))
                         await db.commit()
+                        await self.broadcaster.broadcast(f"task:{task_id}", {
+                            "event_type": "system_event",
+                            "role": "system",
+                            "content": notice,
+                        })
                         msg.prompt = (
                             f"[上下文摘要 — 之前的对话记录]\n{summary}\n\n"
                             f"---\n\n[新消息]\n{msg.prompt}"

@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, Integer, JSON, String
+from sqlalchemy import Boolean, Float, Integer, JSON, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.database import Base
@@ -21,6 +21,9 @@ class GlobalSettings(Base):
     use_pty_mode: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     # Task sort: auto-move accessed task to top of its group (None = True)
     auto_sort_on_access: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # Context compaction threshold (0-1); None = follow env default
+    # (settings.context_compact_threshold)
+    context_compact_threshold: Mapped[float | None] = mapped_column(Float, nullable=True)
     # Org registry URL override (set via registry-changed callback, takes precedence over env)
     org_registry_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     # Default skills/plugins selection for new tasks
