@@ -28,6 +28,27 @@ def _ensure_display(env: dict) -> dict:
         return {**env, "DISPLAY": ":99"}
     return env
 
+async def cdp_screenshot(ws, path, timeout=10):
+    """Save a PNG of the current page (diagnostic aid for flow breakage)."""
+    import base64
+    mid = int(time.time() * 1000) % 100000 + 7
+    await ws.send(json.dumps({"id": mid, "method": "Page.captureScreenshot",
+        "params": {"format": "png"}}))
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            raw = await asyncio.wait_for(ws.recv(), timeout=2)
+            msg = json.loads(raw)
+            if msg.get("id") == mid:
+                data = msg.get("result", {}).get("data")
+                if data:
+                    Path(path).write_bytes(base64.b64decode(data))
+                    print(f"  Screenshot saved: {path}")
+                return
+        except asyncio.TimeoutError:
+            continue
+    print(f"  Screenshot timeout: {path}")
+
 async def xdotool_click(x, y):
     p = await asyncio.create_subprocess_exec("xdotool", "mousemove", str(x), str(y), "click", "1",
         env=_ensure_display(dict(os.environ)), stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
@@ -154,6 +175,9 @@ async def cdp_login(email: str, token: str, config_dir: str, oauth_url: str = ""
                 await asyncio.sleep(2)
             await asyncio.sleep(3)
             print(f"  After magic link: {(await cdp_eval(ws, 'document.location.href') or '')[:60]}")
+            ml_text = await cdp_eval(ws, "document.body?.innerText?.substring(0,700)") or ""
+            print(f"  Magic-link page text: {ml_text}")
+            await cdp_screenshot(ws, "/tmp/cdp_magiclink.png")
 
             # 8. Launch CLI
             cli = subprocess.Popen(["claude", "auth", "login", "--email", email],
@@ -192,6 +216,7 @@ async def cdp_login(email: str, token: str, config_dir: str, oauth_url: str = ""
                 if _retry == 0:
                     page_text = await cdp_eval(ws, "document.body?.innerText?.substring(0,500)") or ""
                     print(f"  Page text: {page_text[:200]}")
+                    await cdp_screenshot(ws, "/tmp/cdp_oauth.png")
                 org = await cdp_eval(ws, JS_ORG)
                 if org:
                     break
