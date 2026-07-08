@@ -142,8 +142,8 @@ Linear 内置了强大的 GitHub 集成，这对 CCM 有重要参考价值：
 Linear 提供纯 GraphQL API，端点为 `https://api.linear.app/graphql`。
 
 **认证方式：**
-- **Personal API Key**：适合内部工具/自托管场景。在 Linear Settings → API 中生成，请求头 `Authorization: <api-key>`
-- **OAuth 2.0**：适合第三方 SaaS 集成。标准授权码流程，Scopes 包括 `read`、`write`、`issues:create`、`comments:create`、`admin`
+- **Personal API Key**：适合内部工具/自托管场景。在 Linear Settings → Security & access 中生成，请求头 `Authorization: <api-key>`（注意：**不带 Bearer 前缀**）。无过期时间，绑定创建用户
+- **OAuth 2.0**：适合第三方 SaaS 集成。授权端点 `https://linear.app/oauth/authorize`，Token 端点 `https://api.linear.app/oauth/token`。Scopes 包括 `read`（默认）、`write`、`issues:create`、`comments:create`、`admin`。Access token 有效期 24 小时，支持 refresh token。支持 `actor=app` 模式让操作以应用身份显示（适合 bot/agent）
 
 **关键操作示例：**
 
@@ -198,10 +198,12 @@ mutation {
 
 Linear 提供完整的 Webhook 支持：
 
-- **支持的事件**：Issue 创建/更新/删除、Comment 创建/更新、Project/Cycle/Label 变更
-- **Payload 格式**：JSON，包含 `action`（create/update/remove）、`type`、`data`、`url`、`organizationId`
-- **安全验签**：HMAC 签名验证，与 CCM 现有的 GitHub Webhook 验签模式一致
+- **支持的事件**：Issue/Comment/Label/Project/Cycle/Document/Initiative/Customer 等 14+ 种资源的 create/update/remove
+- **Payload 格式**：JSON，包含 `action`、`type`、`actor`、`data`、`updatedFrom`（前值）、`url`、`organizationId`
+- **安全验签**：HMAC-SHA256，通过 `Linear-Signature` header 传递。必须用原始 body 验签（重新序列化 JSON 会破坏签名）。需校验 `Linear-Timestamp` 在 60 秒内（防重放）
+- **交付行为**：5 秒超时，失败重试 3 次（1min → 1hr → 6hr 退避），持续失败可能自动禁用。交付可能乱序和重复——需用 `webhookId` 或 `resource id + updatedAt` 去重
 - **可过滤**：按 Team、Project、Label 过滤事件
+- **创建权限**：需 workspace admin 或 OAuth app `admin` scope
 
 **Webhook Payload 示例：**
 ```json
@@ -225,22 +227,33 @@ Linear 提供完整的 Webhook 支持：
 
 ### 3.3 Rate Limits
 
-- 1,500 requests/hour（API Key）
-- 基于 complexity 的查询限制（单次最大 10,000 complexity）
-- 游标分页，每页最多 250 条
+Linear 采用 leaky bucket 算法：
 
-对 CCM 场景足够——任务同步频率通常远低于此限制。
+| 认证方式 | 请求限制 | Complexity 限制 |
+|----------|---------|----------------|
+| Personal API Key | 2,500/h | 3,000,000 points/h |
+| OAuth App | 5,000/h | 2,000,000 points/h |
+| 无认证 | 600/h | 100,000 points/h |
+
+- 单次查询最大 10,000 complexity points
+- 游标分页（Relay 风格），默认 50 条/页
+- 限流时返回 HTTP 400 + `"code": "RATELIMITED"`
+- 响应头含 `X-RateLimit-Requests-Remaining` 等信息
+
+对 CCM 场景绰绰有余——2,500/h 足以覆盖大量任务同步。
 
 ### 3.4 Python 生态
 
-Linear 没有官方 Python SDK，但 GraphQL API 足够简单，两种方案：
+Linear 没有官方 Python SDK，但有社区方案和直接 GraphQL 调用两条路：
 
 | 方案 | 优点 | 缺点 |
 |------|------|------|
-| `httpx`（异步）直接发 GraphQL | 零依赖、与 CCM 现有技术栈一致 | 需手写 query 字符串 |
-| `gql` 库 | 类型安全、自动补全 | 多一个依赖 |
+| `httpx`（异步）直接发 GraphQL | 零新依赖、与 CCM 现有技术栈一致 | 需手写 query 字符串 |
+| `linear-api`（PyPI，v0.2.0） | Pydantic 模型、自动分页、缓存 | 额外依赖 |
+| `linear-python`（PyPI） | 1:1 GraphQL 封装 | 依赖 requests（同步） |
+| `gql` 库 | 通用 GraphQL 客户端、类型安全 | 多一个依赖 |
 
-**推荐用 `httpx`**：CCM 已在用 httpx/aiohttp，不引入新依赖。封装一个 `LinearClient` 类即可覆盖所有需求。
+**推荐用 `httpx`**：CCM 已在用 httpx/aiohttp，不引入新依赖。封装一个 `LinearClient` 类即可覆盖所有需求。GraphQL 查询本质上就是带 body 的 HTTP POST。
 
 ---
 
