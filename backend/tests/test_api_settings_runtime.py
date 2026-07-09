@@ -62,3 +62,40 @@ async def test_toggle_off_drains_idle_sessions(client):
     finally:
         instance_manager._pty_backend = old_backend
         instance_manager._pty_enabled = old_enabled
+
+
+@pytest.mark.asyncio
+async def test_context_compact_threshold_default_and_update(client):
+    from backend.config import settings
+
+    # Default: no DB override -> env default
+    resp = await client.get("/api/settings/runtime")
+    assert resp.status_code == 200
+    assert resp.json()["context_compact_threshold"] == pytest.approx(
+        settings.context_compact_threshold
+    )
+
+    # Update -> persisted and returned as effective value
+    resp = await client.put(
+        "/api/settings/runtime", json={"context_compact_threshold": 0.7}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["context_compact_threshold"] == pytest.approx(0.7)
+
+    resp = await client.get("/api/settings/runtime")
+    assert resp.json()["context_compact_threshold"] == pytest.approx(0.7)
+
+    # Updating other fields must not clobber the stored threshold
+    resp = await client.put(
+        "/api/settings/runtime", json={"auto_sort_on_access": True}
+    )
+    assert resp.json()["context_compact_threshold"] == pytest.approx(0.7)
+
+
+@pytest.mark.asyncio
+async def test_context_compact_threshold_rejects_out_of_range(client):
+    for bad in (0.1, 0.99, 2):
+        resp = await client.put(
+            "/api/settings/runtime", json={"context_compact_threshold": bad}
+        )
+        assert resp.status_code == 422, f"{bad} should be rejected"
