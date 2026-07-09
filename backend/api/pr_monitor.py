@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.config import settings
 from backend.database import get_db
 from backend.models.pr_monitor import MonitoredRepo, PRReview
+from backend.models.task import Task
 from backend.schemas.pr_monitor import (
     MonitoredRepoCreate,
     MonitoredRepoUpdate,
@@ -252,21 +253,39 @@ async def github_webhook(request: Request, db: AsyncSession = Depends(get_db)):
     pr_title = pr.get("title", "")
     pr_url = pr.get("html_url", "")
 
-    # Dedup: check for in-progress review
-    existing_review = await db.execute(
+    # Dedup: check for existing reviews (any non-terminal status)
+    active_result = await db.execute(
         select(PRReview).where(
             PRReview.repo_id == repo.id,
             PRReview.pr_number == pr_number,
             PRReview.status.in_(["pending", "reviewing"]),
         )
     )
+    active_reviews = active_result.scalars().all()
+
     if action == "synchronize":
-        # Mark old reviews as superseded
-        old_reviews = existing_review.scalars().all()
-        for old in old_reviews:
+        # Mark old reviews as superseded and cancel their tasks
+        for old in active_reviews:
             old.status = "superseded"
-    elif existing_review.scalar_one_or_none():
+            if old.task_id:
+                old_task = await db.get(Task, old.task_id)
+                if old_task and old_task.status not in ("completed", "failed"):
+                    old_task.status = "completed"
+                    old_task.error_message = "Superseded by new push"
+                    logger.info("Cancelled task %d (superseded PR review)", old.task_id)
+    elif active_reviews:
         return {"status": "ignored", "reason": "review already in progress"}
+    elif action == "opened":
+        # Also skip if a completed review already exists for this PR
+        completed_result = await db.execute(
+            select(func.count()).select_from(PRReview).where(
+                PRReview.repo_id == repo.id,
+                PRReview.pr_number == pr_number,
+                PRReview.status.in_(["approved", "merged", "commented"]),
+            )
+        )
+        if completed_result.scalar():
+            return {"status": "ignored", "reason": "PR already reviewed"}
 
     # Import and call service
     from backend.services.pr_review_service import create_pr_review_task
