@@ -16,6 +16,7 @@ interface TaskListProps {
   onOpenChat: (task: Task) => void;
   activeTaskId?: number | null;
   autoSortOnAccess?: boolean;
+  onBeforeArchive?: () => void;
 }
 
 const statusColors: Record<string, string> = {
@@ -28,7 +29,7 @@ const statusColors: Record<string, string> = {
   cancelled: 'bg-gray-500',
 };
 
-export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId, autoSortOnAccess }: TaskListProps) {
+export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId, autoSortOnAccess, onBeforeArchive }: TaskListProps) {
   const projectMap = useMemo(() => {
     const map: Record<number, { name: string; color: string | null }> = {};
     for (const p of projects) map[p.id] = { name: p.name, color: p.badge_color };
@@ -85,6 +86,7 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId,
   };
   const handleArchive = async (id: number) => {
     await api.archiveTask(id);
+    onBeforeArchive?.();
     onRefresh();
   };
 
