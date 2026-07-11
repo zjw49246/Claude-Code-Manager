@@ -458,6 +458,7 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
         onOpenChat={handleOpenChat}
         activeTaskId={chatTask?.id ?? null}
         autoSortOnAccess={autoSortOnAccess}
+        onBeforeArchive={() => { skipFreezeOnce.current = true; }}
       />
 
       {totalPages > 1 && searchResults === null && (
@@ -573,7 +574,7 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
                       <Share2 size={13} />
                     </button>
                     <button
-                      onClick={async () => { await api.archiveTask(t.id); refresh(); }}
+                      onClick={async () => { await api.archiveTask(t.id); skipFreezeOnce.current = true; refresh(); }}
                       className="p-1 text-gray-600 hover:text-amber-400 transition-colors"
                       title={t.archived ? 'Unarchive' : 'Archive'}
                     >
