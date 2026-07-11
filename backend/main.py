@@ -170,6 +170,84 @@ async def _cleanup_stale_sub_agents():
             logger.info("Cleaned up %d stale sub-agents from completed tasks", len(stale))
 
 
+async def _ensure_claude_warmup():
+    """Ensure all Claude config dirs have completed onboarding.
+
+    Fresh CC installs show interactive onboarding dialogs (theme picker, trust
+    directory, etc.) that block PTY mode — the MCP/channel server never starts,
+    so inject gets ConnectionRefused.  Running a quick `claude -p` in each
+    config_dir completes the onboarding and writes hasCompletedOnboarding into
+    .claude.json.  This is the same idea as worker_provisioner._step_claude_warmup
+    but for the local machine at startup.
+    """
+    from pathlib import Path
+    import json as _json
+    import subprocess
+
+    config_dirs: list[str] = []
+    if settings.pool_enabled:
+        try:
+            from backend.services.claude_pool import ClaudePool
+            pool = ClaudePool(
+                config_path=settings.pool_config_path,
+                cooldown_seconds=settings.pool_cooldown_seconds,
+            )
+            for acct in pool._accounts:
+                if acct.enabled:
+                    config_dirs.append(acct.config_dir)
+        except Exception:
+            logger.debug("Could not load pool for warmup, using default config dir")
+    if not config_dirs:
+        config_dirs.append(str(Path.home() / ".claude"))
+
+    for config_dir in config_dirs:
+        try:
+            claude_json_path = Path(config_dir) / ".claude.json"
+            needs_warmup = True
+            existing = {}
+            if claude_json_path.exists():
+                try:
+                    existing = _json.loads(claude_json_path.read_text(encoding="utf-8"))
+                    if existing.get("hasCompletedOnboarding"):
+                        needs_warmup = False
+                except Exception:
+                    pass
+
+            if not needs_warmup:
+                continue
+
+            logger.info("Claude warmup needed for %s, running claude -p ...", config_dir)
+
+            env = os.environ.copy()
+            env["CLAUDE_CONFIG_DIR"] = config_dir
+            env.pop("CLAUDECODE", None)
+            env.pop("CLAUDE_CODE", None)
+            try:
+                subprocess.run(
+                    ["claude", "-p", "reply ok", "--dangerously-skip-permissions"],
+                    env=env, capture_output=True, text=True, timeout=30,
+                )
+            except Exception as exc:
+                logger.warning("claude -p warmup failed for %s: %s", config_dir, exc)
+
+            # Ensure hasCompletedOnboarding is set regardless of -p result
+            try:
+                if claude_json_path.exists():
+                    existing = _json.loads(claude_json_path.read_text(encoding="utf-8"))
+                existing["hasCompletedOnboarding"] = True
+                claude_json_path.parent.mkdir(parents=True, exist_ok=True)
+                claude_json_path.write_text(
+                    _json.dumps(existing, indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                logger.info("Claude warmup completed for %s", config_dir)
+            except Exception as exc:
+                logger.warning("Failed to write .claude.json for %s: %s", config_dir, exc)
+
+        except Exception:
+            logger.warning("Claude warmup failed for %s", config_dir, exc_info=True)
+
+
 async def _recover_worker_relays():
     """Manager 重启后为 ready worker 上的活跃 task 重建中继 + 补缺失日志。"""
     from backend.models.worker import Worker
@@ -227,6 +305,7 @@ async def lifespan(app: FastAPI):
     await _cleanup_stale_sub_agents()
     await _sync_tags()
     sub_agent_watcher.start()
+    await _ensure_claude_warmup()
     if settings.auto_start_dispatcher:
         await dispatcher.start()
 
