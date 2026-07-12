@@ -320,10 +320,12 @@ class GlobalDispatcher:
             result = await db.execute(
                 select(Task).where(Task.status.in_(["executing", "in_progress"]))
             )
+            reset_task_ids = []
             for t in result.scalars().all():
                 logger.warning(f"Resetting stuck task {t.id} from '{t.status}' to 'completed'")
                 t.status = "completed"
                 t.error_message = None
+                reset_task_ids.append(t.id)
 
             from backend.models.monitor_session import MonitorSession
             result = await db.execute(
@@ -335,6 +337,11 @@ class GlobalDispatcher:
                 ms.completed_at = datetime.utcnow()
 
             await db.commit()
+
+        # 通知重启前就连着的前端（WS 自动重连），否则它们会一直显示旧的 executing
+        from backend.services.task_events import broadcast_status_change
+        for tid in reset_task_ids:
+            await broadcast_status_change(tid, "completed")
 
     async def stop(self):
         self._running = False
@@ -1356,6 +1363,8 @@ class GlobalDispatcher:
                     t.error_message = None
                     await db.commit()
                     logger.warning(f"Safety reset: task {task_id} was still '{t.status}' after lifecycle ended")
+                    from backend.services.task_events import broadcast_status_change
+                    await broadcast_status_change(task_id, "completed", instance_id)
         except Exception:
             logger.exception(f"Failed to safety-reset instance {instance_id} / task {task_id}")
 
@@ -2838,6 +2847,10 @@ class GlobalDispatcher:
                 task.status = "in_progress"
                 task.error_message = None
                 await db.commit()
+                # 广播认领态：不广播的话 completed 任务收到新消息后，前端要等
+                # executing 广播才知道任务又活了（轮询窗口内两边显示分叉）
+                from backend.services.task_events import broadcast_status_change
+                await broadcast_status_change(task_id, "in_progress")
 
             # Wait for main agent to be idle (not executing)
             for attempt in range(60):

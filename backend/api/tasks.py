@@ -301,6 +301,8 @@ async def stop_task_session(task_id: int, db: AsyncSession = Depends(get_db)):
         if task and task.status in ("executing", "in_progress"):
             task.status = "completed"
             await db.commit()
+            from backend.services.task_events import broadcast_status_change
+            await broadcast_status_change(task_id, "completed")
             return {
                 "ok": True,
                 "stopped": False,
@@ -323,6 +325,8 @@ async def cancel_task(task_id: int, queue: TaskQueue = Depends(_get_queue), db: 
     task = await queue.cancel(task_id)
     if not task:
         raise HTTPException(400, "Cannot cancel task")
+    from backend.services.task_events import broadcast_status_change
+    await broadcast_status_change(task_id, "cancelled")
     await _stop_task_process(task_id, db)
 
     from backend.main import dispatcher
@@ -354,6 +358,8 @@ async def retry_task(task_id: int, queue: TaskQueue = Depends(_get_queue), db: A
     task = await queue.retry(task_id)
     if not task:
         raise HTTPException(404, "Task not found")
+    from backend.services.task_events import broadcast_status_change
+    await broadcast_status_change(task_id, task.status)
     return task
 
 
@@ -407,6 +413,8 @@ async def approve_plan(task_id: int, queue: TaskQueue = Depends(_get_queue)):
     if task.mode != "plan" or task.status != "plan_review":
         raise HTTPException(400, "Task is not in plan review state")
     task = await queue.update_task(task_id, plan_approved=True, status="pending")
+    from backend.services.task_events import broadcast_status_change
+    await broadcast_status_change(task_id, "pending")
     return task
 
 
@@ -422,4 +430,6 @@ async def reject_plan(task_id: int, queue: TaskQueue = Depends(_get_queue)):
     if task.mode != "plan" or task.status != "plan_review":
         raise HTTPException(400, "Task is not in plan review state")
     task = await queue.update_task(task_id, plan_approved=False, status="cancelled")
+    from backend.services.task_events import broadcast_status_change
+    await broadcast_status_change(task_id, "cancelled")
     return task

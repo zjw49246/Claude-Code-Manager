@@ -142,7 +142,9 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
     try { return localStorage.getItem(`ccm-chat-draft-${task.id}`) || ''; } catch { return ''; }
   });
   const [sending, setSending] = useState(false);
-  const [localStatus, setLocalStatus] = useState<string | null>(task.status);
+  // WS 驱动的实时状态覆盖。task.status prop（5s 轮询）才是最终一致的事实源：
+  // prop 变化时清掉覆盖（见下方 effect），否则错过一次 WS 事件就永久陈旧。
+  const [localStatus, setLocalStatus] = useState<string | null>(null);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [interrupting, setInterrupting] = useState(false);
   const [stillRunning, setStillRunning] = useState(false);
@@ -705,6 +707,12 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
   }, [fetchHistory]);
 
   useWebSocket([`task:${task.id}`, 'system', 'tasks'], handleWsMessage, handleReconnect);
+
+  // Fresh server data arrived via polling — drop the WS override so a missed
+  // status_change/process_exit can't pin the header/spinner on a stale status.
+  useEffect(() => {
+    setLocalStatus(null);
+  }, [task.status]);
 
   // Reset sending state when task reaches a terminal status
   // (catches cases where process_exit WebSocket event is missed — e.g. WS disconnect)

@@ -263,6 +263,7 @@ async def github_webhook(request: Request, db: AsyncSession = Depends(get_db)):
     )
     active_reviews = active_result.scalars().all()
 
+    superseded_task_ids = []
     if action == "synchronize":
         # Mark old reviews as superseded and cancel their tasks
         for old in active_reviews:
@@ -272,6 +273,7 @@ async def github_webhook(request: Request, db: AsyncSession = Depends(get_db)):
                 if old_task and old_task.status not in ("completed", "failed"):
                     old_task.status = "completed"
                     old_task.error_message = "Superseded by new push"
+                    superseded_task_ids.append(old.task_id)
                     logger.info("Cancelled task %d (superseded PR review)", old.task_id)
     elif active_reviews:
         return {"status": "ignored", "reason": "review already in progress"}
@@ -296,5 +298,10 @@ async def github_webhook(request: Request, db: AsyncSession = Depends(get_db)):
         "author": pr_author,
         "url": pr_url,
     })
+
+    if superseded_task_ids:
+        from backend.services.task_events import broadcast_status_change
+        for tid in superseded_task_ids:
+            await broadcast_status_change(tid, "completed")
 
     return {"status": "accepted", "review_id": review.id}
