@@ -274,11 +274,16 @@ async def _sync_task_from_worker_response(db: AsyncSession, task: Task, result):
     """代理响应是 worker 的 task JSON 时，同步关键字段（status 等 relay 也会同步，
     这里立即写一份让 API 响应不滞后）。"""
     if isinstance(result, dict) and result.get("id") == task.id:
+        status_changed = result.get("status") is not None and result["status"] != task.status
         for f in ("status", "plan_approved", "error_message", "loop_progress"):
             if f in result and result[f] is not None:
                 setattr(task, f, result[f])
         await db.commit()
         await db.refresh(task)
+        # relay 断连窗口内 worker 侧广播镜像不过来，这里本地补一次
+        if status_changed:
+            from backend.services.task_events import broadcast_status_change
+            await broadcast_status_change(task.id, task.status)
     return task
 
 

@@ -300,6 +300,9 @@ async def github_webhook(request: Request, db: AsyncSession = Depends(get_db)):
     })
 
     if superseded_task_ids:
+        # 显式 commit：不依赖 create_pr_review_task 内部恰好提交了 superseded
+        # 改动（那个耦合将来加早退路径就断了）；已提交时这里是幂等空操作
+        await db.commit()
         from backend.services.task_events import broadcast_status_change
         for tid in superseded_task_ids:
             await broadcast_status_change(tid, "completed")

@@ -145,6 +145,10 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
   // WS 驱动的实时状态覆盖。task.status prop（5s 轮询）才是最终一致的事实源：
   // prop 变化时清掉覆盖（见下方 effect），否则错过一次 WS 事件就永久陈旧。
   const [localStatus, setLocalStatus] = useState<string | null>(null);
+  // 最近一次 WS status_change 时刻：在途旧轮询快照返回（prop 回退旧值）时
+  // 不能击穿刚到的 WS 状态——否则终态 effect 会误触发 autoDequeue，把排队
+  // 消息在 turn 进行中提前发出。超过一个轮询周期没有 WS 事件才允许清除。
+  const lastWsStatusAt = useRef(0);
   const [historyLoading, setHistoryLoading] = useState(true);
   const [interrupting, setInterrupting] = useState(false);
   const [stillRunning, setStillRunning] = useState(false);
@@ -366,6 +370,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
     if (isStatusChange) {
       const newStatus = (msg.data!.new_status as string) || '';
       if (newStatus) {
+        lastWsStatusAt.current = Date.now();
         setLocalStatus(newStatus);
       }
       return;
@@ -710,8 +715,12 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
 
   // Fresh server data arrived via polling — drop the WS override so a missed
   // status_change/process_exit can't pin the header/spinner on a stale status.
+  // Guard: skip if a WS status arrived within the last poll cycle — the prop
+  // change may be a stale in-flight snapshot fetched before that event.
   useEffect(() => {
-    setLocalStatus(null);
+    if (Date.now() - lastWsStatusAt.current > 7000) {
+      setLocalStatus(null);
+    }
   }, [task.status]);
 
   // Reset sending state when task reaches a terminal status

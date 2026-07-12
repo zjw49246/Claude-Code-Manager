@@ -338,7 +338,8 @@ class GlobalDispatcher:
 
             await db.commit()
 
-        # 通知重启前就连着的前端（WS 自动重连），否则它们会一直显示旧的 executing
+        # 防御性广播：lifespan 启动路径此刻还没有 WS 订阅者（重连前端靠重连后
+        # 轮询自愈），但 dispatcher 也可能经 API 端点手动 start——那时有观众
         from backend.services.task_events import broadcast_status_change
         for tid in reset_task_ids:
             await broadcast_status_change(tid, "completed")
@@ -2847,8 +2848,8 @@ class GlobalDispatcher:
                 task.status = "in_progress"
                 task.error_message = None
                 await db.commit()
-                # 广播认领态：不广播的话 completed 任务收到新消息后，前端要等
-                # executing 广播才知道任务又活了（轮询窗口内两边显示分叉）
+                # 广播认领态（此分支是 failed/session 丢失的恢复路径）：不广播
+                # 的话前端要等 executing 广播才知道任务被认领（轮询窗口内分叉）
                 from backend.services.task_events import broadcast_status_change
                 await broadcast_status_change(task_id, "in_progress")
 

@@ -82,6 +82,7 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
           : list;
       setTasks(patch);
       setAllTasks(patch);
+      setSearchResults((prev) => (prev ? patch(prev) : prev));
       setChatTask((prev) => (prev && prev.id === taskId && prev.status !== newStatus ? { ...prev, status: newStatus } : prev));
     }
   }, []);
