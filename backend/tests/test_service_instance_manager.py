@@ -1731,3 +1731,70 @@ async def test_launch_resets_transient_flag(db_factory):
 
     assert im.transient_error_seen(inst_id) is False
     await asyncio.sleep(0.1)
+
+
+# === Reactivation guard (completed → executing) ===
+# 复活块只认前台 turn 的活事件：orphan（PTY resume 回放）和 autonomous
+# （后台子 agent turn）没有收尾路径，翻回 executing 后没人再标回 completed。
+
+
+def _status_change_payloads(broadcaster):
+    return [
+        c.args[1]
+        for c in broadcaster.broadcast.await_args_list
+        if len(c.args) > 1 and isinstance(c.args[1], dict)
+        and c.args[1].get("event") == "status_change"
+    ]
+
+
+async def _make_completed_task(db_factory, name):
+    async with db_factory() as db:
+        inst = Instance(name=name)
+        task = Task(description="reactivation test", status="completed")
+        db.add_all([inst, task])
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        return inst.id, task.id
+
+
+@pytest.mark.asyncio
+async def test_process_event_reactivates_completed_task(db_factory):
+    """Foreground assistant output flips a completed task back to executing."""
+    inst_id, task_id = await _make_completed_task(db_factory, "react-fg")
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    im = InstanceManager(db_factory, broadcaster)
+
+    await im._process_event(inst_id, task_id, {
+        "event_type": "message",
+        "role": "assistant",
+        "content": "still working on the follow-up",
+    })
+
+    async with db_factory() as db:
+        t = await db.get(Task, task_id)
+        assert t.status == "executing"
+    assert any(p.get("new_status") == "executing" for p in _status_change_payloads(broadcaster))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flag", ["orphan", "autonomous"])
+async def test_process_event_no_reactivate_on_stale_events(db_factory, flag):
+    """orphan/autonomous events must NOT flip completed back to executing."""
+    inst_id, task_id = await _make_completed_task(db_factory, f"react-{flag}")
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    im = InstanceManager(db_factory, broadcaster)
+
+    await im._process_event(inst_id, task_id, {
+        "event_type": "message",
+        "role": "assistant",
+        "content": "replayed / background sub-agent output",
+        flag: True,
+    })
+
+    async with db_factory() as db:
+        t = await db.get(Task, task_id)
+        assert t.status == "completed"
+    assert _status_change_payloads(broadcaster) == []

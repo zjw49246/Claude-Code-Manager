@@ -62,13 +62,31 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
   useEffect(() => {
     api.getRuntimeSettings().then((s) => setAutoSortOnAccess(s.auto_sort_on_access)).catch(() => {});
   }, []);
-  const handleSystemWs = useCallback((raw: Record<string, unknown>) => {
+  const handleGlobalWs = useCallback((raw: Record<string, unknown>) => {
     const msg = raw as { channel?: string; data?: Record<string, unknown> };
     if (msg.channel === 'system' && msg.data?.event === 'runtime_settings_changed') {
       setAutoSortOnAccess(Boolean(msg.data.auto_sort_on_access));
+      return;
+    }
+    // Real-time status updates. This also keeps tasks that fell out of the
+    // current page/filter fresh while the chat-open freeze preserves them
+    // in the sidebar with last-known data (they'd otherwise show a stale
+    // status until the chat is closed).
+    if (msg.channel === 'tasks' && msg.data?.event === 'status_change') {
+      const taskId = Number(msg.data.task_id);
+      const newStatus = typeof msg.data.new_status === 'string' ? msg.data.new_status : '';
+      if (!taskId || !newStatus) return;
+      const patch = (list: Task[]) =>
+        list.some((t) => t.id === taskId && t.status !== newStatus)
+          ? list.map((t) => (t.id === taskId ? { ...t, status: newStatus } : t))
+          : list;
+      setTasks(patch);
+      setAllTasks(patch);
+      setSearchResults((prev) => (prev ? patch(prev) : prev));
+      setChatTask((prev) => (prev && prev.id === taskId && prev.status !== newStatus ? { ...prev, status: newStatus } : prev));
     }
   }, []);
-  useWebSocket(['system'], handleSystemWs);
+  useWebSocket(['system', 'tasks'], handleGlobalWs);
 
   const [isWide, setIsWide] = useState(() => window.innerWidth >= 1280);
   useEffect(() => {
