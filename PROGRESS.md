@@ -477,3 +477,16 @@
 - **修复**: ①线上 DB（运维动作，非本提交）：备份后按迁移/模型精确 schema 补建 `user_skills` 表，`alembic_version` 不动（本就该指向「表已存在」）；**不能**重新 stamp+upgrade——重跑 `a2628601782f` 会去重复添加已存在的 `selected_user_skills` 列而炸。无需重启（SQLite 下次查询即见新表）。验证 create/list/delete 均 200。②前端（本提交）：create/update/delete 三个 handler 改 `setError(String(e))` 并在弹窗红字显示，沿用其它页面既有写法。
 - **预防**: ①「alembic 在 head」**不等于**「表一定存在」——排查 DB 问题先 `PRAGMA`/实际查表，别只信 `alembic current`；修漂移要**按模型补建缺失对象**，而不是 stamp 回退去重跑已部分应用的更晚迁移。②前端任何 `catch {}` 静默吞错误都是「按钮无反应」类 bug 的温床——一律 `setError` 给用户看见。③线上跑的是 rsync 副本 `~/.claude-code-manager/claude-code-manager/`（:8000，DB 在那），不是 git 仓库；调试线上现象要查副本+其 DB，可用 `ps` 里 MCP 进程的 `--auth-token` 直接 curl 复现。
 - **Commit**: 本次提交
+
+### 2026-07-12 — 前端 task 状态"老是显示不对"：三层根因大排查 + 修复（多子 Agent 交叉审计）
+- **问题**: 用户长期反馈前端 task 状态显示不对（已完成还显示 executing、列表与聊天页状态不一致、侧栏状态点永久陈旧）。
+- **排查方法**: 3 路只读审计子 Agent（后端状态流转 / WS 链路 / 前端状态管理）+ 主 Agent 独立排查交叉比对 + 生产 DB 取证（确认 DB 真值基本正确、错在展示与广播层）。
+- **三层根因**:
+  ① **后端静默状态变更**：cancel/retry/plan 审批/stop-session 兜底/dispatcher 启动批量重置/_reset_instance_if_stale/队列 consumer 标 in_progress/worker_relay 断连标 failed/pr_monitor supersede——全都只写库不广播 `status_change`，靠 WS 驱动的 ChatView 永远等不到事件；
+  ② **ChatView localStatus 优先级倒挂**：`useState(task.status)` 初始化 + `localStatus || task.status`，WS 覆盖永久优先于轮询 props，错过一次 WS 事件（断线/根因①）就永久陈旧；
+  ③ **TasksPage freeze 幽灵状态**：chat 打开时 `prev.map(t => byId.get(t.id) ?? t)` 对掉出当前页/过滤条件的任务保留旧数据，开状态过滤时任务完成后永远冻结在旧状态。
+  另修 **复活块隐患**：`_process_event` 的 completed→executing 复活不排除 `orphan`/`autonomous` 事件（transient 打标在 #729 已排除，复活块漏了）——PTY 回放/后台子 agent 输出可把完成任务翻回 executing 且无人收尾。
+- **修复**（commit aa9adc4 + 审查回改 6064329）: 新增 `backend/services/task_events.broadcast_status_change` 收口（**约定：任何写 Task.status 的路径 commit 后必须广播**），接入全部静默点；ChatView localStatus 改 null 初始化 + prop 变化时清除覆盖 + `lastWsStatusAt` 守卫（防在途旧轮询快照击穿刚到的 WS 状态、误触发 autoDequeue）；TasksPage 订阅 `tasks` 频道就地 patch tasks/allTasks/searchResults/chatTask；复活块补 orphan/autonomous 排除；instance_manager chat 收尾广播移到 commit 后；user_skill_injector fail-open（DB 表缺失不再炸 launch）。
+- **审查流程**: 2 个子 Agent（后端/前端视角）审 diff，抓到 1 个 major（在途旧快照击穿 WS 覆盖 → autoDequeue 误触发，本次修复自身引入的新窗口）+ 多个 minor（worker 代理路径漏广播、pr_monitor 隐式 commit 依赖、搜索结果不吃 patch），全部落地。
+- **测试**: 复活块排除 ×3、cancel 广播 ×1 回归测试；全量 967 passed，失败集与 main 基线完全一致（7 个存量失败非本次引入）；tsc 通过。
+- **预防**: ①改 Task.status 必须走「commit 后广播」约定（用 `task_events.broadcast_status_change`），新增状态写入点时先问"前端怎么知道"；②前端"WS 实时覆盖 + 轮询兜底"双通道时，覆盖必须能被更新鲜的兜底数据击穿（且要防在途旧快照反向击穿——时间戳守卫）；③事件驱动的状态翻转（如复活块）必须区分前台活事件与 orphan/autonomous 回放，参考 #729；④广播一律放 commit 之后。

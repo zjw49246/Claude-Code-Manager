@@ -669,6 +669,21 @@ curl -X POST http://localhost:8000/api/github/webhook \
 4. 切换 enabled → 验证开关状态
 5. 删除仓库 → 验证列表更新
 
+## Task 状态同步（status_change 广播收口，2026-07-12）
+
+### 自动化测试
+```bash
+# 复活块 orphan/autonomous 排除（completed 不被回放/后台事件翻回 executing）
+uv run python -m pytest backend/tests/test_service_instance_manager.py -k reactivat -v
+# cancel 广播 status_change
+uv run python -m pytest backend/tests/test_api_tasks.py -k broadcasts_status_change -v
+```
+
+### 手动验证
+1. 开两个浏览器页签（列表页 + 同一 task 的 chat 页），在列表页 cancel/retry 任务 → chat 页头部状态应立即变化（无需等 5s 轮询）
+2. chat 打开 + 状态过滤 executing 时，让任务完成 → 侧栏状态点应实时变绿（不再永久冻结）
+3. 断开 WS（devtools offline 几秒）错过 status_change → 恢复后 ≤5s 内 chat 页状态应被轮询数据纠正（不再永久陈旧）
+
 ## 开发规范
 
 ### Claude Code 开发时必须遵守：
