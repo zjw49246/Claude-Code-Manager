@@ -3132,6 +3132,19 @@ class GlobalDispatcher:
                 except Exception:
                     logger.exception(f"Failed to restore enabled_skills for task {task_id}")
 
+            # PTY mode: the persistent session stays alive after a turn, so
+            # _consume_output's process_exit broadcast never fires. The frontend
+            # relies on this event to clear the "thinking" spinner and re-enable
+            # the input box.
+            if self.instance_manager.pty_mode_enabled:
+                process = self.instance_manager.processes.get(inst_id)
+                exit_code = getattr(process, "returncode", 0) if process else 0
+                await self.broadcaster.broadcast(f"task:{task_id}", {
+                    "event_type": "process_exit",
+                    "exit_code": exit_code or 0,
+                    "stderr": None,
+                })
+
     async def _compact_session(self, task_id: int, session_id: str, db) -> str | None:
         """收集当前 session 的对话摘要，用于上下文压缩后带入新 session。
 
