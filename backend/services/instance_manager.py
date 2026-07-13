@@ -32,6 +32,7 @@ class InstanceManager:
         self._tasks: dict[int, asyncio.Task] = {}  # instance_id -> consumer task
         self._stopping: set[int] = set()  # instance_ids being intentionally stopped
         self._config_dirs: dict[int, str] = {}  # instance_id -> CLAUDE_CONFIG_DIR used
+        self._container_tasks: dict[int, int] = {}  # instance_id -> project_id (if running in container)
         self._last_stderr: dict[int, str] = {}  # instance_id -> stderr from last run
         self._launch_params: dict[int, dict] = {}  # instance_id -> params for re-launch on rotation
         # instance_id -> consecutive transient-overload retry count. Survives
@@ -176,6 +177,41 @@ class InstanceManager:
             from backend.services.ask_user_settings import ensure_ask_user_hook
             ensure_ask_user_hook(config_dir or os.path.expanduser("~/.claude"))
 
+        # Check if shared project → prepare Docker container wrapper for PTY
+        _container_project_id = None
+        _container_wrapper = None
+        if provider == "claude" and task_id:
+            try:
+                from backend.services.container_manager import is_shared_project, ContainerManager
+                async with self.db_factory() as _db:
+                    from backend.models.task import Task as _Task
+                    _t = await _db.get(_Task, task_id)
+                    if _t and _t.project_id:
+                        if await is_shared_project(_t.project_id, self.db_factory) and ContainerManager.is_docker_available():
+                            _container_project_id = _t.project_id
+                            if not hasattr(self, '_container_mgr'):
+                                self._container_mgr = ContainerManager()
+                            project_path = cwd or os.getcwd()
+                            # Get project git credentials for container isolation
+                            from backend.models.project import Project as _Project
+                            _proj = await _db.get(_Project, _t.project_id)
+                            container_name = await self._container_mgr.ensure_container(
+                                _container_project_id, project_path, config_dir,
+                                git_credential_type=_proj.git_credential_type if _proj else None,
+                                git_ssh_key_path=_proj.git_ssh_key_path if _proj else None,
+                                git_https_username=_proj.git_https_username if _proj else None,
+                                git_https_token=_proj.git_https_token if _proj else None,
+                            )
+                            # Create wrapper script for PTY: docker exec <container> claude "$@"
+                            wrapper_path = f"/tmp/ccm-docker-claude-{_container_project_id}.sh"
+                            with open(wrapper_path, "w") as wf:
+                                wf.write(f'#!/bin/bash\nexec docker exec -i {container_name} claude "$@"\n')
+                            os.chmod(wrapper_path, 0o755)
+                            _container_wrapper = wrapper_path
+                            self._container_tasks[instance_id] = _container_project_id
+            except Exception:
+                logger.debug("Container setup failed, falling back to bare process")
+
         if provider == "claude" and self.pty_mode_enabled:
             return await self._launch_pty(
                 instance_id=instance_id,
@@ -193,6 +229,7 @@ class InstanceManager:
                 enable_workflows=enable_workflows,
                 enabled_skills=enabled_skills,
                 mcp_config_path=str(mcp_config_path) if mcp_config_path else None,
+                claude_binary_override=_container_wrapper,
             )
 
         cmd = self._build_command(
@@ -229,16 +266,59 @@ class InstanceManager:
         if thinking_budget and thinking_budget > 0 and provider == "claude":
             env["MAX_THINKING_TOKENS"] = str(thinking_budget)
 
-        # Claude Code can output very large NDJSON lines (e.g. Read tool with big files).
-        # Default asyncio limit is 64KB which causes LimitOverrunError and kills the consumer.
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=cwd or os.getcwd(),
-            env=env,
-            limit=10 * 1024 * 1024,  # 10MB line buffer
-        )
+        # Check if this task's project is shared → run in Docker container
+        use_container = False
+        container_project_id = None
+        if task_id and provider == "claude":
+            try:
+                from backend.services.container_manager import is_shared_project, ContainerManager
+                async with self.db_factory() as _db:
+                    from backend.models.task import Task as _Task
+                    _task = await _db.get(_Task, task_id)
+                    if _task and _task.project_id:
+                        _shared = await is_shared_project(_task.project_id, self.db_factory)
+                        if _shared and ContainerManager.is_docker_available():
+                            use_container = True
+                            container_project_id = _task.project_id
+            except Exception:
+                logger.debug("Container check failed, falling back to bare process")
+
+        if use_container and container_project_id:
+            from backend.services.container_manager import ContainerManager
+            if not hasattr(self, '_container_mgr'):
+                self._container_mgr = ContainerManager()
+            project_path = cwd or os.getcwd()
+            # Get project git credentials
+            _git_creds = {}
+            try:
+                async with self.db_factory() as _db2:
+                    from backend.models.project import Project as _Proj
+                    _p = await _db2.get(_Proj, container_project_id)
+                    if _p:
+                        _git_creds = {
+                            "git_credential_type": _p.git_credential_type,
+                            "git_ssh_key_path": _p.git_ssh_key_path,
+                            "git_https_username": _p.git_https_username,
+                            "git_https_token": _p.git_https_token,
+                        }
+            except Exception:
+                pass
+            await self._container_mgr.ensure_container(
+                container_project_id, project_path, config_dir, **_git_creds
+            )
+            process = await self._container_mgr.exec_command(
+                container_project_id, cmd, env=env, cwd="/workspace"
+            )
+            self._container_tasks[instance_id] = container_project_id
+        else:
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=cwd or os.getcwd(),
+                env=env,
+                limit=10 * 1024 * 1024,
+            )
 
         self.processes[instance_id] = process
 
@@ -304,6 +384,7 @@ class InstanceManager:
         enable_workflows: bool,
         enabled_skills: dict | None,
         mcp_config_path: str | None,
+        claude_binary_override: str | None = None,
     ) -> int:
         """PTY-mode launch: delegate to claude_pty, mirror -p bookkeeping.
 
@@ -323,23 +404,38 @@ class InstanceManager:
                 "pty_cold_start": True,
             })
 
-        session_id = await self._pty_backend.launch_for_ccm(
-            instance_id=instance_id,
-            prompt=prompt,
-            task_id=task_id,
-            cwd=cwd,
-            model=model if model and model != "default" else None,
-            resume_session_id=resume_session_id,
-            loop_iteration=loop_iteration,
-            git_env=git_env,
-            thinking_budget=thinking_budget,
-            effort_level=effort_level,
-            chat_initiated=chat_initiated,
-            config_dir=config_dir,
-            enable_workflows=enable_workflows,
-            enabled_skills=enabled_skills,
-            mcp_config_path=mcp_config_path,
-        )
+        # If container wrapper exists, monkey-patch build_config to use it
+        _original_build_config = None
+        if claude_binary_override:
+            _original_build_config = self._pty_backend.build_config
+            _wrapper = claude_binary_override
+            def _patched_build_config(**kw):
+                cfg = _original_build_config(**kw)
+                cfg.claude_binary = _wrapper
+                return cfg
+            self._pty_backend.build_config = _patched_build_config
+
+        try:
+            session_id = await self._pty_backend.launch_for_ccm(
+                instance_id=instance_id,
+                prompt=prompt,
+                task_id=task_id,
+                cwd=cwd,
+                model=model if model and model != "default" else None,
+                resume_session_id=resume_session_id,
+                loop_iteration=loop_iteration,
+                git_env=git_env,
+                thinking_budget=thinking_budget,
+                effort_level=effort_level,
+                chat_initiated=chat_initiated,
+                config_dir=config_dir,
+                enable_workflows=enable_workflows,
+                enabled_skills=enabled_skills,
+                mcp_config_path=mcp_config_path,
+            )
+        finally:
+            if _original_build_config:
+                self._pty_backend.build_config = _original_build_config
 
         if task_id and session_id:
             async with self.db_factory() as db:

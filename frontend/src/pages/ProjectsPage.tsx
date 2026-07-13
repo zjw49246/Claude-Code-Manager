@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '../api/client';
 import type { Project, GlobalSettings, TagItem } from '../api/client';
-import { Trash2, RotateCcw, FolderGit2, Globe, HardDrive, Plus, Settings, X, ChevronDown, ChevronUp, GripVertical, Tag, FileKey, Palette, Server, Share2 } from 'lucide-react';
-import { ShareModal } from '../components/ShareModal';
+import { Trash2, RotateCcw, FolderGit2, Globe, HardDrive, Plus, Settings, X, ChevronDown, ChevronUp, GripVertical, Tag, FileKey, Palette, Server, UserPlus } from 'lucide-react';
+import { TeamShareModal } from '../components/TeamShareModal';
 import { resolveTagColor, TAG_COLOR_OPTIONS } from '../components/TagColors';
 import { TagManager } from '../components/TagManager';
 import { EnvFilesEditor } from '../components/EnvFilesEditor';
@@ -349,6 +349,14 @@ function CreateModal({ onClose, onCreated }: { onClose: () => void; onCreated: (
   const [showGit, setShowGit] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [selectedWorkerId, setSelectedWorkerId] = useState('');
+  const [workerList, setWorkerList] = useState<{ id: number; name: string }[]>([]);
+  const ccU = JSON.parse(localStorage.getItem('cc_user') || '{}');
+  const modalIsAdmin = ccU.role === 'admin' || ccU.role === 'super_admin' || !ccU.id;
+
+  useEffect(() => {
+    api.listWorkers().then(w => setWorkerList(w.filter(wk => wk.status !== 'terminated'))).catch(() => {});
+  }, []);
 
   const identityName = form.git_author_name;
   const identityEmail = form.git_author_email;
@@ -364,6 +372,7 @@ function CreateModal({ onClose, onCreated }: { onClose: () => void; onCreated: (
     try {
       await api.createProject({
         name: form.name.trim(),
+        worker_id: selectedWorkerId ? Number(selectedWorkerId) : undefined,
         git_url: form.git_url.trim() || undefined,
         default_branch: form.default_branch.trim() || 'main',
         git_author_name: form.git_author_name.trim() || undefined,
@@ -420,6 +429,21 @@ function CreateModal({ onClose, onCreated }: { onClose: () => void; onCreated: (
               />
             </div>
           </div>
+
+          {/* Worker selection */}
+          {workerList.length > 0 && (
+            <div>
+              <label className="block text-xs text-gray-400 mb-1">Run on</label>
+              <select
+                className="w-full bg-gray-700 text-foreground text-sm rounded px-3 py-2 outline-none focus:ring-1 focus:ring-indigo-500"
+                value={selectedWorkerId}
+                onChange={(e) => setSelectedWorkerId(e.target.value)}
+              >
+                {modalIsAdmin && <option value="">本机</option>}
+                {workerList.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}
+              </select>
+            </div>
+          )}
 
           {/* Git config (collapsible) */}
           <div className="border border-gray-700 rounded-lg overflow-hidden">
@@ -663,7 +687,10 @@ export function ProjectsPage() {
   const [showCreate, setShowCreate] = useState(false);
   const [editingGit, setEditingGit] = useState<Project | null>(null);
   const [editingEnvFiles, setEditingEnvFiles] = useState<Project | null>(null);
-  const [sharingProject, setSharingProject] = useState<Project | null>(null);
+  const [teamSharingProject, setTeamSharingProject] = useState<Project | null>(null);
+  const ccUser = JSON.parse(localStorage.getItem('cc_user') || '{}');
+  const isAdmin = ccUser.role === 'admin' || ccUser.role === 'super_admin' || !ccUser.id;
+  const [hasWorker, setHasWorker] = useState(isAdmin);
   const [showGlobalGit, setShowGlobalGit] = useState(false);
   const [showTagManager, setShowTagManager] = useState(false);
   const [tagItems, setTagItems] = useState<TagItem[]>([]);
@@ -702,6 +729,7 @@ export function ProjectsPage() {
       setAllTags(Array.from(merged).sort());
       setTagItems(tagList);
       setError(null);
+      if (!isAdmin) api.listWorkers().then(w => setHasWorker(w.length > 0)).catch(() => {});
     } catch (e) {
       setError(String(e));
     }
@@ -892,26 +920,32 @@ export function ProjectsPage() {
       <div className="flex items-center justify-between">
         <h2 className="text-foreground font-semibold text-lg">Projects</h2>
         <div className="flex items-center gap-2">
-          <button
-            onClick={() => setShowGlobalGit(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-300 border border-gray-600 rounded hover:bg-gray-700"
-            title="Global Git Config"
-          >
-            <Settings size={14} /><span className="hidden sm:inline"> Global Git</span> Config
-          </button>
-          <button
-            onClick={() => setShowTagManager(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-300 border border-gray-600 rounded hover:bg-gray-700"
-            title="Manage Tags"
-          >
-            <Tag size={14} /> Tags
-          </button>
-          <button
-            onClick={() => setShowCreate(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-indigo-600 text-white rounded hover:bg-indigo-500"
-          >
-            <Plus size={14} /><span className="hidden sm:inline"> New project</span><span className="sm:hidden"> New</span>
-          </button>
+          {isAdmin && (
+            <button
+              onClick={() => setShowGlobalGit(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-300 border border-gray-600 rounded hover:bg-gray-700"
+              title="Global Git Config"
+            >
+              <Settings size={14} /><span className="hidden sm:inline"> Global Git</span> Config
+            </button>
+          )}
+          {isAdmin && (
+            <button
+              onClick={() => setShowTagManager(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-300 border border-gray-600 rounded hover:bg-gray-700"
+              title="Manage Tags"
+            >
+              <Tag size={14} /> Tags
+            </button>
+          )}
+          {hasWorker && (
+            <button
+              onClick={() => setShowCreate(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-indigo-600 text-white rounded hover:bg-indigo-500"
+            >
+              <Plus size={14} /><span className="hidden sm:inline"> New project</span><span className="sm:hidden"> New</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -956,9 +990,25 @@ export function ProjectsPage() {
 
       {filteredProjects.length === 0 ? (
         <p className="text-gray-400 text-sm">{projects.length === 0 ? 'No projects yet.' : 'No projects match this tag.'}</p>
-      ) : (
-        <div className="space-y-3">
-          {filteredProjects.map((p) => (
+      ) : (() => {
+        const groups = new Map<string, typeof filteredProjects>();
+        for (const p of filteredProjects) {
+          const loc = p.location || 'local';
+          if (!groups.has(loc)) groups.set(loc, []);
+          groups.get(loc)!.push(p);
+        }
+        const sortedKeys = [...groups.keys()].sort((a, b) => a === 'local' ? -1 : b === 'local' ? 1 : a.localeCompare(b));
+        return (
+          <div className="space-y-4">
+            {sortedKeys.map(loc => (
+              <div key={loc}>
+                {groups.size > 1 && (
+                  <h3 className="text-xs text-gray-500 uppercase tracking-wider mb-2 flex items-center gap-1.5">
+                    {loc === 'local' ? '📍 本机' : `🖥 ${loc}`}
+                  </h3>
+                )}
+                <div className="space-y-3">
+                  {groups.get(loc)!.map((p) => (
             <div
               key={p.id}
               ref={setCardRef(p.id)}
@@ -1066,61 +1116,64 @@ export function ProjectsPage() {
                   </button>
                 </label>
 
-                {/* Edit git config */}
-                <button
-                  onClick={() => setEditingGit(p)}
-                  className="p-2 text-gray-400 hover:text-indigo-400 hover:bg-gray-700 rounded transition-colors"
-                  title="Edit git config"
-                >
-                  <Settings size={16} />
-                </button>
-
-                {/* Env files */}
-                <button
-                  onClick={() => setEditingEnvFiles(p)}
-                  className="p-2 text-gray-400 hover:text-green-400 hover:bg-gray-700 rounded transition-colors"
-                  title="Manage env files"
-                >
-                  <FileKey size={16} />
-                </button>
-
-                {/* Reclone (remote only) */}
-                {p.has_remote && (
-                  <button
-                    onClick={async () => {
-                      try {
-                        await api.recloneProject(p.id);
-                        await refresh();
-                      } catch (e) {
-                        setError(String(e));
-                      }
-                    }}
-                    className="min-w-[44px] min-h-[44px] flex items-center justify-center text-gray-400 hover:text-sky-400 hover:bg-gray-700 rounded transition-colors"
-                    title="Re-clone"
-                  >
-                    <RotateCcw size={16} />
-                  </button>
+                {/* Project management: admin or Worker owner */}
+                {(isAdmin || hasWorker) && (
+                  <>
+                    <button
+                      onClick={() => setEditingGit(p)}
+                      className="p-2 text-gray-400 hover:text-indigo-400 hover:bg-gray-700 rounded transition-colors"
+                      title="Edit git config"
+                    >
+                      <Settings size={16} />
+                    </button>
+                    <button
+                      onClick={() => setEditingEnvFiles(p)}
+                      className="p-2 text-gray-400 hover:text-green-400 hover:bg-gray-700 rounded transition-colors"
+                      title="Manage env files"
+                    >
+                      <FileKey size={16} />
+                    </button>
+                    {p.has_remote && (
+                      <button
+                        onClick={async () => {
+                          try {
+                            await api.recloneProject(p.id);
+                            await refresh();
+                          } catch (e) {
+                            setError(String(e));
+                          }
+                        }}
+                        className="min-w-[44px] min-h-[44px] flex items-center justify-center text-gray-400 hover:text-sky-400 hover:bg-gray-700 rounded transition-colors"
+                        title="Re-clone"
+                      >
+                        <RotateCcw size={16} />
+                      </button>
+                    )}
+                    <button
+                      onClick={() => setTeamSharingProject(p)}
+                      className="min-w-[44px] min-h-[44px] flex items-center justify-center text-gray-400 hover:text-indigo-400 hover:bg-gray-700 rounded transition-colors"
+                      title="Share to team members"
+                    >
+                      <UserPlus size={16} />
+                    </button>
+                    <button
+                      onClick={() => handleDelete(p.id)}
+                      className="min-w-[44px] min-h-[44px] flex items-center justify-center text-gray-400 hover:text-red-400 hover:bg-gray-700 rounded transition-colors"
+                      title="Delete project"
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                  </>
                 )}
-
-                <button
-                  onClick={() => setSharingProject(p)}
-                  className="min-w-[44px] min-h-[44px] flex items-center justify-center text-gray-400 hover:text-blue-400 hover:bg-gray-700 rounded transition-colors"
-                  title="Share project"
-                >
-                  <Share2 size={16} />
-                </button>
-                <button
-                  onClick={() => handleDelete(p.id)}
-                  className="min-w-[44px] min-h-[44px] flex items-center justify-center text-gray-400 hover:text-red-400 hover:bg-gray-700 rounded transition-colors"
-                  title="Delete project"
-                >
-                  <Trash2 size={16} />
-                </button>
               </div>
             </div>
-          ))}
-        </div>
-      )}
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        );
+      })()}
 
       {showCreate && <CreateModal onClose={() => setShowCreate(false)} onCreated={refresh} />}
       {editingGit && <GitConfigModal project={editingGit} onClose={() => setEditingGit(null)} onSaved={refresh} />}
@@ -1147,12 +1200,13 @@ export function ProjectsPage() {
       )}
       {showGlobalGit && <GlobalGitConfigModal onClose={() => setShowGlobalGit(false)} />}
       {showTagManager && <TagManager onClose={() => setShowTagManager(false)} onChanged={refresh} />}
-      {sharingProject && (
-        <ShareModal
+
+      {teamSharingProject && (
+        <TeamShareModal
           type="project"
-          itemId={sharingProject.id}
-          itemTitle={sharingProject.name}
-          onClose={() => setSharingProject(null)}
+          itemId={teamSharingProject.id}
+          itemTitle={teamSharingProject.name}
+          onClose={() => setTeamSharingProject(null)}
         />
       )}
     </div>

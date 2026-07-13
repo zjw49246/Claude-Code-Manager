@@ -3,7 +3,7 @@ import fnmatch
 import os
 import pathlib
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.config import settings
 from backend.database import get_db, async_session
 from backend.models.project import Project
+from backend.api.deps import get_current_user_id, get_current_user_role
 from backend.models.project_todo import ProjectTodo
 from backend.models.tag import Tag
 from backend.models.global_settings import GlobalSettings
@@ -20,19 +21,100 @@ from backend.services.dispatcher import _build_git_env
 
 router = APIRouter(prefix="/api/projects", tags=["projects"])
 
+async def _require_project_access(request: Request, project_id: int, db: AsyncSession):
+    """Check if user has access to this project."""
+    from backend.api.deps import is_admin as _is_admin, get_current_user_id as _get_uid
+    if _is_admin(request):
+        return
+    uid = _get_uid(request)
+    if not uid:
+        raise HTTPException(403, "Not authenticated")
+    from backend.models.team_share import TeamProjectShare
+    from backend.models.worker import Worker
+    from backend.models.task import Task
+    from backend.models.user_group import UserGroupMember
+    user_group_ids = select(UserGroupMember.group_id).where(UserGroupMember.user_id == uid)
+    shared = (await db.execute(
+        select(TeamProjectShare.id).where(
+            TeamProjectShare.project_id == project_id,
+            ((TeamProjectShare.target_type == "user") & (TeamProjectShare.target_id == uid))
+            | ((TeamProjectShare.target_type == "group") & TeamProjectShare.target_id.in_(user_group_ids))
+        ).limit(1)
+    )).scalar_one_or_none()
+    if shared:
+        return
+    # Check if project is on a worker owned by this user
+    proj = await db.get(Project, project_id)
+    if proj and proj.worker_id:
+        w = await db.get(Worker, proj.worker_id)
+        if w and w.owner_user_id == uid:
+            return
+    raise HTTPException(403, "No access to this project")
 
-@router.get("", response_model=list[ProjectResponse])
-async def list_projects(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(Project).order_by(Project.sort_order.asc(), Project.name.asc())
-    )
-    return list(result.scalars().all())
+
+
+@router.get("")
+async def list_projects(request: Request, db: AsyncSession = Depends(get_db)):
+    user_id = get_current_user_id(request)
+    user_role = get_current_user_role(request)
+    stmt = select(Project).order_by(Project.sort_order.asc(), Project.name.asc())
+    if user_role not in ("admin", "super_admin") and user_id:
+        from backend.models.team_share import TeamProjectShare
+        from backend.models.worker import Worker
+        from backend.models.user_group import UserGroupMember
+        user_group_ids = select(UserGroupMember.group_id).where(UserGroupMember.user_id == user_id)
+        shared_project_ids = select(TeamProjectShare.project_id).where(
+            ((TeamProjectShare.target_type == "user") & (TeamProjectShare.target_id == user_id))
+            | ((TeamProjectShare.target_type == "group") & TeamProjectShare.target_id.in_(user_group_ids))
+        )
+        owned_worker_ids = select(Worker.id).where(Worker.owner_user_id == user_id)
+        stmt = stmt.where(
+            Project.id.in_(shared_project_ids)
+            | Project.worker_id.in_(owned_worker_ids)
+        )
+    result = await db.execute(stmt)
+    projects = list(result.scalars().all())
+
+    # Annotate each project with its location using project.worker_id
+    from backend.models.worker import Worker as WorkerModel
+    worker_name_map: dict[int, str] = {}
+    worker_ids = {p.worker_id for p in projects if p.worker_id}
+    if worker_ids:
+        wr = await db.execute(select(WorkerModel.id, WorkerModel.name).where(WorkerModel.id.in_(worker_ids)))
+        worker_name_map = {wid: wname for wid, wname in wr}
+
+    out = []
+    for p in projects:
+        d = ProjectResponse.model_validate(p).model_dump()
+        d["location"] = worker_name_map.get(p.worker_id, "local") if p.worker_id else "local"
+        out.append(d)
+    return out
 
 
 @router.get("/tags", response_model=list[str])
-async def list_project_tags(db: AsyncSession = Depends(get_db)):
-    """Return all unique tags across all projects, sorted alphabetically."""
-    result = await db.execute(select(Project.tags))
+async def list_project_tags(request: Request, db: AsyncSession = Depends(get_db)):
+    """Return unique tags from projects the user can see."""
+    user_id = get_current_user_id(request)
+    user_role = get_current_user_role(request)
+    stmt = select(Project.tags)
+    if user_role not in ("admin", "super_admin") and user_id:
+        from backend.models.team_share import TeamProjectShare
+        from backend.models.worker import Worker
+        from backend.models.task import Task
+        from backend.models.user_group import UserGroupMember
+        user_group_ids = select(UserGroupMember.group_id).where(UserGroupMember.user_id == user_id)
+        shared_project_ids = select(TeamProjectShare.project_id).where(
+            ((TeamProjectShare.target_type == "user") & (TeamProjectShare.target_id == user_id))
+            | ((TeamProjectShare.target_type == "group") & TeamProjectShare.target_id.in_(user_group_ids))
+        )
+        owned_worker_ids = select(Worker.id).where(Worker.owner_user_id == user_id)
+        worker_project_ids = select(Task.project_id).where(
+            Task.worker_id.in_(owned_worker_ids), Task.project_id.is_not(None)
+        ).distinct()
+        stmt = stmt.where(
+            Project.id.in_(shared_project_ids) | Project.id.in_(worker_project_ids)
+        )
+    result = await db.execute(stmt)
     all_tags: set[str] = set()
     for (tags,) in result:
         if tags:
@@ -57,7 +139,14 @@ async def reorder_projects(
 
 
 @router.post("", response_model=ProjectResponse, status_code=201)
-async def create_project(body: ProjectCreate, db: AsyncSession = Depends(get_db)):
+async def create_project(request: Request, body: ProjectCreate, db: AsyncSession = Depends(get_db)):
+    user_id = get_current_user_id(request)
+    user_role = get_current_user_role(request)
+    if user_role not in ("admin", "super_admin") and user_id:
+        from backend.models.worker import Worker
+        owned = await db.execute(select(Worker.id).where(Worker.owner_user_id == user_id).limit(1))
+        if not owned.scalar_one_or_none():
+            raise HTTPException(403, "You need a Worker to create Projects")
     # Check duplicate name
     existing = await db.execute(select(Project).where(Project.name == body.name))
     if existing.scalar_one_or_none():
@@ -69,6 +158,7 @@ async def create_project(body: ProjectCreate, db: AsyncSession = Depends(get_db)
 
     project = Project(
         name=body.name,
+        worker_id=body.worker_id,
         git_url=body.git_url if has_remote else None,
         has_remote=has_remote,
         default_branch=body.default_branch,
@@ -98,18 +188,26 @@ async def create_project(body: ProjectCreate, db: AsyncSession = Depends(get_db)
     await db.commit()
     await db.refresh(project)
 
-    global_cfg = await db.get(GlobalSettings, 1)
-    git_config = merge_git_config(_extract_git_config(project), settings_to_dict(global_cfg))
-    if has_remote:
-        asyncio.create_task(_clone_repo(project.id, body.git_url, local_path, body.name, body.default_branch, git_config))
+    # Worker projects: skip local clone — worker_proxy handles remote clone when first task runs
+    if not body.worker_id:
+        global_cfg = await db.get(GlobalSettings, 1)
+        git_config = merge_git_config(_extract_git_config(project), settings_to_dict(global_cfg))
+        if has_remote:
+            asyncio.create_task(_clone_repo(project.id, body.git_url, local_path, body.name, body.default_branch, git_config))
+        else:
+            asyncio.create_task(_init_local_repo(project.id, local_path, body.name, body.default_branch, git_config))
     else:
-        asyncio.create_task(_init_local_repo(project.id, local_path, body.name, body.default_branch, git_config))
+        # Mark as ready immediately — actual clone happens on Worker
+        project.status = "ready"
+        await db.commit()
+        await db.refresh(project)
 
     return project
 
 
 @router.get("/{project_id}", response_model=ProjectResponse)
-async def get_project(project_id: int, db: AsyncSession = Depends(get_db)):
+async def get_project(project_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    await _require_project_access(request, project_id, db)
     project = await db.get(Project, project_id)
     if not project:
         raise HTTPException(404, "Project not found")
@@ -118,8 +216,9 @@ async def get_project(project_id: int, db: AsyncSession = Depends(get_db)):
 
 @router.put("/{project_id}", response_model=ProjectResponse)
 async def update_project(
-    project_id: int, body: ProjectUpdate, db: AsyncSession = Depends(get_db)
+    project_id: int, body: ProjectUpdate, request: Request, db: AsyncSession = Depends(get_db)
 ):
+    await _require_project_access(request, project_id, db)
     project = await db.get(Project, project_id)
     if not project:
         raise HTTPException(404, "Project not found")
@@ -152,7 +251,9 @@ async def update_project(
 
 
 @router.delete("/{project_id}")
-async def delete_project(project_id: int, db: AsyncSession = Depends(get_db)):
+async def delete_project(project_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    from backend.api.deps import require_admin
+    require_admin(request)
     project = await db.get(Project, project_id)
     if not project:
         raise HTTPException(404, "Project not found")
@@ -166,7 +267,8 @@ async def delete_project(project_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/{project_id}/reclone")
-async def reclone_project(project_id: int, db: AsyncSession = Depends(get_db)):
+async def reclone_project(project_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    await _require_project_access(request, project_id, db)
     project = await db.get(Project, project_id)
     if not project:
         raise HTTPException(404, "Project not found")

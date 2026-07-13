@@ -15,6 +15,8 @@ interface TaskFormProps {
 const NEW_PROJECT_VALUE = '__new__';
 
 export function TaskForm({ onCreated }: TaskFormProps) {
+  const ccUser = JSON.parse(localStorage.getItem('cc_user') || '{}');
+  const isAdmin = ccUser.role === 'admin' || ccUser.role === 'super_admin' || !ccUser.id;
   const [description, setDescription] = useState('');
   const [projectId, setProjectId] = useState<number | ''>('');
   const [isNewProject, setIsNewProject] = useState(false);
@@ -25,7 +27,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   const [provider, setProvider] = useState('claude');
   // 分布式 Worker：执行位置（'' = 本机）
   const [workerId, setWorkerId] = useState('');
-  const [workers, setWorkers] = useState<{ id: number; name: string; status: string }[]>([]);
+  // workers state removed — Run on moved to Project level
   const [model, setModel] = useState('');
   const [providerOptions, setProviderOptions] = useState<string[]>(['claude', 'codex']);
   const [effort, setEffort] = useState('');
@@ -47,6 +49,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [projects, setProjects] = useState<Project[]>([]);
+  const [hasWorker, setHasWorker] = useState(isAdmin);
   const [tagItems, setTagItems] = useState<TagItem[]>([]);
   const fileUpload = useFileUpload();
   const [selectedSecretIds, setSelectedSecretIds] = useState<number[]>([]);
@@ -69,6 +72,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
 
   useEffect(() => {
     loadProjects();
+    if (!isAdmin) api.listWorkers().then(w => setHasWorker(w.length > 0)).catch(() => {});
     api.config().then((c) => {
       setProvider(c.default_provider || 'claude');
       setProviderOptions(c.provider_options.length ? c.provider_options : ['claude', 'codex']);
@@ -262,7 +266,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
     !fileUpload.isUploading;
 
   useEffect(() => {
-    api.listWorkers().then(setWorkers).catch(() => {});
+    // workers list removed — Run on moved to Project level
   }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -421,7 +425,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
           value={isNewProject ? NEW_PROJECT_VALUE : projectId || undefined}
           onChange={handleProjectChange}
           placeholder="Select project..."
-          extraOptions={[{ value: NEW_PROJECT_VALUE, label: '+ New project' }]}
+          extraOptions={hasWorker ? [{ value: NEW_PROJECT_VALUE, label: '+ New project' }] : []}
           className="w-full"
           showStatus
           tagColorMap={Object.fromEntries(tagItems.map((t) => [t.name, t.color]))}
@@ -571,19 +575,14 @@ export function TaskForm({ onCreated }: TaskFormProps) {
                   <option value="goal">Goal</option>
                 </select>
 
-                <span className="text-gray-400">Run on</span>
-                <select
-                  className="bg-gray-700 text-foreground rounded px-2 py-1 text-xs"
-                  value={workerId}
-                  onChange={(e) => setWorkerId(e.target.value)}
-                >
-                  <option value="">本机</option>
-                  {workers.map((w) => (
-                    <option key={w.id} value={w.id} disabled={w.status !== 'ready'}>
-                      {w.name}{w.status !== 'ready' ? ` (${w.status})` : ''}
-                    </option>
-                  ))}
-                </select>
+                {false && (
+                  <>
+                    {/* Run on removed — Task inherits from Project */}
+                    <span className="text-gray-400">Run on</span>
+                    <select className="hidden" value={workerId} onChange={(e) => setWorkerId(e.target.value)}>
+                    </select>
+                  </>
+                )}
 
                 <span className="text-gray-400">CLI</span>
                 <select

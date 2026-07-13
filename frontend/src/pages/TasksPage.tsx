@@ -13,7 +13,7 @@ import { ChevronLeft, ChevronRight, ChevronDown, Filter, PanelLeftClose, PanelLe
 import { PluginsBadge, SubAgentsBadge } from '../components/Tasks/TaskBadges';
 import { TAG_COLOR_OPTIONS } from '../components/TagColors';
 import { useTaskReorder } from '../hooks/useTaskReorder';
-import { ShareModal } from '../components/ShareModal';
+import { TeamShareModal } from '../components/TeamShareModal';
 
 const PAGE_SIZE = 20;
 
@@ -36,7 +36,7 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
   const [showArchived, setShowArchived] = useState(false);
   const [tagItems, setTagItems] = useState<TagItem[]>([]);
   const [chatTask, setChatTask] = useState<Task | null>(null);
-  const [sharingTask, setSharingTask] = useState<Task | null>(null);
+  const [teamSharingTask, setTeamSharingTask] = useState<Task | null>(null);
   const chatTaskRef = useRef<Task | null>(null);
   chatTaskRef.current = chatTask;
   const chatTaskIdRef = useRef(chatTaskId);
@@ -48,20 +48,20 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
     onChatTaskChange(t?.id ?? null);
   }, [onChatTaskChange]);
 
-  // Listen for share-task events from TaskList menu
   useEffect(() => {
-    const handler = (e: Event) => {
+    const teamHandler = (e: Event) => {
       const task = (e as CustomEvent).detail?.task;
-      if (task) setSharingTask(task);
+      if (task) setTeamSharingTask(task);
     };
-    window.addEventListener('ccm-share-task', handler);
-    return () => window.removeEventListener('ccm-share-task', handler);
+    window.addEventListener('ccm-team-share-task', teamHandler);
+    return () => window.removeEventListener('ccm-team-share-task', teamHandler);
   }, []);
 
   const [autoSortOnAccess, setAutoSortOnAccess] = useState(true);
   useEffect(() => {
     api.getRuntimeSettings().then((s) => setAutoSortOnAccess(s.auto_sort_on_access)).catch(() => {});
   }, []);
+  const refreshRef = useRef<() => void>(() => {});
   const handleGlobalWs = useCallback((raw: Record<string, unknown>) => {
     const msg = raw as { channel?: string; data?: Record<string, unknown> };
     if (msg.channel === 'system' && msg.data?.event === 'runtime_settings_changed') {
@@ -84,6 +84,9 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
       setAllTasks(patch);
       setSearchResults((prev) => (prev ? patch(prev) : prev));
       setChatTask((prev) => (prev && prev.id === taskId && prev.status !== newStatus ? { ...prev, status: newStatus } : prev));
+    }
+    if (msg.channel === 'tasks' && msg.data?.event === 'status_change') {
+      refreshRef.current();
     }
   }, []);
   useWebSocket(['system', 'tasks'], handleGlobalWs);
@@ -153,6 +156,8 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
       console.error('Failed to load tasks:', e);
     }
   }, [statusFilterParam, showArchived, projectFilter, starredFilter, unreadFilter, page, setChatTaskWrapped]);
+
+  refreshRef.current = refresh;
 
   useEffect(() => {
     refresh();
@@ -637,14 +642,6 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
         <div className="flex-1 min-w-0">
           {chatPanel}
         </div>
-        {sharingTask && (
-          <ShareModal
-            type="task"
-            itemId={sharingTask.id}
-            itemTitle={sharingTask.title || `Task #${sharingTask.id}`}
-            onClose={() => setSharingTask(null)}
-          />
-        )}
       </div>
     );
   }
@@ -653,12 +650,13 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
     <div className="space-y-4">
       {taskListContent}
       {chatPanel}
-      {sharingTask && (
-        <ShareModal
+
+      {teamSharingTask && (
+        <TeamShareModal
           type="task"
-          itemId={sharingTask.id}
-          itemTitle={sharingTask.title || `Task #${sharingTask.id}`}
-          onClose={() => setSharingTask(null)}
+          itemId={teamSharingTask.id}
+          itemTitle={teamSharingTask.title || `Task #${teamSharingTask.id}`}
+          onClose={() => setTeamSharingTask(null)}
         />
       )}
     </div>

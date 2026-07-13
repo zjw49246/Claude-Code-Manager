@@ -1,7 +1,8 @@
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
+from backend.api.deps import require_admin
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config import settings
@@ -33,7 +34,7 @@ async def get_git_settings(db: AsyncSession = Depends(get_db)):
 
 
 @router.put("/git", response_model=GlobalSettingsResponse)
-async def update_git_settings(body: GlobalSettingsUpdate, db: AsyncSession = Depends(get_db)):
+async def update_git_settings(request: Request, body: GlobalSettingsUpdate, db: AsyncSession = Depends(get_db)):
     row = await _get_or_create(db)
     for key, value in body.model_dump().items():
         setattr(row, key, value or None)

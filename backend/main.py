@@ -37,11 +37,9 @@ from backend.api.pr_monitor import router as pr_monitor_router, webhook_router a
 from backend.api.workers import router as workers_router
 from backend.api.feishu import router as feishu_router
 from backend.api.org import router as org_router
-from backend.api.sharing import router as sharing_router
-from backend.api.shared import router as shared_router
-from backend.api.shared_access import router as shared_access_router
 from backend.api.ask_user import router as ask_user_router
 from backend.api.user_skills import router as user_skills_router
+from backend.api.team_sharing import router as team_sharing_router
 from backend.middleware.auth import TokenAuthMiddleware
 from backend.services.ws_broadcaster import WebSocketBroadcaster
 from backend.services.instance_manager import InstanceManager
@@ -64,8 +62,7 @@ broadcaster = WebSocketBroadcaster()
 broadcaster.db_factory = async_session
 instance_manager = InstanceManager(db_factory=async_session, broadcaster=broadcaster)
 
-from backend.services.shared_relay import SharedRelay
-shared_relay = SharedRelay(db_factory=async_session, broadcaster=broadcaster)
+shared_relay = None
 ralph_loop = RalphLoop(
     db_factory=async_session,
     instance_manager=instance_manager,
@@ -266,32 +263,31 @@ async def _recover_worker_relays():
         logger.exception("worker relay recovery failed")
 
 
-async def _org_heartbeat_loop():
-    """Periodically re-register with the org registry to update last_seen_at."""
-    await asyncio.sleep(30)  # initial delay
-    while True:
-        try:
-            from backend.models.feishu_binding import FeishuUserBinding
-            async with async_session() as db:
-                result = await db.execute(select(FeishuUserBinding).limit(1))
-                binding = result.scalar_one_or_none()
-            if binding:
-                from backend.services.feishu_auth import register_with_org_registry
-                await register_with_org_registry(
-                    binding.feishu_open_id,
-                    binding.feishu_name or "",
-                    binding.avatar_url or "",
-                )
-        except asyncio.CancelledError:
-            return
-        except Exception:
-            logger.debug("org heartbeat failed")
-        await asyncio.sleep(300)  # every 5 minutes
-
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    # Create default admin on first startup
+    from backend.models.user import User
+    from backend.api.auth import _hash_password
+    async with async_session() as db:
+        result = await db.execute(select(User))
+        if result.scalars().first() is None:
+            db.add(User(
+                email="admin@apexin.ai",
+                name="Admin",
+                password_hash=_hash_password("admin123456"),
+                role="super_admin",
+            ))
+            await db.commit()
+            logger.info("Default admin account created: admin@apexin.ai")
+    # Build Docker sandbox image if Docker is available (for shared project isolation)
+    try:
+        from backend.services.container_manager import ContainerManager, build_sandbox_image
+        if ContainerManager.is_docker_available():
+            asyncio.create_task(build_sandbox_image())
+    except Exception:
+        logger.debug("Docker not available, container isolation disabled")
     # PTY 权限透传：bridge HTTP 线程需要往主循环调度协程
     instance_manager._loop = asyncio.get_running_loop()
     # Apply persisted runtime-settings override (frontend PTY toggle)
@@ -317,7 +313,6 @@ async def lifespan(app: FastAPI):
         _asyncio.create_task(_recover_worker_relays())
 
     # Recover shared task relays
-    asyncio.create_task(shared_relay.recover_all())
 
     # Start periodic database backup (optional — requires BACKUP_ENABLED=true in .env)
     backup_svc = None
@@ -346,8 +341,6 @@ async def lifespan(app: FastAPI):
 
     # Org registry heartbeat — periodically re-register with the registry
     heartbeat_task = None
-    if settings.org_registry_url or settings.org_registry_enabled:
-        heartbeat_task = asyncio.create_task(_org_heartbeat_loop())
 
     yield
 
@@ -412,11 +405,9 @@ app.include_router(pr_webhook_router)
 app.include_router(workers_router)
 app.include_router(feishu_router)
 app.include_router(org_router)
-app.include_router(sharing_router)
-app.include_router(shared_router)
-app.include_router(shared_access_router)
 app.include_router(ask_user_router)
 app.include_router(user_skills_router)
+app.include_router(team_sharing_router)
 
 # Serve frontend static files in production
 FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"

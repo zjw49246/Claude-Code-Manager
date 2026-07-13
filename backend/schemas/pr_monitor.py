@@ -5,6 +5,7 @@ from pydantic import BaseModel, field_validator
 class MonitoredRepoCreate(BaseModel):
     repo_full_name: str
     project_id: int | None = None
+    worker_id: int | None = None  # NULL = local, else Worker ID
     auto_merge: bool = False
     review_model: str | None = None
     default_branch: str = "main"
@@ -31,6 +32,7 @@ class MonitoredRepoResponse(BaseModel):
     id: int
     repo_full_name: str
     project_id: int | None
+    worker_id: int | None = None
     enabled: bool
     auto_merge: bool
     webhook_secret: str

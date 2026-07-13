@@ -24,6 +24,8 @@ class Task(Base):
     instance_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # 分布式 Worker：None = 本机执行，有值 = 转发到该 Worker（workers.id）
     worker_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    # Team CCM: 谁创建的（users.id）
+    created_by: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     retry_count: Mapped[int] = mapped_column(Integer, default=0)
     max_retries: Mapped[int] = mapped_column(Integer, default=2)
     mode: Mapped[str] = mapped_column(String(20), default="auto")  # "auto", "plan", or "loop"

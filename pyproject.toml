@@ -21,6 +21,8 @@ dependencies = [
     "boto3>=1.34.0",
     # PTY 模式（持久交互会话）；缺失时优雅降级为 `claude -p`
     "claude-pty @ git+https://github.com/zjw49246/Claude-Code-PTY",
+    "pyjwt>=2.13.0",
+    "bcrypt>=5.0.0",
 ]
 
 [project.optional-dependencies]

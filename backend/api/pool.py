@@ -58,14 +58,16 @@ async def pool_usage(force: bool = False):
 
 
 @router.post("/reload")
-async def pool_reload():
+async def pool_reload(request: Request):
+    require_admin(request)
     pool = _get_pool()
     pool.reload()
     return pool.status()
 
 
 @router.post("/accounts/{account_id}/clear-cooldown")
-async def clear_cooldown(account_id: str):
+async def clear_cooldown(request: Request, account_id: str):
+    require_admin(request)
     pool = _get_pool()
     pool.clear_cooldown(account_id)
     return {"ok": True, "account_id": account_id}
@@ -90,7 +92,8 @@ async def _watch_relogin(account_id: str, proc: asyncio.subprocess.Process):
 
 
 @router.post("/accounts/{account_id}/relogin")
-async def relogin_account(account_id: str):
+async def relogin_account(request: Request, account_id: str):
+    require_admin(request)
     """重新登录账号。先试 OAuth refresh（token 过期 ≠ 要重新登录，CLI 平时
     会自动刷，闲置账号刷一下就恢复）；refresh 真失败才跑 auto_login.py。"""
     pool = _get_pool()
@@ -156,7 +159,8 @@ async def relogin_status(account_id: str):
 
 
 @router.delete("/accounts/{account_id}")
-async def delete_account(account_id: str):
+async def delete_account(request: Request, account_id: str):
+    require_admin(request)
     """从号池中删除账号（不删 config_dir 文件夹，方便以后重新登录其他号）。"""
     pool = _get_pool()
     acc = pool.account(account_id)
@@ -172,7 +176,8 @@ async def delete_account(account_id: str):
 
 
 @router.post("/preferred")
-async def set_preferred(body: dict):
+async def set_preferred(request: Request, body: dict):
+    require_admin(request)
     """Pin an account for subsequent launches (manual switch).
 
     Body: {"account_id": "account-1"} or {"account_id": null} to clear.
@@ -238,7 +243,8 @@ async def _watch_add(email: str, proc: asyncio.subprocess.Process):
 
 
 @router.post("/add")
-async def add_account(body: AddAccountRequest):
+async def add_account(request: Request, body: AddAccountRequest):
+    require_admin(request)
     """自动登录新账号并加入号池。三参数：email、接码 token、接码渠道。
 
     后台跑 auto_login.py，前端轮询 GET /api/pool/add/{email} 看进度。"""

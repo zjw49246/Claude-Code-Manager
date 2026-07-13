@@ -11,7 +11,7 @@ import logging
 import socket
 import time
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -45,15 +45,21 @@ def _provisioner():
 
 
 @router.get("", response_model=list[WorkerResponse])
-async def list_workers(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(Worker).where(Worker.status != "terminated").order_by(desc(Worker.created_at))
-    )
+async def list_workers(request: Request, db: AsyncSession = Depends(get_db)):
+    from backend.api.deps import get_current_user_id, get_current_user_role
+    user_id = get_current_user_id(request)
+    user_role = get_current_user_role(request)
+    stmt = select(Worker).where(Worker.status != "terminated").order_by(desc(Worker.created_at))
+    if user_role not in ("admin", "super_admin"):
+        stmt = stmt.where(Worker.owner_user_id == user_id)
+    result = await db.execute(stmt)
     return result.scalars().all()
 
 
 @router.post("", response_model=WorkerResponse)
-async def create_worker(body: WorkerCreate, db: AsyncSession = Depends(get_db)):
+async def create_worker(body: WorkerCreate, request: Request, db: AsyncSession = Depends(get_db)):
+    from backend.api.deps import require_admin
+    require_admin(request)
     prov = _provisioner()
     if not body.name or not body.name.strip():
         raise HTTPException(400, "请填写 Worker 名称")
@@ -76,18 +82,22 @@ async def create_worker(body: WorkerCreate, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/{worker_id}", response_model=WorkerResponse)
-async def get_worker(worker_id: int, db: AsyncSession = Depends(get_db)):
+async def get_worker(worker_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    from backend.api.deps import require_worker_access
     worker = await db.get(Worker, worker_id)
     if not worker:
         raise HTTPException(404, "Worker not found")
+    await require_worker_access(request, worker)
     return worker
 
 
 @router.get("/{worker_id}/logs", response_model=WorkerLogsResponse)
-async def get_worker_logs(worker_id: int, db: AsyncSession = Depends(get_db)):
+async def get_worker_logs(worker_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    from backend.api.deps import require_worker_access
     worker = await db.get(Worker, worker_id)
     if not worker:
         raise HTTPException(404, "Worker not found")
+    await require_worker_access(request, worker)
     return WorkerLogsResponse(id=worker.id, bootstrap_log=worker.bootstrap_log)
 
 
@@ -101,7 +111,12 @@ async def _require_worker(db: AsyncSession, worker_id: int, allowed_statuses: tu
 
 
 @router.post("/{worker_id}/stop", response_model=WorkerResponse)
-async def stop_worker(worker_id: int, db: AsyncSession = Depends(get_db)):
+async def stop_worker(worker_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    from backend.api.deps import require_worker_access
+    worker = await db.get(Worker, worker_id)
+    if not worker:
+        raise HTTPException(404, "Worker not found")
+    await require_worker_access(request, worker)
     prov = _provisioner()
     worker = await _require_worker(db, worker_id, ("ready", "error"))
     # 同步置过渡态：双击/并发请求第二发直接 409，不会起两个后台任务
@@ -113,7 +128,12 @@ async def stop_worker(worker_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/{worker_id}/start", response_model=WorkerResponse)
-async def start_worker(worker_id: int, db: AsyncSession = Depends(get_db)):
+async def start_worker(worker_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    from backend.api.deps import require_worker_access
+    worker = await db.get(Worker, worker_id)
+    if not worker:
+        raise HTTPException(404, "Worker not found")
+    await require_worker_access(request, worker)
     prov = _provisioner()
     worker = await _require_worker(db, worker_id, ("stopped", "error"))
     worker.status = "starting"
@@ -124,7 +144,9 @@ async def start_worker(worker_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/{worker_id}/destroy", response_model=WorkerResponse)
-async def destroy_worker(worker_id: int, db: AsyncSession = Depends(get_db)):
+async def destroy_worker(worker_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    from backend.api.deps import require_admin
+    require_admin(request)
     prov = _provisioner()
     worker = await db.get(Worker, worker_id)
     if not worker:
@@ -188,8 +210,12 @@ async def _migrate_back_then_destroy(prov, worker_id: int, db_factory=None):
 
 
 @router.post("/{worker_id}/retry", response_model=WorkerResponse)
-async def retry_bootstrap(worker_id: int, db: AsyncSession = Depends(get_db)):
-    """error 状态下重跑创建/bootstrap 流程（实例已存在则等效于收养重 bootstrap）。"""
+async def retry_bootstrap(worker_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    """error 状态下重跑创建/bootstrap 流程。"""
+    from backend.api.deps import require_worker_access
+    worker = await db.get(Worker, worker_id)
+    if worker:
+        await require_worker_access(request, worker)
     prov = _provisioner()
     worker = await _require_worker(db, worker_id, ("error",))
     worker.status = "creating"
@@ -205,11 +231,13 @@ async def retry_bootstrap(worker_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.get("/{worker_id}/pool")
-async def get_worker_pool(worker_id: int, db: AsyncSession = Depends(get_db)):
+async def get_worker_pool(worker_id: int, request: Request, db: AsyncSession = Depends(get_db)):
     """实时拉取 worker 上配置的 CC 账号池状态（转发其 /api/pool/status）。"""
     worker = await db.get(Worker, worker_id)
     if not worker:
         raise HTTPException(404, "Worker not found")
+    from backend.api.deps import require_worker_access as _rwa
+    await _rwa(request, worker)
     if worker.status != "ready" or not worker.private_ip:
         raise HTTPException(409, f"Worker 未就绪（{worker.status}）")
     import httpx
@@ -257,11 +285,13 @@ async def get_worker_pool(worker_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/{worker_id}/pool/add")
-async def add_worker_account(worker_id: int, body: dict, db: AsyncSession = Depends(get_db)):
+async def add_worker_account(worker_id: int, request: Request, body: dict, db: AsyncSession = Depends(get_db)):
     """在 worker 上添加账号（跑 auto_login.py）。body: {email, token}"""
     worker = await db.get(Worker, worker_id)
     if not worker:
         raise HTTPException(404, "Worker not found")
+    from backend.api.deps import require_worker_access as _rwa
+    await _rwa(request, worker)
     if worker.status != "ready" or not worker.private_ip:
         raise HTTPException(409, f"Worker 未就绪（{worker.status}）")
 
@@ -324,11 +354,13 @@ async def worker_add_status(worker_id: int, email: str):
 
 
 @router.delete("/{worker_id}/pool/{account_id}")
-async def delete_worker_account(worker_id: int, account_id: str, db: AsyncSession = Depends(get_db)):
+async def delete_worker_account(worker_id: int, request: Request, account_id: str, db: AsyncSession = Depends(get_db)):
     """从 worker 的号池中删除账号。"""
     worker = await db.get(Worker, worker_id)
     if not worker:
         raise HTTPException(404, "Worker not found")
+    from backend.api.deps import require_worker_access as _rwa
+    await _rwa(request, worker)
     if worker.status != "ready" or not worker.private_ip:
         raise HTTPException(409, f"Worker 未就绪（{worker.status}）")
 
@@ -345,11 +377,13 @@ async def delete_worker_account(worker_id: int, account_id: str, db: AsyncSessio
 
 
 @router.get("/{worker_id}/pool/usage")
-async def get_worker_pool_usage(worker_id: int, db: AsyncSession = Depends(get_db)):
+async def get_worker_pool_usage(worker_id: int, request: Request, db: AsyncSession = Depends(get_db)):
     """拉取 worker 的号池额度（转发 /api/pool/usage，和本机 PoolDrawer 同格式）。"""
     worker = await db.get(Worker, worker_id)
     if not worker:
         raise HTTPException(404, "Worker not found")
+    from backend.api.deps import require_worker_access as _rwa
+    await _rwa(request, worker)
     if worker.status != "ready" or not worker.private_ip:
         raise HTTPException(409, f"Worker 未就绪（{worker.status}）")
     import httpx
@@ -372,10 +406,12 @@ async def get_worker_pool_usage(worker_id: int, db: AsyncSession = Depends(get_d
 
 
 @router.get("/{worker_id}/settings/runtime")
-async def get_worker_runtime_settings(worker_id: int, db: AsyncSession = Depends(get_db)):
+async def get_worker_runtime_settings(worker_id: int, request: Request, db: AsyncSession = Depends(get_db)):
     worker = await db.get(Worker, worker_id)
     if not worker:
         raise HTTPException(404, "Worker not found")
+    from backend.api.deps import require_worker_access as _rwa
+    await _rwa(request, worker)
     if worker.status != "ready" or not worker.private_ip:
         raise HTTPException(409, f"Worker 未就绪（{worker.status}）")
     import httpx
@@ -390,10 +426,12 @@ async def get_worker_runtime_settings(worker_id: int, db: AsyncSession = Depends
 
 
 @router.put("/{worker_id}/settings/runtime")
-async def update_worker_runtime_settings(worker_id: int, body: dict, db: AsyncSession = Depends(get_db)):
+async def update_worker_runtime_settings(worker_id: int, request: Request, body: dict, db: AsyncSession = Depends(get_db)):
     worker = await db.get(Worker, worker_id)
     if not worker:
         raise HTTPException(404, "Worker not found")
+    from backend.api.deps import require_worker_access as _rwa
+    await _rwa(request, worker)
     if worker.status != "ready" or not worker.private_ip:
         raise HTTPException(409, f"Worker 未就绪（{worker.status}）")
     import httpx
@@ -406,3 +444,96 @@ async def update_worker_runtime_settings(worker_id: int, body: dict, db: AsyncSe
     if r.status_code >= 400:
         raise HTTPException(r.status_code, r.text[:300])
     return r.json()
+
+
+# --- Team CCM: Worker rename ---
+
+from pydantic import BaseModel as _BaseModel
+
+
+class RenameWorkerBody(_BaseModel):
+    name: str
+
+
+@router.patch("/{worker_id}/rename", response_model=WorkerResponse)
+async def rename_worker(worker_id: int, body: RenameWorkerBody, request: Request, db: AsyncSession = Depends(get_db)):
+    """Rename a worker (DB + AWS Name tag if cloud_instance_id exists)."""
+    from backend.api.deps import require_worker_access
+    worker = await db.get(Worker, worker_id)
+    if not worker:
+        raise HTTPException(404, "Worker not found")
+    await require_worker_access(request, worker)
+    new_name = body.name.strip()
+    if not new_name:
+        raise HTTPException(400, "Worker 名称不能为空")
+    worker.name = new_name
+    await db.commit()
+    await db.refresh(worker)
+    # Update AWS Name tag (best-effort)
+    if worker.cloud_instance_id:
+        try:
+            from backend.services.cloud_provider import AWSProvider
+            cloud = AWSProvider()
+            await cloud.update_instance_tags(worker.cloud_instance_id, {"Name": new_name})
+        except Exception:
+            logger.warning("Failed to update AWS Name tag for %s", worker.cloud_instance_id, exc_info=True)
+    # Broadcast
+    from backend.main import broadcaster
+    if broadcaster:
+        await broadcaster.broadcast("workers", {
+            "event_type": "worker_update",
+            "worker_id": worker.id,
+            "status": worker.status,
+        })
+    return worker
+
+
+# --- Team CCM: Worker assignment ---
+
+
+class AssignWorkerBody(_BaseModel):
+    owner_user_id: int | None = None
+
+
+@router.put("/{worker_id}/assign", response_model=WorkerResponse)
+async def assign_worker(worker_id: int, body: AssignWorkerBody, request: Request, db: AsyncSession = Depends(get_db)):
+    """Assign a worker to a user (admin only). Set owner_user_id=null for public pool."""
+    from backend.api.deps import require_admin
+    require_admin(request)
+    worker = await db.get(Worker, worker_id)
+    if not worker:
+        raise HTTPException(404, "Worker not found")
+    prev_owner = worker.owner_user_id
+    worker.owner_user_id = body.owner_user_id
+    await db.commit()
+    await db.refresh(worker)
+    from backend.api.deps import get_current_user_id
+    from backend.models.user import User
+    admin_id = get_current_user_id(request)
+    # Notify new owner
+    if body.owner_user_id:
+        try:
+            from backend.services.feishu_notify import notify_worker_assigned
+            admin = await db.get(User, admin_id) if admin_id else None
+            import asyncio
+            asyncio.create_task(notify_worker_assigned(
+                admin.name if admin else "Admin",
+                worker.name,
+                body.owner_user_id,
+            ))
+        except Exception:
+            pass
+    # Notify previous owner (if changed and not self-revoke)
+    if prev_owner and prev_owner != body.owner_user_id and prev_owner != admin_id:
+        try:
+            from backend.services.feishu_notify import notify_worker_unassigned
+            admin = await db.get(User, admin_id) if admin_id else None
+            import asyncio
+            asyncio.create_task(notify_worker_unassigned(
+                admin.name if admin else "Admin",
+                worker.name,
+                prev_owner,
+            ))
+        except Exception:
+            pass
+    return worker

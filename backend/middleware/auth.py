@@ -6,43 +6,90 @@ from backend.config import settings
 
 
 class TokenAuthMiddleware(BaseHTTPMiddleware):
-    """Simple bearer token authentication middleware."""
+    """Bearer token + JWT authentication middleware with role enforcement."""
 
-    # Paths that don't require authentication
     PUBLIC_PATHS = {
-        "/api/system/health", "/api/auth/login", "/api/github/webhook",
+        "/api/system/health", "/api/auth/login", "/api/auth/register", "/api/auth/send-code",
+        "/api/github/webhook",
         "/api/feishu/callback",
         "/api/shared/receive", "/api/shared/revoke",
         "/api/org/register",
     }
 
+    # System-level paths: non-GET requires admin/super_admin
+    ADMIN_ONLY_PREFIXES = (
+        "/api/instances",
+        "/api/dispatcher",
+        "/api/pool",
+        "/api/settings",
+    )
+
+    _admin_user_id: int | None = None
+    _admin_resolved: bool = False
+
     async def dispatch(self, request: Request, call_next):
-        # Skip auth if no token is configured
         if not settings.auth_token:
             return await call_next(request)
 
         path = request.url.path
 
-        # Skip auth for public paths, static files, and uploaded images (UUID filenames)
         if path in self.PUBLIC_PATHS or not path.startswith("/api") or path.startswith("/api/uploads/"):
             return await call_next(request)
 
-        # shared-access uses share_token auth (not admin auth_token)
         if path.startswith("/api/shared-access/"):
             return await call_next(request)
 
-        # Skip auth for WebSocket (handled separately)
         if path in ("/ws", "/ws/shared"):
             return await call_next(request)
 
-        # Check Authorization header
         auth_header = request.headers.get("Authorization", "")
-        if auth_header == f"Bearer {settings.auth_token}":
-            return await call_next(request)
+        token = auth_header.replace("Bearer ", "") if auth_header.startswith("Bearer ") else ""
 
-        # Check query parameter (for convenience on mobile)
-        token_param = request.query_params.get("token", "")
-        if token_param == settings.auth_token:
-            return await call_next(request)
+        if not token:
+            token = request.query_params.get("token", "")
 
-        return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+        if not token:
+            return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+
+        # Legacy token → resolve to default admin account
+        if token == settings.auth_token:
+            if not self._admin_resolved or self._admin_user_id is None:
+                await self._resolve_admin_id()
+            request.state.user_id = self._admin_user_id
+            request.state.user_role = "super_admin"
+            request.state.auth_type = "token"
+        else:
+            # JWT token
+            from backend.api.auth import decode_jwt
+            payload = decode_jwt(token)
+            if payload:
+                request.state.user_id = payload.get("user_id")
+                request.state.user_role = payload.get("role", "member")
+                request.state.auth_type = "jwt"
+            else:
+                return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+
+        # Enforce admin-only on system-level write operations
+        if request.method != "GET":
+            role = getattr(request.state, "user_role", "member")
+            if role not in ("admin", "super_admin"):
+                for prefix in self.ADMIN_ONLY_PREFIXES:
+                    if path.startswith(prefix):
+                        return JSONResponse(status_code=403, content={"detail": "Admin only"})
+
+        return await call_next(request)
+
+    @classmethod
+    async def _resolve_admin_id(cls):
+        from backend.database import async_session
+        from backend.models.user import User
+        from sqlalchemy import select
+        try:
+            async with async_session() as db:
+                result = await db.execute(
+                    select(User.id).where(User.role.in_(["admin", "super_admin"])).order_by(User.id).limit(1)
+                )
+                cls._admin_user_id = result.scalar_one_or_none()
+        except Exception:
+            cls._admin_user_id = None
+        cls._admin_resolved = True

@@ -3,7 +3,8 @@ import logging
 import os
 import json
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
+from backend.api.deps import require_task_access
 from pydantic import BaseModel
 from sqlalchemy import and_, not_, select, func  # still used by chat history
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,17 +32,18 @@ class ChatMessage(BaseModel):
 async def send_chat_message(
     task_id: int,
     body: ChatMessage,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
     """Send a follow-up message on a task, resuming its previous session."""
     task = await db.get(Task, task_id)
     if not task:
         raise HTTPException(404, "Task not found")
+    await require_task_access(request, task, db)
     if task.shared_from_id is not None:
         return await _send_shared_chat(task, body, db)
     if task.worker_id is not None:
-        # Worker task：代理到 Worker CCM（session 在 worker 上，由 worker 校验）
-        return await _send_worker_chat(task, body, db)
+        return await _send_worker_chat(task, body, db, request)
     if not task.session_id:
         raise HTTPException(400, "No previous session on this task. Run the task first.")
 
@@ -56,8 +58,17 @@ async def send_chat_message(
         unknown_cmd = stripped.split(None, 1)[0]
         raise HTTPException(400, f"未知命令 {unknown_cmd}，输入 $help 查看可用命令")
 
+    # Add user identifier prefix to all messages
+    user_id = getattr(request.state, "user_id", None)
+    message_text = body.message
+    if user_id:
+        from backend.models.user import User
+        sender = await db.get(User, user_id)
+        if sender:
+            message_text = f"[{sender.name}] {body.message}"
+
     # Build prompt — append secrets, skill instructions, and image paths
-    prompt_parts = [body.message]
+    prompt_parts = [message_text]
     if command:
         # $command detected: inject command prompt and set temporary skills
         prompt_parts.append(command.prompt_template)
@@ -96,17 +107,15 @@ async def send_chat_message(
             "is_image": ext in _IMAGE_EXTS,
         })
 
-    # If this task has active shares, prefix message with sender name
-    display_content = body.message
-    from backend.models.task_share import TaskShare
-    share_check = await db.execute(
-        select(TaskShare.id).where(TaskShare.task_id == task_id, TaskShare.status == "active").limit(1)
-    )
-    if share_check.scalar_one_or_none() is not None:
-        from backend.models.feishu_binding import FeishuUserBinding
-        binding = (await db.execute(select(FeishuUserBinding).limit(1))).scalar_one_or_none()
-        if binding and binding.feishu_name:
-            display_content = f"[{binding.feishu_name}] {body.message}"
+    # Always show sender name in display for multi-user context
+    display_content = message_text  # message_text already has [username] prefix for non-creators
+    user_id_for_display = getattr(request.state, "user_id", None)
+    sender_display_name = None
+    if user_id_for_display:
+        from backend.models.user import User as _User
+        _sender = await db.get(_User, user_id_for_display)
+        if _sender:
+            sender_display_name = _sender.name
 
     # Store user message as a log entry (use instance_id=1 as placeholder)
     user_log = LogEntry(
@@ -124,13 +133,16 @@ async def send_chat_message(
     # Broadcast user message to task channel
     from backend.main import broadcaster
     image_urls = [a["url"] for a in attachments if a.get("is_image")]
-    await broadcaster.broadcast(f"task:{task_id}", {
+    broadcast_data = {
         "event_type": "user_message",
         "role": "user",
         "content": display_content,
         "image_urls": image_urls,
         "attachments": attachments,
-    })
+    }
+    if sender_display_name:
+        broadcast_data["sender_name"] = sender_display_name
+    await broadcaster.broadcast(f"task:{task_id}", broadcast_data)
 
     # Enqueue for serial processing (replaces direct launch)
     from backend.main import dispatcher
@@ -199,18 +211,22 @@ async def _send_shared_chat(task: Task, body: ChatMessage, db: AsyncSession):
     return {"ok": True, "queued": True}
 
 
-async def _send_worker_chat(task: Task, body: ChatMessage, db: AsyncSession):
-    """Worker task 的 chat 代理（elastic-worker 设计 §6.3）。
-
-    顺序很重要：存 user_message → 广播 → 推附件 → 订阅 relay → 转发 →
-    同步 session_id（worker 广播前会 pop session_id，只有 chat 响应里有）。
-    """
+async def _send_worker_chat(task: Task, body: ChatMessage, db: AsyncSession, request: Request | None = None):
+    """Worker task 的 chat 代理。"""
     from backend.main import broadcaster, worker_proxy
     if worker_proxy is None:
         raise HTTPException(503, "Worker 功能未启用")
     if body.secret_ids:
-        # secrets 存在 Manager DB，worker 解析不了 manager 的 secret id
         raise HTTPException(400, "Worker task 暂不支持引用 Secrets（Phase 3）")
+
+    # Add user prefix to all messages
+    if request:
+        uid = getattr(request.state, "user_id", None)
+        if uid:
+            from backend.models.user import User
+            sender = await db.get(User, uid)
+            if sender:
+                body.message = f"[{sender.name}] {body.message}"
 
     worker = await worker_proxy.require_ready_worker(task.worker_id)
 
@@ -301,7 +317,7 @@ def _tool_summary(tool_input: str | None) -> str:
 
 @router.get("/{task_id}/chat/history")
 async def get_chat_history(
-    task_id: int,
+    task_id: int, request: Request,
     limit: int = 0,
     before_id: int = 0,
     compact: bool = True,
@@ -318,6 +334,11 @@ async def get_chat_history(
     stale old-version clients must NOT reorder tasks (prod task 68 实录：
     一个旧版前端残留标签页每隔十几分钟轮询一次，任务在列表里来回跳).
     """
+    from backend.models.task import Task as _T2
+    _task_check = await db.get(_T2, task_id)
+    if _task_check:
+        await require_task_access(request, _task_check, db)
+
     task = await db.get(Task, task_id)
     if not task:
         raise HTTPException(404, "Task not found")
@@ -446,8 +467,12 @@ async def get_chat_history(
 async def get_message_detail(
     task_id: int,
     message_id: int,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
+    _t = await db.get(Task, task_id)
+    if _t:
+        await require_task_access(request, _t, db)
     """Get full tool_input/tool_output for a single message (lazy-load on expand)."""
     _TRUNCATE = 20_000
 
@@ -483,15 +508,13 @@ class InjectMessage(BaseModel):
 async def inject_message(
     task_id: int,
     body: InjectMessage,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    """Inject a message into the RUNNING turn of a PTY session (PTY-only).
-
-    Unlike /chat (which queues a new turn), this delivers the text into CC's
-    context mid-execution via the channel bridge — CC sees it at the next
-    tool-call boundary. Fails when PTY mode is off or no live session exists.
-    """
+    """Inject a message into the RUNNING turn of a PTY session (PTY-only)."""
     task = await db.get(Task, task_id)
+    if task:
+        await require_task_access(request, task, db)
     if not task:
         raise HTTPException(404, "Task not found")
 
@@ -538,16 +561,15 @@ async def resolve_permission(
     task_id: int,
     request_id: str,
     body: PermissionDecision,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    """权限透传回包：前端卡片的 允许/拒绝 → BridgeHub → CC（PTY-only）。
-
-    CC 侧 channel server 最多等 120s，超时默认 deny——过期请求返回 410。
-    """
     if body.behavior not in ("allow", "deny"):
         raise HTTPException(400, "behavior must be 'allow' or 'deny'")
 
     task = await db.get(Task, task_id)
+    if task:
+        await require_task_access(request, task, db)
     if not task:
         raise HTTPException(404, "Task not found")
 
@@ -619,9 +641,13 @@ class DistillSaveRequest(BaseModel):
 @router.post("/{task_id}/distill")
 async def distill_task(
     task_id: int,
+    request: Request,
     body: DistillRequest = DistillRequest(),
     db: AsyncSession = Depends(get_db),
 ):
+    _t = await db.get(Task, task_id)
+    if _t:
+        await require_task_access(request, _t, db)
     """Distill a task's conversation into a reusable skill (markdown).
 
     Reads the full conversation history, sends it to Opus for extraction,
@@ -738,7 +764,7 @@ async def distill_task(
 
 @router.post("/{task_id}/distill/save")
 async def save_distilled_skill(
-    task_id: int,
+    task_id: int, request: Request,
     body: DistillSaveRequest,
     db: AsyncSession = Depends(get_db),
 ):

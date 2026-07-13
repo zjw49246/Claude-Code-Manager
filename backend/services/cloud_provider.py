@@ -170,6 +170,14 @@ class AWSProvider(CloudProvider):
         ec2 = await self._ec2()
         await asyncio.to_thread(ec2.terminate_instances, InstanceIds=[instance_id])
 
+    async def update_instance_tags(self, instance_id: str, tags: dict) -> None:
+        """Update tags on an EC2 instance via ec2.create_tags()."""
+        ec2 = await self._ec2()
+        tag_list = [{"Key": k, "Value": v} for k, v in tags.items()]
+        await asyncio.to_thread(
+            ec2.create_tags, Resources=[instance_id], Tags=tag_list
+        )
+
 
 def get_cloud_provider(provider_name: str) -> CloudProvider:
     providers: dict[str, type[CloudProvider]] = {"aws": AWSProvider}

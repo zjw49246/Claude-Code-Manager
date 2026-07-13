@@ -10,6 +10,7 @@ Web 端调度和管理多个 Claude Code 实例并行工作。灵感来自胡渊
 - **全局调度器** — 启动时自动创建 worker、自动分配任务，无需手动操作
 - **Claude Code 完全自主** — Claude Code 自主完成 worktree 创建、commit、fetch、merge、push、冲突解决和清理，Dispatcher 只负责分配任务和判断成败
 - **9 步任务生命周期** — 领取 → 创建工作区 → 实现 → 提交 → merge + 测试 → 合并到 main → 标记完成 → 清理 → 经验沉淀
+- **项目管理** — 支持 clone 已有仓库（有 remote）和本地 git init（无 remote），创建任务时可直接新建项目
 - **项目 Todo 清单** — 每个项目维护一个可折叠的待办清单（prompt 模板），一键「▶ Run」直接创建 Task 并跳转 Chat；创建后 Todo 自动标记完成并记录派生的 task。支持归档/恢复/永久删除
 - **任务队列** — 按优先级自动调度（数字越小优先级越高）
 - **多实例并行** — 同时运行多个 Claude Code 实例，各自处理不同任务
@@ -646,3 +647,19 @@ cloudflared tunnel run <tunnel-name>
 - **瞬时过载重试**：Anthropic 基础设施侧 429/overloaded 与账号额度用尽严格区分，前者退避重试同一账号，后者走号池轮换
 - **进程管理**：`asyncio.create_subprocess_exec` 启动，必须 unset `CLAUDECODE` 环境变量避免嵌套检测
 - **停止机制**：SIGTERM → 等待 10s → SIGKILL
+
+## 分布式 Worker
+
+CCM 支持将任务分发到远程 EC2 Worker 节点执行，突破单机并发瓶颈。每个 Worker 运行完整的 CCM 服务并拥有独立的 Claude 账号池，Manager 通过 VPC 内网统一管理。
+
+**核心能力：**
+- **一键创建** — Workers 页面点 +，自动创建 EC2、部署代码、安装依赖、启动服务（配置从 Manager 自身继承，无需手动填写 AMI/机型/子网）
+- **任务转发** — 创建任务或修改已有任务时选择执行 Worker，所有 Chat/Stop/Retry/Plan 操作自动代理，前端零感知
+- **实时迁移** — 任务可随时在本机和 Worker 之间迁移，session 文件和工作目录自动同步，`--resume` 无缝衔接
+- **WebSocket 中继** — 每个 Worker 一条 WS 连接，日志实时中继到 Manager 并存储副本，断线自动重连+补全
+- **生命周期管理** — 支持关机（保留数据）/开机/销毁（自动迁回全部任务），健康检查每 30s 自动恢复降级 Worker
+- **版本锁定** — Worker 通过 rsync 部署与 Manager 完全一致的代码版本，健康检查校验 commit 一致性
+
+**前置条件：** Manager 运行在 EC2 + IAM Role 有 EC2 权限 + `.env` 配置 `WORKER_SSH_KEY_PATH`。
+
+详细部署步骤见 [分布式 Worker 部署指南](docs/worker-deployment-guide.md)。

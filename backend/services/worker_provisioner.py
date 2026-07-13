@@ -54,6 +54,22 @@ class WorkerProvisioner:
         src = settings.worker_deploy_source_dir
         self._repo_dir = REPO_ROOT if src in (".", "") else os.path.abspath(src)
 
+    @staticmethod
+    def _build_ec2_overrides() -> dict:
+        """Build EC2 overrides from fixed config (non-empty values only)."""
+        o: dict = {}
+        if settings.worker_instance_type:
+            o["instance_type"] = settings.worker_instance_type
+        if settings.worker_image_id:
+            o["image_id"] = settings.worker_image_id
+        if settings.worker_subnet_id:
+            o["subnet_id"] = settings.worker_subnet_id
+        if settings.worker_security_group_ids:
+            o["security_group_ids"] = [s.strip() for s in settings.worker_security_group_ids.split(",") if s.strip()]
+        if settings.worker_key_name:
+            o["key_name"] = settings.worker_key_name
+        return o
+
     # ------------------------------------------------------------------
     # 工具
     # ------------------------------------------------------------------
@@ -155,8 +171,10 @@ class WorkerProvisioner:
                     existing_iid = None  # 查不到 → 新建
 
             if not existing_iid:
-                await self._log(worker_id, "creating EC2 instance (config inherited from manager)")
-                iid = await self.cloud.create_instance(worker.name)
+                overrides = self._build_ec2_overrides()
+                src = "fixed config" if overrides else "inherited from manager"
+                await self._log(worker_id, f"creating EC2 instance ({src})")
+                iid = await self.cloud.create_instance(worker.name, overrides or None)
                 worker = await self._update(worker_id, cloud_instance_id=iid)
 
             private_ip = await self.cloud.wait_until_running(iid)
@@ -211,6 +229,7 @@ class WorkerProvisioner:
         await run_step("ccm-config", self._step_ccm_config(ssh, worker_id))
         await run_step("account-login", self._step_account_login(ssh, worker_id, accounts))
         await run_step("claude-warmup", self._step_claude_warmup(ssh, worker_id))
+        await run_step("docker-sandbox", self._step_docker_sandbox(ssh, worker_id))
         await run_step("ccm-service", self._step_ccm_service(ssh, worker))
         await run_step("health-check", self._step_health_check(worker_id))
 
@@ -226,6 +245,14 @@ class WorkerProvisioner:
         script = r"""
 set -e
 export DEBIAN_FRONTEND=noninteractive
+# 8GB swap (idempotent)
+if [ ! -f /swapfile ]; then
+  sudo fallocate -l 8G /swapfile
+  sudo chmod 600 /swapfile
+  sudo mkswap /swapfile
+  sudo swapon /swapfile
+  echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+fi
 command -v git >/dev/null || sudo apt-get update -qq
 sudo apt-get install -y -qq git curl rsync python3-venv > /dev/null 2>&1 || true
 if ! command -v node >/dev/null; then
@@ -242,7 +269,14 @@ if ! command -v google-chrome >/dev/null; then
   sudo apt-get -f install -y -qq > /dev/null 2>&1 || true
 fi
 pip3 install --break-system-packages websockets > /dev/null 2>&1 || true
-echo "node=$(node --version) uv=$($HOME/.local/bin/uv --version 2>/dev/null || uv --version) claude=$(claude --version 2>/dev/null | head -1) chrome=$(google-chrome --version 2>/dev/null | head -1)"
+# Docker for shared project container isolation
+if ! command -v docker >/dev/null; then
+  sudo apt-get install -y -qq docker.io > /dev/null 2>&1 || true
+  sudo usermod -aG docker ubuntu 2>/dev/null || true
+  sudo systemctl enable docker > /dev/null 2>&1 || true
+  sudo systemctl start docker > /dev/null 2>&1 || true
+fi
+echo "node=$(node --version) uv=$($HOME/.local/bin/uv --version 2>/dev/null || uv --version) claude=$(claude --version 2>/dev/null | head -1) chrome=$(google-chrome --version 2>/dev/null | head -1) docker=$(docker --version 2>/dev/null | head -1)"
 """
         code, out = await ssh.run(script, timeout=900)
         if code != 0:
@@ -330,6 +364,35 @@ uv run python scripts/auto_login.py --email '{email}' --token '{token}' --config
         await self._update(worker_id, accounts=results)
         if all(r["status"] == "failed" for r in results):
             raise BootstrapError("account-login", "全部账号登录失败")
+
+    async def _step_docker_sandbox(self, ssh: SSHExecutor, worker_id: int):
+        """Build ccm-sandbox Docker image on the worker (for shared project isolation)."""
+        await self._log(worker_id, "building ccm-sandbox Docker image...")
+        script = r"""
+if command -v docker >/dev/null; then
+  if ! docker images -q ccm-sandbox:latest 2>/dev/null | grep -q .; then
+    mkdir -p /tmp/ccm-docker-build
+    cat > /tmp/ccm-docker-build/Dockerfile << 'DEOF'
+FROM node:22-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl git ssh-client ca-certificates python3 \
+    && rm -rf /var/lib/apt/lists/*
+RUN npm install -g @anthropic-ai/claude-code
+RUN groupadd -g 1000 sandbox 2>/dev/null; useradd -m -u 1000 -g 1000 sandbox 2>/dev/null; exit 0
+USER 1000
+WORKDIR /workspace
+DEOF
+    docker build -t ccm-sandbox:latest /tmp/ccm-docker-build
+    echo "ccm-sandbox built"
+  else
+    echo "ccm-sandbox already exists"
+  fi
+else
+  echo "docker not available, skipping sandbox build"
+fi
+"""
+        code, out = await ssh.run(script, timeout=600)
+        await self._log(worker_id, f"docker-sandbox: {out.strip()[-200:]}")
 
     async def _step_claude_warmup(self, ssh: SSHExecutor, worker_id: int):
         """Interactive PTY warmup to complete all onboarding dialogs.

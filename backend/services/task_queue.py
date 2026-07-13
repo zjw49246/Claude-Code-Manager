@@ -47,6 +47,7 @@ class TaskQueue:
         project_id: int | None = None, starred: bool | None = None,
         has_unread: bool | None = None,
         limit: int = 50, offset: int = 0,
+        user_id: int | None = None,
     ) -> list[Task]:
         auto_sort = await self._auto_sort_enabled()
         effective_key = _effective_key_expr(auto_sort)
@@ -64,6 +65,27 @@ class TaskQueue:
             stmt = stmt.where(Task.starred == starred)
         if has_unread is not None:
             stmt = stmt.where(Task.has_unread == has_unread)
+        # Team CCM: member sees tasks on own Workers, created by them, or shared to them
+        if user_id is not None:
+            from backend.models.worker import Worker
+            from backend.models.team_share import TeamTaskShare, TeamProjectShare
+            from backend.models.user_group import UserGroupMember
+            owned_worker_ids_q = select(Worker.id).where(Worker.owner_user_id == user_id)
+            user_group_ids_q = select(UserGroupMember.group_id).where(UserGroupMember.user_id == user_id)
+            shared_task_ids_q = select(TeamTaskShare.task_id).where(
+                ((TeamTaskShare.target_type == "user") & (TeamTaskShare.target_id == user_id))
+                | ((TeamTaskShare.target_type == "group") & TeamTaskShare.target_id.in_(user_group_ids_q))
+            )
+            shared_project_ids_q = select(TeamProjectShare.project_id).where(
+                ((TeamProjectShare.target_type == "user") & (TeamProjectShare.target_id == user_id))
+                | ((TeamProjectShare.target_type == "group") & TeamProjectShare.target_id.in_(user_group_ids_q))
+            )
+            stmt = stmt.where(
+                (Task.created_by == user_id)
+                | Task.worker_id.in_(owned_worker_ids_q)
+                | Task.id.in_(shared_task_ids_q)
+                | Task.project_id.in_(shared_project_ids_q)
+            )
         stmt = stmt.limit(limit).offset(offset)
         result = await self.db.execute(stmt)
         return list(result.scalars().all())
@@ -73,6 +95,7 @@ class TaskQueue:
         archived_only: bool = False,
         project_id: int | None = None, starred: bool | None = None,
         has_unread: bool | None = None,
+        user_id: int | None = None,
     ) -> int:
         stmt = select(func.count(Task.id)).where(Task.shared_from_id.is_(None))
         if archived_only:
@@ -88,6 +111,26 @@ class TaskQueue:
             stmt = stmt.where(Task.starred == starred)
         if has_unread is not None:
             stmt = stmt.where(Task.has_unread == has_unread)
+        if user_id is not None:
+            from backend.models.worker import Worker
+            from backend.models.team_share import TeamTaskShare, TeamProjectShare
+            from backend.models.user_group import UserGroupMember
+            owned_worker_ids_q = select(Worker.id).where(Worker.owner_user_id == user_id)
+            user_group_ids_q = select(UserGroupMember.group_id).where(UserGroupMember.user_id == user_id)
+            shared_task_ids_q = select(TeamTaskShare.task_id).where(
+                ((TeamTaskShare.target_type == "user") & (TeamTaskShare.target_id == user_id))
+                | ((TeamTaskShare.target_type == "group") & TeamTaskShare.target_id.in_(user_group_ids_q))
+            )
+            shared_project_ids_q = select(TeamProjectShare.project_id).where(
+                ((TeamProjectShare.target_type == "user") & (TeamProjectShare.target_id == user_id))
+                | ((TeamProjectShare.target_type == "group") & TeamProjectShare.target_id.in_(user_group_ids_q))
+            )
+            stmt = stmt.where(
+                (Task.created_by == user_id)
+                | Task.worker_id.in_(owned_worker_ids_q)
+                | Task.id.in_(shared_task_ids_q)
+                | Task.project_id.in_(shared_project_ids_q)
+            )
         result = await self.db.execute(stmt)
         return result.scalar() or 0
 

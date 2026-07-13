@@ -3,7 +3,8 @@ import shutil
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
@@ -11,6 +12,7 @@ from backend.models.task import Task
 from backend.models.instance import Instance
 from backend.schemas.task import TaskCreate, TaskUpdate, TaskResponse
 from backend.services.task_queue import TaskQueue
+from backend.api.deps import get_current_user_id, get_current_user_role, require_task_access, require_admin
 
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
@@ -90,6 +92,7 @@ def _get_queue(db: AsyncSession = Depends(get_db)) -> TaskQueue:
 
 @router.get("/count")
 async def count_tasks(
+    request: Request,
     status: str | None = None,
     include_archived: bool = False,
     archived_only: bool = False,
@@ -98,17 +101,21 @@ async def count_tasks(
     has_unread: bool | None = None,
     queue: TaskQueue = Depends(_get_queue),
 ):
+    user_id = get_current_user_id(request)
+    user_role = get_current_user_role(request)
     total = await queue.count_tasks(
         status=status, include_archived=include_archived,
         archived_only=archived_only,
         project_id=project_id, starred=starred,
         has_unread=has_unread,
+        user_id=user_id if user_role not in ("admin", "super_admin") else None,
     )
     return {"total": total}
 
 
 @router.get("", response_model=list[TaskResponse])
 async def list_tasks(
+    request: Request,
     status: str | None = None,
     include_archived: bool = False,
     archived_only: bool = False,
@@ -119,18 +126,50 @@ async def list_tasks(
     offset: int = 0,
     queue: TaskQueue = Depends(_get_queue),
 ):
+    user_id = get_current_user_id(request)
+    user_role = get_current_user_role(request)
     return await queue.list_tasks(
         status=status, include_archived=include_archived,
         archived_only=archived_only,
         project_id=project_id, starred=starred,
         has_unread=has_unread,
         limit=limit, offset=offset,
+        user_id=user_id if user_role not in ("admin", "super_admin") else None,
     )
 
 
 @router.post("", response_model=TaskResponse, status_code=201)
-async def create_task(body: TaskCreate, queue: TaskQueue = Depends(_get_queue), db: AsyncSession = Depends(get_db)):
+async def create_task(request: Request, body: TaskCreate, queue: TaskQueue = Depends(_get_queue), db: AsyncSession = Depends(get_db)):
+    user_id = get_current_user_id(request)
+    user_role = get_current_user_role(request)
+    if user_role not in ("admin", "super_admin") and user_id:
+        from backend.models.worker import Worker
+        from backend.models.team_share import TeamProjectShare
+        from backend.models.user_group import UserGroupMember
+        has_worker = (await db.execute(
+            select(Worker.id).where(Worker.owner_user_id == user_id).limit(1)
+        )).scalar_one_or_none()
+        project_id = body.project_id if hasattr(body, 'project_id') else None
+        has_project = False
+        if project_id:
+            user_group_ids = select(UserGroupMember.group_id).where(UserGroupMember.user_id == user_id)
+            has_project = (await db.execute(
+                select(TeamProjectShare.id).where(
+                    TeamProjectShare.project_id == project_id,
+                    ((TeamProjectShare.target_type == "user") & (TeamProjectShare.target_id == user_id))
+                    | ((TeamProjectShare.target_type == "group") & TeamProjectShare.target_id.in_(user_group_ids))
+                ).limit(1)
+            )).scalar_one_or_none() is not None
+        if not has_worker and not has_project:
+            raise HTTPException(403, "You need a Worker or Project access to create Tasks")
     data = body.model_dump()
+    data["created_by"] = user_id
+    # Task inherits worker_id from its Project
+    if data.get("project_id") and not data.get("worker_id"):
+        from backend.models.project import Project as _Proj
+        _proj = await db.get(_Proj, data["project_id"])
+        if _proj and _proj.worker_id:
+            data["worker_id"] = _proj.worker_id
     if data.get("id") is None:
         data.pop("id", None)  # 未指定 → 正常自增；指定 → 用 Manager 分配的全局 ID
     image_paths = data.pop("image_paths", None)
@@ -180,17 +219,25 @@ async def create_task(body: TaskCreate, queue: TaskQueue = Depends(_get_queue), 
 
 
 @router.get("/{task_id}", response_model=TaskResponse)
-async def get_task(task_id: int, queue: TaskQueue = Depends(_get_queue)):
+async def get_task(task_id: int, request: Request, queue: TaskQueue = Depends(_get_queue), db: AsyncSession = Depends(get_db)):
     task = await queue.get(task_id)
     if not task:
         raise HTTPException(404, "Task not found")
+    await require_task_access(request, task, db)
     return task
 
 
 @router.put("/{task_id}", response_model=TaskResponse)
 async def update_task(
-    task_id: int, body: TaskUpdate, queue: TaskQueue = Depends(_get_queue)
+    task_id: int, body: TaskUpdate, request: Request, queue: TaskQueue = Depends(_get_queue)
 ):
+    # Permission: only creator or admin can modify task config
+    user_id = get_current_user_id(request)
+    user_role = get_current_user_role(request)
+    if user_role not in ("admin", "super_admin"):
+        task = await queue.get(task_id)
+        if task and task.created_by != user_id:
+            raise HTTPException(403, "Only the task creator or admin can modify task config")
     updates = body.model_dump(exclude_unset=True)
 
     # 执行位置切换走 TaskMigrator（同 mode/model 一样在 task 详情改，
@@ -249,7 +296,10 @@ async def _stop_task_process(task_id: int, db: AsyncSession) -> bool:
 
 
 @router.delete("/{task_id}")
-async def delete_task(task_id: int, queue: TaskQueue = Depends(_get_queue)):
+async def delete_task(task_id: int, request: Request, queue: TaskQueue = Depends(_get_queue), db: AsyncSession = Depends(get_db)):
+    task = await db.get(Task, task_id)
+    if task:
+        await require_task_access(request, task, db)
     ok = await queue.delete(task_id)
     if not ok:
         raise HTTPException(400, "Cannot delete task (not found or not in deletable state)")
@@ -288,7 +338,10 @@ async def _sync_task_from_worker_response(db: AsyncSession, task: Task, result):
 
 
 @router.post("/{task_id}/stop-session")
-async def stop_task_session(task_id: int, db: AsyncSession = Depends(get_db)):
+async def stop_task_session(task_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    task = await db.get(Task, task_id)
+    if task:
+        await require_task_access(request, task, db)
     """Stop the running Claude Code session for a task.
 
     Clears pending queued chat messages first so the queue consumer does not
@@ -321,7 +374,10 @@ async def stop_task_session(task_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/{task_id}/cancel", response_model=TaskResponse)
-async def cancel_task(task_id: int, queue: TaskQueue = Depends(_get_queue), db: AsyncSession = Depends(get_db)):
+async def cancel_task(task_id: int, request: Request, queue: TaskQueue = Depends(_get_queue), db: AsyncSession = Depends(get_db)):
+    task = await db.get(Task, task_id)
+    if task:
+        await require_task_access(request, task, db)
     wt = await _worker_task_or_none(db, task_id)
     if wt is not None:
         result = await _proxy(wt, "POST", f"/api/tasks/{task_id}/cancel")
@@ -354,7 +410,10 @@ async def cancel_task(task_id: int, queue: TaskQueue = Depends(_get_queue), db: 
 
 
 @router.post("/{task_id}/retry", response_model=TaskResponse)
-async def retry_task(task_id: int, queue: TaskQueue = Depends(_get_queue), db: AsyncSession = Depends(get_db)):
+async def retry_task(task_id: int, request: Request, queue: TaskQueue = Depends(_get_queue), db: AsyncSession = Depends(get_db)):
+    task = await db.get(Task, task_id)
+    if task:
+        await require_task_access(request, task, db)
     wt = await _worker_task_or_none(db, task_id)
     if wt is not None:
         result = await _proxy(wt, "POST", f"/api/tasks/{task_id}/retry")
@@ -369,7 +428,10 @@ async def retry_task(task_id: int, queue: TaskQueue = Depends(_get_queue), db: A
 
 
 @router.post("/{task_id}/star", response_model=TaskResponse)
-async def star_task(task_id: int, queue: TaskQueue = Depends(_get_queue)):
+async def star_task(task_id: int, request: Request, queue: TaskQueue = Depends(_get_queue), db: AsyncSession = Depends(get_db)):
+    task = await db.get(Task, task_id)
+    if task:
+        await require_task_access(request, task, db)
     task = await queue.star(task_id)
     if not task:
         raise HTTPException(404, "Task not found")
@@ -377,7 +439,10 @@ async def star_task(task_id: int, queue: TaskQueue = Depends(_get_queue)):
 
 
 @router.post("/{task_id}/read", response_model=TaskResponse)
-async def mark_task_read(task_id: int, queue: TaskQueue = Depends(_get_queue)):
+async def mark_task_read(task_id: int, request: Request, queue: TaskQueue = Depends(_get_queue), db: AsyncSession = Depends(get_db)):
+    task = await db.get(Task, task_id)
+    if task:
+        await require_task_access(request, task, db)
     task = await queue.update_task(task_id, has_unread=False)
     if not task:
         raise HTTPException(404, "Task not found")
@@ -385,7 +450,10 @@ async def mark_task_read(task_id: int, queue: TaskQueue = Depends(_get_queue)):
 
 
 @router.post("/{task_id}/unread", response_model=TaskResponse)
-async def mark_task_unread(task_id: int, queue: TaskQueue = Depends(_get_queue)):
+async def mark_task_unread(task_id: int, request: Request, queue: TaskQueue = Depends(_get_queue), db: AsyncSession = Depends(get_db)):
+    task = await db.get(Task, task_id)
+    if task:
+        await require_task_access(request, task, db)
     task = await queue.update_task(task_id, has_unread=True)
     if not task:
         raise HTTPException(404, "Task not found")
@@ -393,7 +461,10 @@ async def mark_task_unread(task_id: int, queue: TaskQueue = Depends(_get_queue))
 
 
 @router.post("/{task_id}/archive", response_model=TaskResponse)
-async def archive_task(task_id: int, queue: TaskQueue = Depends(_get_queue)):
+async def archive_task(task_id: int, request: Request, queue: TaskQueue = Depends(_get_queue), db: AsyncSession = Depends(get_db)):
+    task = await db.get(Task, task_id)
+    if task:
+        await require_task_access(request, task, db)
     task = await queue.archive(task_id)
     if not task:
         raise HTTPException(404, "Task not found")
@@ -406,11 +477,12 @@ async def get_queue(queue: TaskQueue = Depends(_get_queue)):
 
 
 @router.post("/{task_id}/plan/approve", response_model=TaskResponse)
-async def approve_plan(task_id: int, queue: TaskQueue = Depends(_get_queue)):
+async def approve_plan(task_id: int, request: Request, queue: TaskQueue = Depends(_get_queue), db: AsyncSession = Depends(get_db)):
     """Approve a plan-mode task's plan and queue it for execution."""
     task = await queue.get(task_id)
     if not task:
         raise HTTPException(404, "Task not found")
+    await require_task_access(request, task, db)
     if task.worker_id is not None:
         result = await _proxy(task, "POST", f"/api/tasks/{task_id}/plan/approve")
         # worker 上回到 pending 由 worker 自己的 Dispatcher 接力执行
@@ -424,11 +496,12 @@ async def approve_plan(task_id: int, queue: TaskQueue = Depends(_get_queue)):
 
 
 @router.post("/{task_id}/plan/reject", response_model=TaskResponse)
-async def reject_plan(task_id: int, queue: TaskQueue = Depends(_get_queue)):
+async def reject_plan(task_id: int, request: Request, queue: TaskQueue = Depends(_get_queue), db: AsyncSession = Depends(get_db)):
     """Reject a plan-mode task's plan."""
     task = await queue.get(task_id)
     if not task:
         raise HTTPException(404, "Task not found")
+    await require_task_access(request, task, db)
     if task.worker_id is not None:
         result = await _proxy(task, "POST", f"/api/tasks/{task_id}/plan/reject")
         return await _sync_task_from_worker_response(queue.db, task, result)

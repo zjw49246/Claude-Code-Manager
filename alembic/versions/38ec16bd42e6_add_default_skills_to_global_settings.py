@@ -13,10 +13,6 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision: str = '38ec16bd42e6'
-# NOTE: originally pointed at 'd010371017ae' (worker max_tasks/worker_id migration
-# from an unmerged branch that never landed on main) — that dangling reference broke
-# `alembic upgrade head` (KeyError). Re-pointed to the real head at the time,
-# a2628601782f (add_selected_user_skills_to_tasks).
 down_revision: Union[str, None] = 'a2628601782f'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None

@@ -20,6 +20,10 @@ class Worker(Base):
     name: Mapped[str] = mapped_column(String(200), nullable=False)  # "{manager主机名}-worker-{id}"
     status: Mapped[str] = mapped_column(String(20), default="creating", server_default="creating")
 
+    # Team CCM: Worker 分配给哪个用户（NULL = 公共池）
+    owner_user_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    max_tasks: Mapped[int] = mapped_column(Integer, default=8, server_default="8")
+
     # 云实例信息
     cloud_instance_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     private_ip: Mapped[str | None] = mapped_column(String(45), nullable=True)  # 主通信地址（VPC 内网）

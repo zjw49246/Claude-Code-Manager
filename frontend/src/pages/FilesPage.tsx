@@ -184,7 +184,7 @@ interface SSHPanelProps {
   onSave: (profiles: SSHProfile[]) => void;
 }
 
-function SSHPanel({ profiles, active, onActivate, onSave }: SSHPanelProps) {
+function SSHPanel({ profiles, active, onActivate, onSave, isAdmin = true }: SSHPanelProps & { isAdmin?: boolean }) {
   const [editing, setEditing] = useState<SSHProfile | null>(null);
 
   const startNew = () => setEditing(newProfile());
@@ -217,18 +217,20 @@ function SSHPanel({ profiles, active, onActivate, onSave }: SSHPanelProps) {
             <span className="flex-1 truncate" onClick={() => onActivate(p)}>
               {p.label || `${p.username}@${p.host}`}
             </span>
-            <button onClick={() => startEdit(p)} className="text-gray-400 hover:text-gray-200 text-xs px-1">edit</button>
-            <button onClick={() => handleDelete(p.id)} className="text-red-400 hover:text-red-300"><Trash2 size={12} /></button>
+            {isAdmin && <button onClick={() => startEdit(p)} className="text-gray-400 hover:text-gray-200 text-xs px-1">edit</button>}
+            {isAdmin && <button onClick={() => handleDelete(p.id)} className="text-red-400 hover:text-red-300"><Trash2 size={12} /></button>}
           </div>
         ))}
       </div>
 
-      <button
-        onClick={startNew}
-        className="flex items-center gap-1 text-xs text-indigo-400 hover:text-indigo-300"
-      >
-        <Plus size={12} /> Add server
-      </button>
+      {isAdmin && (
+        <button
+          onClick={startNew}
+          className="flex items-center gap-1 text-xs text-indigo-400 hover:text-indigo-300"
+        >
+          <Plus size={12} /> Add server
+        </button>
+      )}
 
       {/* Inline editor */}
       {editing && (
@@ -320,6 +322,8 @@ function DiffView({ diff }: { diff: string }) {
 // ---------------------------------------------------------------------------
 
 export function FilesPage() {
+  const ccUser = JSON.parse(localStorage.getItem('cc_user') || '{}');
+  const isAdmin = ccUser.role === 'admin' || ccUser.role === 'super_admin' || !ccUser.id;
   const [mode, setMode] = useState<Mode>('local');
   const [projects, setProjects] = useState<Project[]>([]);
 
@@ -583,7 +587,7 @@ export function FilesPage() {
 
         {mode === 'local' && <React.Fragment>
           <div className="flex gap-2 flex-wrap">
-            {projects.filter((p) => p.local_path).length > 0 && (
+            {projects.filter((p) => p.local_path && (!p.location || p.location === 'local')).length > 0 && (
               <select
                 onChange={(e) => {
                   const proj = projects.find((p) => String(p.id) === e.target.value);
@@ -593,7 +597,7 @@ export function FilesPage() {
                 className="bg-gray-700 text-gray-300 text-sm rounded px-2 py-1.5 border border-gray-600 focus:outline-none focus:border-indigo-500"
               >
                 <option value="" disabled>Select project...</option>
-                {projects.filter((p) => p.local_path).map((p) => (
+                {projects.filter((p) => p.local_path && (!p.location || p.location === 'local')).map((p) => (
                   <option key={p.id} value={String(p.id)}>{p.name}</option>
                 ))}
               </select>
@@ -641,6 +645,7 @@ export function FilesPage() {
               active={activeProfile}
               onActivate={handleActivateProfile}
               onSave={handleSaveProfiles}
+              isAdmin={isAdmin}
             />
             {activeProfile && (
               <div className="flex gap-2">
@@ -667,7 +672,7 @@ export function FilesPage() {
         {mode === 'git' && (
           <div className="space-y-2">
             <div className="flex gap-2 flex-wrap">
-              {projects.filter((p) => p.local_path).length > 0 && (
+              {projects.filter((p) => p.local_path && (!p.location || p.location === 'local')).length > 0 && (
                 <select
                   onChange={(e) => {
                     const proj = projects.find((p) => String(p.id) === e.target.value);
@@ -677,7 +682,7 @@ export function FilesPage() {
                   className="bg-gray-700 text-gray-300 text-sm rounded px-2 py-1.5 border border-gray-600 focus:outline-none focus:border-indigo-500"
                 >
                   <option value="" disabled>Select project...</option>
-                  {projects.filter((p) => p.local_path).map((p) => (
+                  {projects.filter((p) => p.local_path && (!p.location || p.location === 'local')).map((p) => (
                     <option key={p.id} value={String(p.id)}>{p.name}</option>
                   ))}
                 </select>

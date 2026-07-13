@@ -1,8 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '../api/client';
 import { useWebSocket } from '../hooks/useWebSocket';
-import type { Worker } from '../api/client';
-import { Plus, X, RefreshCw, Trash2, Power, Play, Server, ScrollText } from 'lucide-react';
+import type { Worker, TeamUser } from '../api/client';
+import { Plus, X, RefreshCw, Trash2, Power, Play, Server, ScrollText, Pencil } from 'lucide-react';
 
 const STATUS_COLORS: Record<string, string> = {
   creating: 'bg-blue-500/20 text-blue-400',
@@ -143,14 +143,37 @@ function shortName(w: Worker): string {
   return w.name;
 }
 
-function WorkerCard({ worker, onAction }: { worker: Worker; onAction: () => void }) {
+function WorkerCard({ worker, onAction, users, isAdmin }: { worker: Worker; onAction: () => void; users: TeamUser[]; isAdmin: boolean }) {
   const [logsOpen, setLogsOpen] = useState(false);
   const [poolOpen, setPoolOpen] = useState(false);
   const [pool, setPool] = useState<Awaited<ReturnType<typeof api.getWorkerPool>> | null>(null);
   const [poolErr, setPoolErr] = useState<string | null>(null);
   const [ptyEnabled, setPtyEnabled] = useState<boolean | null>(null);
   const [ptySwitching, setPtySwitching] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [editName, setEditName] = useState(worker.name);
+  const editRef = useRef<HTMLInputElement>(null);
   const busy = BUSY.has(worker.status);
+
+  const ccU = JSON.parse(localStorage.getItem('cc_user') || '{}');
+  const canControl = isAdmin || worker.owner_user_id === ccU.id;
+
+  useEffect(() => {
+    if (editing && editRef.current) editRef.current.focus();
+  }, [editing]);
+
+  const saveRename = async () => {
+    const trimmed = editName.trim();
+    if (!trimmed || trimmed === worker.name) { setEditing(false); setEditName(worker.name); return; }
+    try {
+      await api.renameWorker(worker.id, trimmed);
+      onAction();
+    } catch (e) {
+      window.alert(String(e));
+      setEditName(worker.name);
+    }
+    setEditing(false);
+  };
 
   useEffect(() => {
     if (worker.status !== 'ready') return;
@@ -183,59 +206,104 @@ function WorkerCard({ worker, onAction }: { worker: Worker; onAction: () => void
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 min-w-0">
           <Server size={16} className="text-indigo-400 shrink-0" />
-          <span className="text-foreground font-medium truncate" title={worker.name}>{shortName(worker)}</span>
+          {editing ? (
+            <input
+              ref={editRef}
+              className="bg-gray-700 text-foreground text-sm font-medium rounded px-2 py-0.5 outline-none focus:ring-1 focus:ring-indigo-500 min-w-0"
+              value={editName}
+              onChange={(e) => setEditName(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') saveRename(); if (e.key === 'Escape') { setEditing(false); setEditName(worker.name); } }}
+              onBlur={saveRename}
+            />
+          ) : (
+            <span
+              className={`text-foreground font-medium truncate ${canControl ? 'cursor-pointer hover:text-indigo-300 group' : ''}`}
+              title={canControl ? 'Click to rename' : worker.name}
+              onClick={() => { if (canControl) { setEditName(worker.name); setEditing(true); } }}
+            >
+              {shortName(worker)}
+              {canControl && <Pencil size={11} className="inline ml-1 opacity-0 group-hover:opacity-60" />}
+            </span>
+          )}
           <span className={`text-xs px-2 py-0.5 rounded-full shrink-0 ${STATUS_COLORS[worker.status] || 'bg-gray-500/20 text-gray-400'}`}>
             {worker.status}{busy && worker.bootstrap_step ? `: ${worker.bootstrap_step}` : ''}
           </span>
+          {isAdmin && (
+            <select
+              value={worker.owner_user_id ?? ''}
+              onChange={async (e) => {
+                const val = e.target.value ? Number(e.target.value) : null;
+                try { await api.assignWorker(worker.id, val); onAction(); } catch {}
+              }}
+              className="text-xs bg-gray-700 text-gray-300 rounded px-1.5 py-0.5 border border-gray-600 shrink-0"
+              title="Assign to user"
+            >
+              <option value="">Public Pool</option>
+              {users.filter(u => u.role === 'member').map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
+            </select>
+          )}
+          {!isAdmin && worker.owner_user_id && (
+            <span className="text-xs text-gray-500 shrink-0">
+              {users.find(u => u.id === worker.owner_user_id)?.name || ''}
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-1 shrink-0">
-          {worker.status === 'ready' && ptyEnabled !== null && (
-            <button
-              title={ptyEnabled ? 'PTY 模式：开（点击关闭）' : 'PTY 模式：关（点击开启）'}
-              disabled={ptySwitching}
-              onClick={async () => {
-                if (ptyEnabled && !window.confirm('关闭 PTY 模式将回退到 claude -p 一次性进程。确定？')) return;
-                setPtySwitching(true);
-                try {
-                  const r = await api.updateWorkerRuntimeSettings(worker.id, { use_pty_mode: !ptyEnabled });
-                  setPtyEnabled(r.use_pty_mode);
-                } catch { /* keep current */ }
-                finally { setPtySwitching(false); }
-              }}
-              className={`flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-semibold ${ptyEnabled ? 'bg-green-600/30 text-green-400' : 'bg-gray-700 text-gray-400'}`}
-            >PTY</button>
-          )}
-          {worker.status === 'ready' && (
-            <button title="Worker 号池额度" onClick={togglePool}
-              className={`flex items-center gap-0.5 px-1.5 py-0.5 rounded ${poolOpen ? 'bg-indigo-600/30 text-indigo-300' : 'bg-gray-700 text-gray-400'} hover:text-indigo-300 text-[10px] font-semibold`}>Pro</button>
-          )}
-          <button title="日志" onClick={() => setLogsOpen(true)}
-            className="p-1.5 text-gray-400 hover:text-gray-200"><ScrollText size={15} /></button>
-          {worker.status === 'error' && (
-            <button title="重试 bootstrap" onClick={() => act(api.retryWorker)}
-              className="p-1.5 text-gray-400 hover:text-blue-400"><RefreshCw size={15} /></button>
-          )}
-          {worker.status === 'ready' && (
-            <button title="关机（EC2 stop，数据保留）" onClick={() => act(api.stopWorker, `关机 ${shortName(worker)}？数据保留，停机期间不可派发任务。`)}
-              className="p-1.5 text-gray-400 hover:text-yellow-400"><Power size={15} /></button>
-          )}
-          {worker.status === 'stopped' && (
-            <button title="开机" onClick={() => act(api.startWorker)}
-              className="p-1.5 text-gray-400 hover:text-green-400"><Play size={15} /></button>
-          )}
-          {(
-            <button title="销毁（terminate EC2）"
-              onClick={() => act(api.destroyWorker, `销毁 ${shortName(worker)}？EC2 实例将被 terminate，不可恢复！`)}
-              className="p-1.5 text-gray-400 hover:text-red-400"><Trash2 size={15} /></button>
-          )}
+          {(() => {
+            return (<>
+              {worker.status === 'ready' && ptyEnabled !== null && canControl && (
+                <button
+                  title={ptyEnabled ? 'PTY 模式：开（点击关闭）' : 'PTY 模式：关（点击开启）'}
+                  disabled={ptySwitching}
+                  onClick={async () => {
+                    if (ptyEnabled && !window.confirm('关闭 PTY 模式将回退到 claude -p 一次性进程。确定？')) return;
+                    setPtySwitching(true);
+                    try {
+                      const r = await api.updateWorkerRuntimeSettings(worker.id, { use_pty_mode: !ptyEnabled });
+                      setPtyEnabled(r.use_pty_mode);
+                    } catch { /* keep current */ }
+                    finally { setPtySwitching(false); }
+                  }}
+                  className={`flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-semibold ${ptyEnabled ? 'bg-green-600/30 text-green-400' : 'bg-gray-700 text-gray-400'}`}
+                >PTY</button>
+              )}
+              {worker.status === 'ready' && canControl && (
+                <button title="Worker 号池额度" onClick={togglePool}
+                  className={`flex items-center gap-0.5 px-1.5 py-0.5 rounded ${poolOpen ? 'bg-indigo-600/30 text-indigo-300' : 'bg-gray-700 text-gray-400'} hover:text-indigo-300 text-[10px] font-semibold`}>Pro</button>
+              )}
+              {canControl && (
+                <button title="日志" onClick={() => setLogsOpen(true)}
+                  className="p-1.5 text-gray-400 hover:text-gray-200"><ScrollText size={15} /></button>
+              )}
+              {canControl && worker.status === 'error' && (
+                <button title="重试 bootstrap" onClick={() => act(api.retryWorker)}
+                  className="p-1.5 text-gray-400 hover:text-blue-400"><RefreshCw size={15} /></button>
+              )}
+              {canControl && worker.status === 'ready' && (
+                <button title="关机（EC2 stop，数据保留）" onClick={() => act(api.stopWorker, `关机 ${shortName(worker)}？数据保留，停机期间不可派发任务。`)}
+                  className="p-1.5 text-gray-400 hover:text-yellow-400"><Power size={15} /></button>
+              )}
+              {canControl && worker.status === 'stopped' && (
+                <button title="开机" onClick={() => act(api.startWorker)}
+                  className="p-1.5 text-gray-400 hover:text-green-400"><Play size={15} /></button>
+              )}
+              {isAdmin && (
+                <button title="销毁（terminate EC2）"
+                  onClick={() => act(api.destroyWorker, `销毁 ${shortName(worker)}？EC2 实例将被 terminate，不可恢复！`)}
+                  className="p-1.5 text-gray-400 hover:text-red-400"><Trash2 size={15} /></button>
+              )}
+            </>);
+          })()}
         </div>
       </div>
-      <div className="text-xs text-gray-400 flex flex-wrap gap-x-4 gap-y-1">
-        {worker.private_ip && <span>内网 {worker.private_ip}</span>}
-        {worker.cloud_instance_id && <span>{worker.cloud_instance_id}</span>}
-        {worker.ccm_commit && <span title={worker.ccm_commit}>@{worker.ccm_commit.slice(0, 8)}</span>}
-        {worker.last_heartbeat && <span>心跳 {new Date(worker.last_heartbeat + 'Z').toLocaleTimeString()}</span>}
-      </div>
+      {isAdmin && (
+        <div className="text-xs text-gray-400 flex flex-wrap gap-x-4 gap-y-1">
+          {worker.private_ip && <span>内网 {worker.private_ip}</span>}
+          {worker.cloud_instance_id && <span>{worker.cloud_instance_id}</span>}
+          {worker.ccm_commit && <span title={worker.ccm_commit}>@{worker.ccm_commit.slice(0, 8)}</span>}
+          {worker.last_heartbeat && <span>心跳 {new Date(worker.last_heartbeat + 'Z').toLocaleTimeString()}</span>}
+        </div>
+      )}
 
       {poolOpen && (
         <div className="bg-gray-900/60 rounded p-3 space-y-2">
@@ -343,16 +411,23 @@ function WorkerCard({ worker, onAction }: { worker: Worker; onAction: () => void
 
 export default function WorkersPage() {
   const [workers, setWorkers] = useState<Worker[]>([]);
+  const [users, setUsers] = useState<TeamUser[]>([]);
   const [loading, setLoading] = useState(true);
   const [adding, setAdding] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const ccUser = JSON.parse(localStorage.getItem('cc_user') || '{}');
+  const isAdmin = ccUser.role === 'admin' || ccUser.role === 'super_admin' || !ccUser.role;
 
   const load = useCallback(() => {
     api.listWorkers()
       .then((w) => { setWorkers(w); setError(null); })
       .catch((e) => setError(String(e)))
       .finally(() => setLoading(false));
-  }, []);
+    if (isAdmin) {
+      api.getTeamUsers().then(setUsers).catch(() => {});
+    }
+  }, [isAdmin]);
 
   useEffect(() => {
     load();
@@ -369,11 +444,13 @@ export default function WorkersPage() {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold text-foreground">Workers</h2>
-        <button onClick={() => setAdding(true)}
-          className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-indigo-600 text-white rounded hover:bg-indigo-500">
-          <Plus size={15} /> Add Worker
-        </button>
+        <h2 className="text-lg font-semibold text-foreground">{isAdmin ? 'Workers' : 'My Workers'}</h2>
+        {isAdmin && (
+          <button onClick={() => setAdding(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-indigo-600 text-white rounded hover:bg-indigo-500">
+            <Plus size={15} /> Add Worker
+          </button>
+        )}
       </div>
       {error && <p className="text-red-400 text-sm">{error}</p>}
       {loading ? (
@@ -385,7 +462,7 @@ export default function WorkersPage() {
         </div>
       ) : (
         <div className="grid gap-3 sm:grid-cols-2">
-          {workers.map((w) => <WorkerCard key={w.id} worker={w} onAction={load} />)}
+          {workers.map((w) => <WorkerCard key={w.id} worker={w} onAction={load} users={users} isAdmin={isAdmin} />)}
         </div>
       )}
       {adding && <AddWorkerModal onClose={() => setAdding(false)} onSaved={load} />}

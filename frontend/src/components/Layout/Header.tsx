@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { Palette, Globe, Menu, X, Settings } from 'lucide-react';
-import { api } from '../../api/client';
+import { Palette, Globe, Menu, X, Settings, LogOut } from 'lucide-react';
+import { api, clearToken } from '../../api/client';
 import type { RuntimeSettings } from '../../api/client';
 import { isCapacitor } from '../../config/server';
+import { useWebSocket } from '../../hooks/useWebSocket';
 import { getTheme, setTheme as persistTheme, THEME_OPTIONS, type Theme } from '../../config/theme';
 import { getTimezone, setTimezone, TIMEZONE_OPTIONS } from '../../config/timezone';
 import { PoolDrawer } from './PoolDrawer';
@@ -77,19 +78,35 @@ export function Header({ currentPage, onNavigate }: HeaderProps) {
     }
   }, [runtime, switching]);
 
-  const pages = [
-    { key: 'dashboard', label: 'Dashboard' },
-    { key: 'tasks', label: 'Tasks' },
-    { key: 'projects', label: 'Projects' },
-    { key: 'secrets', label: 'Secrets' },
-    { key: 'files', label: 'Files' },
-    { key: 'discussions', label: 'Discussions' },
-    { key: 'pr-monitor', label: 'PR Monitor' },
-    { key: 'workers', label: 'Workers' },
-    { key: 'skills', label: 'Skills' },
-    { key: 'team', label: 'Team' },
-    ...(isCapacitor() ? [{ key: 'server', label: 'Server' }] : []),
+  const ccUser = JSON.parse(localStorage.getItem('cc_user') || '{}');
+  const isAdmin = ccUser.role === 'admin' || ccUser.role === 'super_admin' || !ccUser.id;
+  const [hasWorker, setHasWorker] = useState(isAdmin);
+
+  const refreshWorkerStatus = useCallback(() => {
+    if (!isAdmin) {
+      api.listWorkers().then(w => setHasWorker(w.length > 0)).catch(() => {});
+    }
+  }, [isAdmin]);
+
+  useEffect(() => { refreshWorkerStatus(); }, [refreshWorkerStatus]);
+
+  // Refresh nav when worker assignments change
+  useWebSocket(['workers'], () => { refreshWorkerStatus(); });
+
+  const allPages = [
+    { key: 'dashboard', label: 'Dashboard', show: isAdmin },
+    { key: 'tasks', label: 'Tasks', show: true },
+    { key: 'projects', label: 'Projects', show: true },
+    { key: 'secrets', label: 'Secrets', show: true },
+    { key: 'files', label: 'Files', show: true },
+    { key: 'discussions', label: 'Discussions', show: true },
+    { key: 'pr-monitor', label: 'PR Monitor', show: isAdmin || hasWorker },
+    { key: 'workers', label: 'Workers', show: isAdmin || hasWorker },
+    { key: 'skills', label: 'Skills', show: true },
+    { key: 'team', label: 'Team', show: true },
+    ...(isCapacitor() ? [{ key: 'server', label: 'Server', show: true }] : []),
   ];
+  const pages = allPages.filter(p => p.show);
 
   const handleThemeChange = (next: Theme) => {
     persistTheme(next);
@@ -152,9 +169,12 @@ export function Header({ currentPage, onNavigate }: HeaderProps) {
           </nav>
         )}
         <div ref={rightRef} className="ml-auto flex items-center gap-1">
+          {ccUser.name && (
+            <span className="text-xs text-gray-400 mr-1 hidden sm:inline">{ccUser.name}</span>
+          )}
           <UpdateButton />
-          <PoolDrawer />
-          {runtime && (
+          {isAdmin && <PoolDrawer />}
+          {isAdmin && runtime && (
             <div
               className="flex items-center gap-1.5 mr-1 px-2 py-1 rounded bg-gray-800 border border-gray-700"
               title={
@@ -279,6 +299,39 @@ export function Header({ currentPage, onNavigate }: HeaderProps) {
                       >绑定</button>
                     ) : null}
                   </div>
+                </div>
+                {/* Change password */}
+                {ccUser.id && (
+                  <div className="border-t border-gray-700 pt-2 mt-1">
+                    <button
+                      onClick={() => {
+                        const oldPwd = prompt('当前密码：');
+                        if (!oldPwd) return;
+                        const newPwd = prompt('新密码：');
+                        if (!newPwd) return;
+                        fetch('/api/auth/me/password', {
+                          method: 'PUT',
+                          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${localStorage.getItem('cc_token')}` },
+                          body: JSON.stringify({ old_password: oldPwd, new_password: newPwd }),
+                        }).then(r => {
+                          if (r.ok) alert('密码修改成功');
+                          else r.json().then(d => alert(d.detail || '修改失败'));
+                        }).catch(() => alert('修改失败'));
+                      }}
+                      className="flex items-center gap-1.5 text-xs text-gray-400 hover:text-gray-200 transition-colors w-full"
+                    >
+                      <Settings size={12} /> 修改密码
+                    </button>
+                  </div>
+                )}
+                {/* Logout */}
+                <div className="border-t border-gray-700 pt-2 mt-1">
+                  <button
+                    onClick={() => { clearToken(); localStorage.removeItem('cc_user'); window.location.reload(); }}
+                    className="flex items-center gap-1.5 text-xs text-red-400 hover:text-red-300 transition-colors w-full"
+                  >
+                    <LogOut size={12} /> 退出登录
+                  </button>
                 </div>
               </div>
             )}

@@ -11,6 +11,7 @@ from backend.config import settings
 from backend.database import get_db
 from backend.models.pr_monitor import MonitoredRepo, PRReview
 from backend.models.task import Task
+from backend.api.deps import get_current_user_id, get_current_user_role
 from backend.schemas.pr_monitor import (
     MonitoredRepoCreate,
     MonitoredRepoUpdate,
@@ -52,24 +53,59 @@ async def webhook_info():
 
 
 @router.get("/repos", response_model=list[MonitoredRepoResponse])
-async def list_repos(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(MonitoredRepo).order_by(desc(MonitoredRepo.created_at))
-    )
+async def list_repos(request: Request, db: AsyncSession = Depends(get_db)):
+    user_role = get_current_user_role(request)
+    user_id = get_current_user_id(request)
+    stmt = select(MonitoredRepo).order_by(desc(MonitoredRepo.created_at))
+    if user_role not in ("admin", "super_admin"):
+        from backend.models.worker import Worker
+        owned_worker_ids = select(Worker.id).where(Worker.owner_user_id == user_id)
+        stmt = stmt.where(MonitoredRepo.worker_id.in_(owned_worker_ids))
+    result = await db.execute(stmt)
     return result.scalars().all()
 
 
+async def _require_pr_monitor_write(request: Request, db: AsyncSession):
+    """Admin or Worker owner can manage PR monitors."""
+    role = get_current_user_role(request)
+    if role in ("admin", "super_admin"):
+        return
+    user_id = get_current_user_id(request)
+    if user_id:
+        from backend.models.worker import Worker
+        has_worker = (await db.execute(
+            select(Worker.id).where(Worker.owner_user_id == user_id).limit(1)
+        )).scalar_one_or_none()
+        if has_worker:
+            return
+    raise HTTPException(403, "You need a Worker or admin role to manage PR monitors")
+
+
 @router.post("/repos", response_model=MonitoredRepoDetailResponse)
-async def create_repo(body: MonitoredRepoCreate, db: AsyncSession = Depends(get_db)):
+async def create_repo(request: Request, body: MonitoredRepoCreate, db: AsyncSession = Depends(get_db)):
+    await _require_pr_monitor_write(request, db)
     existing = await db.execute(
         select(MonitoredRepo).where(MonitoredRepo.repo_full_name == body.repo_full_name)
     )
     if existing.scalar_one_or_none():
         raise HTTPException(409, f"Repository '{body.repo_full_name}' already monitored")
 
+    # Validate worker_id: admin can use NULL (local) or any worker; member only own workers
+    worker_id = getattr(body, 'worker_id', None)
+    user_role = get_current_user_role(request)
+    user_id = get_current_user_id(request)
+    if worker_id is None and user_role not in ("admin", "super_admin"):
+        raise HTTPException(403, "Only admin can create PR monitors on local machine")
+    if worker_id is not None and user_role not in ("admin", "super_admin"):
+        from backend.models.worker import Worker
+        w = await db.get(Worker, worker_id)
+        if not w or w.owner_user_id != user_id:
+            raise HTTPException(403, "You can only create PR monitors on your own Worker")
+
     repo = MonitoredRepo(
         repo_full_name=body.repo_full_name,
         project_id=body.project_id,
+        worker_id=worker_id,
         auto_merge=body.auto_merge,
         review_model=body.review_model,
         default_branch=body.default_branch,
@@ -94,8 +130,10 @@ async def get_repo(repo_id: int, db: AsyncSession = Depends(get_db)):
 async def update_repo(
     repo_id: int,
     body: MonitoredRepoUpdate,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ):
+    await _require_pr_monitor_write(request, db)
     repo = await db.get(MonitoredRepo, repo_id)
     if not repo:
         raise HTTPException(404, "Repository not found")
@@ -110,7 +148,8 @@ async def update_repo(
 
 
 @router.delete("/repos/{repo_id}")
-async def delete_repo(repo_id: int, db: AsyncSession = Depends(get_db)):
+async def delete_repo(repo_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    await _require_pr_monitor_write(request, db)
     repo = await db.get(MonitoredRepo, repo_id)
     if not repo:
         raise HTTPException(404, "Repository not found")
@@ -130,7 +169,8 @@ async def delete_repo(repo_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/repos/{repo_id}/toggle", response_model=MonitoredRepoResponse)
-async def toggle_repo(repo_id: int, db: AsyncSession = Depends(get_db)):
+async def toggle_repo(repo_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    await _require_pr_monitor_write(request, db)
     repo = await db.get(MonitoredRepo, repo_id)
     if not repo:
         raise HTTPException(404, "Repository not found")
@@ -141,7 +181,8 @@ async def toggle_repo(repo_id: int, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/repos/{repo_id}/regenerate-secret", response_model=MonitoredRepoDetailResponse)
-async def regenerate_secret(repo_id: int, db: AsyncSession = Depends(get_db)):
+async def regenerate_secret(repo_id: int, request: Request, db: AsyncSession = Depends(get_db)):
+    await _require_pr_monitor_write(request, db)
     repo = await db.get(MonitoredRepo, repo_id)
     if not repo:
         raise HTTPException(404, "Repository not found")

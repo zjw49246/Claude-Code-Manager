@@ -406,8 +406,15 @@ class GlobalDispatcher:
         async with self.db_factory() as db:
             result = await db.execute(select(Instance))
             existing = list(result.scalars().all())
+            total_count = len(existing)
             idle_count = sum(1 for i in existing if i.status == "idle")
             needed = settings.min_idle_instances - idle_count
+            if needed <= 0:
+                return
+            # Hard cap: total instances (idle + running) must not exceed max_concurrent_instances
+            cap = settings.max_concurrent_instances
+            if cap > 0 and total_count + needed > cap:
+                needed = max(0, cap - total_count)
             if needed <= 0:
                 return
             base = 0
@@ -600,6 +607,16 @@ class GlobalDispatcher:
                 worker = await db.get(WorkerModel, task.worker_id)
             if not worker or worker.status != "ready":
                 continue  # worker 没就绪，留在 pending 等下轮
+            # Check worker concurrency limit
+            async with self.db_factory() as db:
+                running_on_worker = (await db.execute(
+                    select(func.count(Task.id)).where(
+                        Task.worker_id == worker.id,
+                        Task.status.in_(["in_progress", "executing"]),
+                    )
+                )).scalar() or 0
+            if running_on_worker >= worker.max_tasks:
+                continue  # worker 已满，留在 pending 等下轮
             # 与本地路径一致：把 project.local_path 写进 target_repo——
             # 否则迁回本机后 chat 解析不出 cwd（实测 task 58 教训）
             if task.project_id and not task.target_repo:
