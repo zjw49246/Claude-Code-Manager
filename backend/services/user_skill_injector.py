@@ -34,6 +34,10 @@ def build_user_skill_prompt_sync(task_id: int) -> str | None:
             f"SELECT id, name, description FROM user_skills WHERE id IN ({placeholders})",
             skill_ids,
         ).fetchall()
+    except sqlite3.Error:
+        # Fail-open：注入用户技能是增强项，DB 文件缺失/表不存在（全新部署、
+        # 测试 worktree）绝不能炸掉 launch 本身
+        return None
     finally:
         conn.close()
 

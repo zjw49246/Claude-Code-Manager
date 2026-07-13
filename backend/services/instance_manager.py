@@ -736,6 +736,7 @@ class InstanceManager:
                     update(Instance).where(Instance.id == instance_id).values(**values)
                 )
                 # Restore task status for chat-initiated runs (not managed by dispatcher)
+                final_status = None
                 if task_id and chat_initiated:
                     chat_active_statuses = ["executing", "in_progress", "failed", "pending"]
                     if exit_code == 0 or interrupted:
@@ -745,12 +746,7 @@ class InstanceManager:
                             .values(status="completed", completed_at=datetime.utcnow(), error_message=None)
                         )
                         if result.rowcount:
-                            await self.broadcaster.broadcast("tasks", {
-                                "event": "status_change",
-                                "task_id": task_id,
-                                "new_status": "completed",
-                                "instance_id": instance_id,
-                            })
+                            final_status = "completed"
                     else:
                         result = await db.execute(
                             update(Task)
@@ -758,13 +754,17 @@ class InstanceManager:
                             .values(status="failed", error_message=stderr_text[:500] if stderr_text else f"Process exited with code {exit_code}")
                         )
                         if result.rowcount:
-                            await self.broadcaster.broadcast("tasks", {
-                                "event": "status_change",
-                                "task_id": task_id,
-                                "new_status": "failed",
-                                "instance_id": instance_id,
-                            })
+                            final_status = "failed"
                 await db.commit()
+            # 广播必须在 commit 之后：先广播的话手快的客户端收到事件立刻回读，
+            # 拿到的还是旧状态，反而把 UI 钉在过期值上
+            if final_status:
+                await self.broadcaster.broadcast("tasks", {
+                    "event": "status_change",
+                    "task_id": task_id,
+                    "new_status": final_status,
+                    "instance_id": instance_id,
+                })
 
             # 原生子 agent（native-monitor 等）生命周期跟 session 走——
             # session 退出/重建时一律标 completed，否则 UI 上永远显示 running。
@@ -1258,11 +1258,17 @@ class InstanceManager:
                 )
                 await db.commit()
 
-        # Reactivate completed task if sub-agent produces new output
+        # Reactivate completed task if sub-agent produces new output.
+        # 与 transient 打标同理（见下方 _transient_seen 处、task #729）：orphan
+        # （resume 时 PTY 回放的上一 turn 旧事件）和 autonomous（后台子 agent
+        # turn）不算"任务又活了"——它们没有对应的收尾路径，把 completed 翻回
+        # executing 后没人再标回来，任务会永远卡在 executing。
         if (
             task_id
             and event.get("role") == "assistant"
             and event["event_type"] in ("message", "tool_use")
+            and not event.get("orphan")
+            and not event.get("autonomous")
         ):
             async with self.db_factory() as db:
                 task = await db.get(Task, task_id)

@@ -1323,3 +1323,26 @@ async def test_update_sort_order_via_api_moves_task(client):
     resp = await client.get("/api/tasks?limit=10")
     order = [t["id"] for t in resp.json() if t["id"] in ids]
     assert order == [ids[0], ids[2], ids[1]]
+
+
+# === status_change 广播收口（2026-07 状态显示大排查）===
+# API 侧改 Task.status 的路径必须广播 status_change，否则 ChatView（WS 驱动）
+# 与任务列表（轮询驱动）状态分叉。
+
+
+@pytest.mark.asyncio
+async def test_cancel_task_broadcasts_status_change(client):
+    create = await client.post("/api/tasks", json={"description": "to cancel"})
+    task_id = create.json()["id"]
+
+    mock_broadcaster = MagicMock()
+    mock_broadcaster.broadcast = AsyncMock()
+    with patch("backend.main.broadcaster", mock_broadcaster):
+        resp = await client.post(f"/api/tasks/{task_id}/cancel")
+    assert resp.status_code == 200
+
+    payloads = [
+        c.args[1] for c in mock_broadcaster.broadcast.await_args_list
+        if c.args[1].get("event") == "status_change"
+    ]
+    assert any(p["task_id"] == task_id and p["new_status"] == "cancelled" for p in payloads)

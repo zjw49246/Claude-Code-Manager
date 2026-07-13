@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>CCM Quick Capture Settings</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <div class="container">
+    <h1>CCM Quick Capture</h1>
+    <p class="subtitle">Configure your Claude Code Manager connection.</p>
+
+    <label for="serverUrl">Server URL</label>
+    <input type="url" id="serverUrl" placeholder="https://xiaoyu.claude-code-manager.com">
+
+    <label for="authToken">Auth Token</label>
+    <input type="password" id="authToken" placeholder="Enter your CCM auth token">
+
+    <div class="actions">
+      <button id="save" class="btn-primary">Save</button>
+      <button id="test" class="btn-secondary">Test Connection</button>
+    </div>
+
+    <div id="status" class="status" style="display:none"></div>
+  </div>
+  <script src="options.js"></script>
+</body>
+</html>

@@ -324,11 +324,16 @@ async def _sync_task_from_worker_response(db: AsyncSession, task: Task, result):
     """代理响应是 worker 的 task JSON 时，同步关键字段（status 等 relay 也会同步，
     这里立即写一份让 API 响应不滞后）。"""
     if isinstance(result, dict) and result.get("id") == task.id:
+        status_changed = result.get("status") is not None and result["status"] != task.status
         for f in ("status", "plan_approved", "error_message", "loop_progress"):
             if f in result and result[f] is not None:
                 setattr(task, f, result[f])
         await db.commit()
         await db.refresh(task)
+        # relay 断连窗口内 worker 侧广播镜像不过来，这里本地补一次
+        if status_changed:
+            from backend.services.task_events import broadcast_status_change
+            await broadcast_status_change(task.id, task.status)
     return task
 
 
@@ -354,6 +359,8 @@ async def stop_task_session(task_id: int, request: Request, db: AsyncSession = D
         if task and task.status in ("executing", "in_progress"):
             task.status = "completed"
             await db.commit()
+            from backend.services.task_events import broadcast_status_change
+            await broadcast_status_change(task_id, "completed")
             return {
                 "ok": True,
                 "stopped": False,
@@ -379,6 +386,8 @@ async def cancel_task(task_id: int, request: Request, queue: TaskQueue = Depends
     task = await queue.cancel(task_id)
     if not task:
         raise HTTPException(400, "Cannot cancel task")
+    from backend.services.task_events import broadcast_status_change
+    await broadcast_status_change(task_id, "cancelled")
     await _stop_task_process(task_id, db)
 
     from backend.main import dispatcher
@@ -413,6 +422,8 @@ async def retry_task(task_id: int, request: Request, queue: TaskQueue = Depends(
     task = await queue.retry(task_id)
     if not task:
         raise HTTPException(404, "Task not found")
+    from backend.services.task_events import broadcast_status_change
+    await broadcast_status_change(task_id, task.status)
     return task
 
 
@@ -479,6 +490,8 @@ async def approve_plan(task_id: int, request: Request, queue: TaskQueue = Depend
     if task.mode != "plan" or task.status != "plan_review":
         raise HTTPException(400, "Task is not in plan review state")
     task = await queue.update_task(task_id, plan_approved=True, status="pending")
+    from backend.services.task_events import broadcast_status_change
+    await broadcast_status_change(task_id, "pending")
     return task
 
 
@@ -495,4 +508,6 @@ async def reject_plan(task_id: int, request: Request, queue: TaskQueue = Depends
     if task.mode != "plan" or task.status != "plan_review":
         raise HTTPException(400, "Task is not in plan review state")
     task = await queue.update_task(task_id, plan_approved=False, status="cancelled")
+    from backend.services.task_events import broadcast_status_change
+    await broadcast_status_change(task_id, "cancelled")
     return task

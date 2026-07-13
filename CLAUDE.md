@@ -128,6 +128,7 @@ claude-manager/
 - **备份服务**: `BackupService`（`backend/services/backup_service.py`）封装 auto-backup SDK，在 lifespan 中以后台线程（APScheduler）运行，支持 local / s3 / oss；`BACKUP_ENABLED=false` 时完全不加载
 - **PR Monitor**: GitHub PR 自动审核功能。GitHub Webhook 推送 PR 事件 → 创建 CCM task 让 Claude 审核 → 审核通过可自动 merge。数据模型：`MonitoredRepo`（监控仓库配置）+ `PRReview`（审核记录）。Webhook 端点 `/api/github/webhook`（公开，HMAC-SHA256 验签）。前端独立页面 `PRMonitorPage`。Webhook URL: `https://youchengsong.claude-code-manager.com/api/github/webhook`
 - **WebSocket channels**: `instance:{id}`, `task:{id}`, `tasks`, `system`, `pr-monitor`
+- **状态变更必广播**: 任何写 `Task.status` 的路径，`db.commit()` **之后**必须调 `task_events.broadcast_status_change`（tasks 频道，broadcaster 自动镜像到 task:{id}）。此前 cancel/retry/plan 审批/stop-session/stale 兜底/worker 断连等只写库不广播，导致 ChatView（WS 驱动）与列表（轮询驱动）状态分叉（2026-07-12 大排查）。前端侧：ChatView 的 localStatus 是 WS 实时覆盖、task.status prop（轮询）是事实源，prop 变化清覆盖（带 7s `lastWsStatusAt` 守卫防在途旧快照击穿）；`_process_event` 的 completed→executing 复活块排除 orphan/autonomous 事件
 - **认证**: 除 `/api/system/health`、`/api/auth/login`、`/api/github/webhook` 外，所有 API 需要 `Authorization: Bearer <token>`
 - **前端 type 导入**: 用 `import type { X }` 导入类型，`import { api }` 导入值（Vite 会去除 type-only exports）
 - **Tailwind v4**: 用 `@import "tailwindcss"` + `@tailwindcss/vite` 插件，无 tailwind.config

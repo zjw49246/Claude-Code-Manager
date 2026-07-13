@@ -167,13 +167,18 @@ class WorkerRelay:
                 continue
         # 重连失败 → 活跃 task 标 failed（worker 状态交给健康检查处理）
         logger.error("worker %s relay reconnect exhausted", worker.id)
+        failed_ids = []
         async with self.db_factory() as db:
             for tid in task_ids:
                 t = await db.get(Task, tid)
                 if t and t.status in ("executing", "in_progress"):
                     t.status = "failed"
                     t.error_message = f"Worker {worker.name} 断连且无法重连"
+                    failed_ids.append(tid)
             await db.commit()
+        from backend.services.task_events import broadcast_status_change
+        for tid in failed_ids:
+            await broadcast_status_change(tid, "failed")
 
     async def _handle(self, msg: dict, worker: Worker):
         channel = msg.get("channel", "")
