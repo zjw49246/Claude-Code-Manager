@@ -490,3 +490,24 @@
 - **审查流程**: 2 个子 Agent（后端/前端视角）审 diff，抓到 1 个 major（在途旧快照击穿 WS 覆盖 → autoDequeue 误触发，本次修复自身引入的新窗口）+ 多个 minor（worker 代理路径漏广播、pr_monitor 隐式 commit 依赖、搜索结果不吃 patch），全部落地。
 - **测试**: 复活块排除 ×3、cancel 广播 ×1 回归测试；全量 967 passed，失败集与 main 基线完全一致（7 个存量失败非本次引入）；tsc 通过。
 - **预防**: ①改 Task.status 必须走「commit 后广播」约定（用 `task_events.broadcast_status_change`），新增状态写入点时先问"前端怎么知道"；②前端"WS 实时覆盖 + 轮询兜底"双通道时，覆盖必须能被更新鲜的兜底数据击穿（且要防在途旧快照反向击穿——时间戳守卫）；③事件驱动的状态翻转（如复活块）必须区分前台活事件与 orphan/autonomous 回放，参考 #729；④广播一律放 commit 之后。
+
+### 2026-07-13 — 前端设计 v2：Multica 风主题系统 + App Shell（commit e1c778c）
+
+**改动**：主题系统升级为「每主题覆盖 gray（中性）+ indigo（品牌）CSS 变量」的换肤架构：
+新默认 dark（zinc + 蓝品牌，oklch）+ 新增 light；v1 默认外观完整保留为 `legacy` 主题，
+ocean/forest/rose 归入 Legacy 组。Header 顶栏导航重构为 AppShell（桌面固定侧栏 + 移动端抽屉），
+偏好设置抽出 PrefsMenu。字体 Inter/JetBrains Mono 随 bundle 离线。
+
+**经验**：
+1. **1300+ 处硬编码 gray-* 类名不必重写**——变量重映射层让全部旧类名自动适配新主题，
+   手工精修只做高频页面（Login/Tasks/Chat/Dashboard）。新增主题必须同时覆盖 gray 全档 + indigo 全档。
+2. **浅色主题的坑在 accent 300/400 档**：`text-X-300/400` 是深底浅字的设计，浅色主题必须
+   把这些档位反转成深色调（≈ Tailwind 原生 600/700），否则 chip 全部不可读；同理中性底上的
+   `text-white`/`hover:text-white` 要清扫成 `text-foreground`。
+3. **视觉验证用临时后端 + Playwright 截图时，演示数据绝不能插 `pending` 状态的 task**——
+   dispatcher 2 秒轮询会把它真的跑起来（本次浪费了一次真实 Claude 调用，还往 worktree 里写了
+   一段不相干的文档改动，差点混入 PR）。演示数据只用 completed/failed/cancelled/executing。
+4. **Playwright 截图切主题要强制 reload**：localStorage 在 app 启动后写入、hash-only 导航
+   不重载页面，不 reload 的话所有截图都是默认主题（第一轮截图全部白拍）。
+5. 布局改动前先 grep `100vh|h-screen|fixed|sticky` 找耦合点：TasksPage 分屏高度硬编码了
+   顶栏高度（64px→49px），漏改会溢出/留缝。
