@@ -123,10 +123,14 @@ export function TaskList({ tasks, projects, onRefresh, onOpenChat, activeTaskId,
         <div
           key={t.id}
           {...targetProps(t, idx)}
-          className={`relative rounded-lg p-3 transition-opacity ${
+          className={`relative rounded-xl p-3 border transition-[opacity,border-color,box-shadow] ${
             draggingId === t.id ? 'opacity-40' : ''
           } ${overIndex === idx && draggingId !== null && draggingId !== t.id ? 'ring-2 ring-indigo-400' : ''} ${
-            activeTaskId === t.id ? 'bg-indigo-900/60 ring-1 ring-indigo-400/60' : t.has_unread ? 'bg-indigo-900/50 ring-1 ring-indigo-500/50' : 'bg-gray-800'
+            activeTaskId === t.id
+              ? 'bg-indigo-900/60 border-indigo-500/40 ring-1 ring-indigo-400/40'
+              : t.has_unread
+                ? 'bg-indigo-900/50 border-indigo-500/30 ring-1 ring-indigo-500/30'
+                : 'bg-gray-800 border-gray-700/60 hover:border-gray-600/70 shadow-sm'
           }`}
         >
           {/* 拖拽手柄（右下角，空间更宽裕）：卡片正文是可选中文字，整卡

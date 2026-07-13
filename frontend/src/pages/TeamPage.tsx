@@ -61,7 +61,7 @@ function GroupModal({
             onChange={(e) => setDescription(e.target.value)}
           />
           <div className="flex justify-end gap-2 pt-1">
-            <button onClick={onClose} className="px-4 py-2 text-sm text-gray-300 hover:text-white">Cancel</button>
+            <button onClick={onClose} className="px-4 py-2 text-sm text-gray-300 hover:text-foreground">Cancel</button>
             <button onClick={handleSave} disabled={saving || !name.trim()}
               className="px-4 py-2 text-sm bg-indigo-600 text-white rounded hover:bg-indigo-500 disabled:opacity-50">
               {saving ? 'Saving...' : 'Save'}

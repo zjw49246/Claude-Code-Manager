@@ -75,7 +75,7 @@ claude-manager/
 │       ├── api/client.ts        # API 客户端 + 类型 (401 自动登出, 动态 base URL)
 │       ├── api/ws.ts            # WebSocket 客户端 (指数退避重连)
 │       ├── config/server.ts     # 远程服务器 URL 配置 (Capacitor/Android 支持)
-│       ├── config/theme.ts      # 浅色/深色主题切换 (localStorage 持久化)
+│       ├── config/theme.ts      # 主题注册表 (现代深/浅 + Legacy 组, localStorage 持久化)
 │       ├── pages/               # Dashboard, TasksPage, LoginPage, ServerConfigPage
 │       ├── components/
 │       │   ├── Chat/ChatView.tsx              # 多轮对话 UI (基于 task, 含 monitor 消息渲染)
@@ -83,7 +83,9 @@ claude-manager/
 │       │   ├── Chat/MonitorPanel.tsx          # Monitor 面板 (活跃 monitor 列表 + 历史 checks)
 │       │   ├── Instances/              # InstanceGrid, InstanceLog
 │       │   ├── Tasks/                  # TaskForm (含 Monitor skill 勾选), TaskList
-│       │   ├── Layout/PoolDrawer.tsx   # Pool 额度抽屉 (Header "Pro" 徽标 + 账号额度进度条)
+│       │   ├── Layout/AppShell.tsx     # App 壳 (桌面侧栏导航 + sticky 顶栏 + 移动端抽屉)
+│       │   ├── Layout/PrefsMenu.tsx    # 顶栏齿轮下拉 (时区/主题/PTY/压缩阈值/飞书/密码/退出)
+│       │   ├── Layout/PoolDrawer.tsx   # Pool 额度抽屉 (顶栏 "Pro" 徽标 + 账号额度进度条)
 │       │   ├── PlanReview/PlanPanel.tsx # Plan 审批
 │       │   └── Voice/VoiceButton.tsx   # MediaRecorder → Whisper
 │       └── hooks/useWebSocket.ts
@@ -132,7 +134,7 @@ claude-manager/
 - **认证**: 除 `/api/system/health`、`/api/auth/login`、`/api/github/webhook` 外，所有 API 需要 `Authorization: Bearer <token>`
 - **前端 type 导入**: 用 `import type { X }` 导入类型，`import { api }` 导入值（Vite 会去除 type-only exports）
 - **Tailwind v4**: 用 `@import "tailwindcss"` + `@tailwindcss/vite` 插件，无 tailwind.config
-- **主题**: 深色/浅色切换通过覆盖 `--color-gray-*` CSS 变量实现灰度反转，内容文字用 `text-foreground`（随主题变化），按钮文字保持 `text-white`
+- **主题（v2）**: 换肤机制 = 每主题覆盖 `--color-gray-*`（中性色）与 `--color-indigo-*`（品牌色）等 CSS 变量（`index.css`），组件类名不变。现代组：`dark`（默认，Multica 风 zinc 中性色 + 蓝品牌色，oklch）、`light`（中性色反转 + accent 300/400 档反转成深色调保对比度）；Legacy 组：`legacy`（v1 默认外观，Tailwind 原生 gray/indigo）、`ocean`/`forest`/`rose`。**新增主题必须同时覆盖 gray 全档 + indigo 全档**；浅色兼容规则：中性底上禁用 `text-white`/`hover:text-white`，一律 `text-foreground`（彩色实底按钮除外）。字体 Inter Variable + JetBrains Mono（@fontsource-variable，随 bundle 离线）。App 壳 `AppShell.tsx`：桌面 lg+ 固定侧栏 + sticky 顶栏（h-12 + 1px 边框，TasksPage 分屏高度按 `100vh-49px` 计算），移动端抽屉导航
 - **Android App**: Capacitor 打包，API/WS 地址通过 `config/server.ts` 动态获取，LoginPage 可展开配置 Server URL
 - **Goal 模式**: `mode="goal"` 任务使用自然语言完成条件（`goal_condition`），每 turn 后由独立评估器（默认 Haiku）判断是否达成。使用 `--resume` 保持同一 session 的连续上下文。评估器通过 `claude -p` 子进程调用，不需要额外 API key
 - **Goal 评估器**: `GoalEvaluator`（`backend/services/goal_evaluator.py`）读取对话日志摘要，发给轻量模型判断条件是否满足。默认模型 `claude-haiku-4-5`，可通过 `goal_evaluator_model` 覆盖

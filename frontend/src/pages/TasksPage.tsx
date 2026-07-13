@@ -489,7 +489,7 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
           <button
             onClick={() => setPage((p) => Math.max(1, p - 1))}
             disabled={page <= 1}
-            className="p-1.5 rounded text-gray-400 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed"
+            className="p-1.5 rounded text-gray-400 hover:text-foreground disabled:opacity-30 disabled:cursor-not-allowed"
           >
             <ChevronLeft size={18} />
           </button>
@@ -500,7 +500,7 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
           <button
             onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
             disabled={page >= totalPages}
-            className="p-1.5 rounded text-gray-400 hover:text-white disabled:opacity-30 disabled:cursor-not-allowed"
+            className="p-1.5 rounded text-gray-400 hover:text-foreground disabled:opacity-30 disabled:cursor-not-allowed"
           >
             <ChevronRight size={18} />
           </button>
@@ -528,7 +528,7 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
       cancelled: 'bg-gray-500',
     };
     return (
-      <div className="flex h-[calc(100vh-64px)] -mt-4 -mx-4">
+      <div className="flex h-[calc(100vh-49px)] -m-4">
         {sidebarOpen && (
           <div className="w-[260px] shrink-0 flex flex-col border-r border-gray-800 bg-gray-900/50">
             <div className="px-3 py-2 border-b border-gray-800 flex items-center justify-between shrink-0">
@@ -612,7 +612,7 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
                 <button
                   onClick={() => setPage((p) => Math.max(1, p - 1))}
                   disabled={page <= 1}
-                  className="p-1 rounded text-gray-400 hover:text-white disabled:opacity-30"
+                  className="p-1 rounded text-gray-400 hover:text-foreground disabled:opacity-30"
                 >
                   <ChevronLeft size={14} />
                 </button>
@@ -620,7 +620,7 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
                 <button
                   onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
                   disabled={page >= totalPages}
-                  className="p-1 rounded text-gray-400 hover:text-white disabled:opacity-30"
+                  className="p-1 rounded text-gray-400 hover:text-foreground disabled:opacity-30"
                 >
                   <ChevronRight size={14} />
                 </button>

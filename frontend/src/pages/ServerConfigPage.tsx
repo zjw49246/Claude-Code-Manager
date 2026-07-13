@@ -63,7 +63,7 @@ export function ServerConfigPage({ onConfigured }: ServerConfigPageProps) {
             type="button"
             onClick={handleTest}
             disabled={testing}
-            className="flex-1 bg-gray-600 hover:bg-gray-500 text-white py-2 rounded text-sm font-medium disabled:opacity-50"
+            className="flex-1 bg-gray-600 hover:bg-gray-500 text-foreground py-2 rounded text-sm font-medium disabled:opacity-50"
           >
             {testing ? 'Testing...' : 'Test Connection'}
           </button>

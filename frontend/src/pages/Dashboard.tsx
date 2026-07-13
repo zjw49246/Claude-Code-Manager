@@ -38,14 +38,14 @@ export function Dashboard() {
       {stats && (
         <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
           {Object.entries(stats.tasks).map(([status, count]) => (
-            <div key={status} className="bg-gray-800 rounded-lg p-3 text-center">
-              <p className="text-2xl font-bold text-foreground">{count}</p>
-              <p className="text-xs text-gray-400 capitalize">{status}</p>
+            <div key={status} className="bg-gray-800 border border-gray-700/60 rounded-xl p-4 text-center shadow-sm">
+              <p className="text-2xl font-semibold tracking-tight text-foreground tabular-nums">{count}</p>
+              <p className="text-xs text-gray-500 capitalize mt-0.5">{status.replace('_', ' ')}</p>
             </div>
           ))}
-          <div className="bg-gray-800 rounded-lg p-3 text-center">
-            <p className="text-2xl font-bold text-green-400">{stats.running_instances}</p>
-            <p className="text-xs text-gray-400">Running</p>
+          <div className="bg-gray-800 border border-gray-700/60 rounded-xl p-4 text-center shadow-sm">
+            <p className="text-2xl font-semibold tracking-tight text-green-400 tabular-nums">{stats.running_instances}</p>
+            <p className="text-xs text-gray-500 mt-0.5">Running</p>
           </div>
         </div>
       )}

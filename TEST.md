@@ -684,6 +684,22 @@ uv run python -m pytest backend/tests/test_api_tasks.py -k broadcasts_status_cha
 2. chat 打开 + 状态过滤 executing 时，让任务完成 → 侧栏状态点应实时变绿（不再永久冻结）
 3. 断开 WS（devtools offline 几秒）错过 status_change → 恢复后 ≤5s 内 chat 页状态应被轮询数据纠正（不再永久陈旧）
 
+## 前端主题系统 v2 测试（2026-07-13）
+
+### 自动化
+- `cd frontend && npx tsc --noEmit` — 类型检查
+- `cd frontend && npm run build` — 构建（字体 woff2 应打进 dist/assets）
+- `cd frontend && npx vitest run` — 组件测试（注意：main 上存在历史失败基线，对比失败数是否增加）
+
+### 手动验证（每个主题 × 桌面/移动端）
+- [ ] 齿轮 → 主题下拉分「现代 / Legacy」两组：深色、浅色、经典深色、海蓝、森林、莓红
+- [ ] 「经典深色」外观 = v1 默认深色（Tailwind 原生 gray/indigo 色板）
+- [ ] 浅色主题：白色卡片 + 浅灰画布；chip 文字（text-X-300/400）可读；无白字白底（text-white 只允许出现在彩色实底上）
+- [ ] 桌面 lg+：左侧固定侧栏导航高亮正确；顶栏 sticky；Tasks 分屏（≥1280px）无纵向溢出（100vh-49px）
+- [ ] 移动端：汉堡 → 抽屉滑出导航，点遮罩关闭；safe-area 顶部不遮挡
+- [ ] 切主题后手机状态栏 / PWA theme-color 跟随（meta 同步）
+- [ ] 刷新后主题保持（localStorage cc_theme）；旧值 ocean/forest/rose 直接沿用，无迁移丢失
+
 ## 开发规范
 
 ### Claude Code 开发时必须遵守：

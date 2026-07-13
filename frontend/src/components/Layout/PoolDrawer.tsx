@@ -225,7 +225,7 @@ function AddAccountModal({ onClose, onAdded }: { onClose: () => void; onAdded: (
           {status === 'running' && <p className="text-xs text-blue-400">登录中… 请等待（可能需要 1-2 分钟）</p>}
           {status === 'failed' && <p className="text-xs text-red-400 break-all">{detail || '登录失败'}</p>}
           <div className="flex justify-end gap-2 pt-1">
-            <button type="button" onClick={onClose} className="px-3 py-1.5 text-xs text-gray-300 hover:text-white">取消</button>
+            <button type="button" onClick={onClose} className="px-3 py-1.5 text-xs text-gray-300 hover:text-foreground">取消</button>
             <button type="submit" disabled={submitting || status === 'running' || !email.trim() || !token.trim()}
               className="px-3 py-1.5 text-xs bg-indigo-600 text-white rounded hover:bg-indigo-500 disabled:opacity-50">
               {status === 'running' ? '登录中…' : '添加'}
