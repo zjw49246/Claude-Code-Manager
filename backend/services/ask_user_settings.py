@@ -95,6 +95,12 @@ def ensure_ask_user_hook(config_dir: str) -> None:
             })
             changed = True
 
+        # Ensure thinking summaries are visible in stream output —
+        # without this, CC returns encrypted thinking only.
+        if not data.get("showThinkingSummaries"):
+            data["showThinkingSummaries"] = True
+            changed = True
+
         # 没变化（disabled 且本来就没有我们的项）→ 不写盘
         if not changed and not enabled:
             return
