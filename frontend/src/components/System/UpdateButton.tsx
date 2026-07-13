@@ -55,6 +55,7 @@ export function UpdateButton() {
   const [oldCommit, setOldCommit] = useState('');
   const [newCommit, setNewCommit] = useState('');
   const [reconnectCount, setReconnectCount] = useState(0);
+  const [reconnectSlow, setReconnectSlow] = useState(false);
   const reconnectTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
 
@@ -116,13 +117,16 @@ export function UpdateButton() {
   const startReconnectPolling = () => {
     if (reconnectTimer.current) clearInterval(reconnectTimer.current);
     let attempts = 0;
-    reconnectTimer.current = setInterval(async () => {
+    setReconnectSlow(false);
+
+    const poll = async () => {
       attempts++;
       setReconnectCount(attempts);
       try {
         await api.health();
         if (reconnectTimer.current) clearInterval(reconnectTimer.current);
         reconnectTimer.current = null;
+        setReconnectSlow(false);
         try {
           const status = await api.getUpdateStatus() as UpdateStatusData;
           if (status.old_commit) setOldCommit(status.old_commit);
@@ -138,14 +142,16 @@ export function UpdateButton() {
           setPhase('completed');
         }
       } catch {
-        if (attempts >= 30) {
+        // After 120s (60 fast polls), switch to slow polling instead of giving up
+        if (attempts === 60) {
+          setReconnectSlow(true);
           if (reconnectTimer.current) clearInterval(reconnectTimer.current);
-          reconnectTimer.current = null;
-          setError('服务重启超时（60秒），请手动检查');
-          setPhase('failed');
+          reconnectTimer.current = setInterval(poll, 5000);
         }
       }
-    }, 2000);
+    };
+
+    reconnectTimer.current = setInterval(poll, 2000);
   };
 
   const handleCheck = async () => {
@@ -205,6 +211,7 @@ export function UpdateButton() {
     setOldCommit('');
     setNewCommit('');
     setReconnectCount(0);
+    setReconnectSlow(false);
   };
 
   const isModalOpen = phase !== 'idle';
@@ -328,7 +335,23 @@ export function UpdateButton() {
                 <div className="flex flex-col items-center gap-3 py-6">
                   <RefreshCw size={24} className="animate-spin text-indigo-400" />
                   <p className="text-sm text-gray-300">服务正在重启...</p>
-                  <p className="text-xs text-gray-500">每 2 秒检测一次（{reconnectCount}/30）</p>
+                  <p className="text-xs text-gray-500">
+                    {reconnectSlow
+                      ? `等待服务恢复（每 5 秒检测，已等待 ${Math.round((60 * 2 + (reconnectCount - 60) * 5))}秒）`
+                      : `每 2 秒检测一次（${reconnectCount}/60）`
+                    }
+                  </p>
+                  {reconnectSlow && (
+                    <>
+                      <p className="text-xs text-yellow-400">重启时间超过预期，可能正在执行数据库迁移...</p>
+                      <button
+                        onClick={() => window.location.reload()}
+                        className="px-3 py-1.5 text-xs rounded bg-gray-800 text-gray-300 hover:bg-gray-700"
+                      >
+                        手动刷新页面
+                      </button>
+                    </>
+                  )}
                 </div>
               )}
 
