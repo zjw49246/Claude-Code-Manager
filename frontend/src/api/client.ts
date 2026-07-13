@@ -76,11 +76,27 @@ export interface Project {
   git_https_token: string | null;
   badge_color: string | null;
   created_at: string;
+  location?: string;  // "local" or worker name
+}
+
+export type ProjectTodoStatus = 'open' | 'done' | 'archived';
+
+export interface ProjectTodo {
+  id: number;
+  project_id: number;
+  title: string;
+  prompt: string;
+  status: ProjectTodoStatus;
+  sort_order: number;
+  created_task_id: number | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface Task {
   id: number;
   worker_id: number | null;
+  created_by: number | null;
   title: string;
   description: string | null;
   status: string;
@@ -409,10 +425,19 @@ export interface PoolUsageStatus {
 }
 
 
+export interface TeamUser {
+  id: number;
+  email: string;
+  name: string;
+  role: string;
+  avatar_url: string;
+}
+
 export interface Worker {
   id: number;
   name: string;
   status: string;
+  owner_user_id: number | null;
   cloud_instance_id: string | null;
   private_ip: string | null;
   public_ip: string | null;
@@ -554,6 +579,7 @@ export const api = {
   listProjectTags: () => request<string[]>('/api/projects/tags'),
   createProject: (data: {
     name: string;
+    worker_id?: number;
     git_url?: string;
     default_branch?: string;
     sort_order?: number;
@@ -907,7 +933,7 @@ export const api = {
   // PR Monitor
   getMonitoredRepos: () =>
     request<MonitoredRepo[]>('/api/pr-monitor/repos'),
-  createMonitoredRepo: (data: { repo_full_name: string; project_id?: number; auto_merge?: boolean; review_model?: string; default_branch?: string; allowed_authors?: string[] }) =>
+  createMonitoredRepo: (data: { repo_full_name: string; project_id?: number; worker_id?: number; auto_merge?: boolean; review_model?: string; default_branch?: string; allowed_authors?: string[] }) =>
     request<MonitoredRepo>('/api/pr-monitor/repos', { method: 'POST', body: JSON.stringify(data) }),
   updateMonitoredRepo: (id: number, data: { project_id?: number; auto_merge?: boolean; review_model?: string; default_branch?: string; allowed_authors?: string[]; enabled?: boolean }) =>
     request<MonitoredRepo>(`/api/pr-monitor/repos/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
@@ -948,6 +974,36 @@ export const api = {
   startWorker: (id: number) => request<Worker>(`/api/workers/${id}/start`, { method: 'POST' }),
   destroyWorker: (id: number) => request<Worker>(`/api/workers/${id}/destroy`, { method: 'POST' }),
   retryWorker: (id: number) => request<Worker>(`/api/workers/${id}/retry`, { method: 'POST' }),
+  renameWorker: (id: number, name: string) =>
+    request<Worker>(`/api/workers/${id}/rename`, { method: 'PATCH', body: JSON.stringify({ name }) }),
+  assignWorker: (id: number, ownerUserId: number | null) =>
+    request<Worker>(`/api/workers/${id}/assign`, { method: 'PUT', body: JSON.stringify({ owner_user_id: ownerUserId }) }),
+
+  // Team CCM
+  getTeamUsers: () => request<TeamUser[]>('/api/team/users'),
+  getTeamGroups: () => request<any[]>('/api/team/groups'),
+  createTeamGroup: (name: string, description?: string) =>
+    request<any>('/api/team/groups', { method: 'POST', body: JSON.stringify({ name, description }) }),
+  updateTeamGroup: (id: number, name: string, description?: string) =>
+    request<any>(`/api/team/groups/${id}`, { method: 'PUT', body: JSON.stringify({ name, description }) }),
+  deleteTeamGroup: (id: number) =>
+    request<{ ok: boolean }>(`/api/team/groups/${id}`, { method: 'DELETE' }),
+  addTeamGroupMember: (groupId: number, userId: number) =>
+    request<{ ok: boolean }>(`/api/team/groups/${groupId}/members`, { method: 'POST', body: JSON.stringify({ user_id: userId }) }),
+  removeTeamGroupMember: (groupId: number, userId: number) =>
+    request<{ ok: boolean }>(`/api/team/groups/${groupId}/members/${userId}`, { method: 'DELETE' }),
+  teamShareProject: (projectId: number, targetType: string, targetId: number) =>
+    request<{ ok: boolean }>(`/api/team/projects/${projectId}/share`, { method: 'POST', body: JSON.stringify({ target_type: targetType, target_id: targetId }) }),
+  teamUnshareProject: (projectId: number, targetType: string, targetId: number) =>
+    request<{ ok: boolean }>(`/api/team/projects/${projectId}/share`, { method: 'DELETE', body: JSON.stringify({ target_type: targetType, target_id: targetId }) }),
+  teamGetProjectShares: (projectId: number) =>
+    request<any[]>(`/api/team/projects/${projectId}/shares`),
+  shareTaskTeam: (taskId: number, targetType: string, targetId: number, permission?: string) =>
+    request<{ ok: boolean }>(`/api/team/tasks/${taskId}/share`, { method: 'POST', body: JSON.stringify({ target_type: targetType, target_id: targetId, permission: permission || 'chat' }) }),
+  unshareTaskTeam: (taskId: number, targetType: string, targetId: number) =>
+    request<{ ok: boolean }>(`/api/team/tasks/${taskId}/share`, { method: 'DELETE', body: JSON.stringify({ target_type: targetType, target_id: targetId }) }),
+  getTaskSharesTeam: (taskId: number) =>
+    request<any[]>(`/api/team/tasks/${taskId}/shares`),
 
   // Pool add account
   poolAddAccount: (data: { email: string; token: string; login_method?: string }) =>
