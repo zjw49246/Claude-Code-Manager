@@ -1369,6 +1369,24 @@ class InstanceManager:
             if rate_limit_event_is_actionable(info):
                 self._pty_rate_limit_seen.add(instance_id)
 
+        # PTY rate-limit detection from assistant text: CC outputs messages like
+        # "You've hit your session limit" as plain assistant text, not as a
+        # rate_limit_event. In PTY mode the process stays alive so
+        # _check_rate_limit_and_rotate (which needs exit_code != 0) never fires.
+        if (
+            event.get("role") == "assistant"
+            and event.get("event_type") in ("message", "result")
+            and not event.get("orphan")
+            and not event.get("autonomous")
+        ):
+            content = event.get("content") or ""
+            if content:
+                from backend.services.claude_pool import is_rate_limited
+                if is_rate_limited(content):
+                    self._pty_rate_limit_seen.add(instance_id)
+                    logger.info("PTY rate limit detected from assistant text (instance %s): %s",
+                                instance_id, content[:120])
+
         # Mark task as unread when assistant produces a message or result
         if task_id and event.get("role") == "assistant" and event["event_type"] in ("message", "result"):
             async with self.db_factory() as db:
