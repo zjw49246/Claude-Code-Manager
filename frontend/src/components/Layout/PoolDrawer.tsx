@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { Plus, RefreshCw, X, Users } from 'lucide-react';
+import { Plus, RefreshCw, X, Users, Settings } from 'lucide-react';
 import { api } from '../../api/client';
 import type { PoolAccountUsage, PoolUsageStatus, PoolUsageWindow } from '../../api/client';
 
@@ -237,6 +237,77 @@ function AddAccountModal({ onClose, onAdded }: { onClose: () => void; onAdded: (
   );
 }
 
+function CcSettingsModal({ onClose }: { onClose: () => void }) {
+  const [text, setText] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null);
+
+  useEffect(() => {
+    api.getCcSettings()
+      .then((r) => setText(JSON.stringify(r.settings, null, 2)))
+      .catch((e) => setText(`// 加载失败: ${e instanceof Error ? e.message : e}`))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const handleSave = async () => {
+    setResult(null);
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      setResult({ ok: false, message: 'JSON 格式错误' });
+      return;
+    }
+    setSaving(true);
+    try {
+      const r = await api.putCcSettings(parsed);
+      setResult({ ok: true, message: `已同步到 ${r.synced} 个账号` });
+    } catch (e) {
+      setResult({ ok: false, message: e instanceof Error ? e.message : '保存失败' });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="absolute inset-0 bg-gray-900/80 z-10 flex items-start justify-center pt-12">
+      <div className="bg-gray-800 rounded-lg shadow-xl w-full max-w-xs flex flex-col max-h-[80%]">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700">
+          <h3 className="text-sm font-semibold text-foreground">CC Settings 模板</h3>
+          <button onClick={onClose} className="text-gray-400 hover:text-foreground"><X size={14} /></button>
+        </div>
+        <div className="flex-1 overflow-hidden p-3 flex flex-col gap-2">
+          <p className="text-[10px] text-gray-500">编辑后保存将同步到所有 Pool 账号的 settings.json（hooks 字段会保留）</p>
+          {loading ? (
+            <div className="text-xs text-gray-500 py-4 text-center">加载中…</div>
+          ) : (
+            <textarea
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              className="flex-1 min-h-[200px] bg-gray-900 text-gray-300 text-[11px] font-mono rounded border border-gray-700 p-2 resize-none focus:outline-none focus:border-indigo-500"
+              spellCheck={false}
+            />
+          )}
+          {result && (
+            <div className={`text-xs ${result.ok ? 'text-green-400' : 'text-red-400'}`}>{result.message}</div>
+          )}
+        </div>
+        <div className="flex justify-end gap-2 px-4 py-3 border-t border-gray-700">
+          <button onClick={onClose} className="px-3 py-1.5 text-xs rounded bg-gray-700 text-gray-300 hover:bg-gray-600">关闭</button>
+          <button
+            onClick={handleSave}
+            disabled={saving || loading}
+            className="px-3 py-1.5 text-xs bg-indigo-600 text-white rounded hover:bg-indigo-500 disabled:opacity-50"
+          >
+            {saving ? '同步中…' : '保存并同步'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function PoolDrawer() {
   const [poolEnabled, setPoolEnabled] = useState(false);
   const [open, setOpen] = useState(false);
@@ -286,6 +357,7 @@ export function PoolDrawer() {
 
   const [relogin, setRelogin] = useState<Record<string, { status: string; message?: string }>>({});
   const [showAdd, setShowAdd] = useState(false);
+  const [showCcSettings, setShowCcSettings] = useState(false);
 
   const handleRelogin = useCallback(async (accountId: string) => {
     setRelogin((m) => ({ ...m, [accountId]: { status: 'running' } }));
@@ -342,6 +414,13 @@ export function PoolDrawer() {
               )}
               <div className="ml-auto flex items-center gap-1">
                 <button
+                  onClick={() => setShowCcSettings(true)}
+                  className="p-1.5 rounded text-gray-400 hover:text-foreground hover:bg-gray-800"
+                  title="CC Settings 模板"
+                >
+                  <Settings size={14} />
+                </button>
+                <button
                   onClick={() => setShowAdd(true)}
                   className="p-1.5 rounded text-gray-400 hover:text-foreground hover:bg-gray-800"
                   title="添加账号"
@@ -366,6 +445,7 @@ export function PoolDrawer() {
             </div>
             <div className="flex-1 overflow-y-auto p-3 space-y-2 relative">
               {showAdd && <AddAccountModal onClose={() => setShowAdd(false)} onAdded={loadUsage} />}
+              {showCcSettings && <CcSettingsModal onClose={() => setShowCcSettings(false)} />}
               {error && <div className="text-xs text-red-400">{error}</div>}
               {loading && !status && <div className="text-xs text-gray-500">加载中…</div>}
               {status?.accounts.map((a) => (
