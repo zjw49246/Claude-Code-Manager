@@ -128,8 +128,12 @@ class InstanceManager:
         if enabled:
             if self._pty_backend is None:
                 try:
-                    from claude_pty.adapters.ccm import CCMBackend
-                    self._pty_backend = CCMBackend(self)
+                    # FullMirrorCCMBackend = CCMBackend + idle-time autonomous
+                    # turn 全量镜像（后台监视器回报进聊天，task 27 事故）
+                    from backend.services.pty_full_mirror import (
+                        FullMirrorCCMBackend,
+                    )
+                    self._pty_backend = FullMirrorCCMBackend(self)
                     # 权限透传：CC 的权限请求经 BridgeHub 转给前端卡片，
                     # 不注册的话 channel server 120s 超时默认 deny
                     self._pty_backend._bridge.on_permission_request(
@@ -1228,6 +1232,27 @@ class InstanceManager:
         session_id = event.pop("session_id", None)
         cost_usd = event.pop("cost_usd", None)
         context_usage = event.pop("context_usage", None)
+
+        # Autonomous-turn user records are the harness's own wake-up inputs,
+        # not fresh user messages. Mirroring them verbatim is the historical
+        # "stale prompt replay" that once forced on_exit to mute the autonomous
+        # callback entirely (claude_pty 412d911)。<task-notification> 压成一行
+        # system_event 说明会话为何自己动了；channel 回显等其余 user 记录在
+        # 发送时已入库过，直接丢弃。
+        if event.get("autonomous") and event.get("role") == "user":
+            content = event.get("content") or ""
+            if "<task-notification>" not in content:
+                return
+            m_tid = re.search(r"<task-id>([^<]*)</task-id>", content)
+            m_status = re.search(r"<status>([^<]*)</status>", content)
+            label = m_tid.group(1) if m_tid else "?"
+            status = f"（{m_status.group(1)}）" if m_status else ""
+            event = {
+                "event_type": "system_event",
+                "role": "system",
+                "content": f"⏰ 后台任务 {label} 回报{status}，会话自主处理中",
+                "autonomous": True,
+            }
 
         # Native sub-agent lifecycle (model-spawned Agent/Monitor, observed by
         # the PTY layer) — register into the generic sub-agent tables so the
