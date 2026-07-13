@@ -78,20 +78,6 @@ export interface Project {
   created_at: string;
 }
 
-export type ProjectTodoStatus = 'open' | 'done' | 'archived';
-
-export interface ProjectTodo {
-  id: number;
-  project_id: number;
-  title: string;
-  prompt: string;
-  status: ProjectTodoStatus;
-  sort_order: number;
-  created_task_id: number | null;
-  created_at: string;
-  updated_at: string;
-}
-
 export interface Task {
   id: number;
   worker_id: number | null;
@@ -968,6 +954,10 @@ export const api = {
     request<{ ok: boolean; status: string; account_id?: string }>('/api/pool/add', { method: 'POST', body: JSON.stringify(data) }),
   poolAddStatus: (email: string) =>
     request<{ status: string; detail?: string }>(`/api/pool/add/${encodeURIComponent(email)}`),
+  getCcSettings: () =>
+    request<{ settings: Record<string, unknown> }>('/api/pool/cc-settings'),
+  putCcSettings: (settings: Record<string, unknown>) =>
+    request<{ ok: boolean; synced: number; settings: Record<string, unknown> }>('/api/pool/cc-settings', { method: 'PUT', body: JSON.stringify({ settings }) }),
 
   // User Skills
   listUserSkills: () => request<any[]>('/api/user-skills'),

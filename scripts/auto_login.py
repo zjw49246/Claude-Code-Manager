@@ -806,22 +806,34 @@ async def perform_login(
             (config_path / f).write_bytes(data)
         return False
 
-    # Write default settings.json if not exists
+    # Merge default settings into settings.json (preserve existing hooks)
     settings_path = config_path / "settings.json"
-    if not settings_path.exists():
-        settings_path.write_text(json.dumps({
-            "permissions": {
-                "defaultMode": "bypassPermissions",
-                "additionalDirectories": ["/home/ubuntu/Claude-Code-Manager"],
-            },
-            "model": "claude-opus-4-6",
-            "effortLevel": "medium",
-            "skipDangerousModePermissionPrompt": True,
-            "hasCompletedOnboarding": True,
-            "theme": "dark",
-            "showThinkingSummaries": True,
-        }, indent=2))
-        logger.info("wrote default settings.json to %s", settings_path)
+    _default_cc_settings = {
+        "permissions": {
+            "defaultMode": "bypassPermissions",
+            "additionalDirectories": ["/home/ubuntu/Claude-Code-Manager"],
+        },
+        "model": "claude-opus-4-6",
+        "effortLevel": "medium",
+        "skipDangerousModePermissionPrompt": True,
+        "hasCompletedOnboarding": True,
+        "theme": "dark",
+        "showThinkingSummaries": True,
+    }
+    existing_settings: dict = {}
+    if settings_path.exists():
+        try:
+            existing_settings = json.loads(settings_path.read_text(encoding="utf-8")) or {}
+        except (json.JSONDecodeError, OSError):
+            existing_settings = {}
+    if not isinstance(existing_settings, dict):
+        existing_settings = {}
+    saved_hooks = existing_settings.get("hooks")
+    merged = {**existing_settings, **_default_cc_settings}
+    if saved_hooks is not None:
+        merged["hooks"] = saved_hooks
+    settings_path.write_text(json.dumps(merged, indent=2))
+    logger.info("merged default settings.json to %s", settings_path)
 
     logger.info("登录成功: %s", email)
     return True

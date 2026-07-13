@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, Float, Integer, JSON, String
+from sqlalchemy import Boolean, Float, Integer, JSON, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.database import Base
@@ -29,3 +29,5 @@ class GlobalSettings(Base):
     # Default skills/plugins selection for new tasks
     default_enabled_plugins: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     default_enabled_user_skills: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # CC settings template (JSON string) synced to all pool account config dirs
+    cc_settings_template: Mapped[str | None] = mapped_column(Text, nullable=True)
