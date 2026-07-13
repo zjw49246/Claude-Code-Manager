@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from collections import Counter
 
 import httpx
 import websockets
@@ -27,6 +28,46 @@ from backend.models.log_entry import LogEntry
 from backend.models.monitor_session import MonitorCheck, MonitorSession
 from backend.models.task import Task
 from backend.models.worker import Worker
+
+_FP_PREFIX = 1000  # chars; compare only a prefix so the chat/history endpoint's
+                   # 20k truncation of tool_input/tool_output can't cause a false
+                   # "missing" (which would re-insert an already-present entry).
+
+
+def _entry_fingerprint(e: dict) -> tuple:
+    """Stable identity for a relayed log entry, comparable between the local DB
+    copy and the remote chat/history payload. Uses only fields that survive the
+    history serialization unchanged, prefix-capped to dodge truncation."""
+    def p(s):
+        return (s or "")[:_FP_PREFIX]
+    return (
+        e.get("event_type") or "",
+        e.get("role") or "",
+        p(e.get("content")),
+        e.get("tool_name") or "",
+        p(e.get("tool_input")),
+        p(e.get("tool_output")),
+        e.get("loop_iteration"),
+    )
+
+
+def _missing_by_fingerprint(local_entries: list[dict], remote_entries: list[dict]) -> list[dict]:
+    """Remote entries not already present locally, matched by fingerprint multiset.
+
+    Order- and race-tolerant: unlike count-based tail slicing
+    (``remote[local_count:]``), a mid-stream gap or a concurrent live-relay insert
+    cannot make an already-present entry be re-inserted — the duplicate-message-
+    on-reconnect bug.
+    """
+    have = Counter(_entry_fingerprint(e) for e in local_entries)
+    missing: list[dict] = []
+    for r in remote_entries:
+        fp = _entry_fingerprint(r)
+        if have.get(fp, 0) > 0:
+            have[fp] -= 1
+        else:
+            missing.append(r)
+    return missing
 
 logger = logging.getLogger(__name__)
 
@@ -399,12 +440,17 @@ class WorkerRelay:
             for tid in task_ids:
                 try:
                     async with self.db_factory() as db:
-                        local_count = (await db.execute(
-                            select(func.count()).select_from(LogEntry).where(
+                        local_rows = (await db.execute(
+                            select(
+                                LogEntry.event_type, LogEntry.role, LogEntry.content,
+                                LogEntry.tool_name, LogEntry.tool_input,
+                                LogEntry.tool_output, LogEntry.loop_iteration,
+                            ).where(
                                 LogEntry.task_id == tid,
                                 LogEntry.event_type != "user_message",
                             )
-                        )).scalar() or 0
+                        )).all()
+                    local_entries = [dict(row._mapping) for row in local_rows]
                     r = await client.get(
                         self._api(worker, f"/api/tasks/{tid}/chat/history?compact=false"),
                         headers=self._headers(worker),
@@ -415,7 +461,11 @@ class WorkerRelay:
                     if isinstance(remote, dict):
                         remote = remote.get("messages", [])
                     remote_non_user = [m for m in remote if m.get("event_type") != "user_message"]
-                    missing = remote_non_user[local_count:]
+                    # Dedup by content fingerprint, NOT by count: count-based tail
+                    # slicing (remote[local_count:]) re-inserts already-present
+                    # entries whenever there is a mid-stream gap or the live relay
+                    # races this backfill → duplicate messages after reconnect.
+                    missing = _missing_by_fingerprint(local_entries, remote_non_user)
                     if missing:
                         async with self.db_factory() as db:
                             for m in missing:

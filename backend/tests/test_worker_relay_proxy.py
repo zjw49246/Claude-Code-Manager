@@ -357,3 +357,60 @@ async def test_ws_token_check():
         assert _ws_token_ok(FakeWS(qp={"token": "wrong"})) is False
     finally:
         settings.auth_token = old
+
+
+# ---------------------------------------------------------------------------
+# Backfill dedup — duplicate-message-on-reconnect regression
+# ---------------------------------------------------------------------------
+
+def _entry(et="message", role="assistant", content=None, tool_name=None,
+           tool_input=None, tool_output=None, loop_iteration=None):
+    return {
+        "event_type": et, "role": role, "content": content,
+        "tool_name": tool_name, "tool_input": tool_input,
+        "tool_output": tool_output, "loop_iteration": loop_iteration,
+    }
+
+
+class TestBackfillDedup:
+    """`_missing_by_fingerprint` must not re-insert already-present entries —
+    the count-based `remote[local_count:]` slicing did exactly that whenever a
+    gap was mid-stream (not tail-only) or the live relay raced the backfill."""
+
+    def test_tail_only_missing(self):
+        from backend.services.worker_relay import _missing_by_fingerprint
+        remote = [_entry(content=str(i)) for i in range(5)]
+        local = remote[:3]
+        missing = _missing_by_fingerprint(local, remote)
+        assert [m["content"] for m in missing] == ["3", "4"]
+
+    def test_mid_stream_gap_does_not_duplicate(self):
+        # local missed entry "2" in the middle but has "3"; count-based slicing
+        # (remote[local_count=3:]) would re-insert "3" AND drop "2".
+        from backend.services.worker_relay import _missing_by_fingerprint
+        remote = [_entry(content=str(i)) for i in range(5)]  # 0,1,2,3,4
+        local = [remote[0], remote[1], remote[3]]            # missing "2"
+        missing = _missing_by_fingerprint(local, remote)
+        assert [m["content"] for m in missing] == ["2", "4"]  # "3" NOT re-inserted
+
+    def test_fully_synced_inserts_nothing(self):
+        from backend.services.worker_relay import _missing_by_fingerprint
+        remote = [_entry(content=str(i)) for i in range(4)]
+        assert _missing_by_fingerprint(list(remote), remote) == []
+
+    def test_truncated_tool_output_still_matches(self):
+        # remote tool_output is truncated by the history endpoint; the local copy
+        # is full. Prefix-capped fingerprint must still treat them as identical.
+        from backend.services.worker_relay import _missing_by_fingerprint
+        full = "x" * 50_000
+        truncated = ("x" * 20_000) + "\n…(truncated)"
+        local = [_entry(et="tool_result", tool_name="bash", tool_output=full)]
+        remote = [_entry(et="tool_result", tool_name="bash", tool_output=truncated)]
+        assert _missing_by_fingerprint(local, remote) == []
+
+    def test_duplicate_fingerprints_preserve_multiplicity(self):
+        from backend.services.worker_relay import _missing_by_fingerprint
+        remote = [_entry(content="same") for _ in range(3)]
+        local = [_entry(content="same")]  # only one present
+        missing = _missing_by_fingerprint(local, remote)
+        assert len(missing) == 2  # insert the two still-missing copies
