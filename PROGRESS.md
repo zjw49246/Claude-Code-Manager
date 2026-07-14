@@ -490,3 +490,10 @@
 - **审查流程**: 2 个子 Agent（后端/前端视角）审 diff，抓到 1 个 major（在途旧快照击穿 WS 覆盖 → autoDequeue 误触发，本次修复自身引入的新窗口）+ 多个 minor（worker 代理路径漏广播、pr_monitor 隐式 commit 依赖、搜索结果不吃 patch），全部落地。
 - **测试**: 复活块排除 ×3、cancel 广播 ×1 回归测试；全量 967 passed，失败集与 main 基线完全一致（7 个存量失败非本次引入）；tsc 通过。
 - **预防**: ①改 Task.status 必须走「commit 后广播」约定（用 `task_events.broadcast_status_change`），新增状态写入点时先问"前端怎么知道"；②前端"WS 实时覆盖 + 轮询兜底"双通道时，覆盖必须能被更新鲜的兜底数据击穿（且要防在途旧快照反向击穿——时间戳守卫）；③事件驱动的状态翻转（如复活块）必须区分前台活事件与 orphan/autonomous 回放，参考 #729；④广播一律放 commit 之后。
+
+### 2026-07-13 — 后台监视器回报在聊天里不可见：autonomous turn 被 subagent-only 回调丢弃（task 27）
+
+- **问题**：agent 挂 `Bash run_in_background` 监视器后前台 turn 结束；监视器正点回调、session 自主醒来写出完整报告，但用户在聊天里看不到任何东西（用户以为"后台任务不能回调激活 session"——实际回调链路全通，是产出被丢了）。根因：adapter 在 chat turn 结束时把 `on_autonomous_event` 降级成 `_subagent_only_callback`（claude_pty 412d911，防重放旧 prompt），自主 turn 的 assistant 事件全部被丢弃；idle watcher 消费后 reader offset 越过，orphan 回填也捞不回
+- **解决**：`FullMirrorCCMBackend`（backend/services/pty_full_mirror.py）在 `super().on_exit()` 降级后按回调函数名识别并原位换回全量转发 `_process_event`；`_process_event` 增加 autonomous user-role 消毒（`<task-notification>` 压成一行 system_event，channel 回显丢弃），承接历史上降级要防的重放问题。10 例新测试（test_autonomous_mirror.py）
+- **以后如何避免**：镜像/过滤类回调要区分"结构事件"和"内容事件"——砍内容前先想清楚谁是它的最终读者；"防 A 顺带丢 B"的粗粒度降级要在修好 A 的防线后回收
+- **commit**: 6dd3547（PR zjw49246/Claude-Code-Manager#31；因 push 权限收回改走 fork PR）

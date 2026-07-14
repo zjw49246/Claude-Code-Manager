@@ -169,6 +169,21 @@ cd frontend && npx tsc --noEmit
 | `test_dispatcher_status/start/stop` | 调度器控制 |
 | `test_ralph_start/stop/status` | Ralph Loop 控制 |
 
+#### `test_autonomous_mirror.py` — PTY autonomous turn 全量镜像
+
+| 测试 | 验证内容 |
+|------|---------|
+| `test_task_notification_becomes_system_event` | autonomous user `<task-notification>` 压成一行 system_event 入库+广播 |
+| `test_channel_echo_dropped` | autonomous user channel 回显直接丢弃（防重放旧 prompt） |
+| `test_non_autonomous_user_event_unchanged` | 非 autonomous user 事件维持原行为（orphan 回填不受影响） |
+| `test_autonomous_assistant_message_logged_and_unread` | 自主 turn 的 assistant 产出入库 + has_unread + task 频道广播 |
+| `test_restore_replaces_subagent_only` | on_exit 后降级回调被换回全量转发 |
+| `test_mirror_forwards_to_process_event` | 镜像回调转发 event.to_dict() 给 _process_event |
+| `test_mirror_swallows_process_event_errors` | 镜像回调异常不外抛（不打断 idle watcher） |
+| `test_restore_skips_fresh_binding` | 轮换 relaunch 的新绑定 _on_autonomous 不被覆盖 |
+| `test_restore_skips_none_session` | session 缺失时安全跳过 |
+| `test_init_wires_full_mirror_backend` | use_pty_mode 开启时 IM 构造即接线 FullMirrorCCMBackend |
+
 #### `test_native_sub_agents.py` — 原生子 Agent 接入（通用 sub_agent 表）
 
 | 测试 | 验证内容 |
