@@ -34,7 +34,7 @@ describe('theme config', () => {
     expect(feishu).toBeDefined();
     expect(feishu!.group).toBe('modern');
     expect(feishu!.scheme).toBe('light');
-    expect(feishu!.themeColor).toBe('#f2f3f5');
+    expect(feishu!.themeColor).toBe('#eceef1');
   });
 
   it('主题 value 无重复', () => {
@@ -48,7 +48,7 @@ describe('theme config', () => {
     expect(document.documentElement.dataset.theme).toBe('feishu');
     expect(
       document.querySelector('meta[name="theme-color"]')!.getAttribute('content'),
-    ).toBe('#f2f3f5');
+    ).toBe('#eceef1');
   });
 
   it('getTheme 对无效存储值回退到 dark', () => {
@@ -89,11 +89,12 @@ describe('index.css 主题变量覆盖完整性', () => {
     }
   });
 
-  it('飞书主题使用官方品牌蓝与中性色 token', () => {
+  it('飞书主题使用官方品牌蓝与中性色 token（截图实证）', () => {
     const block = themeBlock('feishu');
-    expect(block).toContain('--color-indigo-600: #336df4'); // B500 主色
+    expect(block).toContain('--color-indigo-600: #3370ff'); // 经典飞书蓝 B500（App 截图取色 #316efa 实证）
+    expect(block).toContain('--color-indigo-500: #245bdb'); // B600 hover 向深走
     expect(block).toContain('--color-gray-100: #1f2329'); // N900 主文字
     expect(block).toContain('--color-gray-800: #ffffff'); // 卡片纯白
-    expect(block).toContain('--color-gray-900: #f5f6f7'); // N50 画布
+    expect(block).toContain('--color-gray-950: #eceef1'); // 侧栏壳 = 飞书 rail 灰（截图取色）
   });
 });

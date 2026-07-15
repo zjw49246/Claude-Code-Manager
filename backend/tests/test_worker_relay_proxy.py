@@ -229,8 +229,11 @@ async def test_dispatch_forward_failure_marks_failed(db_factory, session_factory
     disp._running_tasks = {}
 
     await disp._dispatch_worker_tasks()
-    for _ in range(10):
-        await asyncio.sleep(0)
+    # _safe_forward_to_worker 带 3 次指数退避重试（1s+2s），直接 await 转发
+    # 任务跑完全部重试（done_callback 会 pop，所以先取引用）
+    fwd = disp._running_tasks.get(f"worker-{t.id}")
+    assert fwd is not None
+    await fwd
 
     async with session_factory() as db:
         task = await db.get(Task, t.id)

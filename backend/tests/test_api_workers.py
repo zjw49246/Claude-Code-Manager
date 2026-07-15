@@ -92,7 +92,8 @@ async def test_create_worker_auto_name_and_background_task(client, fake_provisio
     await asyncio.sleep(0)  # 让 create_task 跑起来
     fake_provisioner.create_worker.assert_called_once()
     kwargs = fake_provisioner.create_worker.call_args.kwargs
-    assert kwargs["accounts"] == [{"email": "a@x.com", "token": "tok123"}]
+    # login_method 为可选字段（"" = 按邮箱后缀自动识别），schema 会补默认值
+    assert kwargs["accounts"] == [{"email": "a@x.com", "token": "tok123", "login_method": ""}]
 
 
 async def test_stop_requires_ready(client, session_factory, fake_provisioner):

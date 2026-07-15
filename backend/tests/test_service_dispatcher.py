@@ -19,6 +19,10 @@ def _make_dispatcher(db_factory):
     instance_manager.transient_error_seen = MagicMock(return_value=False)
     instance_manager.get_last_stderr = MagicMock(return_value="")
     instance_manager.get_recent_log_contents = AsyncMock(return_value=[])
+    # PTY proactive pool switch path (dispatcher._process_task_lifecycle)
+    instance_manager.pty_rate_limit_seen = MagicMock(return_value=False)
+    instance_manager._try_proactive_pool_switch = AsyncMock()
+    instance_manager._pty_rate_limit_seen = set()
 
     broadcaster = MagicMock()
     broadcaster.broadcast = AsyncMock()

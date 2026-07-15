@@ -96,7 +96,8 @@ describe('LoopChatView', () => {
       const task = makeTask();
       render(<LoopChatView task={task} onBack={onBack} />);
       await waitFor(() => {
-        expect(api.getTaskChatHistory).toHaveBeenCalledWith(task.id);
+        // limit=0 表示不限量拉全量历史（compact=true, beforeId=0, touch=true）
+        expect(api.getTaskChatHistory).toHaveBeenCalledWith(task.id, true, 0, 0, true);
       });
     });
   });

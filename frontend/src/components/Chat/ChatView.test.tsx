@@ -16,6 +16,19 @@ vi.mock('../../api/client', () => ({
     getRuntimeSettings: vi.fn().mockResolvedValue({ use_pty_mode: false, pty_available: false }),
     config: vi.fn().mockResolvedValue({ model_options: ['claude-opus-4-6'], codex_model_options: [] }),
     injectTaskMessage: vi.fn().mockResolvedValue({ ok: true, injected: true }),
+    getAskUserPending: vi.fn().mockResolvedValue({ pending: [] }),
+    listQuickPhrases: vi.fn().mockResolvedValue([]),
+    createQuickPhrase: vi.fn().mockResolvedValue({}),
+    updateQuickPhrase: vi.fn().mockResolvedValue({}),
+    deleteQuickPhrase: vi.fn().mockResolvedValue({}),
+    getMessageDetail: vi.fn().mockResolvedValue({}),
+    getMonitorChecks: vi.fn().mockResolvedValue([]),
+    deleteMonitorSession: vi.fn().mockResolvedValue({}),
+    resolvePermission: vi.fn().mockResolvedValue({}),
+    submitAskUser: vi.fn().mockResolvedValue({}),
+    starTask: vi.fn().mockResolvedValue({}),
+    distillTask: vi.fn().mockResolvedValue({}),
+    saveDistilledSkill: vi.fn().mockResolvedValue({}),
   },
 }));
 
@@ -325,7 +338,7 @@ describe('ChatView', () => {
       return msgs;
     }
 
-    it('does not show navigation buttons when fewer than 2 user messages', async () => {
+    it('shows navigation buttons even with fewer than 2 user messages (always visible since e049d57)', async () => {
       const msgs = makeChatMessages(0);
       (api.getTaskChatHistory as ReturnType<typeof vi.fn>).mockResolvedValue(msgs);
       const task = makeTask({ description: 'Only one user msg' });
@@ -335,8 +348,9 @@ describe('ChatView', () => {
         expect(api.getTaskChatHistory).toHaveBeenCalled();
       });
 
-      expect(screen.queryByTitle('Previous user message')).not.toBeInTheDocument();
-      expect(screen.queryByTitle('Next user message')).not.toBeInTheDocument();
+      // e049d57 起导航按钮常驻工具栏右侧（不再按消息数量显隐）
+      expect(screen.getByTitle('Previous user message')).toBeInTheDocument();
+      expect(screen.getByTitle('Next user message')).toBeInTheDocument();
     });
 
     it('shows navigation buttons when 2+ user messages exist (description + 1 chat msg)', async () => {

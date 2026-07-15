@@ -23,6 +23,17 @@ vi.mock('../../api/client', () => ({
       codex_effort_options: ['low', 'medium', 'high', 'xhigh'],
     }),
     createTask: vi.fn().mockResolvedValue({ id: 1 }),
+    createProject: vi.fn().mockResolvedValue({ id: 2 }),
+    listWorkers: vi.fn().mockResolvedValue([]),
+    listSkillsCached: vi.fn().mockResolvedValue([
+      { key: 'monitor', label: 'Monitor', description: 'Background monitoring sub-agents' },
+    ]),
+    listUserSkillsCached: vi.fn().mockResolvedValue([]),
+    getDefaultSkills: vi.fn().mockResolvedValue({
+      default_enabled_plugins: null,
+      default_enabled_user_skills: null,
+    }),
+    setDefaultSkills: vi.fn().mockResolvedValue({}),
   },
 }));
 

@@ -142,6 +142,7 @@ async def test_spawn_progress_done_lifecycle(im, db_session):
     assert event_types == [
         "sub_agent_session_created",
         "sub_agent_report",
+        "system_event",  # subagent_progress 同时写入聊天 system_event
         "sub_agent_session_status",
     ]
 

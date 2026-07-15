@@ -139,28 +139,31 @@ html[data-theme='light'] {
 
 /* ============================== 飞书（现代浅色） ============================== */
 /*
- * 配色取自飞书 Universe Design 官方色板（从 open.feishu.cn 线上 CSS 提取）：
- * - 中性色 N 系：主文字 N900 #1f2329 / 次要 N600 #646a73 / 占位 N500 #8f959e /
- *   禁用 N400 #bbbfc4 / 边框 N300 #dee0e3 / 填充 N100 #f2f3f5 / 画布 N50 #f5f6f7
- * - 品牌蓝 B 系：主色 B500 #336df4（--primary-pri-500）/ hover B600 #1456f0 /
- *   pressed B700 #0442d2 / 选中浅底 B50 #f0f4ff
- * - 交互遵循飞书习惯：hover / pressed 均为「加深」（500/700 取 B600/B700）
+ * 配色依据两份实证（2026-07 调研）：
+ * ① 飞书 App 真实截图像素取色（App Store iPad 官方截图，v7.72）：
+ *    左导航 rail #ecedef~#f0f0f2 / 主区纯白 / 选中 pill ≈B100 + 蓝字 /
+ *    rail 选中 icon #316efa ≈ 经典飞书蓝 #3370FF / 画布缝隙 #f5f6f8
+ * ② Universe Design 官方 token（open.feishu.cn 线上 CSS）：
+ *    N 系中性色（主文字 N900 #1f2329 / 次要 N600 / 占位 N500 / 禁用 N400）
+ *    经典 B 系（B500 #3370FF / B600 #245BDB / B700 #1C4CBA / B100 #E1EAFF）
+ * 风格要点：低边框（层次靠留白与浅灰面，gray-700 刻意取 #e8eaed 弱化线框感）、
+ * 白卡片 + 浅灰壳、hover/pressed 向深走（500/700 取 B600/B700）
  */
 html[data-theme='feishu'] {
-  background-color: #f2f3f5;
+  background-color: #eceef1;
   color-scheme: light;
 
   --color-foreground: #1f2329;
   --scrollbar-thumb: oklch(0% 0 0 / 0.14);
   --scrollbar-thumb-hover: oklch(0% 0 0 / 0.26);
-  --ring: #336df4;
+  --ring: #3370ff;
 
-  /* 中性色反转：950 侧栏壳(N100) < 900 画布(N50) < 800 卡片(纯白) */
-  --color-gray-950: #f2f3f5;
+  /* 中性色反转：950 侧栏壳(飞书 rail 灰) < 900 画布 < 800 卡片(纯白) */
+  --color-gray-950: #eceef1;
   --color-gray-900: #f5f6f7;
   --color-gray-800: #ffffff;
   --color-gray-750: #f2f3f5;
-  --color-gray-700: #dee0e3;
+  --color-gray-700: #e8eaed;
   --color-gray-600: #bbbfc4;
   --color-gray-500: #8f959e;
   --color-gray-400: #646a73;
@@ -169,16 +172,16 @@ html[data-theme='feishu'] {
   --color-gray-100: #1f2329;
   --color-gray-50: #0f1114;
 
-  /* 品牌色：飞书蓝 B 系（900/950 变浅作选中底色；hover 向深走） */
+  /* 品牌色：经典飞书蓝（900/950 变浅作选中底色；hover 向深走） */
   --color-indigo-950: #f0f4ff;
-  --color-indigo-900: #e0e9ff;
-  --color-indigo-800: #002f9e;
-  --color-indigo-700: #0442d2;
-  --color-indigo-600: #336df4;
-  --color-indigo-500: #1456f0;
-  --color-indigo-400: #1456f0;
-  --color-indigo-300: #0442d2;
-  --color-indigo-100: #e0e9ff;
+  --color-indigo-900: #e1eaff;
+  --color-indigo-800: #133c9a;
+  --color-indigo-700: #1c4cba;
+  --color-indigo-600: #3370ff;
+  --color-indigo-500: #245bdb;
+  --color-indigo-400: #245bdb;
+  --color-indigo-300: #1c4cba;
+  --color-indigo-100: #e1eaff;
 
   /* accent 色 300/400 档深色化（浅底可读）：优先用飞书功能色
      （红 R / 橙 O / 绿 G / 蓝 B / 紫 P），其余沿用现代浅色的取值 */
@@ -200,8 +203,8 @@ html[data-theme='feishu'] {
   --color-cyan-300: oklch(52% 0.105 223.128);
   --color-sky-400: oklch(58.8% 0.158 241.966);
   --color-sky-300: oklch(50% 0.134 242.749);
-  --color-blue-400: #1456f0;
-  --color-blue-300: #0442d2;
+  --color-blue-400: #245bdb;
+  --color-blue-300: #1c4cba;
   --color-purple-400: #8d55ed;
   --color-purple-300: #7a35f0;
   --color-rose-400: #cc398c;

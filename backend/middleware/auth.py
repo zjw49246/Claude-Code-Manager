@@ -29,6 +29,13 @@ class TokenAuthMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         if not settings.auth_token:
+            # 无鉴权模式（AUTH_TOKEN 为空）：历史语义是完全开放。RBAC 守卫
+            # （require_task_access / require_admin）需要请求身份，若不设置则
+            # user_id=None + role=member → 全线 403，无鉴权部署整个不可用。
+            # 故此模式下所有请求视为 super_admin（与「无鉴权 = 全开放」一致）。
+            request.state.user_id = None
+            request.state.user_role = "super_admin"
+            request.state.auth_type = "none"
             return await call_next(request)
 
         path = request.url.path

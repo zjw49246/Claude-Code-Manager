@@ -8,6 +8,12 @@ import pytest
 from backend.api.chat import get_chat_history
 
 
+def _fake_request():
+    """require_task_access 需要请求身份；super_admin 直接短路，不触发 DB 查询。"""
+    from types import SimpleNamespace
+    return SimpleNamespace(state=SimpleNamespace(user_id=1, user_role="super_admin"))
+
+
 def _make_log_row(timestamp: datetime | None = None, **kwargs):
     defaults = dict(
         id=1, role="assistant", event_type="message", content="hello",
@@ -41,7 +47,7 @@ async def test_chat_history_timestamp_has_z_suffix():
     mock_result.scalar.return_value = None  # 访问置顶的组内 max-key 子查询
     mock_db.execute.return_value = mock_result
 
-    messages = await get_chat_history(task_id=1, limit=0, compact=True, db=mock_db)
+    messages = await get_chat_history(task_id=1, request=_fake_request(), limit=0, compact=True, db=mock_db)
 
     assert len(messages) == 1
     ts = messages[0]["timestamp"]
@@ -78,7 +84,7 @@ async def test_chat_history_null_timestamp():
     mock_result.scalar.return_value = None  # 访问置顶的组内 max-key 子查询
     mock_db.execute.return_value = mock_result
 
-    messages = await get_chat_history(task_id=1, limit=0, compact=True, db=mock_db)
+    messages = await get_chat_history(task_id=1, request=_fake_request(), limit=0, compact=True, db=mock_db)
 
     assert len(messages) == 1
     assert messages[0]["timestamp"] is None

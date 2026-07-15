@@ -35,6 +35,7 @@ async def test_tops_up_idle_to_min(dispatcher, db_factory):
     """4 idle + 2 busy → add 6 so idle count reaches 10."""
     await _seed(db_factory, ["idle"] * 4 + ["running"] * 2)
     with patch("backend.services.dispatcher.settings") as s:
+        s.max_concurrent_instances = 0  # 0 = 不设并发硬上限
         s.min_idle_instances = 10
         await dispatcher._ensure_min_idle_instances()
 
@@ -47,6 +48,7 @@ async def test_tops_up_idle_to_min(dispatcher, db_factory):
 async def test_no_op_when_enough_idle(dispatcher, db_factory):
     await _seed(db_factory, ["idle"] * 10)
     with patch("backend.services.dispatcher.settings") as s:
+        s.max_concurrent_instances = 0  # 0 = 不设并发硬上限
         s.min_idle_instances = 10
         await dispatcher._ensure_min_idle_instances()
     assert len(await _all_instances(db_factory)) == 10
@@ -56,6 +58,7 @@ async def test_no_op_when_enough_idle(dispatcher, db_factory):
 async def test_disabled_when_zero(dispatcher, db_factory):
     await _seed(db_factory, ["idle"])
     with patch("backend.services.dispatcher.settings") as s:
+        s.max_concurrent_instances = 0  # 0 = 不设并发硬上限
         s.min_idle_instances = 0
         await dispatcher._ensure_min_idle_instances()
     assert len(await _all_instances(db_factory)) == 1
@@ -70,6 +73,7 @@ async def test_names_continue_from_highest_suffix(dispatcher, db_factory):
         await db.commit()
 
     with patch("backend.services.dispatcher.settings") as s:
+        s.max_concurrent_instances = 0  # 0 = 不设并发硬上限
         s.min_idle_instances = 2
         await dispatcher._ensure_min_idle_instances()
 
@@ -82,6 +86,7 @@ async def test_names_continue_from_highest_suffix(dispatcher, db_factory):
 async def test_idempotent_across_polls(dispatcher, db_factory):
     """Repeated polls (dispatch loop) must not keep adding instances."""
     with patch("backend.services.dispatcher.settings") as s:
+        s.max_concurrent_instances = 0  # 0 = 不设并发硬上限
         s.min_idle_instances = 10
         await dispatcher._ensure_min_idle_instances()
         await dispatcher._ensure_min_idle_instances()
