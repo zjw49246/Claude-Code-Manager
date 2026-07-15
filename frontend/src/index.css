@@ -1,16 +1,173 @@
 @import "tailwindcss";
+@import "@fontsource-variable/inter";
+@import "@fontsource-variable/jetbrains-mono";
+
+/*
+ * 主题系统（v2）
+ * ----------------------------------------------------------------------
+ * 机制：组件统一使用 Tailwind 的 gray-*（中性色）与 indigo-*（品牌色）
+ * 类名；每个主题通过覆盖对应的 --color-* CSS 变量整体换肤。
+ *
+ * - @theme 里的值 = 默认主题「深色 (dark)」：Multica 风格的 zinc 色相
+ *   中性色 + 蓝色品牌色（oklch 色彩空间）。
+ * - html[data-theme='light']：现代浅色。中性色反转（950 最浅），同时把
+ *   各 accent 色的 300/400 档反转为深色调，保证浅底上的文字对比度。
+ * - html[data-theme='legacy']：v1 的默认深色，完整还原 Tailwind 原生
+ *   gray/indigo 色板（升级前的外观）。
+ * - ocean / forest / rose：v1 的三套彩色深色主题，原样保留（legacy 组）。
+ */
 
 @theme {
-  --color-foreground: #ffffff;
+  --font-sans: 'Inter Variable', ui-sans-serif, system-ui, -apple-system,
+    'Segoe UI', Roboto, 'Helvetica Neue', 'PingFang SC', 'Noto Sans SC',
+    'Microsoft YaHei', sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji';
+  --font-mono: 'JetBrains Mono Variable', ui-monospace, SFMono-Regular, Menlo,
+    Consolas, 'Liberation Mono', monospace;
+
+  /* 圆角整体上调一档，更柔和（Multica: --radius .625rem） */
+  --radius-sm: 0.3125rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.625rem;
+  --radius-xl: 0.875rem;
+  --radius-2xl: 1.125rem;
+
+  --color-foreground: oklch(98.5% 0 0);
+
+  /* 现代深色中性色（zinc 色相；层次：950 侧栏壳 < 900 画布 < 800 卡片） */
+  --color-gray-950: oklch(16% 0.005 285.8);
+  --color-gray-900: oklch(19.5% 0.006 285.9);
+  --color-gray-800: oklch(23.5% 0.007 285.9);
+  --color-gray-750: oklch(26% 0.007 286);
+  --color-gray-700: oklch(28.5% 0.007 286);
+  --color-gray-600: oklch(37% 0.012 286);
+  --color-gray-500: oklch(55.2% 0.016 285.9);
+  --color-gray-400: oklch(71% 0.015 286);
+  --color-gray-300: oklch(86% 0.008 286);
+  --color-gray-200: oklch(93% 0.004 286);
+  --color-gray-100: oklch(96.5% 0.001 286);
+  --color-gray-50: oklch(98.5% 0 0);
+
+  /* 品牌色：indigo → Multica 蓝（hue 255） */
+  --color-indigo-950: oklch(25% 0.06 255);
+  --color-indigo-900: oklch(32% 0.09 255);
+  --color-indigo-800: oklch(42% 0.14 255);
+  --color-indigo-700: oklch(49% 0.17 255);
+  --color-indigo-600: oklch(55% 0.18 255);
+  --color-indigo-500: oklch(62% 0.17 255);
+  --color-indigo-400: oklch(70% 0.14 255);
+  --color-indigo-300: oklch(78% 0.1 255);
+}
+
+/* 非 @theme 的运行时 token（滚动条 / 焦点环） */
+:root {
+  --scrollbar-thumb: oklch(100% 0 0 / 0.14);
+  --scrollbar-thumb-hover: oklch(100% 0 0 / 0.24);
+  --ring: oklch(62% 0.17 255);
 }
 
 html {
-  background-color: #030712;
+  background-color: oklch(16% 0.005 285.8);
+  color-scheme: dark;
   touch-action: manipulation;
   overflow-x: clip;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
 }
 
+/* ============================== 浅色（现代） ============================== */
+html[data-theme='light'] {
+  background-color: oklch(95% 0.002 286);
+  color-scheme: light;
 
+  --color-foreground: oklch(14.1% 0.005 285.8);
+  --scrollbar-thumb: oklch(0% 0 0 / 0.14);
+  --scrollbar-thumb-hover: oklch(0% 0 0 / 0.26);
+  --ring: oklch(52% 0.18 255);
+
+  /* 中性色反转：950 侧栏壳(最深灰) < 900 画布 < 800 卡片(纯白) */
+  --color-gray-950: oklch(95% 0.002 286);
+  --color-gray-900: oklch(96.8% 0.001 286);
+  --color-gray-800: oklch(100% 0 0);
+  --color-gray-750: oklch(96.5% 0.002 286);
+  --color-gray-700: oklch(93% 0.003 286);
+  --color-gray-600: oklch(70% 0.012 286);
+  --color-gray-500: oklch(55.2% 0.016 285.9);
+  --color-gray-400: oklch(44% 0.015 286);
+  --color-gray-300: oklch(30% 0.008 286);
+  --color-gray-200: oklch(23% 0.006 286);
+  --color-gray-100: oklch(18% 0.005 286);
+  --color-gray-50: oklch(14.1% 0.005 285.8);
+
+  /* 品牌色（浅底加深，保证白字/深字对比度；900/950 变浅作选中底色） */
+  --color-indigo-950: oklch(93% 0.03 255);
+  --color-indigo-900: oklch(88% 0.05 255);
+  --color-indigo-800: oklch(38% 0.14 255);
+  --color-indigo-700: oklch(42% 0.17 255);
+  --color-indigo-600: oklch(48% 0.19 255);
+  --color-indigo-500: oklch(52% 0.18 255);
+  --color-indigo-400: oklch(50% 0.17 255);
+  --color-indigo-300: oklch(46% 0.16 255);
+
+  /* accent 色 300/400 档反转为深色调（chip 文字 text-X-300/400 在浅色
+     tint 底上要可读）。取值 ≈ Tailwind 原生 700/600 档。 */
+  --color-red-400: oklch(57.7% 0.245 27.325);
+  --color-red-300: oklch(50.5% 0.213 27.518);
+  --color-orange-400: oklch(64.6% 0.222 41.116);
+  --color-orange-300: oklch(55.3% 0.195 38.402);
+  --color-amber-400: oklch(66.6% 0.179 58.318);
+  --color-amber-300: oklch(55.5% 0.163 48.998);
+  --color-yellow-400: oklch(68.1% 0.162 75.834);
+  --color-yellow-300: oklch(55.4% 0.135 66.442);
+  --color-green-400: oklch(62.7% 0.194 149.214);
+  --color-green-300: oklch(52.7% 0.154 150.069);
+  --color-emerald-400: oklch(59.6% 0.145 163.225);
+  --color-emerald-300: oklch(50.8% 0.118 165.612);
+  --color-teal-400: oklch(60% 0.118 184.704);
+  --color-teal-300: oklch(51.1% 0.096 186.391);
+  --color-cyan-400: oklch(60.9% 0.126 221.723);
+  --color-cyan-300: oklch(52% 0.105 223.128);
+  --color-sky-400: oklch(58.8% 0.158 241.966);
+  --color-sky-300: oklch(50% 0.134 242.749);
+  --color-blue-400: oklch(54.6% 0.245 262.881);
+  --color-blue-300: oklch(48.8% 0.243 264.376);
+  --color-purple-400: oklch(55.8% 0.288 302.321);
+  --color-purple-300: oklch(49.6% 0.265 301.924);
+  --color-rose-400: oklch(58.6% 0.253 17.585);
+  --color-rose-300: oklch(51.4% 0.222 16.935);
+}
+
+/* ========================== 经典深色（Legacy v1） ========================== */
+/* 完整还原升级前的默认外观：Tailwind 原生 gray / indigo 色板 */
+html[data-theme='legacy'] {
+  background-color: #030712;
+
+  --color-foreground: #ffffff;
+
+  --color-gray-950: oklch(13% 0.028 261.692);
+  --color-gray-900: oklch(21% 0.034 264.665);
+  --color-gray-800: oklch(27.8% 0.033 256.848);
+  --color-gray-750: oklch(32.5% 0.033 258);
+  --color-gray-700: oklch(37.3% 0.034 259.733);
+  --color-gray-600: oklch(44.6% 0.03 256.802);
+  --color-gray-500: oklch(55.1% 0.027 264.364);
+  --color-gray-400: oklch(70.7% 0.022 261.325);
+  --color-gray-300: oklch(87.2% 0.01 258.338);
+  --color-gray-200: oklch(92.8% 0.006 264.531);
+  --color-gray-100: oklch(96.7% 0.003 264.542);
+  --color-gray-50: oklch(98.5% 0.002 247.839);
+
+  --color-indigo-950: oklch(25.7% 0.09 281.288);
+  --color-indigo-900: oklch(35.9% 0.144 278.697);
+  --color-indigo-800: oklch(39.8% 0.195 277.366);
+  --color-indigo-700: oklch(45.7% 0.24 277.023);
+  --color-indigo-600: oklch(51.1% 0.262 276.966);
+  --color-indigo-500: oklch(58.5% 0.233 277.117);
+  --color-indigo-400: oklch(67.3% 0.182 276.935);
+  --color-indigo-300: oklch(78.5% 0.115 274.713);
+}
+
+/* ============================ 海蓝（Legacy） ============================ */
 html[data-theme='ocean'] {
   background-color: #06131f;
 
@@ -19,6 +176,7 @@ html[data-theme='ocean'] {
   --color-gray-950: #06131f;
   --color-gray-900: #0b1f30;
   --color-gray-800: #123047;
+  --color-gray-750: #17394f;
   --color-gray-700: #1c4562;
   --color-gray-600: #2f5f7c;
   --color-gray-500: #5f8298;
@@ -32,6 +190,8 @@ html[data-theme='ocean'] {
   --color-blue-400: #38bdf8;
   --color-blue-300: #7dd3fc;
 
+  --color-indigo-900: #164e63;
+  --color-indigo-700: #0e7490;
   --color-indigo-600: #0891b2;
   --color-indigo-500: #06b6d4;
   --color-indigo-400: #22d3ee;
@@ -50,6 +210,7 @@ html[data-theme='ocean'] {
   --color-emerald-300: #6ee7b7;
 }
 
+/* ============================ 森林（Legacy） ============================ */
 html[data-theme='forest'] {
   background-color: #07130d;
 
@@ -58,6 +219,7 @@ html[data-theme='forest'] {
   --color-gray-950: #07130d;
   --color-gray-900: #102015;
   --color-gray-800: #1a3221;
+  --color-gray-750: #213c28;
   --color-gray-700: #29472f;
   --color-gray-600: #3f6046;
   --color-gray-500: #6d846d;
@@ -71,6 +233,8 @@ html[data-theme='forest'] {
   --color-blue-400: #60a5fa;
   --color-blue-300: #93c5fd;
 
+  --color-indigo-900: #14532d;
+  --color-indigo-700: #166534;
   --color-indigo-600: #15803d;
   --color-indigo-500: #16a34a;
   --color-indigo-400: #4ade80;
@@ -89,6 +253,7 @@ html[data-theme='forest'] {
   --color-emerald-300: #86efac;
 }
 
+/* ============================ 莓红（Legacy） ============================ */
 html[data-theme='rose'] {
   background-color: #1a0b12;
 
@@ -97,6 +262,7 @@ html[data-theme='rose'] {
   --color-gray-950: #1a0b12;
   --color-gray-900: #2a121d;
   --color-gray-800: #3d1c2b;
+  --color-gray-750: #4a2233;
   --color-gray-700: #55283c;
   --color-gray-600: #71384f;
   --color-gray-500: #976276;
@@ -110,6 +276,8 @@ html[data-theme='rose'] {
   --color-blue-400: #a78bfa;
   --color-blue-300: #c4b5fd;
 
+  --color-indigo-900: #831843;
+  --color-indigo-700: #be185d;
   --color-indigo-600: #db2777;
   --color-indigo-500: #ec4899;
   --color-indigo-400: #f472b6;
@@ -126,6 +294,41 @@ html[data-theme='rose'] {
   --color-red-300: #fda4af;
 
   --color-emerald-300: #6ee7b7;
+}
+
+/* ============================== 全局基础 ============================== */
+
+/* 自定义滚动条（跟随主题） */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-thumb);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+  background-clip: content-box;
+}
+
+/* 键盘导航焦点环 */
+:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+
+::selection {
+  background: color-mix(in oklab, var(--ring) 30%, transparent);
 }
 
 /* Markdown body styles */
@@ -187,14 +390,14 @@ html[data-theme='rose'] {
 .markdown-body blockquote {
   margin: 0.5em 0;
   padding: 0.25em 0.75em;
-  border-left: 3px solid #4b5563;
-  color: #9ca3af;
+  border-left: 3px solid var(--color-gray-600);
+  color: var(--color-gray-400);
 }
 
 .markdown-body hr {
   margin: 0.75em 0;
   border: none;
-  border-top: 1px solid #374151;
+  border-top: 1px solid var(--color-gray-700);
 }
 
 .markdown-body img {
@@ -208,6 +411,22 @@ html[data-theme='rose'] {
 
 .markdown-body em {
   font-style: italic;
+}
+
+/* 抽屉 / 遮罩入场动画 */
+@keyframes ccm-slide-in-left {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(0); }
+}
+@keyframes ccm-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.animate-slide-in-left {
+  animation: ccm-slide-in-left 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.animate-fade-in {
+  animation: ccm-fade-in 0.18s ease-out;
 }
 
 /* On touch devices (no hover), always show copy buttons */

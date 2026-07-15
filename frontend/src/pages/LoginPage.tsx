@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { setToken } from '../api/client';
 import { getApiBase, getServerUrl, setServerUrl } from '../config/server';
-import { ChevronDown, ChevronRight } from 'lucide-react';
+import { ChevronDown, ChevronRight, Bot } from 'lucide-react';
 
 interface LoginPageProps {
   onLogin: () => void;
@@ -136,20 +136,34 @@ export function LoginPage({ onLogin }: LoginPageProps) {
     }
   };
 
+  const inputCls = 'w-full bg-gray-700 text-foreground rounded-lg px-3 py-2.5 text-sm border border-gray-600/60 placeholder-gray-500 focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/25 transition-colors';
+  const primaryBtnCls = 'w-full bg-indigo-600 hover:bg-indigo-500 text-white py-2.5 rounded-lg text-sm font-medium shadow-lg shadow-indigo-600/20 transition-colors disabled:opacity-50';
+
   return (
-    <div className="min-h-screen bg-gray-950 flex items-center justify-center p-4">
-      <div className="bg-gray-800 rounded-lg p-6 w-full max-w-sm space-y-4">
-        <h1 className="text-foreground text-lg font-bold text-center">Claude Code Manager</h1>
+    <div className="relative min-h-screen bg-gray-950 flex items-center justify-center p-4 overflow-hidden">
+      {/* 品牌辉光背景 */}
+      <div className="pointer-events-none absolute -top-32 left-1/2 -translate-x-1/2 h-96 w-[36rem] rounded-full bg-indigo-600/15 blur-3xl" />
+      <div className="relative w-full max-w-sm space-y-5">
+        <div className="flex flex-col items-center gap-3">
+          <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-indigo-500 to-indigo-700 text-white shadow-lg shadow-indigo-600/30">
+            <Bot size={26} />
+          </div>
+          <div className="text-center">
+            <h1 className="text-foreground text-xl font-semibold tracking-tight">Claude Code Manager</h1>
+            <p className="text-gray-500 text-xs mt-1">调度并行 Claude Code 实例的控制台</p>
+          </div>
+        </div>
+        <div className="bg-gray-800 border border-gray-700/70 rounded-2xl p-6 space-y-4 shadow-xl shadow-black/10">
 
         {/* Mode tabs */}
-        <div className="flex gap-1 bg-gray-700 rounded p-0.5">
+        <div className="flex gap-1 bg-gray-900/50 rounded-lg p-1">
           {([['email', 'Email'], ['token', 'Token'], ['register', 'Register']] as const).map(([key, label]) => (
             <button
               key={key}
               type="button"
               onClick={() => { setMode(key); setError(''); }}
-              className={`flex-1 py-1.5 text-xs font-medium rounded transition-colors ${
-                mode === key ? 'bg-gray-600 text-foreground' : 'text-gray-400 hover:text-gray-300'
+              className={`flex-1 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                mode === key ? 'bg-indigo-600 text-white shadow-sm' : 'text-gray-400 hover:text-gray-300'
               }`}
             >
               {label}
@@ -162,7 +176,7 @@ export function LoginPage({ onLogin }: LoginPageProps) {
           <form onSubmit={handleTokenLogin} className="space-y-3">
             <input
               type="password"
-              className="w-full bg-gray-700 text-foreground rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              className={inputCls}
               placeholder="Access Token"
               value={token}
               onChange={(e) => setTokenValue(e.target.value)}
@@ -170,7 +184,7 @@ export function LoginPage({ onLogin }: LoginPageProps) {
               required
             />
             <button type="submit" disabled={loading}
-              className="w-full bg-indigo-600 hover:bg-indigo-700 text-white py-2 rounded text-sm font-medium disabled:opacity-50">
+              className={primaryBtnCls}>
               {loading ? 'Verifying...' : 'Login'}
             </button>
           </form>
@@ -181,7 +195,7 @@ export function LoginPage({ onLogin }: LoginPageProps) {
           <form onSubmit={handleEmailLogin} className="space-y-3">
             <input
               type="email"
-              className="w-full bg-gray-700 text-foreground rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              className={inputCls}
               placeholder="Email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
@@ -190,14 +204,14 @@ export function LoginPage({ onLogin }: LoginPageProps) {
             />
             <input
               type="password"
-              className="w-full bg-gray-700 text-foreground rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              className={inputCls}
               placeholder="Password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
             />
             <button type="submit" disabled={loading}
-              className="w-full bg-indigo-600 hover:bg-indigo-700 text-white py-2 rounded text-sm font-medium disabled:opacity-50">
+              className={primaryBtnCls}>
               {loading ? 'Logging in...' : 'Login'}
             </button>
           </form>
@@ -208,7 +222,7 @@ export function LoginPage({ onLogin }: LoginPageProps) {
           <form onSubmit={handleRegister} className="space-y-3">
             <input
               type="text"
-              className="w-full bg-gray-700 text-foreground rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              className={inputCls}
               placeholder="Name"
               value={name}
               onChange={(e) => setName(e.target.value)}
@@ -218,7 +232,7 @@ export function LoginPage({ onLogin }: LoginPageProps) {
             <div className="flex gap-2">
               <input
                 type="email"
-                className="flex-1 bg-gray-700 text-foreground rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                className={`${inputCls} flex-1`}
                 placeholder="Email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
@@ -228,14 +242,14 @@ export function LoginPage({ onLogin }: LoginPageProps) {
                 type="button"
                 onClick={handleSendCode}
                 disabled={!email || codeCooldown > 0}
-                className="shrink-0 bg-gray-600 hover:bg-gray-500 text-foreground px-3 py-2 rounded text-xs font-medium disabled:opacity-50 whitespace-nowrap"
+                className="shrink-0 bg-gray-600 hover:bg-gray-500 text-foreground px-3 py-2 rounded-lg text-xs font-medium disabled:opacity-50 whitespace-nowrap transition-colors"
               >
                 {codeCooldown > 0 ? `${codeCooldown}s` : codeSent ? 'Resend' : 'Send Code'}
               </button>
             </div>
             <input
               type="text"
-              className="w-full bg-gray-700 text-foreground rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              className={inputCls}
               placeholder="Verification Code"
               value={code}
               onChange={(e) => setCode(e.target.value)}
@@ -243,14 +257,14 @@ export function LoginPage({ onLogin }: LoginPageProps) {
             />
             <input
               type="password"
-              className="w-full bg-gray-700 text-foreground rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              className={inputCls}
               placeholder="Password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
             />
             <button type="submit" disabled={loading || !codeSent}
-              className="w-full bg-indigo-600 hover:bg-indigo-700 text-white py-2 rounded text-sm font-medium disabled:opacity-50">
+              className={primaryBtnCls}>
               {loading ? 'Registering...' : 'Register'}
             </button>
           </form>
@@ -269,7 +283,7 @@ export function LoginPage({ onLogin }: LoginPageProps) {
           {showServer && (
             <input
               type="url"
-              className="w-full bg-gray-700 text-foreground rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 mt-1"
+              className={`${inputCls} mt-1`}
               placeholder="https://your-server.com"
               value={serverUrl}
               onChange={(e) => setServerUrlValue(e.target.value)}
@@ -278,6 +292,7 @@ export function LoginPage({ onLogin }: LoginPageProps) {
         </div>
 
         {error && <p className="text-red-400 text-xs text-center">{error}</p>}
+        </div>
       </div>
     </div>
   );

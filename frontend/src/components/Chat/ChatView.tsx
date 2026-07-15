@@ -1237,7 +1237,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
             <div className="text-center text-xs text-gray-600 py-1 mb-1">— Initial Prompt —</div>
             <div className="flex justify-end">
               <div className="max-w-[85%] group">
-                <div className="rounded-2xl px-4 py-2.5 text-sm bg-indigo-600 text-white rounded-br-md">
+                <div className="rounded-2xl px-4 py-2.5 text-sm bg-indigo-600 text-white rounded-br-md shadow-md shadow-indigo-600/10">
                   {task.metadata_?.attachments && task.metadata_.attachments.length > 0 && (
                     <div className="mb-2 flex flex-wrap gap-2">
                       {task.metadata_.attachments.filter((a) => a.is_image).length > 0 && (
@@ -1405,7 +1405,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
                   <button
                     type="button"
                     onClick={() => fileUpload.removeFile(upload.id)}
-                    className="absolute top-0 right-0 bg-gray-900/80 rounded-bl p-0.5 text-gray-300 hover:text-white"
+                    className="absolute top-0 right-0 bg-gray-900/80 rounded-bl p-0.5 text-gray-300 hover:text-foreground"
                   >
                     <X size={10} />
                   </button>
@@ -1533,7 +1533,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
               }
               disabled={!task.session_id && !task.shared_from_id}
               rows={1}
-              className="flex-1 bg-gray-800 text-foreground rounded-lg px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-none disabled:opacity-50 max-h-48 overflow-y-auto"
+              className="flex-1 bg-gray-800 text-foreground rounded-xl px-4 py-2.5 text-sm border border-gray-700/70 focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/25 resize-none disabled:opacity-50 max-h-48 overflow-y-auto transition-colors"
               style={{ minHeight: '40px' }}
             />
             <button
@@ -1542,9 +1542,9 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
               title={injectMode && ptyMode
                 ? (isProcessing ? '注入到运行中的 turn (Ctrl+Enter)' : '注入模式：仅在 turn 运行中可用，空闲时请关闭注入模式')
                 : isProcessing ? 'Add to queue (Ctrl+Enter)' : 'Send (Ctrl+Enter)'}
-              className={`p-2.5 text-white rounded-lg disabled:opacity-40 disabled:cursor-not-allowed ${
-                injectMode && ptyMode ? 'bg-teal-600 hover:bg-teal-700'
-                : isProcessing ? 'bg-amber-600 hover:bg-amber-700' : 'bg-indigo-600 hover:bg-indigo-700'
+              className={`p-2.5 text-white rounded-xl transition-colors disabled:opacity-40 disabled:cursor-not-allowed shadow-md ${
+                injectMode && ptyMode ? 'bg-teal-600 hover:bg-teal-700 shadow-teal-600/20'
+                : isProcessing ? 'bg-amber-600 hover:bg-amber-700 shadow-amber-600/20' : 'bg-indigo-600 hover:bg-indigo-500 shadow-indigo-600/25'
               }`}
             >
               {injectMode && ptyMode ? <Syringe size={18} /> : isProcessing ? <ListPlus size={18} /> : <Send size={18} />}
@@ -2227,12 +2227,12 @@ const MessageBubble = memo(function MessageBubble({ message, taskId }: { message
         <div
           className={`rounded-2xl px-4 py-2.5 text-sm ${
             isUser
-              ? 'bg-indigo-600 text-white rounded-br-md whitespace-pre-wrap'
+              ? 'bg-indigo-600 text-white rounded-br-md whitespace-pre-wrap shadow-md shadow-indigo-600/10'
               : isMonitor
                 ? 'bg-teal-900/40 text-gray-200 rounded-bl-md border border-teal-700/30'
                 : isSubAgent
                   ? 'bg-amber-900/40 text-gray-200 rounded-bl-md border border-amber-700/30'
-                  : 'bg-gray-800 text-gray-200 rounded-bl-md'
+                  : 'bg-gray-800 text-gray-200 rounded-bl-md border border-gray-700/50 shadow-sm'
           }`}
         >
           {isUser ? (

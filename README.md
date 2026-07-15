@@ -50,7 +50,7 @@ Web 端调度和管理多个 Claude Code 实例并行工作。灵感来自胡渊
 - **PR Monitor** — GitHub PR 自动审核，Webhook 接收 PR 事件后创建审核 Task，Claude 审核代码后自动 approve/merge 或 request-changes
 - **PWA** — 手机浏览器 Add to Home Screen，原生 App 体验
 - **Android App** — 通过 Capacitor 打包原生 APK，App 内可配置远程服务器地址
-- **主题切换** — 支持浅色/深色主题，偏好持久化
+- **主题切换** — v2 主题系统：现代深色（默认，Multica 风格）/ 现代浅色，v1 的经典深色、海蓝、森林、莓红完整保留为 Legacy 组，偏好持久化
 - **Token 认证** — Bearer Token 保护所有 API，安全远程访问
 - **远程访问** — 通过 Cloudflare Tunnel 隧道暴露到公网
 
@@ -158,7 +158,7 @@ claude-manager/
 │       ├── api/client.ts        # API 客户端 + 类型 (401 自动登出, 动态 base URL)
 │       ├── api/ws.ts            # WebSocket 客户端 (指数退避重连)
 │       ├── config/server.ts     # 远程服务器 URL 配置 (Capacitor/Android)
-│       ├── config/theme.ts      # 浅色/深色主题切换
+│       ├── config/theme.ts      # 主题注册表 (现代深/浅 + Legacy 组, meta theme-color 同步)
 │       ├── pages/               # Dashboard, TasksPage, WorkersPage, PRMonitorPage, LoginPage...
 │       ├── components/
 │       │   ├── AskUserNotifications.tsx   # 全局 ask_user 弹窗通知

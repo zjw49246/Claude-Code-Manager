@@ -497,3 +497,24 @@
 - **解决**：`FullMirrorCCMBackend`（backend/services/pty_full_mirror.py）在 `super().on_exit()` 降级后按回调函数名识别并原位换回全量转发 `_process_event`；`_process_event` 增加 autonomous user-role 消毒（`<task-notification>` 压成一行 system_event，channel 回显丢弃），承接历史上降级要防的重放问题。10 例新测试（test_autonomous_mirror.py）
 - **以后如何避免**：镜像/过滤类回调要区分"结构事件"和"内容事件"——砍内容前先想清楚谁是它的最终读者；"防 A 顺带丢 B"的粗粒度降级要在修好 A 的防线后回收
 - **commit**: 6dd3547（PR zjw49246/Claude-Code-Manager#31；因 push 权限收回改走 fork PR）
+
+### 2026-07-13 — 前端设计 v2：Multica 风主题系统 + App Shell（commit e1c778c）
+
+**改动**：主题系统升级为「每主题覆盖 gray（中性）+ indigo（品牌）CSS 变量」的换肤架构：
+新默认 dark（zinc + 蓝品牌，oklch）+ 新增 light；v1 默认外观完整保留为 `legacy` 主题，
+ocean/forest/rose 归入 Legacy 组。Header 顶栏导航重构为 AppShell（桌面固定侧栏 + 移动端抽屉），
+偏好设置抽出 PrefsMenu。字体 Inter/JetBrains Mono 随 bundle 离线。
+
+**经验**：
+1. **1300+ 处硬编码 gray-* 类名不必重写**——变量重映射层让全部旧类名自动适配新主题，
+   手工精修只做高频页面（Login/Tasks/Chat/Dashboard）。新增主题必须同时覆盖 gray 全档 + indigo 全档。
+2. **浅色主题的坑在 accent 300/400 档**：`text-X-300/400` 是深底浅字的设计，浅色主题必须
+   把这些档位反转成深色调（≈ Tailwind 原生 600/700），否则 chip 全部不可读；同理中性底上的
+   `text-white`/`hover:text-white` 要清扫成 `text-foreground`。
+3. **视觉验证用临时后端 + Playwright 截图时，演示数据绝不能插 `pending` 状态的 task**——
+   dispatcher 2 秒轮询会把它真的跑起来（本次浪费了一次真实 Claude 调用，还往 worktree 里写了
+   一段不相干的文档改动，差点混入 PR）。演示数据只用 completed/failed/cancelled/executing。
+4. **Playwright 截图切主题要强制 reload**：localStorage 在 app 启动后写入、hash-only 导航
+   不重载页面，不 reload 的话所有截图都是默认主题（第一轮截图全部白拍）。
+5. 布局改动前先 grep `100vh|h-screen|fixed|sticky` 找耦合点：TasksPage 分屏高度硬编码了
+   顶栏高度（64px→49px），漏改会溢出/留缝。

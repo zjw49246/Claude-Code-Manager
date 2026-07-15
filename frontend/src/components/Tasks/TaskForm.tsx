@@ -349,7 +349,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   };
 
   return (
-    <form ref={formRef} onSubmit={handleSubmit} className="bg-gray-800 rounded-lg p-4 space-y-3 overflow-visible">
+    <form ref={formRef} onSubmit={handleSubmit} className="bg-gray-800 border border-gray-700/60 rounded-xl p-4 space-y-3 overflow-visible shadow-sm">
       <h3 className="text-sm font-semibold text-gray-300">New Task</h3>
       {dropError && (
         <div className="bg-yellow-900/50 border border-yellow-700 text-yellow-300 text-xs rounded px-3 py-2 flex items-center justify-between">
@@ -369,7 +369,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
       )}
       <div className="flex gap-2">
         <textarea
-          className="flex-1 bg-gray-700 text-foreground rounded px-3 py-2 text-sm h-24 resize-none focus:outline-none focus:ring-2 focus:ring-indigo-500"
+          className="flex-1 bg-gray-700 text-foreground rounded-lg px-3 py-2 text-sm h-24 resize-none border border-gray-600/50 focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/25 transition-colors"
           placeholder={mode === 'loop' ? 'Background / context (optional)' : `Prompt / Description (this will be sent to ${provider === 'codex' ? 'Codex' : 'Claude Code'})`}
           value={description}
           onChange={(e) => setDescription(e.target.value)}
@@ -412,7 +412,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
             <button
               type="button"
               onClick={() => fileUpload.removeFile(upload.id)}
-              className="absolute top-0 right-0 bg-gray-900/80 rounded-bl p-0.5 text-gray-300 hover:text-white"
+              className="absolute top-0 right-0 bg-gray-900/80 rounded-bl p-0.5 text-gray-300 hover:text-foreground"
             >
               <X size={10} />
             </button>

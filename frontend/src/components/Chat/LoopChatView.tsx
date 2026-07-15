@@ -528,7 +528,7 @@ export function LoopChatView({ task, onBack, inline }: LoopChatViewProps) {
       {showScrollBottom && (
         <button
           onClick={() => scrollBottomRef.current?.scrollIntoView({ behavior: 'smooth' })}
-          className="absolute bottom-28 right-6 z-10 p-2.5 bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-white rounded-full shadow-lg transition-all"
+          className="absolute bottom-28 right-6 z-10 p-2.5 bg-gray-700 hover:bg-gray-600 text-gray-300 hover:text-foreground rounded-full shadow-lg transition-all"
           title="Scroll to bottom"
         >
           <ArrowDown size={18} />

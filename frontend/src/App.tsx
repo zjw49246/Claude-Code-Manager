@@ -1,6 +1,6 @@
 import { useState, useEffect, Component } from 'react';
 import type { ReactNode, ErrorInfo } from 'react';
-import { Header } from './components/Layout/Header';
+import { AppShell } from './components/Layout/AppShell';
 import { Dashboard } from './pages/Dashboard';
 import { TasksPage } from './pages/TasksPage';
 import { LoginPage } from './pages/LoginPage';
@@ -146,8 +146,9 @@ function App() {
 
   if (checking) {
     return (
-      <div className="min-h-screen bg-gray-950 flex items-center justify-center">
-        <p className="text-gray-400">Connecting...</p>
+      <div className="min-h-screen bg-gray-950 flex flex-col items-center justify-center gap-3">
+        <div className="h-8 w-8 rounded-full border-2 border-gray-700 border-t-indigo-500 animate-spin" />
+        <p className="text-gray-500 text-sm">Connecting...</p>
       </div>
     );
   }
@@ -158,24 +159,21 @@ function App() {
 
   return (
     <ErrorBoundary>
-      <div className="min-h-screen bg-gray-900 text-foreground flex flex-col overflow-x-clip">
-        <Header currentPage={page} onNavigate={handleNavigate} />
-        <main className={`flex-1 mx-auto w-full p-4 ${page === 'tasks' && chatTaskId ? 'max-w-[1400px]' : 'max-w-6xl'}`}>
-          {page === 'dashboard' && <Dashboard />}
-          {page === 'tasks' && <TasksPage chatTaskId={chatTaskId} onChatTaskChange={setChatTaskId} />}
-          {page === 'projects' && <ProjectsPage />}
-          {page === 'secrets' && <SecretsPage />}
-          {page === 'files' && <FilesPage />}
-          {page === 'discussions' && <DiscussionsPage />}
-          {page === 'pr-monitor' && <PRMonitorPage />}
-          {page === 'workers' && <WorkersPage />}
-          {page === 'skills' && <SkillsPage />}
-          {page === 'team' && <TeamPage />}
-          {page === 'server' && (
-            <ServerConfigPage onConfigured={() => window.location.reload()} />
-          )}
-        </main>
-      </div>
+      <AppShell currentPage={page} onNavigate={handleNavigate} wide={page === 'tasks' && !!chatTaskId}>
+        {page === 'dashboard' && <Dashboard />}
+        {page === 'tasks' && <TasksPage chatTaskId={chatTaskId} onChatTaskChange={setChatTaskId} />}
+        {page === 'projects' && <ProjectsPage />}
+        {page === 'secrets' && <SecretsPage />}
+        {page === 'files' && <FilesPage />}
+        {page === 'discussions' && <DiscussionsPage />}
+        {page === 'pr-monitor' && <PRMonitorPage />}
+        {page === 'workers' && <WorkersPage />}
+        {page === 'skills' && <SkillsPage />}
+        {page === 'team' && <TeamPage />}
+        {page === 'server' && (
+          <ServerConfigPage onConfigured={() => window.location.reload()} />
+        )}
+      </AppShell>
     </ErrorBoundary>
   );
 }

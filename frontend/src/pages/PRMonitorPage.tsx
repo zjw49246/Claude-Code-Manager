@@ -126,7 +126,7 @@ function AddRepoModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =
             />
           </div>
           <div className="flex justify-end gap-2 pt-1">
-            <button type="button" onClick={onClose} className="px-4 py-2 text-sm text-gray-300 hover:text-white">Cancel</button>
+            <button type="button" onClick={onClose} className="px-4 py-2 text-sm text-gray-300 hover:text-foreground">Cancel</button>
             <button type="submit" disabled={submitting || !repoName.trim()}
               className="px-4 py-2 text-sm bg-indigo-600 text-white rounded hover:bg-indigo-500 disabled:opacity-50">
               {submitting ? 'Adding...' : 'Add'}
@@ -205,7 +205,7 @@ function RepoDetail({ repo, onBack, onRefresh }: { repo: MonitoredRepo; onBack: 
 
   return (
     <div className="space-y-6">
-      <button onClick={onBack} className="flex items-center gap-1 text-sm text-gray-400 hover:text-white">
+      <button onClick={onBack} className="flex items-center gap-1 text-sm text-gray-400 hover:text-foreground">
         <ArrowLeft size={16} /> Back to repositories
       </button>
 
@@ -255,7 +255,7 @@ function RepoDetail({ repo, onBack, onRefresh }: { repo: MonitoredRepo; onBack: 
             <div className="flex items-center gap-2">
               <code className="flex-1 bg-gray-700 text-foreground text-xs rounded px-3 py-2 overflow-x-auto">{webhookUrl}</code>
               <button onClick={() => handleCopy(webhookUrl, 'url')}
-                className="p-2 text-gray-400 hover:text-white">
+                className="p-2 text-gray-400 hover:text-foreground">
                 {copied === 'url' ? <Check size={16} className="text-green-400" /> : <Copy size={16} />}
               </button>
             </div>
@@ -265,10 +265,10 @@ function RepoDetail({ repo, onBack, onRefresh }: { repo: MonitoredRepo; onBack: 
             <div className="flex items-center gap-2">
               <code className="flex-1 bg-gray-700 text-foreground text-xs rounded px-3 py-2 overflow-x-auto">{detail.webhook_secret}</code>
               <button onClick={() => handleCopy(detail.webhook_secret, 'secret')}
-                className="p-2 text-gray-400 hover:text-white">
+                className="p-2 text-gray-400 hover:text-foreground">
                 {copied === 'secret' ? <Check size={16} className="text-green-400" /> : <Copy size={16} />}
               </button>
-              <button onClick={handleRegenerate} className="p-2 text-gray-400 hover:text-white" title="Regenerate secret">
+              <button onClick={handleRegenerate} className="p-2 text-gray-400 hover:text-foreground" title="Regenerate secret">
                 <RefreshCw size={16} />
               </button>
             </div>
@@ -428,7 +428,7 @@ export function PRMonitorPage() {
                     )}
                   </td>
                   <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
-                    <button onClick={() => handleToggle(repo)} className="text-gray-400 hover:text-white">
+                    <button onClick={() => handleToggle(repo)} className="text-gray-400 hover:text-foreground">
                       {repo.enabled ? <ToggleRight size={22} className="text-green-400" /> : <ToggleLeft size={22} />}
                     </button>
                   </td>
