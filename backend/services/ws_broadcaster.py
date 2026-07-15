@@ -8,6 +8,9 @@ from fastapi import WebSocket
 logger = logging.getLogger(__name__)
 
 
+_SEND_TIMEOUT = 5  # seconds — drop slow clients rather than blocking the pipeline
+
+
 class WebSocketBroadcaster:
     """Central hub for broadcasting real-time events to WebSocket clients."""
 
@@ -28,15 +31,24 @@ class WebSocketBroadcaster:
                 if not self.subscriptions[ch]:
                     del self.subscriptions[ch]
 
+    async def _send_with_timeout(self, ws: WebSocket, message: str) -> bool:
+        """Send text to a WebSocket with a timeout. Returns False on failure."""
+        try:
+            await asyncio.wait_for(ws.send_text(message), timeout=_SEND_TIMEOUT)
+            return True
+        except asyncio.TimeoutError:
+            logger.warning("WebSocket send timed out after %ds, dropping client", _SEND_TIMEOUT)
+            return False
+        except Exception as e:
+            logger.debug("WebSocket send failed: %s", e)
+            return False
+
     async def broadcast(self, channel: str, data: dict):
         message = json.dumps({"channel": channel, "data": data})
         subs = self.subscriptions.get(channel, set())
         dead = []
         for ws in subs:
-            try:
-                await ws.send_text(message)
-            except Exception as e:
-                logger.debug("broadcast send failed on %s: %s", channel, e)
+            if not await self._send_with_timeout(ws, message):
                 dead.append(ws)
         for ws in dead:
             await self.unsubscribe(ws)
@@ -47,9 +59,7 @@ class WebSocketBroadcaster:
             task_msg = json.dumps({"channel": task_channel, "data": data})
             task_dead = []
             for ws in self.subscriptions.get(task_channel, set()):
-                try:
-                    await ws.send_text(task_msg)
-                except Exception:
+                if not await self._send_with_timeout(ws, task_msg):
                     task_dead.append(ws)
             for ws in task_dead:
                 await self.unsubscribe(ws)
