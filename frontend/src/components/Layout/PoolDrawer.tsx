@@ -404,7 +404,7 @@ export function PoolDrawer() {
       {open && createPortal(
         <div className="fixed inset-0 z-[70]">
           <div className="absolute inset-0 bg-black/50" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 top-0 h-full w-full max-w-sm bg-gray-900 border-l border-gray-700 shadow-xl flex flex-col">
+          <div className="absolute right-0 top-0 h-full w-full max-w-sm bg-gray-900 border-l border-gray-700 shadow-xl flex flex-col pt-[env(safe-area-inset-top)]">
             <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-700">
               <Users size={16} className="text-indigo-400" />
               <h2 className="text-sm font-semibold text-foreground">Claude Pool 额度</h2>

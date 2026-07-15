@@ -128,6 +128,16 @@ describe('PoolDrawer', () => {
       expect(overlay!.className).toContain('inset-0');
     });
 
+    it('drawer panel has safe-area-inset-top padding for mobile notch/status bar', async () => {
+      const user = userEvent.setup();
+      await renderAndWaitForPro();
+      await openDrawer(user);
+
+      const panel = screen.getByText('Claude Pool 额度').closest('[class*="max-w-sm"]');
+      expect(panel).toBeTruthy();
+      expect(panel!.className).toContain('pt-[env(safe-area-inset-top)]');
+    });
+
     it('drawer portal escapes a header ancestor with position:relative', async () => {
       const user = userEvent.setup();
 
