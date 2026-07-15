@@ -115,6 +115,33 @@ export function UpdateButton() {
     };
   }, []);
 
+  const phaseRef = useRef(phase);
+  phaseRef.current = phase;
+
+  useEffect(() => {
+    const onVisible = async () => {
+      if (document.visibilityState !== 'visible') return;
+      const p = phaseRef.current;
+      if (p !== 'running' && p !== 'restarting') return;
+      try {
+        const status = await api.getUpdateStatus() as UpdateStatusData;
+        if (status.old_commit) setOldCommit(status.old_commit);
+        if (status.new_commit) setNewCommit(status.new_commit);
+        if (status.steps) setSteps(status.steps);
+        if (status.status === 'completed') {
+          setPhase('completed');
+        } else if (status.status === 'rolled_back' || status.status === 'failed') {
+          setError(status.error || '更新失败');
+          setPhase('failed');
+        }
+      } catch {
+        // Server may still be restarting — keep current phase
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, []);
+
   const startReconnectPolling = () => {
     if (reconnectTimer.current) clearInterval(reconnectTimer.current);
     let attempts = 0;

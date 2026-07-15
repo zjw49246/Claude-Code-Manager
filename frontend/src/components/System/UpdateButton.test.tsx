@@ -265,4 +265,159 @@ describe('UpdateButton', () => {
       });
     });
   });
+
+  describe('visibilitychange recovery', () => {
+    function simulateVisibilityChange(state: 'visible' | 'hidden') {
+      Object.defineProperty(document, 'visibilityState', {
+        value: state,
+        writable: true,
+        configurable: true,
+      });
+      document.dispatchEvent(new Event('visibilitychange'));
+    }
+
+    it('polls update status when page becomes visible during running phase', async () => {
+      vi.mocked(api.startUpdate)
+        .mockResolvedValueOnce(mockDryRun as never)
+        .mockResolvedValueOnce({ update_id: 'u1', old_commit: 'abc' } as never);
+
+      const mockStatus = {
+        status: 'completed',
+        old_commit: 'abc1234',
+        new_commit: 'def5678',
+        steps: [{ name: 'git_pull', status: 'completed', duration_ms: 500 }],
+      };
+      vi.mocked(api.getUpdateStatus).mockResolvedValue(mockStatus as never);
+
+      const user = userEvent.setup();
+      render(<UpdateButton />);
+
+      await user.click(screen.getByTitle('更新并重启'));
+      await waitFor(() => expect(findModalOverlay()).toBeTruthy());
+
+      const confirmBtn = screen.getAllByText('确认更新').find(el => el.tagName === 'BUTTON');
+      await user.click(confirmBtn!);
+
+      await waitFor(() => {
+        expect(screen.getByText('更新中...')).toBeInTheDocument();
+      });
+
+      simulateVisibilityChange('hidden');
+      simulateVisibilityChange('visible');
+
+      await waitFor(() => {
+        expect(api.getUpdateStatus).toHaveBeenCalled();
+      });
+
+      await waitFor(() => {
+        expect(screen.getByText('更新完成')).toBeInTheDocument();
+      });
+    });
+
+    it('does NOT poll when page becomes visible during idle phase', async () => {
+      render(<UpdateButton />);
+
+      simulateVisibilityChange('hidden');
+      simulateVisibilityChange('visible');
+
+      await new Promise(r => setTimeout(r, 50));
+      expect(api.getUpdateStatus).not.toHaveBeenCalled();
+    });
+
+    it('does NOT poll when page becomes visible during confirming phase', async () => {
+      const user = userEvent.setup();
+      render(<UpdateButton />);
+
+      await user.click(screen.getByTitle('更新并重启'));
+      await waitFor(() => expect(findModalOverlay()).toBeTruthy());
+
+      simulateVisibilityChange('hidden');
+      simulateVisibilityChange('visible');
+
+      await new Promise(r => setTimeout(r, 50));
+      expect(api.getUpdateStatus).not.toHaveBeenCalled();
+    });
+
+    it('handles failed status on visibility recovery', async () => {
+      vi.mocked(api.startUpdate)
+        .mockResolvedValueOnce(mockDryRun as never)
+        .mockResolvedValueOnce({ update_id: 'u1', old_commit: 'abc' } as never);
+
+      vi.mocked(api.getUpdateStatus).mockResolvedValue({
+        status: 'failed',
+        error: '迁移出错',
+        steps: [{ name: 'alembic_upgrade', status: 'failed' }],
+      } as never);
+
+      const user = userEvent.setup();
+      render(<UpdateButton />);
+
+      await user.click(screen.getByTitle('更新并重启'));
+      await waitFor(() => expect(findModalOverlay()).toBeTruthy());
+
+      const confirmBtn = screen.getAllByText('确认更新').find(el => el.tagName === 'BUTTON');
+      await user.click(confirmBtn!);
+
+      await waitFor(() => {
+        expect(screen.getByText('更新中...')).toBeInTheDocument();
+      });
+
+      simulateVisibilityChange('visible');
+
+      await waitFor(() => {
+        expect(screen.getByText('更新失败')).toBeInTheDocument();
+        expect(screen.getByText('迁移出错')).toBeInTheDocument();
+      });
+    });
+
+    it('keeps current phase if getUpdateStatus fails (server still restarting)', async () => {
+      vi.mocked(api.startUpdate)
+        .mockResolvedValueOnce(mockDryRun as never)
+        .mockResolvedValueOnce({ update_id: 'u1', old_commit: 'abc' } as never);
+
+      vi.mocked(api.getUpdateStatus).mockRejectedValue(new Error('connection refused'));
+
+      const user = userEvent.setup();
+      render(<UpdateButton />);
+
+      await user.click(screen.getByTitle('更新并重启'));
+      await waitFor(() => expect(findModalOverlay()).toBeTruthy());
+
+      const confirmBtn = screen.getAllByText('确认更新').find(el => el.tagName === 'BUTTON');
+      await user.click(confirmBtn!);
+
+      await waitFor(() => {
+        expect(screen.getByText('更新中...')).toBeInTheDocument();
+      });
+
+      simulateVisibilityChange('visible');
+
+      await new Promise(r => setTimeout(r, 100));
+      expect(screen.getByText('更新中...')).toBeInTheDocument();
+    });
+
+    it('does NOT trigger on hidden event (only on visible)', async () => {
+      vi.mocked(api.startUpdate)
+        .mockResolvedValueOnce(mockDryRun as never)
+        .mockResolvedValueOnce({ update_id: 'u1', old_commit: 'abc' } as never);
+
+      const user = userEvent.setup();
+      render(<UpdateButton />);
+
+      await user.click(screen.getByTitle('更新并重启'));
+      await waitFor(() => expect(findModalOverlay()).toBeTruthy());
+
+      const confirmBtn = screen.getAllByText('确认更新').find(el => el.tagName === 'BUTTON');
+      await user.click(confirmBtn!);
+
+      await waitFor(() => {
+        expect(screen.getByText('更新中...')).toBeInTheDocument();
+      });
+
+      simulateVisibilityChange('hidden');
+
+      await new Promise(r => setTimeout(r, 50));
+      expect(api.getUpdateStatus).not.toHaveBeenCalled();
+    });
+  });
 });
