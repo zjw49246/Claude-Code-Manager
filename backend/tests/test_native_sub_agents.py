@@ -202,3 +202,44 @@ async def test_summary_groups_by_agent_type(client, db_session):
     assert by_type["monitor"] == {"running": 1, "completed": 1}
     assert by_type["native-agent"] == {"running": 1, "completed": 0}
     assert by_type["native-monitor"] == {"running": 0, "completed": 1}
+
+
+# ------------------------------------------------- no auto-resume on done
+
+
+@pytest.mark.asyncio
+async def test_native_done_does_not_enqueue_auto_resume(im, db_session):
+    """subagent_done 绝不往 dispatcher 队列投递唤醒 prompt（2026-07-15 事故）。
+
+    PTY 模式下 harness 自己的 task-notification 已在完成瞬间唤醒 session；
+    这里再 enqueue 会和通知 turn 赛跑，输了被 CLI 吸收成 mid-turn steering
+    （queue-op remove、无独立回显），send_prompt 的回显锁定永不成立 →
+    consumer 永挂 → 队列冻结 → 7200s 超时杀掉仍在干活的进程。
+    """
+    import sys
+    import types
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    fake_main = types.ModuleType("backend.main")
+    fake_main.dispatcher = MagicMock()
+    fake_main.dispatcher.enqueue_message = AsyncMock()
+
+    info = {
+        "tool_use_id": "toolu_done",
+        "kind": "native-agent",
+        "description": "查文献",
+    }
+    with patch.dict(sys.modules, {"backend.main": fake_main}):
+        await im._upsert_native_sub_agent(11, "subagent_spawn", info)
+        await im._upsert_native_sub_agent(
+            11, "subagent_done", {**info, "summary": "batch done"}
+        )
+
+    fake_main.dispatcher.enqueue_message.assert_not_called()
+
+    row = (
+        await db_session.execute(
+            select(SubAgentSession).where(SubAgentSession.task_id == 11)
+        )
+    ).scalars().first()
+    assert row.status == "completed"
