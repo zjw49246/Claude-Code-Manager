@@ -705,9 +705,11 @@ uv run python -m pytest backend/tests/test_api_tasks.py -k broadcasts_status_cha
 - `cd frontend && npx tsc --noEmit` — 类型检查
 - `cd frontend && npm run build` — 构建（字体 woff2 应打进 dist/assets）
 - `cd frontend && npx vitest run` — 组件测试（注意：main 上存在历史失败基线，对比失败数是否增加）
+- `cd frontend && npx vitest run src/config/theme.test.ts` — 主题注册表 + index.css 变量覆盖完整性（gray/indigo 全档、浅色主题 color-scheme 与 accent 300/400 深色化、飞书官方 token 抽查）
 
 ### 手动验证（每个主题 × 桌面/移动端）
-- [ ] 齿轮 → 主题下拉分「现代 / Legacy」两组：深色、浅色、经典深色、海蓝、森林、莓红
+- [ ] 齿轮 → 主题下拉分「现代 / Legacy」两组：深色、浅色、飞书、经典深色、海蓝、森林、莓红
+- [ ] 飞书主题：白卡片 + #f5f6f7 画布 + #f2f3f5 侧栏；主按钮飞书蓝 #336df4，hover 加深（#1456f0）；主文字 #1f2329；边框 #dee0e3 清晰可见
 - [ ] 「经典深色」外观 = v1 默认深色（Tailwind 原生 gray/indigo 色板）
 - [ ] 浅色主题：白色卡片 + 浅灰画布；chip 文字（text-X-300/400）可读；无白字白底（text-white 只允许出现在彩色实底上）
 - [ ] 桌面 lg+：左侧固定侧栏导航高亮正确；顶栏 sticky；Tasks 分屏（≥1280px）无纵向溢出（100vh-49px）

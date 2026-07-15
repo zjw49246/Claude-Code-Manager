@@ -137,6 +137,77 @@ html[data-theme='light'] {
   --color-rose-300: oklch(51.4% 0.222 16.935);
 }
 
+/* ============================== 飞书（现代浅色） ============================== */
+/*
+ * 配色取自飞书 Universe Design 官方色板（从 open.feishu.cn 线上 CSS 提取）：
+ * - 中性色 N 系：主文字 N900 #1f2329 / 次要 N600 #646a73 / 占位 N500 #8f959e /
+ *   禁用 N400 #bbbfc4 / 边框 N300 #dee0e3 / 填充 N100 #f2f3f5 / 画布 N50 #f5f6f7
+ * - 品牌蓝 B 系：主色 B500 #336df4（--primary-pri-500）/ hover B600 #1456f0 /
+ *   pressed B700 #0442d2 / 选中浅底 B50 #f0f4ff
+ * - 交互遵循飞书习惯：hover / pressed 均为「加深」（500/700 取 B600/B700）
+ */
+html[data-theme='feishu'] {
+  background-color: #f2f3f5;
+  color-scheme: light;
+
+  --color-foreground: #1f2329;
+  --scrollbar-thumb: oklch(0% 0 0 / 0.14);
+  --scrollbar-thumb-hover: oklch(0% 0 0 / 0.26);
+  --ring: #336df4;
+
+  /* 中性色反转：950 侧栏壳(N100) < 900 画布(N50) < 800 卡片(纯白) */
+  --color-gray-950: #f2f3f5;
+  --color-gray-900: #f5f6f7;
+  --color-gray-800: #ffffff;
+  --color-gray-750: #f2f3f5;
+  --color-gray-700: #dee0e3;
+  --color-gray-600: #bbbfc4;
+  --color-gray-500: #8f959e;
+  --color-gray-400: #646a73;
+  --color-gray-300: #373c43;
+  --color-gray-200: #2b2f36;
+  --color-gray-100: #1f2329;
+  --color-gray-50: #0f1114;
+
+  /* 品牌色：飞书蓝 B 系（900/950 变浅作选中底色；hover 向深走） */
+  --color-indigo-950: #f0f4ff;
+  --color-indigo-900: #e0e9ff;
+  --color-indigo-800: #002f9e;
+  --color-indigo-700: #0442d2;
+  --color-indigo-600: #336df4;
+  --color-indigo-500: #1456f0;
+  --color-indigo-400: #1456f0;
+  --color-indigo-300: #0442d2;
+  --color-indigo-100: #e0e9ff;
+
+  /* accent 色 300/400 档深色化（浅底可读）：优先用飞书功能色
+     （红 R / 橙 O / 绿 G / 蓝 B / 紫 P），其余沿用现代浅色的取值 */
+  --color-red-400: #e22e28;
+  --color-red-300: #c02a26;
+  --color-orange-400: #ed6d0c;
+  --color-orange-300: #c25705;
+  --color-amber-400: oklch(66.6% 0.179 58.318);
+  --color-amber-300: oklch(55.5% 0.163 48.998);
+  --color-yellow-400: oklch(68.1% 0.162 75.834);
+  --color-yellow-300: oklch(55.4% 0.135 66.442);
+  --color-green-400: #32a645;
+  --color-green-300: #258832;
+  --color-emerald-400: oklch(59.6% 0.145 163.225);
+  --color-emerald-300: oklch(50.8% 0.118 165.612);
+  --color-teal-400: #10a893;
+  --color-teal-300: #0f8575;
+  --color-cyan-400: oklch(60.9% 0.126 221.723);
+  --color-cyan-300: oklch(52% 0.105 223.128);
+  --color-sky-400: oklch(58.8% 0.158 241.966);
+  --color-sky-300: oklch(50% 0.134 242.749);
+  --color-blue-400: #1456f0;
+  --color-blue-300: #0442d2;
+  --color-purple-400: #8d55ed;
+  --color-purple-300: #7a35f0;
+  --color-rose-400: #cc398c;
+  --color-rose-300: #b82879;
+}
+
 /* ========================== 经典深色（Legacy v1） ========================== */
 /* 完整还原升级前的默认外观：Tailwind 原生 gray / indigo 色板 */
 html[data-theme='legacy'] {
