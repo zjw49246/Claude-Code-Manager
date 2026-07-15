@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { ArrowUpCircle, RefreshCw } from 'lucide-react';
 import { api } from '../../api/client';
 import { useWebSocket } from '../../hooks/useWebSocket';
@@ -226,8 +227,8 @@ export function UpdateButton() {
         <ArrowUpCircle size={18} />
       </button>
 
-      {isModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+      {isModalOpen && createPortal(
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60">
           <div className="bg-gray-900 border border-gray-700 rounded-xl shadow-2xl w-full max-w-lg mx-4 max-h-[85vh] flex flex-col">
             {/* Header */}
             <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700">
@@ -410,7 +411,8 @@ export function UpdateButton() {
               )}
             </div>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </>
   );
