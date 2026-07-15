@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Plus, RefreshCw, X, Users, Settings } from 'lucide-react';
 import { api } from '../../api/client';
 import type { PoolAccountUsage, PoolUsageStatus, PoolUsageWindow } from '../../api/client';
@@ -400,8 +401,8 @@ export function PoolDrawer() {
         <Users size={13} className="text-indigo-400" />
         <span className="text-xs font-semibold text-indigo-300">Pro</span>
       </button>
-      {open && (
-        <div className="fixed inset-0 z-50">
+      {open && createPortal(
+        <div className="fixed inset-0 z-[70]">
           <div className="absolute inset-0 bg-black/50" onClick={() => setOpen(false)} />
           <div className="absolute right-0 top-0 h-full w-full max-w-sm bg-gray-900 border-l border-gray-700 shadow-xl flex flex-col">
             <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-700">
@@ -463,7 +464,8 @@ export function PoolDrawer() {
               ))}
             </div>
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </>
   );
