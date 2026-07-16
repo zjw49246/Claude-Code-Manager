@@ -8,6 +8,7 @@ import logging
 import os
 import shutil
 import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -333,13 +334,7 @@ class UpdateService:
             await self._broadcast("restarting", message="服务即将重启...")
             await asyncio.sleep(1)
 
-            systemctl = self._tools["systemctl"]
-            subprocess.Popen(
-                [self._tools["bash"], "-c", f"sleep 2 && {systemctl} --user restart {self._service_name}"],
-                stdout=open(f"/tmp/ccm-restart-{self.port}.log", "w"),
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
+            self._restart_service()
             return {"status": "rolling_back", "old_commit": old_commit}
 
     # ---- Pipeline implementation ----
@@ -596,15 +591,46 @@ class UpdateService:
         await self._broadcast("restarting", message="服务即将重启，请等待自动重连...")
         await asyncio.sleep(1)
 
-        systemctl = self._tools["systemctl"]
-        subprocess.Popen(
-            [self._tools["bash"], "-c", f"sleep 2 && {systemctl} --user restart {self._service_name}"],
-            stdout=open(f"/tmp/ccm-restart-{self.port}.log", "w"),
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
+        self._restart_service()
 
     # ---- Helpers ----
+
+    def _is_managed_by_systemd(self) -> bool:
+        """Check if this process was started by systemd."""
+        try:
+            result = subprocess.run(
+                [self._tools["systemctl"], "--user", "is-active", self._service_name],
+                capture_output=True, text=True, timeout=5,
+            )
+            return result.stdout.strip() == "active"
+        except Exception:
+            return False
+
+    def _restart_service(self):
+        """Restart via systemd if managed, otherwise re-exec the process."""
+        if self._is_managed_by_systemd():
+            subprocess.Popen(
+                [self._tools["bash"], "-c",
+                 f"sleep 2 && {self._tools['systemctl']} --user restart {self._service_name}"],
+                stdout=open(f"/tmp/ccm-restart-{self.port}.log", "w"),
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        else:
+            # Fallback: hardcoded uvicorn args — flags the user originally
+            # passed (--reload, --workers, etc.) are not preserved.
+            uvicorn_cmd = (
+                f"sleep 2 && kill {os.getpid()}; sleep 1; "
+                f"cd {self.project_dir} && "
+                f"{sys.executable} -m uvicorn backend.main:app "
+                f"--host 0.0.0.0 --port {self.port}"
+            )
+            subprocess.Popen(
+                [self._tools["bash"], "-c", uvicorn_cmd],
+                stdout=open(f"/tmp/ccm-restart-{self.port}.log", "w"),
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
 
     async def _backup_database(self) -> str:
         import sqlite3 as _sqlite3
