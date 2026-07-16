@@ -144,6 +144,27 @@ html[data-theme='custom'][data-scheme='light'] {
   --color-rose-300: oklch(51.4% 0.222 16.935);
 }
 
+/* ===================== 自定义主题：背景图（毛玻璃） ===================== */
+/*
+ * 背景图不直接铺在 html 上，而是交给这个固定伪元素并**模糊**它。半透明的
+ * 面板（bg-gray-900/950/800，alpha 见 customTheme.SURFACE_ALPHA）透出的是
+ * 「模糊柔和的色块」而非高频原图，故界面清晰、文字清晰、无雾感（毛玻璃观感）。
+ * 图片 url 与壳色 scrim 由 customBg.applyBgImage 经 --ccm-bg-* 变量注入。
+ * inset 负值补偿 blur 收缩留下的透明边；z-index:-1 沉到最底（html 背景此时
+ * 被设为 transparent，见 applyCustomTheme）。
+ */
+html[data-theme='custom'][data-has-bg]::before {
+  content: '';
+  position: fixed;
+  inset: -32px;
+  z-index: -1;
+  pointer-events: none;
+  background-image: linear-gradient(var(--ccm-bg-scrim), var(--ccm-bg-scrim)), var(--ccm-bg-url);
+  background-size: cover;
+  background-position: center;
+  filter: blur(18px);
+}
+
 /* ============================== 飞书（现代浅色） ============================== */
 /*
  * 配色依据两份实证（2026-07 调研）：

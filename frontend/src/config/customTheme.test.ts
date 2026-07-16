@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
   hexToOklch, buildCustomTheme, getCustomColors, setCustomColors,
-  applyCustomTheme, clearCustomTheme, getBgVisible, setBgVisible,
+  applyCustomTheme, clearCustomTheme, getBgVisible, setBgVisible, setHasBgImage,
   CUSTOM_DEFAULT_BG, CUSTOM_DEFAULT_BRAND, CUSTOM_DEFAULT_BG_VISIBLE,
 } from './customTheme';
 import { setTheme } from './theme';
@@ -232,6 +232,17 @@ describe('自定义主题持久化与应用', () => {
     expect(el.dataset.scheme).toBe('light');
     expect(el.style.getPropertyValue('--color-gray-950')).toBeTruthy();
     expect(el.style.getPropertyValue('--color-indigo-500')).toBeTruthy();
+  });
+
+  it('有背景图时 html 背景透明（让模糊背景伪元素露出）', () => {
+    setCustomColors('#131316', '#4f7cf7');
+    setHasBgImage(false);
+    applyCustomTheme();
+    expect(document.documentElement.style.backgroundColor).toBe('var(--color-gray-950)');
+    setHasBgImage(true);
+    applyCustomTheme();
+    expect(document.documentElement.style.backgroundColor).toBe('transparent');
+    setHasBgImage(false);
   });
 
   it('clearCustomTheme 清空全部内联变量与 data-scheme', () => {

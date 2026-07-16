@@ -19,11 +19,11 @@ const DB_VERSION = 1;
 const STORE = 'bg';
 const IMAGE_KEY = 'image';
 
-/** 壳色 scrim 的浓度：可见度=100 时保底 0.18（把图片压柔和），可见度越低越浓
- * （0 时 0.5，配合此时已不透明的表面档位，图片基本隐去）。scrim 用壳色，故
- * 深色主题压暗图片、浅色主题提亮图片，文字始终有干净的托底。 */
-const SCRIM_MIN = 0.18;
-const SCRIM_MAX = 0.50;
+/** 壳色 scrim 的浓度：可见度=100 时最淡（图片最明显），越低越浓（图片渐隐）。
+ * 背景图本身已被伪元素模糊（见 index.css 的 [data-has-bg]::before），故 scrim
+ * 只需轻压对比、无需靠它保可读——数值远比未模糊时低，避免雾感。 */
+const SCRIM_MIN = 0.10;
+const SCRIM_MAX = 0.55;
 
 /** 落盘前缩到最长边不超过此值，控制体积（壁纸多为 4K，直接存太浪费）。 */
 const MAX_EDGE = 1920;
@@ -164,29 +164,27 @@ export async function importBgImage(file: File): Promise<{ bg: string; brand: st
   return { ...colors, dataUrl };
 }
 
-/** 壳色 scrim 的 CSS 色（半透明壳色，浓度随可见度）。铺在图片之上、UI 之下，
- * 把图片压柔和，保证文字有干净托底。 */
+/** 壳色 scrim 的 CSS 色（半透明壳色，浓度随可见度）。作为伪元素上叠的一层，
+ * 轻压模糊图的对比；深色主题压暗、浅色主题提亮。 */
 function scrimColor(): string {
   const shell = hexToOklch(getCustomColors().bg);
   const a = SCRIM_MIN + (1 - getBgVisible() / 100) * (SCRIM_MAX - SCRIM_MIN);
   return `oklch(${shell.l.toFixed(2)}% ${shell.c.toFixed(4)} ${shell.h.toFixed(2)} / ${a.toFixed(3)})`;
 }
 
-/** 把背景图铺到 documentElement（异步读 IDB，故与色阶应用分开）。
- * background-image 列表里 gradient 在前=盖在图片上，充当壳色 scrim。 */
+/** 把背景图交给 documentElement（异步读 IDB，故与色阶应用分开）。
+ * 图片经由 CSS 变量喂给伪元素 [data-has-bg]::before，在那里被模糊 + 叠 scrim，
+ * 面板则透出「模糊柔和的背景」而非高频原图 —— 清晰不雾（毛玻璃观感）。 */
 export async function applyBgImage(): Promise<void> {
   const el = document.documentElement;
   const dataUrl = await loadBgImage();
   if (!dataUrl) {
-    el.style.removeProperty('background-image');
-    el.style.removeProperty('background-size');
-    el.style.removeProperty('background-position');
-    el.style.removeProperty('background-attachment');
+    el.style.removeProperty('--ccm-bg-url');
+    el.style.removeProperty('--ccm-bg-scrim');
+    delete el.dataset.hasBg;
     return;
   }
-  const scrim = scrimColor();
-  el.style.setProperty('background-image', `linear-gradient(${scrim}, ${scrim}), url("${dataUrl}")`);
-  el.style.setProperty('background-size', 'cover');
-  el.style.setProperty('background-position', 'center');
-  el.style.setProperty('background-attachment', 'fixed');
+  el.style.setProperty('--ccm-bg-url', `url("${dataUrl}")`);
+  el.style.setProperty('--ccm-bg-scrim', scrimColor());
+  el.dataset.hasBg = '1';
 }

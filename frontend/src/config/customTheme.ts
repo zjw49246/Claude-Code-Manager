@@ -236,25 +236,28 @@ export function applyCustomTheme(): string {
   // 有图时表面档位带 alpha 透出背景图，透明度由可见度滑块控制。标记读
   // localStorage 而非 IDB：色阶必须同步算出（applyTheme 是同步的），图片字节
   // 则异步铺上（applyBgImage）。
-  const { scheme, vars, metaColor } = buildCustomTheme(bg, brand, hasBgImage() ? getBgVisible() : null);
+  const hasBg = hasBgImage();
+  const { scheme, vars, metaColor } = buildCustomTheme(bg, brand, hasBg ? getBgVisible() : null);
   const el = document.documentElement;
   Object.entries(vars).forEach(([k, v]) => el.style.setProperty(k, v));
   el.dataset.scheme = scheme;
-  // 壳背景跟随生成的 950（而非用户原色）：浅色底会限幅，直接用原色会与
-  // 侧栏 bg-gray-950 对不上，overscroll 处露出色差
-  el.style.backgroundColor = 'var(--color-gray-950)';
+  // 有图时 html 背景必须透明，否则会盖住铺模糊背景的伪元素（::before z-index:-1）；
+  // 无图时壳背景跟随生成的 950（浅色底会限幅，直接用原色会与侧栏对不上、
+  // overscroll 处露色差）。
+  el.style.backgroundColor = hasBg ? 'transparent' : 'var(--color-gray-950)';
   el.style.colorScheme = scheme;
   return metaColor;
 }
 
 /** 背景图相关的内联属性（切走主题要一并清掉，否则壁纸会留在新主题下）。 */
-const BG_IMAGE_PROPS = ['background-image', 'background-size', 'background-position', 'background-attachment'];
+const BG_IMAGE_VARS = ['--ccm-bg-url', '--ccm-bg-scrim'];
 
 /** 切换到非自定义主题时清场，避免内联变量/壁纸盖住新主题。 */
 export function clearCustomTheme() {
   const el = document.documentElement;
   MANAGED_VARS.forEach((v) => el.style.removeProperty(v));
-  BG_IMAGE_PROPS.forEach((p) => el.style.removeProperty(p));
+  BG_IMAGE_VARS.forEach((v) => el.style.removeProperty(v));
+  delete el.dataset.hasBg;
   delete el.dataset.scheme;
   el.style.removeProperty('background-color');
   el.style.removeProperty('color-scheme');
