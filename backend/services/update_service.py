@@ -599,6 +599,9 @@ class UpdateService:
                 [
                     self._tools["systemd-run"], "--user", "--collect",
                     f"--unit=ccm-update-{self.port}",
+                    # transient units do NOT inherit our cwd — without this the
+                    # script's git/uv/alembic would run from systemd's default dir
+                    f"--working-directory={self.project_dir}",
                     f"--setenv=PATH={env['PATH']}",
                     f"--property=StandardOutput=append:{log_file}",
                     "--property=StandardError=inherit",
