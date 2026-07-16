@@ -201,7 +201,7 @@ class UpdateService:
                 state.steps = [StepInfo(name=n, status="completed") for n in STEP_NAMES]
                 self._current = state
                 logger.info("Recovered from restart — marking completed")
-            elif status in ("stopping", "migrating"):
+            elif status in ("stopping", "migrating", "rolling_back"):
                 # The external update script died mid-way (e.g. killed together
                 # with the service cgroup). We are running again, but the update
                 # never finished — surface it as failed so the user can retry.
@@ -344,14 +344,19 @@ class UpdateService:
         async with self._lock:
             await self._broadcast("step_update", step="rollback", status="running", message="正在回滚...")
 
-            if backup_file and Path(backup_file).exists():
-                db_path = self.db_path
-                for ext in ("-wal", "-shm"):
-                    p = db_path.with_suffix(db_path.suffix + ext)
-                    if p.exists():
-                        p.unlink()
-                shutil.copy2(backup_file, db_path)
+            # Never restore the SQLite file while this process still holds open
+            # connections — a later write/checkpoint through the live connection
+            # corrupts the restored DB (2026-07-16 test-env rollback wiped it to
+            # 0 bytes). The DB must only be touched after the service is down.
+            if self._is_managed_by_systemd():
+                self._write_status_file("restarting", "正在停服回滚...", old_commit=old_commit)
+                await self._broadcast("restarting", message="服务即将停止进行回滚，请等待自动重连...")
+                await asyncio.sleep(1)
+                self._spawn_update_script("rollback", old_commit, backup_file or "")
+                return {"status": "rolling_back", "old_commit": old_commit}
 
+            # Non-systemd fallback: code reset is safe while running; the DB
+            # restore happens in the detached shell after this process is killed.
             await self._run_cmd(["git", "reset", "--hard", old_commit])
             await self._run_cmd(["uv", "sync"], timeout=300)
 
@@ -359,7 +364,22 @@ class UpdateService:
             await self._broadcast("restarting", message="服务即将重启...")
             await asyncio.sleep(1)
 
-            self._restart_service()
+            restore_cmd = ""
+            if backup_file and Path(backup_file).exists():
+                db = self.db_path
+                restore_cmd = f"rm -f '{db}-wal' '{db}-shm' && cp '{backup_file}' '{db}'; "
+            uvicorn_cmd = (
+                f"sleep 2 && kill {os.getpid()}; sleep 1; {restore_cmd}"
+                f"cd {self.project_dir} && "
+                f"{sys.executable} -m uvicorn backend.main:app "
+                f"--host 0.0.0.0 --port {self.port}"
+            )
+            subprocess.Popen(
+                [self._tools["bash"], "-c", uvicorn_cmd],
+                stdout=open(f"/tmp/ccm-restart-{self.port}.log", "w"),
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
             return {"status": "rolling_back", "old_commit": old_commit}
 
     # ---- Pipeline implementation ----
@@ -565,6 +585,13 @@ class UpdateService:
                               message="即将停服进行数据库迁移...")
         await asyncio.sleep(1)
 
+        self._spawn_update_script("migrate", state.old_commit, state.backup_file)
+
+        state.status = "restarting"
+        await self._broadcast("restarting", message="服务即将停止进行迁移，请等待自动重连...")
+
+    def _spawn_update_script(self, mode: str, old_commit: str, backup_file: str):
+        """Launch update_migrate.sh so it survives this service being stopped."""
         script = Path(self.project_dir) / "scripts" / "update_migrate.sh"
         log_file = f"/tmp/ccm-update-migrate-{self.port}.log"
 
@@ -577,11 +604,12 @@ class UpdateService:
         script_argv = [
             self._tools["bash"], str(script),
             self.project_dir,
-            state.old_commit,
-            state.backup_file,
+            old_commit,
+            backup_file,
             str(self.port),
             str(self.db_path),
             self._service_name,
+            mode,
         ]
 
         if self._is_managed_by_systemd():
@@ -606,9 +634,6 @@ class UpdateService:
                 start_new_session=True,
                 env=env,
             )
-
-        state.status = "restarting"
-        await self._broadcast("restarting", message="服务即将停止进行迁移，请等待自动重连...")
 
     async def _fast_restart_path(self, state: UpdateState):
         """No migration: skip steps 8-9, do nohup restart for step 10."""

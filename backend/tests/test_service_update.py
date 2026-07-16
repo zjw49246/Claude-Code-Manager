@@ -122,6 +122,84 @@ def test_recover_marks_restart_completed(tmp_path, status):
     assert svc._current.status == "completed"
 
 
+# ---- rollback must never touch the DB while the service is running ----
+
+
+@pytest.mark.asyncio
+async def test_rollback_delegates_to_script_when_managed(tmp_path):
+    svc = _make_service(tmp_path)
+    svc._current = _make_state()
+    backup = tmp_path / "backup.db"
+    backup.write_text("db")
+    svc._current.backup_file = str(backup)
+
+    with patch.object(svc, "_is_managed_by_systemd", return_value=True), \
+         patch("backend.services.update_service.subprocess.Popen") as popen, \
+         patch("backend.services.update_service.asyncio.sleep", new=AsyncMock()):
+        result = await svc.rollback()
+
+    assert result["status"] == "rolling_back"
+    argv = popen.call_args[0][0]
+    assert "systemd-run" in Path(argv[0]).name
+    assert argv[-1] == "rollback"
+
+
+@pytest.mark.asyncio
+async def test_rollback_non_systemd_restores_db_after_kill(tmp_path):
+    svc = _make_service(tmp_path)
+    svc._current = _make_state()
+    backup = tmp_path / "backup.db"
+    backup.write_text("db")
+    svc._current.backup_file = str(backup)
+
+    with patch.object(svc, "_is_managed_by_systemd", return_value=False), \
+         patch.object(svc, "_run_cmd", new=AsyncMock(return_value={"returncode": 0, "stdout": "", "stderr": ""})), \
+         patch("backend.services.update_service.subprocess.Popen") as popen, \
+         patch("backend.services.update_service.asyncio.sleep", new=AsyncMock()):
+        result = await svc.rollback()
+
+    assert result["status"] == "rolling_back"
+    shell_cmd = popen.call_args[0][0][-1]
+    # the DB restore must come after the kill of the running process
+    assert shell_cmd.index("kill ") < shell_cmd.index(f"cp '{backup}'")
+    assert "-wal" in shell_cmd and "uvicorn" in shell_cmd
+
+
+def test_migrate_script_rollback_mode(tmp_path):
+    """Script rollback mode: stop → restore DB → git reset → start."""
+    env, call_log = _script_env(tmp_path)
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    genv = {**env, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    subprocess.run(["git", "init", "-q"], cwd=project, check=True, env=genv)
+    (project / "f.txt").write_text("v1")
+    subprocess.run(["git", "add", "."], cwd=project, check=True, env=genv)
+    subprocess.run(["git", "commit", "-qm", "v1"], cwd=project, check=True, env=genv)
+    old = subprocess.run(["git", "rev-parse", "HEAD"], cwd=project, capture_output=True, text=True, env=genv).stdout.strip()
+    (project / "f.txt").write_text("v2")
+    subprocess.run(["git", "commit", "-aqm", "v2"], cwd=project, check=True, env=genv)
+
+    db = tmp_path / "claude_manager.db"
+    db.write_text("corrupted")
+    backup = tmp_path / "backup.db"
+    backup.write_text("good-data")
+
+    subprocess.run(
+        ["bash", str(SCRIPT), str(project), old, str(backup), "8999",
+         str(db), "ccm.service", "rollback"],
+        env=env, check=True, timeout=30,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+    assert db.read_text() == "good-data"
+    assert (project / "f.txt").read_text() == "v1"
+    calls = call_log.read_text()
+    assert "stop ccm.service" in calls and "start ccm.service" in calls
+    status = json.loads(Path("/tmp/ccm-update-status-8999.json").read_text())
+    assert status["status"] == "rolled_back"
+
+
 # ---- update_migrate.sh always brings the service back up ----
 
 

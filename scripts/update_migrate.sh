@@ -10,6 +10,7 @@ BACKUP_FILE="$3"
 PORT="$4"
 DB_FILE="${5:-claude_manager.db}"
 SERVICE_NAME="${6:-ccm.service}"
+MODE="${7:-migrate}"   # migrate | rollback
 STATUS_FILE="/tmp/ccm-update-status-${PORT}.json"
 LOG_FILE="/tmp/ccm-update-migrate-${PORT}.log"
 
@@ -43,6 +44,23 @@ fi
 # and on boot init_db() runs `alembic upgrade head` anyway.
 trap 'systemctl --user start "$SERVICE_NAME" || true' EXIT
 sleep 1
+
+if [ "$MODE" = "rollback" ]; then
+    # Rollback: restore DB backup + reset code, service is already down so
+    # touching the SQLite files is safe (no live connections).
+    write_status "rolling_back" "正在回滚..." "rollback"
+    echo "=== Rollback mode: restoring $BACKUP_FILE, reset to $OLD_COMMIT ===" >> "$LOG_FILE"
+    if [ -n "$BACKUP_FILE" ] && [ -f "$BACKUP_FILE" ]; then
+        rm -f "${DB_FILE}-wal" "${DB_FILE}-shm"
+        cp "$BACKUP_FILE" "$DB_FILE"
+    fi
+    git reset --hard "$OLD_COMMIT" >> "$LOG_FILE" 2>&1
+    uv sync >> "$LOG_FILE" 2>&1 || true
+    systemctl --user start "$SERVICE_NAME"
+    write_status "rolled_back" "已回滚到 $OLD_COMMIT" "rollback"
+    echo "=== update_migrate.sh (rollback) finished at $(date -Iseconds) ===" >> "$LOG_FILE"
+    exit 0
+fi
 
 # 2. Run migration with timeout
 write_status "migrating" "正在执行数据库迁移..." "alembic_upgrade"
