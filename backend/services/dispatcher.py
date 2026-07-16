@@ -2848,8 +2848,13 @@ class GlobalDispatcher:
         original_skills: dict = {}
         async with self.db_factory() as db:
             task = await db.get(Task, task_id)
-            if not task or not task.session_id:
-                logger.warning(f"Task {task_id} not found or no session, skipping queued message")
+            if not task:
+                logger.warning(f"Task {task_id} not found, skipping queued message")
+                return
+            # compact_retry starts a fresh session with the compacted summary,
+            # so it doesn't need an existing session_id to resume.
+            if not task.session_id and msg.source != "compact_retry":
+                logger.warning(f"Task {task_id} no session, skipping queued message")
                 return
 
             # Recover before resuming when the session can't be resumed:
