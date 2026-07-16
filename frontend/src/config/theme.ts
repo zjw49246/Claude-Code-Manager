@@ -12,8 +12,8 @@ export interface ThemeOption {
 
 export const THEME_OPTIONS = [
   { value: 'dark', label: '深色', group: 'modern', scheme: 'dark', themeColor: '#131316' },
-  { value: 'light', label: '浅色', group: 'modern', scheme: 'light', themeColor: '#f0f0f1' },
-  { value: 'feishu', label: '飞书', group: 'modern', scheme: 'light', themeColor: '#eceef1' },
+  { value: 'light', label: '浅色', group: 'modern', scheme: 'light', themeColor: '#e9e9ec' },
+  { value: 'feishu', label: '飞书', group: 'modern', scheme: 'light', themeColor: '#ecedef' },
   { value: 'legacy', label: '经典深色', group: 'legacy', scheme: 'dark', themeColor: '#030712' },
   { value: 'ocean', label: '海蓝', group: 'legacy', scheme: 'dark', themeColor: '#06131f' },
   { value: 'forest', label: '森林', group: 'legacy', scheme: 'dark', themeColor: '#07130d' },

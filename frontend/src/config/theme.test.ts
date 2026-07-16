@@ -34,7 +34,7 @@ describe('theme config', () => {
     expect(feishu).toBeDefined();
     expect(feishu!.group).toBe('modern');
     expect(feishu!.scheme).toBe('light');
-    expect(feishu!.themeColor).toBe('#eceef1');
+    expect(feishu!.themeColor).toBe('#ecedef');
   });
 
   it('主题 value 无重复', () => {
@@ -48,7 +48,7 @@ describe('theme config', () => {
     expect(document.documentElement.dataset.theme).toBe('feishu');
     expect(
       document.querySelector('meta[name="theme-color"]')!.getAttribute('content'),
-    ).toBe('#eceef1');
+    ).toBe('#ecedef');
   });
 
   it('getTheme 对无效存储值回退到 dark', () => {
@@ -95,6 +95,18 @@ describe('index.css 主题变量覆盖完整性', () => {
     expect(block).toContain('--color-indigo-500: #245bdb'); // B600 hover 向深走
     expect(block).toContain('--color-gray-100: #1f2329'); // N900 主文字
     expect(block).toContain('--color-gray-800: #ffffff'); // 卡片纯白
-    expect(block).toContain('--color-gray-950: #eceef1'); // 侧栏壳 = 飞书 rail 灰（截图取色）
+    expect(block).toContain('--color-gray-950: #ecedef'); // 侧栏壳 = 飞书 rail 灰（截图取色）
+    expect(block).toContain('--color-gray-900: #fbfbfc'); // 画布近白：白底为主，区别于「现代浅色」的灰画布
+  });
+
+  it('飞书主题与现代浅色不趋同（白底为主 vs 灰画布）', () => {
+    // 回归守卫：feishu 的画布(gray-900)必须显著白于 light 的画布，
+    // 否则两个主题肉眼无法区分（2026-07-16 用户反馈）
+    const feishu = themeBlock('feishu');
+    const light = themeBlock('light');
+    expect(feishu).toContain('--color-gray-900: #fbfbfc');
+    // light 画布保持色调分层灰（tonal zinc），确保没人把两边改成同一取值
+    expect(light).toContain('--color-gray-900: oklch(95.8% 0.002 286)');
+    expect(light).toContain('--color-gray-950: oklch(92.5% 0.003 286)');
   });
 });
