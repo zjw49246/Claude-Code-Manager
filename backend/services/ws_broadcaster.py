@@ -45,7 +45,10 @@ class WebSocketBroadcaster:
 
     async def broadcast(self, channel: str, data: dict):
         message = json.dumps({"channel": channel, "data": data})
-        subs = self.subscriptions.get(channel, set())
+        # 迭代必须用快照：send 是悬挂点，期间并发的 (un)subscribe 会修改活集合
+        # → RuntimeError: Set changed size during iteration → API 500
+        #（2026-07-16 前端 WS 连环 keepalive 超时断开时命中，create_monitor 被炸出重复 monitor）
+        subs = list(self.subscriptions.get(channel, set()))
         dead = []
         for ws in subs:
             if not await self._send_with_timeout(ws, message):
@@ -58,7 +61,7 @@ class WebSocketBroadcaster:
             task_channel = f"task:{data['task_id']}"
             task_msg = json.dumps({"channel": task_channel, "data": data})
             task_dead = []
-            for ws in self.subscriptions.get(task_channel, set()):
+            for ws in list(self.subscriptions.get(task_channel, set())):
                 if not await self._send_with_timeout(ws, task_msg):
                     task_dead.append(ws)
             for ws in task_dead:

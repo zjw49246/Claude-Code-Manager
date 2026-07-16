@@ -89,6 +89,67 @@ def test_build_monitor_agent_prompt_no_context(dispatcher):
     assert "上下文" not in prompt
 
 
+def test_build_monitor_agent_prompt_interval_guidance(dispatcher):
+    """等待指引按 interval 生成：单次睡满间隔 + 显式大 timeout + 拆分兜底。
+
+    2026-07-16 task 35：interval 3600/1800 的 monitor 首查后长 sleep 被 CLI
+    转后台 → 子 agent 转投 ScheduleWakeup 结束回合 → -p 进程退出 → 误判 failed。
+    """
+    prompt = dispatcher._build_monitor_agent_prompt("watch", None, interval=1800)
+    assert "1800 秒" in prompt
+    assert "time.sleep(1800)" in prompt
+    assert f"timeout={(1800 + 120) * 1000}" in prompt
+    # 长 sleep 被拦时的拆分兜底
+    assert "time.sleep(300)" in prompt
+
+
+@pytest.mark.asyncio
+async def test_launch_monitor_agent_raises_bash_max_timeout(dispatcher, tmp_path):
+    """BASH_MAX_TIMEOUT_MS 按 interval 抬高，否则单次长 sleep 被 CLI 转后台。"""
+    dispatcher.pool = None
+    captured = {}
+
+    async def fake_exec(*cmd, **kwargs):
+        captured["env"] = kwargs["env"]
+        return _fake_proc()
+
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        await dispatcher._launch_monitor_agent(
+            prompt="p", cwd="/tmp", model=None,
+            monitor_session_id=990001,
+            mcp_config_path=tmp_path / "mcp.json",
+            interval_seconds=3600,
+        )
+
+    assert captured["env"]["BASH_MAX_TIMEOUT_MS"] == str((3600 + 600) * 1000)
+    dispatcher._monitor_log_fhs[990001].close()
+
+
+@pytest.mark.asyncio
+async def test_launch_monitor_agent_keeps_larger_env_timeout(
+    dispatcher, tmp_path, monkeypatch
+):
+    """环境里已有更大的 BASH_MAX_TIMEOUT_MS 时只抬不降。"""
+    dispatcher.pool = None
+    monkeypatch.setenv("BASH_MAX_TIMEOUT_MS", "99999000")
+    captured = {}
+
+    async def fake_exec(*cmd, **kwargs):
+        captured["env"] = kwargs["env"]
+        return _fake_proc()
+
+    with patch("asyncio.create_subprocess_exec", side_effect=fake_exec):
+        await dispatcher._launch_monitor_agent(
+            prompt="p", cwd="/tmp", model=None,
+            monitor_session_id=990002,
+            mcp_config_path=tmp_path / "mcp.json",
+            interval_seconds=300,
+        )
+
+    assert captured["env"]["BASH_MAX_TIMEOUT_MS"] == "99999000"
+    dispatcher._monitor_log_fhs[990002].close()
+
+
 # === start_monitor_session ===
 
 

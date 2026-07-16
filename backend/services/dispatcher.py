@@ -2291,6 +2291,7 @@ class GlobalDispatcher:
             prompt = self._build_monitor_agent_prompt(
                 description=ms_description,
                 context=ms_context,
+                interval=ms_interval,
             )
 
             mcp_config_path = generate_monitor_agent_mcp_config(
@@ -2304,6 +2305,7 @@ class GlobalDispatcher:
                 model=model,
                 monitor_session_id=monitor_session_id,
                 mcp_config_path=mcp_config_path,
+                interval_seconds=ms_interval,
             )
 
             try:
@@ -2377,6 +2379,7 @@ class GlobalDispatcher:
         model: str | None,
         monitor_session_id: int,
         mcp_config_path: Path,
+        interval_seconds: int = 300,
     ) -> asyncio.subprocess.Process:
         """Launch a persistent Claude subprocess for a monitor sub-agent.
 
@@ -2400,6 +2403,18 @@ class GlobalDispatcher:
 
         env = {k: v for k, v in os.environ.items()
                if k.upper() not in ("CLAUDECODE", "CLAUDE_CODE")}
+
+        # Bash 单调用超时上限默认 600s：interval 更长时，子 agent 的一次
+        # time.sleep(interval) 会被 CLI 转后台（不阻塞）→ 它转投 ScheduleWakeup
+        # 并结束回合 → -p 进程退出 → monitor 被误判 failed（2026-07-16 task 35
+        # #192/#193/#194 三连死）。按 interval 抬高上限并留检查余量；只抬不降，
+        # 环境里已有更大值时保留。
+        want_ms = (max(interval_seconds, 0) + 600) * 1000
+        try:
+            have_ms = int(env.get("BASH_MAX_TIMEOUT_MS", "0"))
+        except ValueError:
+            have_ms = 0
+        env["BASH_MAX_TIMEOUT_MS"] = str(max(want_ms, have_ms, 600_000))
 
         # Monitor sub-agent needs a logged-in account. Pick one from the pool
         # (or fall back to default ~/.claude).
@@ -2432,7 +2447,9 @@ class GlobalDispatcher:
         )
         return process
 
-    def _build_monitor_agent_prompt(self, description: str, context: str | None) -> str:
+    def _build_monitor_agent_prompt(
+        self, description: str, context: str | None, interval: int = 300
+    ) -> str:
         """Build the system prompt for a monitor sub-agent."""
         parts = [
             "你是一个自主监控 Agent，持续监控目标并在有变化时主动汇报。",
@@ -2445,7 +2462,12 @@ class GlobalDispatcher:
             parts.append("## 上下文")
             parts.append(context)
         parts.append("")
-        parts.append("""\
+        # 等待指引必须按 interval 生成：默认 Bash timeout 只有 120s，单次
+        # sleep 又不能超过 CLI 的单调用上限（launch 时已按 interval 抬高
+        # BASH_MAX_TIMEOUT_MS），两头都要在 prompt 里写死数字，子 agent
+        # 才不会自己发明等待方式（ScheduleWakeup / 转后台 = 进程退出即死）。
+        sleep_timeout_ms = (interval + 120) * 1000
+        parts.append(f"""\
 ## 你的 MCP 工具
 - report_status(summary, is_important): 报告状态。重要变化设 is_important=True
 - mark_complete(reason): 监控目标完成时调用，然后立即停止所有活动
@@ -2454,16 +2476,22 @@ class GlobalDispatcher:
 ## 行为准则
 1. 用 Bash 执行 ps、tail、cat 等命令检查状态
 2. 每次检查后调用 report_status 汇报
-3. 等待下一轮检查时，用 python 延时命令等待，例如：
-   `Bash(command="python3 -c \"import time; time.sleep(30)\"", timeout=120000)`
+3. 你的检查间隔是 {interval} 秒。等待下一轮检查时，用 python 延时命令一次睡满整个间隔，
+   并且必须像下面这样显式传大 timeout（默认只有 120 秒，会截断长等待）：
+   `Bash(command="python3 -c 'import time; time.sleep({interval})'", timeout={sleep_timeout_ms})`
    【重要】不要使用 bash 的 sleep 命令（会被系统拦截），必须用 python3 的 time.sleep。
+   【兜底】如果这个 sleep 没有阻塞等待、而是立即返回（提示转入后台/超出时限），改用
+   连续多次 `time.sleep(300)`（每次一个独立 Bash 调用，timeout=360000）累计等够
+   {interval} 秒，绝不因此改用其他等待方式。
 4. 【关键】你必须严格按以下循环执行，绝不中断：
    检查 → report_status → python sleep → 检查 → report_status → python sleep → ...
    每一步都是一个独立的工具调用。你的进程必须持续运行直到目标完成。
 5. 任务完成/失败/异常 → mark_complete 并说明原因，然后停止
 6. 你是只读观察者，不要修改任何文件
 7. 【禁止】不要使用内置的 Agent 工具
-8. 【禁止】不要使用 Monitor 工具、ScheduleWakeup 工具或 run_in_background —— 这些会导致你退出进程
+8. 【禁止】不要使用 Monitor 工具、ScheduleWakeup 工具或 run_in_background —— 你是
+   一次性 claude -p 进程，回合一结束进程就退出，"到点自动唤醒"的承诺对你不成立，
+   用了必死
 9. 【禁止】不要在调用 mark_complete 之前结束你的回合（end_turn）
 
 先做一次初始状态检查并 report_status，然后用 python sleep 等待，然后继续下一轮。""")
