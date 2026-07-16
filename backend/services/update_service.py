@@ -346,40 +346,13 @@ class UpdateService:
 
             # Never restore the SQLite file while this process still holds open
             # connections — a later write/checkpoint through the live connection
-            # corrupts the restored DB (2026-07-16 test-env rollback wiped it to
-            # 0 bytes). The DB must only be touched after the service is down.
-            if self._is_managed_by_systemd():
-                self._write_status_file("restarting", "正在停服回滚...", old_commit=old_commit)
-                await self._broadcast("restarting", message="服务即将停止进行回滚，请等待自动重连...")
-                await asyncio.sleep(1)
-                self._spawn_update_script("rollback", old_commit, backup_file or "")
-                return {"status": "rolling_back", "old_commit": old_commit}
-
-            # Non-systemd fallback: code reset is safe while running; the DB
-            # restore happens in the detached shell after this process is killed.
-            await self._run_cmd(["git", "reset", "--hard", old_commit])
-            await self._run_cmd(["uv", "sync"], timeout=300)
-
-            self._write_status_file("restarting", "回滚完成，正在重启...", old_commit=old_commit)
-            await self._broadcast("restarting", message="服务即将重启...")
+            # corrupts the restored DB (2026-07-16 test-env rollback incident).
+            # The script stops the service (systemctl or kill, per deployment)
+            # BEFORE touching the DB, then resets code and starts it again.
+            self._write_status_file("restarting", "正在停服回滚...", old_commit=old_commit)
+            await self._broadcast("restarting", message="服务即将停止进行回滚，请等待自动重连...")
             await asyncio.sleep(1)
-
-            restore_cmd = ""
-            if backup_file and Path(backup_file).exists():
-                db = self.db_path
-                restore_cmd = f"rm -f '{db}-wal' '{db}-shm' && cp '{backup_file}' '{db}'; "
-            uvicorn_cmd = (
-                f"sleep 2 && kill {os.getpid()}; sleep 1; {restore_cmd}"
-                f"cd {self.project_dir} && "
-                f"{sys.executable} -m uvicorn backend.main:app "
-                f"--host 0.0.0.0 --port {self.port}"
-            )
-            subprocess.Popen(
-                [self._tools["bash"], "-c", uvicorn_cmd],
-                stdout=open(f"/tmp/ccm-restart-{self.port}.log", "w"),
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-            )
+            self._spawn_update_script("rollback", old_commit, backup_file or "")
             return {"status": "rolling_back", "old_commit": old_commit}
 
     # ---- Pipeline implementation ----
@@ -601,6 +574,7 @@ class UpdateService:
             if tool_dir not in env.get("PATH", ""):
                 env["PATH"] = tool_dir + ":" + env.get("PATH", "")
 
+        managed = self._is_managed_by_systemd()
         script_argv = [
             self._tools["bash"], str(script),
             self.project_dir,
@@ -608,11 +582,15 @@ class UpdateService:
             backup_file,
             str(self.port),
             str(self.db_path),
-            self._service_name,
+            # "-" tells the script to stop/start via kill/respawn instead of
+            # systemctl (bare-uvicorn deployments)
+            self._service_name if managed else "-",
             mode,
+            str(os.getpid()),
+            sys.executable,
         ]
 
-        if self._is_managed_by_systemd():
+        if managed:
             # start_new_session only escapes the process group, NOT the service's
             # cgroup — `systemctl stop` kills the whole cgroup including the script,
             # leaving the service stopped with nobody left to start it again.
@@ -662,14 +640,23 @@ class UpdateService:
 
     # ---- Helpers ----
 
+    def _cgroup_text(self) -> str:
+        return Path("/proc/self/cgroup").read_text()
+
     def _is_managed_by_systemd(self) -> bool:
-        """Check if this process was started by systemd."""
+        """True only if THIS process runs inside the service's own cgroup.
+
+        `systemctl is-active` is not enough: a manually launched uvicorn can
+        coexist with an active (but port-less) systemd unit — it would then
+        believe it is systemd-managed and stop/start the *other* instance
+        (2026-07-16 test-env orphan incident). /proc/self/cgroup answers for
+        this very process; on non-Linux it raises → False → fallback path.
+        """
+        name = self._service_name
+        if not name.endswith(".service"):
+            name += ".service"
         try:
-            result = subprocess.run(
-                [self._tools["systemctl"], "--user", "is-active", self._service_name],
-                capture_output=True, text=True, timeout=5,
-            )
-            return result.stdout.strip() == "active"
+            return f"/{name}" in self._cgroup_text()
         except Exception:
             return False
 

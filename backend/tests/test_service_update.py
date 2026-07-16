@@ -141,11 +141,11 @@ async def test_rollback_delegates_to_script_when_managed(tmp_path):
     assert result["status"] == "rolling_back"
     argv = popen.call_args[0][0]
     assert "systemd-run" in Path(argv[0]).name
-    assert argv[-1] == "rollback"
+    assert "rollback" in argv
 
 
 @pytest.mark.asyncio
-async def test_rollback_non_systemd_restores_db_after_kill(tmp_path):
+async def test_rollback_non_systemd_delegates_to_script_kill_mode(tmp_path):
     svc = _make_service(tmp_path)
     svc._current = _make_state()
     backup = tmp_path / "backup.db"
@@ -153,16 +153,31 @@ async def test_rollback_non_systemd_restores_db_after_kill(tmp_path):
     svc._current.backup_file = str(backup)
 
     with patch.object(svc, "_is_managed_by_systemd", return_value=False), \
-         patch.object(svc, "_run_cmd", new=AsyncMock(return_value={"returncode": 0, "stdout": "", "stderr": ""})), \
          patch("backend.services.update_service.subprocess.Popen") as popen, \
          patch("backend.services.update_service.asyncio.sleep", new=AsyncMock()):
         result = await svc.rollback()
 
     assert result["status"] == "rolling_back"
-    shell_cmd = popen.call_args[0][0][-1]
-    # the DB restore must come after the kill of the running process
-    assert shell_cmd.index("kill ") < shell_cmd.index(f"cp '{backup}'")
-    assert "-wal" in shell_cmd and "uvicorn" in shell_cmd
+    argv = popen.call_args[0][0]
+    assert "systemd-run" not in argv[0]
+    assert "-" in argv and "rollback" in argv          # kill/respawn mode
+    assert str(os.getpid()) in argv                    # pid to kill
+
+
+# ---- _is_managed_by_systemd answers for THIS process, not the unit ----
+
+
+def test_is_managed_true_only_when_self_in_service_cgroup(tmp_path):
+    svc = _make_service(tmp_path)
+    with patch.object(svc, "_cgroup_text",
+                      return_value="0::/user.slice/user-1000.slice/user@1000.service/app.slice/ccm.service\n"):
+        assert svc._is_managed_by_systemd() is True
+    # orphan uvicorn in a login session — unit may be active, but WE are not it
+    with patch.object(svc, "_cgroup_text",
+                      return_value="0::/user.slice/user-1000.slice/session-19215.scope\n"):
+        assert svc._is_managed_by_systemd() is False
+    with patch.object(svc, "_cgroup_text", side_effect=FileNotFoundError):
+        assert svc._is_managed_by_systemd() is False
 
 
 def test_migrate_script_rollback_mode(tmp_path):
@@ -220,6 +235,46 @@ def _script_env(tmp_path: Path) -> tuple[dict, Path]:
     env = os.environ.copy()
     env["PATH"] = f"{bin_dir}:{env['PATH']}"
     return env, call_log
+
+
+def test_migrate_script_bare_uvicorn_mode(tmp_path):
+    """SERVICE_NAME='-': stop = kill the given pid, start = respawn uvicorn."""
+    env, call_log = _script_env(tmp_path)
+    bin_dir = tmp_path / "bin"
+    python_stub = bin_dir / "python-stub"
+    python_stub.write_text(f'#!/bin/bash\necho "python $@" >> {call_log}\n')
+    python_stub.chmod(python_stub.stat().st_mode | stat.S_IEXEC)
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    genv = {**env, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    subprocess.run(["git", "init", "-q"], cwd=project, check=True, env=genv)
+    (project / "f.txt").write_text("v1")
+    subprocess.run(["git", "add", "."], cwd=project, check=True, env=genv)
+    subprocess.run(["git", "commit", "-qm", "v1"], cwd=project, check=True, env=genv)
+    old = subprocess.run(["git", "rev-parse", "HEAD"], cwd=project, capture_output=True, text=True, env=genv).stdout.strip()
+
+    db = tmp_path / "claude_manager.db"
+    db.write_text("corrupted")
+    backup = tmp_path / "backup.db"
+    backup.write_text("good-data")
+
+    dummy_server = subprocess.Popen(["sleep", "60"])
+    try:
+        subprocess.run(
+            ["bash", str(SCRIPT), str(project), old, str(backup), "8999",
+             str(db), "-", "rollback", str(dummy_server.pid), str(python_stub)],
+            env=env, check=True, timeout=60,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        assert dummy_server.wait(timeout=5) != 0  # killed by svc_stop
+        assert db.read_text() == "good-data"
+        calls = call_log.read_text()
+        assert "systemctl" not in calls or "ccm.service" not in calls
+        assert "python -m uvicorn backend.main:app" in calls  # respawned
+    finally:
+        if dummy_server.poll() is None:
+            dummy_server.kill()
 
 
 def test_migrate_script_trap_starts_service_even_if_killed(tmp_path):
