@@ -31,21 +31,21 @@
   --radius-xl: 0.875rem;
   --radius-2xl: 1.125rem;
 
-  --color-foreground: oklch(98.5% 0 0);
+  --color-foreground: oklch(100% 0 0);
 
-  /* 现代深色中性色（zinc 色相；层次：950 侧栏壳 < 900 画布 < 800 卡片） */
-  --color-gray-950: oklch(16% 0.005 285.8);
-  --color-gray-900: oklch(19.5% 0.006 285.9);
-  --color-gray-800: oklch(23.5% 0.007 285.9);
-  --color-gray-750: oklch(26% 0.007 286);
-  --color-gray-700: oklch(28.5% 0.007 286);
-  --color-gray-600: oklch(37% 0.012 286);
-  --color-gray-500: oklch(55.2% 0.016 285.9);
-  --color-gray-400: oklch(71% 0.015 286);
-  --color-gray-300: oklch(86% 0.008 286);
-  --color-gray-200: oklch(93% 0.004 286);
-  --color-gray-100: oklch(96.5% 0.001 286);
-  --color-gray-50: oklch(98.5% 0 0);
+  /* 现代深色中性色（对标 Tailwind gray 默认暗度，chroma 极低避免蓝雾） */
+  --color-gray-950: oklch(7.5% 0.002 285);
+  --color-gray-900: oklch(14.5% 0.003 285);
+  --color-gray-800: oklch(21% 0.004 285);
+  --color-gray-750: oklch(24% 0.004 285);
+  --color-gray-700: oklch(28% 0.005 285);
+  --color-gray-600: oklch(37% 0.008 285);
+  --color-gray-500: oklch(50% 0.01 285);
+  --color-gray-400: oklch(65% 0.01 285);
+  --color-gray-300: oklch(82% 0.005 285);
+  --color-gray-200: oklch(90% 0.003 285);
+  --color-gray-100: oklch(95% 0.001 285);
+  --color-gray-50: oklch(98% 0 0);
 
   /* 品牌色：indigo → Multica 蓝（hue 255） */
   --color-indigo-950: oklch(25% 0.06 255);
@@ -66,7 +66,7 @@
 }
 
 html {
-  background-color: oklch(16% 0.005 285.8);
+  background-color: oklch(7.5% 0.002 285);
   color-scheme: dark;
   touch-action: manipulation;
   overflow-x: clip;
@@ -162,7 +162,7 @@ html[data-theme='custom'][data-has-bg]::before {
   background-image: linear-gradient(var(--ccm-bg-scrim), var(--ccm-bg-scrim)), var(--ccm-bg-url);
   background-size: cover;
   background-position: center;
-  filter: blur(18px);
+  filter: none;
 }
 
 /* ============================== 飞书（现代浅色） ============================== */

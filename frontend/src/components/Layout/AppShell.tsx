@@ -146,7 +146,7 @@ export function AppShell({ currentPage, onNavigate, wide, children }: AppShellPr
 
       {/* 右侧主列：sticky 顶栏 + 页面内容 */}
       <div className="lg:pl-60 flex flex-col min-h-screen">
-        <header className="sticky top-0 z-30 bg-gray-900/85 backdrop-blur-md border-b border-gray-800 pt-[env(safe-area-inset-top)]">
+        <header className="sticky top-0 z-30 bg-gray-900 border-b border-gray-800 pt-[env(safe-area-inset-top)]">
           <div className="h-12 flex items-center gap-2 px-3 sm:px-4">
             <button
               onClick={() => setDrawerOpen(true)}

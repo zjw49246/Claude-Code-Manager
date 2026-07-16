@@ -22,8 +22,8 @@ const IMAGE_KEY = 'image';
 /** 壳色 scrim 的浓度：可见度=100 时最淡（图片最明显），越低越浓（图片渐隐）。
  * 背景图本身已被伪元素模糊（见 index.css 的 [data-has-bg]::before），故 scrim
  * 只需轻压对比、无需靠它保可读——数值远比未模糊时低，避免雾感。 */
-const SCRIM_MIN = 0.10;
-const SCRIM_MAX = 0.55;
+const SCRIM_MIN = 0;
+const SCRIM_MAX = 0.40;
 
 /** 落盘前缩到最长边不超过此值，控制体积（壁纸多为 4K，直接存太浪费）。 */
 const MAX_EDGE = 1920;
