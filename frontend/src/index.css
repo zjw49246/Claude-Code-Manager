@@ -409,6 +409,14 @@ html[data-theme='rose'] {
   background: color-mix(in oklab, var(--ring) 30%, transparent);
 }
 
+/* 品牌蓝实底（用户聊天气泡、主按钮 bg-indigo-600）上的选中高亮：
+   全局高亮本身是品牌蓝，蓝底上完全不可见 → 改用白色半透明覆盖。
+   [class~=] 精确匹配整词，不会误伤 bg-indigo-600/15 之类的浅 tint 底 */
+[class~='bg-indigo-600']::selection,
+[class~='bg-indigo-600'] *::selection {
+  background: oklch(100% 0 0 / 0.35);
+}
+
 /* Markdown body styles */
 .markdown-body {
   line-height: 1.6;

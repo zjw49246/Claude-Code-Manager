@@ -109,4 +109,11 @@ describe('index.css 主题变量覆盖完整性', () => {
     expect(light).toContain('--color-gray-900: oklch(95.8% 0.002 286)');
     expect(light).toContain('--color-gray-950: oklch(92.5% 0.003 286)');
   });
+
+  it('品牌蓝实底上有白色选中高亮覆盖（蓝底蓝高亮不可见问题）', () => {
+    // 回归守卫：全局 ::selection 是品牌蓝，用户气泡/主按钮是 bg-indigo-600
+    // 实底蓝，必须有词级匹配的白色半透明覆盖（2026-07-16 用户反馈）
+    expect(indexCss).toContain("[class~='bg-indigo-600']::selection");
+    expect(indexCss).toContain("[class~='bg-indigo-600'] *::selection");
+  });
 });
