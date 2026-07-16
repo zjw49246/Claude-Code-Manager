@@ -1,6 +1,7 @@
 #!/bin/bash
 # Stop service → run migration → start service (or rollback on failure).
-# Launched via nohup so it survives the service being killed by systemctl stop.
+# Must be launched OUTSIDE the service's cgroup (systemd-run) — otherwise the
+# `systemctl stop` below kills this script too and the service never restarts.
 set -uo pipefail
 
 PROJECT_DIR="$1"
@@ -37,6 +38,10 @@ if ! systemctl --user stop "$SERVICE_NAME"; then
     write_status "failed" "停止服务失败，中止迁移" "stop_service"
     exit 1
 fi
+# From here on the service is down: whatever happens to this script (crash,
+# SIGTERM, timeout), always bring the service back up. `start` is idempotent,
+# and on boot init_db() runs `alembic upgrade head` anyway.
+trap 'systemctl --user start "$SERVICE_NAME" || true' EXIT
 sleep 1
 
 # 2. Run migration with timeout
