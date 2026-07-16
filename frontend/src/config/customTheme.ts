@@ -17,6 +17,9 @@ const BRAND_KEY = 'cc_theme_custom_brand';
 /** 有背景图标记。存 localStorage 而非跟图片一起放 IDB：色阶推导要同步知道
  * 该不该给表面档位加 alpha，而读 IDB 是异步的（图片字节由 customBg 异步铺）。 */
 const HAS_BG_KEY = 'cc_theme_custom_has_bg';
+/** 背景图可见度 0-100：100 = 表面档位最透（图片最明显，仍保证文字可读），
+ * 0 = 表面完全不透明（等于没图）。见 SURFACE_ALPHA / buildCustomTheme。 */
+const BG_VISIBLE_KEY = 'cc_theme_custom_bg_visible';
 
 export const hasBgImage = () => localStorage.getItem(HAS_BG_KEY) === '1';
 export const setHasBgImage = (on: boolean) =>
@@ -24,6 +27,16 @@ export const setHasBgImage = (on: boolean) =>
 
 export const CUSTOM_DEFAULT_BG = '#131316';
 export const CUSTOM_DEFAULT_BRAND = '#4f7cf7';
+export const CUSTOM_DEFAULT_BG_VISIBLE = 100;
+
+export function getBgVisible(): number {
+  const raw = localStorage.getItem(BG_VISIBLE_KEY);
+  if (raw === null) return CUSTOM_DEFAULT_BG_VISIBLE;  // Number(null)===0，须先挡掉缺失
+  const v = Number(raw);
+  return Number.isFinite(v) && v >= 0 && v <= 100 ? v : CUSTOM_DEFAULT_BG_VISIBLE;
+}
+export const setBgVisible = (v: number) =>
+  localStorage.setItem(BG_VISIBLE_KEY, String(Math.max(0, Math.min(100, Math.round(v)))));
 
 /** L > 该值判定为浅色底，走浅色曲线（文字向深走）。 */
 const LIGHT_L_CUTOFF = 60;
@@ -92,9 +105,9 @@ const css = (o: Oklch, alpha?: number) => {
 const GRAY_STOPS = ['950', '900', '800', '750', '700', '600', '500', '400', '300', '200', '100', '50'] as const;
 
 /**
- * 有背景图时各表面档位的不透明度（无图时全部不透明，行为不变）。
- * 只有表面档（侧栏/画布/卡片/边框）透明——文字与图标档位必须保持不透明，
- * 否则正文会被背景图穿透、可读性崩掉。
+ * 各表面档位在「可见度=100」时的不透明度（= 最透边界，已验证文字可读）。
+ * 只有表面档（侧栏/画布/卡片/边框）透明——文字与图标档位不在表内，始终不
+ * 透明，否则正文会被背景图穿透、可读性崩掉。
  * 数值按叠加后的实效不透明度取：卡片(800) 落在画布(900) 上，对图片的实效
  * 遮盖 = 0.88 + 0.12×0.55 ≈ 0.95，故卡片上的文字仍然干净。
  */
@@ -105,6 +118,17 @@ const SURFACE_ALPHA: Partial<Record<typeof GRAY_STOPS[number], number>> = {
   '750': 0.85,
   '700': 0.82,  // 边框/控件底
 };
+
+/**
+ * 按可见度把某档 alpha 从「不透明(1)」插值到「最透边界(base)」。
+ * visible=100 → base（最透，图片最明显）；visible=0 → 1（不透明，等于没图）。
+ * 返回 undefined = 该档不参与透明（文字/图标档位）。
+ */
+function surfaceAlpha(stop: typeof GRAY_STOPS[number], visible: number): number | undefined {
+  const base = SURFACE_ALPHA[stop];
+  if (base === undefined) return undefined;
+  return round(1 - (visible / 100) * (1 - base), 3);
+}
 
 /** 参考中性色阶亮度（index.css 的 dark / light 主题逐档实测值）。 */
 const GRAY_REF = {
@@ -148,9 +172,9 @@ export interface CustomThemeResult {
   metaColor: string;
 }
 
-/** 从背景色 + 品牌色生成整套 CSS 变量。translucent=true 时表面档位带 alpha，
- * 供背景图透出（见 SURFACE_ALPHA）。 */
-export function buildCustomTheme(bgHex: string, brandHex: string, translucent = false): CustomThemeResult {
+/** 从背景色 + 品牌色生成整套 CSS 变量。bgVisible 非空（0-100）时表面档位带
+ * alpha 供背景图透出（见 SURFACE_ALPHA / surfaceAlpha）；null 表示无图，全不透明。 */
+export function buildCustomTheme(bgHex: string, brandHex: string, bgVisible: number | null = null): CustomThemeResult {
   const bg = hexToOklch(bgHex);
   const brand = hexToOklch(brandHex);
   const scheme: 'dark' | 'light' = bg.l > LIGHT_L_CUTOFF ? 'light' : 'dark';
@@ -165,7 +189,7 @@ export function buildCustomTheme(bgHex: string, brandHex: string, translucent = 
     const stop = GRAY_STOPS[i];
     // 壳色（950）保色度：用户挑的就是它，不做色度裁剪。
     const c = i === 0 ? bg.c : surfaceC * (1 - TEXT_C_FALLOFF * Math.max(0, Math.min(1, t)));
-    const alpha = translucent ? SURFACE_ALPHA[stop] : undefined;
+    const alpha = bgVisible === null ? undefined : surfaceAlpha(stop, bgVisible);
     vars[`--color-gray-${stop}`] = css({ l: shellL + t * (fgL - shellL), c, h: bg.h }, alpha);
   });
 
@@ -208,9 +232,10 @@ const MANAGED_VARS = [
  * 返回状态栏 meta 用色。 */
 export function applyCustomTheme(): string {
   const { bg, brand } = getCustomColors();
-  // 有图时表面档位带 alpha 透出背景图。标记读 localStorage 而非 IDB：色阶必须
-  // 同步算出来（applyTheme 是同步的），图片字节则异步铺上（applyBgImage）。
-  const { scheme, vars, metaColor } = buildCustomTheme(bg, brand, hasBgImage());
+  // 有图时表面档位带 alpha 透出背景图，透明度由可见度滑块控制。标记读
+  // localStorage 而非 IDB：色阶必须同步算出（applyTheme 是同步的），图片字节
+  // 则异步铺上（applyBgImage）。
+  const { scheme, vars, metaColor } = buildCustomTheme(bg, brand, hasBgImage() ? getBgVisible() : null);
   const el = document.documentElement;
   Object.entries(vars).forEach(([k, v]) => el.style.setProperty(k, v));
   el.dataset.scheme = scheme;

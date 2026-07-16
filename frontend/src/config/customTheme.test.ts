@@ -1,15 +1,22 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import {
   hexToOklch, buildCustomTheme, getCustomColors, setCustomColors,
-  applyCustomTheme, clearCustomTheme, CUSTOM_DEFAULT_BG, CUSTOM_DEFAULT_BRAND,
+  applyCustomTheme, clearCustomTheme, getBgVisible, setBgVisible,
+  CUSTOM_DEFAULT_BG, CUSTOM_DEFAULT_BRAND, CUSTOM_DEFAULT_BG_VISIBLE,
 } from './customTheme';
 import { setTheme } from './theme';
 
-/** 解析 `oklch(L% C H)` 回结构，用于断言逐档取值 */
+/** 解析 `oklch(L% C H)` 回结构，用于断言逐档取值（忽略可能的 / alpha 尾巴） */
 function parseOklch(v: string) {
-  const m = v.match(/oklch\(([\d.]+)%\s+([\d.]+)\s+([\d.]+)\)/);
+  const m = v.match(/oklch\(([\d.]+)%\s+([\d.]+)\s+([\d.]+)/);
   expect(m, `应为 oklch 三元组: ${v}`).toBeTruthy();
   return { l: Number(m![1]), c: Number(m![2]), h: Number(m![3]) };
+}
+
+/** 取 oklch 字符串的 alpha（无 / 尾巴则返回 1，即不透明） */
+function alphaOf(v: string): number {
+  const m = v.match(/\/\s*([\d.]+)\s*\)/);
+  return m ? Number(m[1]) : 1;
 }
 
 const REQUIRED_GRAY = [950, 900, 800, 750, 700, 600, 500, 400, 300, 200, 100, 50];
@@ -140,6 +147,51 @@ describe('buildCustomTheme 色阶推导', () => {
   });
 });
 
+describe('背景图透明度（可见度滑块）', () => {
+  const SURFACE = [950, 900, 800, 750, 700];
+  const TEXTISH = [600, 500, 400, 300, 200, 100, 50];
+
+  it('无图（null）时所有档位不透明，行为与纯色一致', () => {
+    const { vars } = buildCustomTheme('#131316', '#4f7cf7', null);
+    for (const s of [...SURFACE, ...TEXTISH]) {
+      expect(alphaOf(vars[`--color-gray-${s}`]), `gray-${s} 应不透明`).toBe(1);
+    }
+  });
+
+  it('可见度=100 时表面档位取最透边界（画布 0.55 / 卡片 0.88）', () => {
+    const { vars } = buildCustomTheme('#131316', '#4f7cf7', 100);
+    expect(alphaOf(vars['--color-gray-900'])).toBeCloseTo(0.55, 3);
+    expect(alphaOf(vars['--color-gray-800'])).toBeCloseTo(0.88, 3);
+    expect(alphaOf(vars['--color-gray-950'])).toBeCloseTo(0.72, 3);
+  });
+
+  it('可见度=0 时表面档位完全不透明（等于没图）', () => {
+    const { vars } = buildCustomTheme('#131316', '#4f7cf7', 0);
+    for (const s of SURFACE) expect(alphaOf(vars[`--color-gray-${s}`]), `gray-${s}`).toBe(1);
+  });
+
+  it('文字/图标档位在任何可见度下都保持不透明（正文不被穿透）', () => {
+    for (const vis of [0, 50, 100]) {
+      const { vars } = buildCustomTheme('#131316', '#4f7cf7', vis);
+      for (const s of TEXTISH) {
+        expect(alphaOf(vars[`--color-gray-${s}`]), `vis=${vis} gray-${s}`).toBe(1);
+      }
+    }
+  });
+
+  it('可见度越高表面越透（alpha 单调下降）', () => {
+    const a = (vis: number) => alphaOf(buildCustomTheme('#131316', '#4f7cf7', vis).vars['--color-gray-900']);
+    expect(a(100)).toBeLessThan(a(50));
+    expect(a(50)).toBeLessThan(a(0));
+  });
+
+  it('可见度=50 是不透明与最透边界的中点', () => {
+    const { vars } = buildCustomTheme('#131316', '#4f7cf7', 50);
+    // 画布 base=0.55 → 中点 = 1 - 0.5*(1-0.55) = 0.775
+    expect(alphaOf(vars['--color-gray-900'])).toBeCloseTo(0.775, 3);
+  });
+});
+
 describe('自定义主题持久化与应用', () => {
   beforeEach(() => {
     localStorage.clear();
@@ -154,6 +206,16 @@ describe('自定义主题持久化与应用', () => {
   it('setCustomColors 持久化后可读回', () => {
     setCustomColors('#07130d', '#16a34a');
     expect(getCustomColors()).toEqual({ bg: '#07130d', brand: '#16a34a' });
+  });
+
+  it('背景图可见度默认 100，setBgVisible 持久化并夹到 [0,100]', () => {
+    expect(getBgVisible()).toBe(CUSTOM_DEFAULT_BG_VISIBLE);
+    setBgVisible(40);
+    expect(getBgVisible()).toBe(40);
+    setBgVisible(999);
+    expect(getBgVisible()).toBe(100);
+    setBgVisible(-5);
+    expect(getBgVisible()).toBe(0);
   });
 
   it('applyCustomTheme 内联变量并按亮度标注 data-scheme', () => {

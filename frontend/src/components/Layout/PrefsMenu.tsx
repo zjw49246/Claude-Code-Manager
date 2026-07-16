@@ -3,7 +3,7 @@ import { Palette, Globe, Settings, LogOut, KeyRound, Image as ImageIcon } from '
 import { api, clearToken } from '../../api/client';
 import type { RuntimeSettings } from '../../api/client';
 import { getTheme, setTheme as persistTheme, THEME_OPTIONS, type Theme } from '../../config/theme';
-import { getCustomColors, setCustomColors, hasBgImage } from '../../config/customTheme';
+import { getCustomColors, setCustomColors, hasBgImage, getBgVisible, setBgVisible } from '../../config/customTheme';
 import { importBgImage, clearBgImage } from '../../config/customBg';
 import { getTimezone, setTimezone, TIMEZONE_OPTIONS } from '../../config/timezone';
 
@@ -14,6 +14,7 @@ export function PrefsMenu({ isAdmin }: { isAdmin: boolean }) {
   const [custom, setCustom] = useState(getCustomColors());
   const [bgOn, setBgOn] = useState(hasBgImage());
   const [bgBusy, setBgBusy] = useState(false);
+  const [bgVisible, setBgVisibleState] = useState(getBgVisible());
   const bgInputRef = useRef<HTMLInputElement>(null);
   const [tz, setTz] = useState(getTimezone());
   const [open, setOpen] = useState(false);
@@ -112,6 +113,12 @@ export function PrefsMenu({ isAdmin }: { isAdmin: boolean }) {
     await clearBgImage();
     setBgOn(false);
     persistTheme('custom');  // 重算：去掉表面档位的 alpha
+  };
+
+  const handleBgVisible = (v: number) => {
+    setBgVisibleState(v);
+    setBgVisible(v);
+    persistTheme('custom');  // 重算表面档位 alpha（实时预览）
   };
 
   const selectCls = 'bg-gray-700 text-gray-200 text-xs rounded-md px-2 py-1 border border-gray-600 focus:outline-none focus:ring-1 focus:ring-indigo-500 cursor-pointer';
@@ -243,6 +250,23 @@ export function PrefsMenu({ isAdmin }: { isAdmin: boolean }) {
                   )}
                 </div>
               </div>
+              {bgOn && (
+                <div className="flex items-center justify-between gap-3 pl-4">
+                  <span className="text-xs text-gray-500">背景图强度</span>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      value={bgVisible}
+                      onChange={(e) => handleBgVisible(Number(e.target.value))}
+                      className="w-28 accent-indigo-500 cursor-pointer"
+                      title="向右：背景图更明显；向左：界面更实"
+                    />
+                    <span className="text-[10px] text-gray-500 tabular-nums w-8 text-right">{bgVisible}%</span>
+                  </div>
+                </div>
+              )}
             </>
           )}
           {runtime && (
