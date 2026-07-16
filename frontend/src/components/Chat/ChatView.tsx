@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm';
 import { api } from '../../api/client';
 import type { ChatMessage, FileAttachment, Task, Project, UploadResult, MonitorSession, AskUserQuestion, AskUserAnswer } from '../../api/client';
 import { useWebSocket } from '../../hooks/useWebSocket';
+import { resolveAssetUrl } from '../../config/server';
 import { Send, ArrowLeft, Loader2, ChevronDown, ChevronRight, ChevronUp, Copy, Check, Paperclip, X, StopCircle, Pencil, ArrowDown, Star, ListPlus, Trash2, AlertCircle, Sparkles } from 'lucide-react';
 import { SecretPicker } from '../Secrets/SecretPicker';
 import { QuickPhraseDropdown } from '../QuickPhrases/QuickPhraseDropdown';
@@ -593,9 +594,14 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
       const attachments = (msg.data.attachments as { url: string; name: string; is_image: boolean }[]) || null;
       setSending(true);
       setMessages((prev) => {
-        // Skip if last message is an optimistic duplicate (same content, recent)
+        // Skip if last message is an optimistic duplicate (same content, recent).
+        // 但服务端广播可能带附件而乐观回显没有 —— 去重时必须把附件合并进去，
+        // 整条丢弃会让刚发的图片消失（2026-07-16 用户反馈）
         const last = prev[prev.length - 1];
         if (last && last.role === 'user' && last.event_type === 'user_message' && last.content === content) {
+          if ((imageUrls?.length || attachments?.length) && !last.image_urls?.length && !last.attachments?.length) {
+            return [...prev.slice(0, -1), { ...last, image_urls: imageUrls, attachments }];
+          }
           return prev;
         }
         return [...prev, {
@@ -874,22 +880,29 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
 
     try {
       let uploadedPaths: string[] | undefined;
+      let uploadedResults: UploadResult[] = [];
       if (preUploadedResults && preUploadedResults.length > 0) {
-        uploadedPaths = preUploadedResults.map((r) => r.path);
+        uploadedResults = preUploadedResults;
       } else if (fileUpload.uploadedResults.length > 0) {
-        uploadedPaths = fileUpload.uploadedResults.map((r) => r.path);
+        uploadedResults = fileUpload.uploadedResults;
       }
+      if (uploadedResults.length > 0) uploadedPaths = uploadedResults.map((r) => r.path);
       if (!fromQueue) fileUpload.clear();
 
-      // Optimistic message — show immediately, always with user prefix
+      // Optimistic message — show immediately, always with user prefix.
+      // 附件也要立刻带上：WS 回包按内容去重时若整条丢弃，图片就再也不显示了
       if (text) {
+        const optimisticAttachments: FileAttachment[] | null = uploadedResults.length > 0
+          ? uploadedResults.map((r) => ({ url: r.url, name: r.filename || r.url.split('/').pop() || 'file', is_image: r.is_image }))
+          : null;
         const ccU = JSON.parse(localStorage.getItem('cc_user') || '{}');
         const displayText = ccU.name ? `[${ccU.name}] ${text}` : text;
         setMessages(prev => [...prev, {
           id: Date.now() + Math.random(), role: 'user', event_type: 'user_message',
           content: displayText, tool_name: null, tool_input: null, tool_output: null,
           is_error: false, loop_iteration: null, timestamp: new Date().toISOString(),
-          image_urls: null, attachments: null,
+          image_urls: optimisticAttachments?.filter((a) => a.is_image).map((a) => a.url) || null,
+          attachments: optimisticAttachments,
         }]);
         setSending(true);
       }
@@ -1244,7 +1257,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
                         <MessageImages urls={task.metadata_.attachments.filter((a) => a.is_image).map((a) => a.url)} />
                       )}
                       {task.metadata_.attachments.filter((a) => !a.is_image).map((a, i) => (
-                        <a key={i} href={a.url} target="_blank" rel="noopener noreferrer"
+                        <a key={i} href={resolveAssetUrl(a.url)} target="_blank" rel="noopener noreferrer"
                           className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-500/30 rounded-lg text-xs text-indigo-100 hover:bg-indigo-500/40 transition-colors max-w-[200px]"
                         >
                           <Paperclip size={12} className="shrink-0" />
@@ -1880,7 +1893,9 @@ function MessageImages({ urls }: { urls: string[] }) {
   return (
     <>
       <div className="flex flex-wrap gap-2">
-        {urls.map((url, i) => (
+        {urls.map((rawUrl, i) => {
+          const url = resolveAssetUrl(rawUrl);
+          return (
           <img
             key={i}
             src={url}
@@ -1888,7 +1903,8 @@ function MessageImages({ urls }: { urls: string[] }) {
             className="max-w-[200px] max-h-[150px] rounded-lg object-cover cursor-pointer hover:opacity-80 transition-opacity"
             onClick={() => setLightboxSrc(url)}
           />
-        ))}
+          );
+        })}
       </div>
       {lightboxSrc && <ImageLightbox src={lightboxSrc} onClose={() => setLightboxSrc(null)} />}
     </>
@@ -2243,7 +2259,7 @@ const MessageBubble = memo(function MessageBubble({ message, taskId }: { message
                     <MessageImages urls={message.attachments.filter((a) => a.is_image).map((a) => a.url)} />
                   )}
                   {message.attachments.filter((a) => !a.is_image).map((a, i) => (
-                    <a key={i} href={a.url} target="_blank" rel="noopener noreferrer"
+                    <a key={i} href={resolveAssetUrl(a.url)} target="_blank" rel="noopener noreferrer"
                       className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-500/30 rounded-lg text-xs text-indigo-100 hover:bg-indigo-500/40 transition-colors max-w-[200px]"
                     >
                       <Paperclip size={12} className="shrink-0" />

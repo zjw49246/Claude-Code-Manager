@@ -35,6 +35,13 @@ export function getApiBase(): string {
   return getServerUrl();
 }
 
+/** 后端返回的资源相对路径（如 /api/uploads/x.png）在 Capacitor App 里
+ *  会相对 capacitor://localhost 解析而 404 —— 统一经此拼上远程服务器地址。
+ *  Web 端 getApiBase() 为空串，原样返回。 */
+export function resolveAssetUrl(url: string): string {
+  return url.startsWith('/') ? `${getApiBase()}${url}` : url;
+}
+
 export function getWsUrl(): string {
   if (!isCapacitor()) {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
