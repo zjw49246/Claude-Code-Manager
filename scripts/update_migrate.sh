@@ -18,7 +18,9 @@ PYTHON_BIN="${9:-python3}"
 STATUS_FILE="/tmp/ccm-update-status-${PORT}.json"
 LOG_FILE="/tmp/ccm-update-migrate-${PORT}.log"
 
-cd "$PROJECT_DIR"
+# Everything below (git/uv/alembic/relative DB paths) assumes the project dir;
+# abort outright if it is gone rather than running them somewhere random.
+cd "$PROJECT_DIR" || exit 1
 
 write_status() {
     local status="$1" message="$2" step="${3:-}"
