@@ -1595,30 +1595,15 @@ class InstanceManager:
                     "agent_type": existing.agent_type,
                     "status": "completed",
                 })
-
-                # Auto-resume: native sub-agent 完成后通知主 Agent
-                if existing.agent_type in ("native-monitor", "native-agent"):
-                    try:
-                        from backend.main import dispatcher
-                        from backend.services.dispatcher import PRIORITY_MONITOR_COMPLETE
-                        summary = existing.last_summary or existing.description or "子任务完成"
-                        label = "Monitor" if "monitor" in existing.agent_type else "Agent"
-                        prompt = (
-                            f"[{label} 完成] {summary}\n\n"
-                            "请根据结果回复用户。"
-                        )
-                        await dispatcher.enqueue_message(
-                            task_id=task_id,
-                            prompt=prompt,
-                            priority=PRIORITY_MONITOR_COMPLETE,
-                            source=f"sub-agent:native-complete",
-                            user_message_text=f"[{label}] 后台任务完成: {summary[:100]}",
-                        )
-                    except Exception:
-                        logger.exception(
-                            "Failed to enqueue auto-resume for native sub-agent on task %s",
-                            task_id,
-                        )
+                # 绝不在这里 enqueue auto-resume：subagent_done 只来自 PTY 观测，
+                # 而 PTY 模式下 harness 自己的 task-notification 已在同一瞬间唤醒
+                # session（唤醒后的产出由 FullMirrorCCMBackend 镜像进聊天）。这里
+                # 再投递一条 prompt 必然和该通知 turn 赛跑，输了会被 CLI 当
+                # mid-turn steering 吸收（queue-op remove、无独立回显）→
+                # send_prompt 的回显锁定永不成立 → consumer 永挂 → 队列冻结 →
+                # 7200s 超时杀掉仍在干活的进程（2026-07-15 task 32/33 事故）。
+                # -p 模式的退出补唤醒走 _consume_output 的
+                # monitor:native-exit-resume，不受影响。
 
     # ---------------------------------------------------- PTY 权限透传
 
