@@ -45,7 +45,9 @@ export function applyTheme(theme?: Theme) {
   document.documentElement.classList.remove('light');
   document.documentElement.dataset.theme = t;
   // custom 的色阶是运行时算出来的内联变量；切走时必须清场，否则会盖住新主题
-  let themeColor = opt.themeColor;
+  // 注意类型：THEME_OPTIONS 是 as const，opt.themeColor 是字面量联合；
+  // custom 的取色是运行时算的普通 string，故这里必须显式放宽
+  let themeColor: string = opt.themeColor;
   if (t === 'custom') {
     themeColor = applyCustomTheme();
     void applyBgImage();  // 图片字节要读 IDB，异步铺；色阶已同步就位
