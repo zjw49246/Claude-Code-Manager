@@ -9,12 +9,21 @@
  * 存 IndexedDB 而非 localStorage：后者约 5MB 且只收字符串，壁纸很容易撑爆。
  */
 
-import { hexToOklch, oklchToHex, hasBgImage, setHasBgImage, type Oklch } from './customTheme';
+import {
+  hexToOklch, oklchToHex, hasBgImage, setHasBgImage,
+  getCustomColors, getBgVisible, type Oklch,
+} from './customTheme';
 
 const DB_NAME = 'ccm-theme';
 const DB_VERSION = 1;
 const STORE = 'bg';
 const IMAGE_KEY = 'image';
+
+/** 壳色 scrim 的浓度：可见度=100 时保底 0.18（把图片压柔和），可见度越低越浓
+ * （0 时 0.5，配合此时已不透明的表面档位，图片基本隐去）。scrim 用壳色，故
+ * 深色主题压暗图片、浅色主题提亮图片，文字始终有干净的托底。 */
+const SCRIM_MIN = 0.18;
+const SCRIM_MAX = 0.50;
 
 /** 落盘前缩到最长边不超过此值，控制体积（壁纸多为 4K，直接存太浪费）。 */
 const MAX_EDGE = 1920;
@@ -155,7 +164,16 @@ export async function importBgImage(file: File): Promise<{ bg: string; brand: st
   return { ...colors, dataUrl };
 }
 
-/** 把背景图铺到 documentElement（异步读 IDB，故与色阶应用分开）。 */
+/** 壳色 scrim 的 CSS 色（半透明壳色，浓度随可见度）。铺在图片之上、UI 之下，
+ * 把图片压柔和，保证文字有干净托底。 */
+function scrimColor(): string {
+  const shell = hexToOklch(getCustomColors().bg);
+  const a = SCRIM_MIN + (1 - getBgVisible() / 100) * (SCRIM_MAX - SCRIM_MIN);
+  return `oklch(${shell.l.toFixed(2)}% ${shell.c.toFixed(4)} ${shell.h.toFixed(2)} / ${a.toFixed(3)})`;
+}
+
+/** 把背景图铺到 documentElement（异步读 IDB，故与色阶应用分开）。
+ * background-image 列表里 gradient 在前=盖在图片上，充当壳色 scrim。 */
 export async function applyBgImage(): Promise<void> {
   const el = document.documentElement;
   const dataUrl = await loadBgImage();
@@ -166,7 +184,8 @@ export async function applyBgImage(): Promise<void> {
     el.style.removeProperty('background-attachment');
     return;
   }
-  el.style.setProperty('background-image', `url("${dataUrl}")`);
+  const scrim = scrimColor();
+  el.style.setProperty('background-image', `linear-gradient(${scrim}, ${scrim}), url("${dataUrl}")`);
   el.style.setProperty('background-size', 'cover');
   el.style.setProperty('background-position', 'center');
   el.style.setProperty('background-attachment', 'fixed');
