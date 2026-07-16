@@ -19,9 +19,7 @@ const DB_VERSION = 1;
 const STORE = 'bg';
 const IMAGE_KEY = 'image';
 
-/** 壳色 scrim 的浓度：可见度=100 时最淡（图片最明显），越低越浓（图片渐隐）。
- * 背景图本身已被伪元素模糊（见 index.css 的 [data-has-bg]::before），故 scrim
- * 只需轻压对比、无需靠它保可读——数值远比未模糊时低，避免雾感。 */
+/** 壳色 scrim 的浓度：可见度=100 时最淡（图片最明显），越低越浓（图片渐隐）。 */
 const SCRIM_MIN = 0;
 const SCRIM_MAX = 0.40;
 
@@ -165,7 +163,7 @@ export async function importBgImage(file: File): Promise<{ bg: string; brand: st
 }
 
 /** 壳色 scrim 的 CSS 色（半透明壳色，浓度随可见度）。作为伪元素上叠的一层，
- * 轻压模糊图的对比；深色主题压暗、浅色主题提亮。 */
+ * 轻压对比；深色主题压暗、浅色主题提亮。 */
 function scrimColor(): string {
   const shell = hexToOklch(getCustomColors().bg);
   const a = SCRIM_MIN + (1 - getBgVisible() / 100) * (SCRIM_MAX - SCRIM_MIN);
@@ -173,8 +171,7 @@ function scrimColor(): string {
 }
 
 /** 把背景图交给 documentElement（异步读 IDB，故与色阶应用分开）。
- * 图片经由 CSS 变量喂给伪元素 [data-has-bg]::before，在那里被模糊 + 叠 scrim，
- * 面板则透出「模糊柔和的背景」而非高频原图 —— 清晰不雾（毛玻璃观感）。 */
+ * 图片经由 CSS 变量喂给伪元素 [data-has-bg]::before，叠 scrim 后透出背景。 */
 export async function applyBgImage(): Promise<void> {
   const el = document.documentElement;
   const dataUrl = await loadBgImage();

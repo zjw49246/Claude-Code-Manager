@@ -158,11 +158,11 @@ describe('背景图透明度（可见度滑块）', () => {
     }
   });
 
-  it('可见度=100 时表面档位取最透边界（画布 0.66 / 卡片 0.92）', () => {
+  it('可见度=100 时表面档位取最透边界（画布 0.70 / 卡片 0.88）', () => {
     const { vars } = buildCustomTheme('#131316', '#4f7cf7', 100);
-    expect(alphaOf(vars['--color-gray-900'])).toBeCloseTo(0.66, 3);
-    expect(alphaOf(vars['--color-gray-800'])).toBeCloseTo(0.92, 3);
-    expect(alphaOf(vars['--color-gray-950'])).toBeCloseTo(0.80, 3);
+    expect(alphaOf(vars['--color-gray-900'])).toBeCloseTo(0.70, 3);
+    expect(alphaOf(vars['--color-gray-800'])).toBeCloseTo(0.88, 3);
+    expect(alphaOf(vars['--color-gray-950'])).toBeCloseTo(0.85, 3);
   });
 
   it('画布(承载正文)遮盖不低于 0.6，防止正文被背景图穿透', () => {
@@ -193,8 +193,8 @@ describe('背景图透明度（可见度滑块）', () => {
 
   it('可见度=50 是不透明与最透边界的中点', () => {
     const { vars } = buildCustomTheme('#131316', '#4f7cf7', 50);
-    // 画布 base=0.66 → 中点 = 1 - 0.5*(1-0.66) = 0.83
-    expect(alphaOf(vars['--color-gray-900'])).toBeCloseTo(0.83, 3);
+    // 画布 base=0.70 → 中点 = 1 - 0.5*(1-0.70) = 0.85
+    expect(alphaOf(vars['--color-gray-900'])).toBeCloseTo(0.85, 3);
   });
 });
 
