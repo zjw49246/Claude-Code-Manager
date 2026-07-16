@@ -18,6 +18,35 @@ PYTHON_BIN="${9:-python3}"
 STATUS_FILE="/tmp/ccm-update-status-${PORT}.json"
 LOG_FILE="/tmp/ccm-update-migrate-${PORT}.log"
 
+# ---- self-escape trampoline -------------------------------------------------
+# Old (pre-systemd-run) backends spawn this script as a plain uvicorn child, so
+# it starts INSIDE the service's cgroup and `systemctl stop` below would kill it
+# mid-stop (KillMode=control-group ignores setsid/nohup), leaving the service
+# permanently down with the status file frozen at "stopping". The script itself
+# is freshly pulled during the update, so fixing it HERE reaches those old
+# deployments: detect the situation and re-exec into a transient unit first.
+# Backends that already launch us via systemd-run don't match and skip this.
+SELF="$(readlink -f "$0")"
+if [ -z "${CCM_ESCAPED:-}" ] && [ "$SERVICE_NAME" != "-" ] \
+    && command -v systemd-run >/dev/null 2>&1; then
+    case "$(cat /proc/self/cgroup 2>/dev/null)" in
+        *"/${SERVICE_NAME}"*)
+            # transient units inherit neither cwd nor env — pin both, and pass
+            # $SELF (absolute) because a relative $0 breaks after the re-exec
+            if systemd-run --user --collect --unit="ccm-update-escape-${PORT}-$$" \
+                --working-directory="$PROJECT_DIR" \
+                --setenv=CCM_ESCAPED=1 \
+                --setenv=PATH="$PATH" \
+                --property=StandardOutput="append:${LOG_FILE}" \
+                --property=StandardError=inherit \
+                /bin/bash "$SELF" "$@"; then
+                exit 0  # escaped copy owns the update from here
+            fi
+            echo "cgroup escape failed at $(date -Iseconds) — continuing in-place (may die at svc_stop)" >> "$LOG_FILE"
+            ;;
+    esac
+fi
+
 # Everything below (git/uv/alembic/relative DB paths) assumes the project dir;
 # abort outright if it is gone rather than running them somewhere random.
 cd "$PROJECT_DIR" || exit 1
@@ -66,6 +95,7 @@ svc_start() {
 }
 
 echo "=== update_migrate.sh started at $(date -Iseconds) (mode=$MODE) ===" > "$LOG_FILE"
+echo "cgroup: $(cat /proc/self/cgroup 2>/dev/null) (escaped=${CCM_ESCAPED:-0})" >> "$LOG_FILE"
 
 # 1. Stop service
 write_status "stopping" "正在停止服务..." "stop_service"

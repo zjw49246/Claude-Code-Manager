@@ -169,6 +169,7 @@ async def test_rollback_non_systemd_delegates_to_script_kill_mode(tmp_path):
 
 def test_is_managed_true_only_when_self_in_service_cgroup(tmp_path):
     svc = _make_service(tmp_path)
+    svc._service_name = "ccm.service"  # pin: settings.service_name varies per .env
     with patch.object(svc, "_cgroup_text",
                       return_value="0::/user.slice/user-1000.slice/user@1000.service/app.slice/ccm.service\n"):
         assert svc._is_managed_by_systemd() is True
@@ -305,3 +306,84 @@ def test_migrate_script_trap_starts_service_even_if_killed(tmp_path):
     calls = call_log.read_text()
     assert "stop ccm.service" in calls
     assert "start ccm.service" in calls, "EXIT trap must restart the service"
+
+
+# ---- self-escape trampoline: the script itself must survive old backends ----
+# The 2026-07-16 production outage: a pre-systemd-run backend spawned the
+# (freshly pulled, already "fixed") script as a plain uvicorn child — inside
+# the service cgroup — and its own `systemctl stop` killed it mid-stop.
+# Fixing the Python spawn can't reach old deployments (they run their old
+# Python), but the script is pulled fresh each update, so it must save itself.
+
+
+def _self_cgroup_leaf() -> str | None:
+    """Leaf name of the current process's cgroup (cgroup v2), e.g.
+    'session-42.scope' — lets tests trigger the trampoline's match for real."""
+    try:
+        text = Path("/proc/self/cgroup").read_text()
+    except OSError:
+        return None
+    path = text.strip().splitlines()[0].split("::", 1)[-1]
+    leaf = path.rstrip("/").rsplit("/", 1)[-1]
+    return leaf or None
+
+
+def _stub_systemd_run(tmp_path: Path) -> Path:
+    """Replace systemd-run with a logger so the escape is observable."""
+    run_log = tmp_path / "systemd-run.log"
+    stub = tmp_path / "bin" / "systemd-run"
+    stub.write_text(f'#!/bin/bash\necho "$@" >> {run_log}\nexit 0\n')
+    stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+    return run_log
+
+
+def test_migrate_script_escapes_own_service_cgroup(tmp_path):
+    """Launched inside the service's own cgroup, the script must re-exec via
+    systemd-run and NOT run `systemctl stop` from its doomed position."""
+    env, call_log = _script_env(tmp_path)
+    leaf = _self_cgroup_leaf()
+    if not leaf:
+        pytest.skip("cgroup v2 unavailable")
+    run_log = _stub_systemd_run(tmp_path)
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    # SERVICE_NAME = our own cgroup leaf → the in-service detection matches
+    result = subprocess.run(
+        ["bash", str(SCRIPT), str(project), "deadbeef",
+         str(tmp_path / "backup.db"), "8999",
+         str(tmp_path / "claude_manager.db"), leaf, "migrate"],
+        env=env, timeout=30, capture_output=True, text=True,
+    )
+
+    assert result.returncode == 0
+    calls = run_log.read_text()
+    assert "--setenv=CCM_ESCAPED=1" in calls
+    assert str(SCRIPT) in calls, "must re-exec itself by absolute path"
+    assert f"--working-directory={project}" in calls, \
+        "transient units don't inherit cwd — must be pinned"
+    stop_calls = call_log.read_text() if call_log.exists() else ""
+    assert "stop" not in stop_calls, "must never stop the service from inside its cgroup"
+
+
+def test_migrate_script_trampoline_runs_once(tmp_path):
+    """CCM_ESCAPED=1 (the re-exec'd copy) must skip the trampoline and proceed
+    into the normal flow — no infinite escape loop."""
+    env, call_log = _script_env(tmp_path)
+    leaf = _self_cgroup_leaf()
+    if not leaf:
+        pytest.skip("cgroup v2 unavailable")
+    run_log = _stub_systemd_run(tmp_path)
+    env["CCM_ESCAPED"] = "1"
+
+    # project dir intentionally missing: proceeding past the trampoline means
+    # dying at the `cd` guard with exit 1 — proof the escape was skipped
+    result = subprocess.run(
+        ["bash", str(SCRIPT), str(tmp_path / "missing"), "deadbeef",
+         str(tmp_path / "backup.db"), "8999",
+         str(tmp_path / "claude_manager.db"), leaf, "migrate"],
+        env=env, timeout=30, capture_output=True, text=True,
+    )
+
+    assert result.returncode == 1
+    assert not run_log.exists(), "escaped copy must not systemd-run again"
