@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { ChatView } from './ChatView';
 import type { Task, Project, ChatMessage } from '../../api/client';
@@ -32,10 +32,12 @@ vi.mock('../../api/client', () => ({
   },
 }));
 
-// Store the onReconnect callback so tests can trigger it
+// Store the onMessage/onReconnect callbacks so tests can trigger them
 let capturedOnReconnect: (() => void) | undefined;
+let capturedOnMessage: ((msg: Record<string, unknown>) => void) | undefined;
 vi.mock('../../hooks/useWebSocket', () => ({
-  useWebSocket: vi.fn((_channels: string[], _onMessage?: unknown, onReconnect?: () => void) => {
+  useWebSocket: vi.fn((_channels: string[], onMessage?: unknown, onReconnect?: () => void) => {
+    capturedOnMessage = onMessage as typeof capturedOnMessage;
     capturedOnReconnect = onReconnect;
     return { lastMessage: null, isConnected: true };
   }),
@@ -575,5 +577,88 @@ describe('ChatView', () => {
         expect(localStorage.getItem(draftKey(7))).toBeNull();
       });
     });
+  });
+});
+
+describe('聊天图片附件展示（2026-07-16 用户反馈：发图后图片不显示）', () => {
+  const projects: Project[] = [];
+  const onBack = vi.fn();
+  const onTaskUpdated = vi.fn();
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    localStorage.clear();
+    delete (window as Record<string, unknown>).Capacitor;
+  });
+
+  function wsUserMessage(taskId: number, data: Record<string, unknown>) {
+    capturedOnMessage!({
+      channel: `task:${taskId}`,
+      data: { event_type: 'user_message', ...data },
+    });
+  }
+
+  it('WS user_message 与已展示消息内容重复时，附件必须合并进已展示消息（去重不能吃掉图片）', async () => {
+    const task = makeTask({ id: 11 });
+    render(<ChatView task={task} projects={projects} onBack={onBack} onTaskUpdated={onTaskUpdated} />);
+    await waitFor(() => expect(api.getTaskChatHistory).toHaveBeenCalled());
+
+    // 第一条：乐观回显场景 —— 只有文字、无附件
+    await act(async () => {
+      wsUserMessage(11, { content: '看下这张截图', image_urls: null, attachments: null });
+    });
+    expect(screen.getByText('看下这张截图')).toBeInTheDocument();
+
+    // 第二条：服务端广播 —— 同样内容但带图片附件（真实发送时后端会广播这条）
+    await act(async () => {
+      wsUserMessage(11, {
+        content: '看下这张截图',
+        image_urls: ['/api/uploads/shot.png'],
+        attachments: [{ url: '/api/uploads/shot.png', name: 'shot.png', is_image: true }],
+      });
+    });
+
+    // 不应产生重复文本消息
+    expect(screen.getAllByText('看下这张截图')).toHaveLength(1);
+    // 但图片必须显示出来（去重时合并附件，而不是整条丢弃）
+    const imgs = document.querySelectorAll('img[src*="/api/uploads/shot.png"]');
+    expect(imgs.length).toBeGreaterThan(0);
+  });
+
+  it('Capacitor（手机 App）下附件相对 URL 必须拼上远程服务器地址', async () => {
+    (window as Record<string, unknown>).Capacitor = {};
+    localStorage.setItem('cc_server_url', 'https://ccm.example.com');
+    const task = makeTask({ id: 12 });
+    render(<ChatView task={task} projects={projects} onBack={onBack} onTaskUpdated={onTaskUpdated} />);
+    await waitFor(() => expect(api.getTaskChatHistory).toHaveBeenCalled());
+
+    await act(async () => {
+      wsUserMessage(12, {
+        content: '手机发图',
+        image_urls: ['/api/uploads/phone.png'],
+        attachments: [
+          { url: '/api/uploads/phone.png', name: 'phone.png', is_image: true },
+          { url: '/api/uploads/doc.pdf', name: 'doc.pdf', is_image: false },
+        ],
+      });
+    });
+
+    const img = document.querySelector('img[src="https://ccm.example.com/api/uploads/phone.png"]');
+    expect(img).not.toBeNull();
+    const link = document.querySelector('a[href="https://ccm.example.com/api/uploads/doc.pdf"]');
+    expect(link).not.toBeNull();
+  });
+
+  it('初始 Prompt 气泡渲染 task.metadata_.attachments 里的图片', () => {
+    const task = makeTask({
+      id: 13,
+      description: '看图建任务',
+      metadata_: {
+        attachments: [{ url: '/api/uploads/init.png', name: 'init.png', is_image: true }],
+      },
+    } as Partial<Task>);
+    render(<ChatView task={task} projects={projects} onBack={onBack} onTaskUpdated={onTaskUpdated} />);
+    const img = document.querySelector('img[src*="/api/uploads/init.png"]');
+    expect(img).not.toBeNull();
   });
 });

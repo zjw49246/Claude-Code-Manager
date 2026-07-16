@@ -712,6 +712,8 @@ uv run python -m pytest backend/tests/test_api_tasks.py -k broadcasts_status_cha
 - [ ] 飞书主题：白底为主（#fbfbfc 近白画布 + 纯白卡片，发丝线分隔）+ #ecedef 侧栏（飞书 rail 灰）；主按钮经典飞书蓝 #3370ff，hover 加深（#245bdb）；主文字 #1f2329；低边框风（#e8eaed，弱线框）；选中项浅蓝 pill #e1eaff + 蓝字
 - [ ] 浅色 vs 飞书肉眼可区分：浅色 = 灰调分层（壳 oklch 92.5% / 画布 95.8%），飞书 = 大面积白（画布 #fbfbfc）；并排切换主画布白度应有明显差异
 - [ ] 蓝色用户气泡内鼠标选中文字：高亮为白色半透明覆盖（亮一档的蓝），清晰可见；灰底消息选中仍是品牌蓝 tint（所有主题通用）
+- [ ] Chat 发送「文字+图片」：发送瞬间气泡内立即显示图片缩略图；WS 回包不产生重复消息、也不吞图（去重合并附件）；刷新后图片仍在（历史 raw_json 回放）
+- [ ] 手机 App（Capacitor）聊天图片/附件可正常加载（相对 /api/uploads/ URL 已拼上远程服务器地址，点击附件可打开）
 - [ ] 「经典深色」外观 = v1 默认深色（Tailwind 原生 gray/indigo 色板）
 - [ ] 浅色主题：白色卡片 + 浅灰画布；chip 文字（text-X-300/400）可读；无白字白底（text-white 只允许出现在彩色实底上）
 - [ ] 桌面 lg+：左侧固定侧栏导航高亮正确；顶栏 sticky；Tasks 分屏（≥1280px）无纵向溢出（100vh-49px）
