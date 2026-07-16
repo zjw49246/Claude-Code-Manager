@@ -111,8 +111,13 @@ html[data-theme='light'] {
   --color-indigo-400: oklch(50% 0.17 255);
   --color-indigo-300: oklch(46% 0.16 255);
 
-  /* accent 色 300/400 档反转为深色调（chip 文字 text-X-300/400 在浅色
-     tint 底上要可读）。取值 ≈ Tailwind 原生 700/600 档。 */
+}
+
+/* accent 色 300/400 档反转为深色调（chip 文字 text-X-300/400 在浅色
+   tint 底上要可读）。取值 ≈ Tailwind 原生 700/600 档。
+   自定义主题判定为浅色底时（data-scheme=light）共用同一套反转。 */
+html[data-theme='light'],
+html[data-theme='custom'][data-scheme='light'] {
   --color-red-400: oklch(57.7% 0.245 27.325);
   --color-red-300: oklch(50.5% 0.213 27.518);
   --color-orange-400: oklch(64.6% 0.222 41.116);

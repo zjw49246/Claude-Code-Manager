@@ -6,13 +6,23 @@ import { THEME_OPTIONS, getTheme, setTheme, applyTheme } from './theme';
 // vitest root = frontend/（jsdom 下 import.meta.url 非 file 协议，用 cwd 定位）
 const indexCss = readFileSync(join(process.cwd(), 'src/index.css'), 'utf-8');
 
-/** 提取 index.css 中某主题的变量块（主题块内无嵌套大括号） */
+/**
+ * 提取 index.css 中所有作用于该主题的变量块（块内无嵌套大括号）。
+ * 含逗号选择器列表里的共享规则——浅色 accent 反转由 light 与 custom
+ * 共用一条规则，故不能只认 `html[data-theme='x'] {` 这一种写法。
+ */
 function themeBlock(theme: string): string {
-  const marker = `html[data-theme='${theme}'] {`;
-  const start = indexCss.indexOf(marker);
-  expect(start, `index.css 应包含 ${marker} 主题块`).toBeGreaterThan(-1);
-  const end = indexCss.indexOf('\n}', start);
-  return indexCss.slice(start, end);
+  const sel = `html[data-theme='${theme}']`;
+  const blocks: string[] = [];
+  const ruleStart = /html\[data-theme=[^{]*\{/g;
+  let m: RegExpExecArray | null;
+  while ((m = ruleStart.exec(indexCss)) !== null) {
+    const selectors = m[0].slice(0, -1).split(',').map((s) => s.trim());
+    if (!selectors.some((s) => s.startsWith(sel))) continue;
+    blocks.push(indexCss.slice(m.index, indexCss.indexOf('\n}', m.index)));
+  }
+  expect(blocks.length, `index.css 应包含作用于 ${sel} 的规则`).toBeGreaterThan(0);
+  return blocks.join('\n');
 }
 
 /** CLAUDE.md 约定：新增主题必须同时覆盖 gray 全档 + indigo 全档 */
