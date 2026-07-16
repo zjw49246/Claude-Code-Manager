@@ -171,6 +171,7 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
     const prev = prevFilter.current;
     if (prev.statusFilterParam !== statusFilterParam || prev.showArchived !== showArchived || prev.projectFilter !== projectFilter || prev.starredFilter !== starredFilter || prev.unreadFilter !== unreadFilter) {
       setPage(1);
+      skipFreezeOnce.current = true;
       prevFilter.current = { statusFilterParam, showArchived, projectFilter, starredFilter, unreadFilter };
     }
   }, [statusFilterParam, showArchived, projectFilter, starredFilter, unreadFilter]);
