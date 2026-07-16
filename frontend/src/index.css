@@ -31,21 +31,21 @@
   --radius-xl: 0.875rem;
   --radius-2xl: 1.125rem;
 
-  --color-foreground: oklch(98.5% 0 0);
+  --color-foreground: oklch(100% 0 0);
 
-  /* 现代深色中性色（zinc 色相；层次：950 侧栏壳 < 900 画布 < 800 卡片） */
-  --color-gray-950: oklch(16% 0.005 285.8);
-  --color-gray-900: oklch(19.5% 0.006 285.9);
-  --color-gray-800: oklch(23.5% 0.007 285.9);
-  --color-gray-750: oklch(26% 0.007 286);
-  --color-gray-700: oklch(28.5% 0.007 286);
-  --color-gray-600: oklch(37% 0.012 286);
-  --color-gray-500: oklch(55.2% 0.016 285.9);
-  --color-gray-400: oklch(71% 0.015 286);
-  --color-gray-300: oklch(86% 0.008 286);
-  --color-gray-200: oklch(93% 0.004 286);
-  --color-gray-100: oklch(96.5% 0.001 286);
-  --color-gray-50: oklch(98.5% 0 0);
+  /* 现代深色中性色（对标 Tailwind gray 默认暗度，chroma 极低避免蓝雾） */
+  --color-gray-950: oklch(7.5% 0.002 285);
+  --color-gray-900: oklch(14.5% 0.003 285);
+  --color-gray-800: oklch(21% 0.004 285);
+  --color-gray-750: oklch(24% 0.004 285);
+  --color-gray-700: oklch(28% 0.005 285);
+  --color-gray-600: oklch(37% 0.008 285);
+  --color-gray-500: oklch(50% 0.01 285);
+  --color-gray-400: oklch(65% 0.01 285);
+  --color-gray-300: oklch(82% 0.005 285);
+  --color-gray-200: oklch(90% 0.003 285);
+  --color-gray-100: oklch(95% 0.001 285);
+  --color-gray-50: oklch(98% 0 0);
 
   /* 品牌色：indigo → Multica 蓝（hue 255） */
   --color-indigo-950: oklch(25% 0.06 255);
@@ -66,7 +66,7 @@
 }
 
 html {
-  background-color: oklch(16% 0.005 285.8);
+  background-color: oklch(7.5% 0.002 285);
   color-scheme: dark;
   touch-action: manipulation;
   overflow-x: clip;
@@ -111,8 +111,13 @@ html[data-theme='light'] {
   --color-indigo-400: oklch(50% 0.17 255);
   --color-indigo-300: oklch(46% 0.16 255);
 
-  /* accent 色 300/400 档反转为深色调（chip 文字 text-X-300/400 在浅色
-     tint 底上要可读）。取值 ≈ Tailwind 原生 700/600 档。 */
+}
+
+/* accent 色 300/400 档反转为深色调（chip 文字 text-X-300/400 在浅色
+   tint 底上要可读）。取值 ≈ Tailwind 原生 700/600 档。
+   自定义主题判定为浅色底时（data-scheme=light）共用同一套反转。 */
+html[data-theme='light'],
+html[data-theme='custom'][data-scheme='light'] {
   --color-red-400: oklch(57.7% 0.245 27.325);
   --color-red-300: oklch(50.5% 0.213 27.518);
   --color-orange-400: oklch(64.6% 0.222 41.116);
@@ -137,6 +142,27 @@ html[data-theme='light'] {
   --color-purple-300: oklch(49.6% 0.265 301.924);
   --color-rose-400: oklch(58.6% 0.253 17.585);
   --color-rose-300: oklch(51.4% 0.222 16.935);
+}
+
+/* ===================== 自定义主题：背景图（毛玻璃） ===================== */
+/*
+ * 背景图不直接铺在 html 上，而是交给这个固定伪元素并**模糊**它。半透明的
+ * 面板（bg-gray-900/950/800，alpha 见 customTheme.SURFACE_ALPHA）透出的是
+ * 「模糊柔和的色块」而非高频原图，故界面清晰、文字清晰、无雾感（毛玻璃观感）。
+ * 图片 url 与壳色 scrim 由 customBg.applyBgImage 经 --ccm-bg-* 变量注入。
+ * inset 负值补偿 blur 收缩留下的透明边；z-index:-1 沉到最底（html 背景此时
+ * 被设为 transparent，见 applyCustomTheme）。
+ */
+html[data-theme='custom'][data-has-bg]::before {
+  content: '';
+  position: fixed;
+  inset: -32px;
+  z-index: -1;
+  pointer-events: none;
+  background-image: linear-gradient(var(--ccm-bg-scrim), var(--ccm-bg-scrim)), var(--ccm-bg-url);
+  background-size: cover;
+  background-position: center;
+  filter: none;
 }
 
 /* ============================== 飞书（现代浅色） ============================== */

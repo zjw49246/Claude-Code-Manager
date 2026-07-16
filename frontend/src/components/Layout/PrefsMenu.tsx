@@ -1,14 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Palette, Globe, Settings, LogOut, KeyRound } from 'lucide-react';
+import { Palette, Globe, Settings, LogOut, KeyRound, Image as ImageIcon } from 'lucide-react';
 import { api, clearToken } from '../../api/client';
 import type { RuntimeSettings } from '../../api/client';
 import { getTheme, setTheme as persistTheme, THEME_OPTIONS, type Theme } from '../../config/theme';
+import { getCustomColors, setCustomColors, hasBgImage, getBgVisible, setBgVisible } from '../../config/customTheme';
+import { importBgImage, clearBgImage } from '../../config/customBg';
 import { getTimezone, setTimezone, TIMEZONE_OPTIONS } from '../../config/timezone';
 
 /** 顶栏齿轮下拉：时区 / 主题 / PTY / 访问置顶 / 压缩阈值 / 飞书 / 密码 / 退出。
  * 低频设置集中收纳，保持顶栏精简。 */
 export function PrefsMenu({ isAdmin }: { isAdmin: boolean }) {
   const [theme, setTheme] = useState(getTheme());
+  const [custom, setCustom] = useState(getCustomColors());
+  const [bgOn, setBgOn] = useState(hasBgImage());
+  const [bgBusy, setBgBusy] = useState(false);
+  const [bgVisible, setBgVisibleState] = useState(getBgVisible());
+  const bgInputRef = useRef<HTMLInputElement>(null);
   const [tz, setTz] = useState(getTimezone());
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -75,6 +82,43 @@ export function PrefsMenu({ isAdmin }: { isAdmin: boolean }) {
   const handleThemeChange = (next: Theme) => {
     persistTheme(next);
     setTheme(next);
+  };
+
+  const applyCustom = (bg: string, brand: string) => {
+    setCustom({ bg, brand });
+    setCustomColors(bg, brand);
+    persistTheme('custom');  // 重算色阶并落盘
+    setTheme('custom');
+  };
+
+  const handleCustomColor = (key: 'bg' | 'brand', value: string) =>
+    applyCustom(key === 'bg' ? value : custom.bg, key === 'brand' ? value : custom.brand);
+
+  /** 上传背景图：缩放存 IDB + 取色回填两个取色器（之后仍可手动微调）。 */
+  const handleBgUpload = async (file: File) => {
+    setBgBusy(true);
+    try {
+      const { bg, brand } = await importBgImage(file);
+      setBgOn(true);
+      applyCustom(bg, brand);
+    } catch {
+      alert('图片读取失败，请换一张试试');
+    } finally {
+      setBgBusy(false);
+      if (bgInputRef.current) bgInputRef.current.value = '';  // 允许重传同一文件
+    }
+  };
+
+  const handleBgClear = async () => {
+    await clearBgImage();
+    setBgOn(false);
+    persistTheme('custom');  // 重算：去掉表面档位的 alpha
+  };
+
+  const handleBgVisible = (v: number) => {
+    setBgVisibleState(v);
+    setBgVisible(v);
+    persistTheme('custom');  // 重算表面档位 alpha（实时预览）
   };
 
   const selectCls = 'bg-gray-700 text-gray-200 text-xs rounded-md px-2 py-1 border border-gray-600 focus:outline-none focus:ring-1 focus:ring-indigo-500 cursor-pointer';
@@ -147,8 +191,84 @@ export function PrefsMenu({ isAdmin }: { isAdmin: boolean }) {
                   <option key={opt.value} value={opt.value}>{opt.label}</option>
                 ))}
               </optgroup>
+              <optgroup label="自定义">
+                {THEME_OPTIONS.filter((o) => o.group === 'custom').map((opt) => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </optgroup>
             </select>
           </div>
+          {theme === 'custom' && (
+            <>
+              <div className="flex items-center justify-between gap-3 pl-4">
+                <span className="text-xs text-gray-500">背景 / 品牌色</span>
+                <div className="flex items-center gap-1.5">
+                  <input
+                    type="color"
+                    value={custom.bg}
+                    onChange={(e) => handleCustomColor('bg', e.target.value)}
+                    className="h-6 w-8 rounded border border-gray-600 bg-transparent cursor-pointer"
+                    title="背景色：决定整套中性色与明暗"
+                  />
+                  <input
+                    type="color"
+                    value={custom.brand}
+                    onChange={(e) => handleCustomColor('brand', e.target.value)}
+                    className="h-6 w-8 rounded border border-gray-600 bg-transparent cursor-pointer"
+                    title="品牌色：决定按钮/选中态/链接色"
+                  />
+                </div>
+              </div>
+              <div className="flex items-center justify-between gap-3 pl-4">
+                <span className="text-xs text-gray-500 flex items-center gap-1.5">
+                  <ImageIcon size={12} /> 背景图
+                </span>
+                <div className="flex items-center gap-1.5">
+                  <input
+                    ref={bgInputRef}
+                    type="file"
+                    accept="image/*"
+                    onChange={(e) => { const f = e.target.files?.[0]; if (f) void handleBgUpload(f); }}
+                    className="hidden"
+                  />
+                  <button
+                    onClick={() => bgInputRef.current?.click()}
+                    disabled={bgBusy}
+                    className="text-xs px-2 py-1 rounded-md bg-gray-700 text-gray-200 border border-gray-600 hover:bg-gray-600 disabled:opacity-50 transition-colors"
+                    title="上传后自动从图中取色，界面会半透明透出背景图"
+                  >
+                    {bgBusy ? '处理中…' : bgOn ? '更换' : '上传'}
+                  </button>
+                  {bgOn && (
+                    <button
+                      onClick={() => void handleBgClear()}
+                      className="text-xs px-2 py-1 rounded-md text-gray-400 hover:text-red-400 transition-colors"
+                      title="移除背景图"
+                    >
+                      移除
+                    </button>
+                  )}
+                </div>
+              </div>
+              {bgOn && (
+                <div className="flex items-center justify-between gap-3 pl-4">
+                  <span className="text-xs text-gray-500">背景图强度</span>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="range"
+                      min={0}
+                      max={100}
+                      value={bgVisible}
+                      onChange={(e) => handleBgVisible(Number(e.target.value))}
+                      className="w-28 accent-indigo-500 cursor-pointer"
+                      title="向右：背景图更明显；向左：界面更实"
+                    />
+                    <span className="text-[10px] text-gray-500 tabular-nums w-8 text-right">{bgVisible}%</span>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
           {runtime && (
             <div className="flex items-center justify-between gap-3">
               <span className="text-xs text-gray-400">访问置顶</span>

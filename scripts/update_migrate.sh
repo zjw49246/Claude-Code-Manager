@@ -1,6 +1,9 @@
 #!/bin/bash
-# Stop service → run migration → start service (or rollback on failure).
-# Launched via nohup so it survives the service being killed by systemctl stop.
+# Stop service → run migration (or rollback) → start service.
+# Must be launched OUTSIDE the service's cgroup (systemd-run) — otherwise the
+# `systemctl stop` below kills this script too and the service never restarts.
+# SERVICE_NAME="-" means a bare-uvicorn deployment: stop = kill $SERVER_PID,
+# start = respawn uvicorn (hardcoded args, custom flags are not preserved).
 set -uo pipefail
 
 PROJECT_DIR="$1"
@@ -9,6 +12,9 @@ BACKUP_FILE="$3"
 PORT="$4"
 DB_FILE="${5:-claude_manager.db}"
 SERVICE_NAME="${6:-ccm.service}"
+MODE="${7:-migrate}"     # migrate | rollback
+SERVER_PID="${8:-}"      # only used when SERVICE_NAME="-"
+PYTHON_BIN="${9:-python3}"
 STATUS_FILE="/tmp/ccm-update-status-${PORT}.json"
 LOG_FILE="/tmp/ccm-update-migrate-${PORT}.log"
 
@@ -29,21 +35,70 @@ write_status() {
 EOJSON
 }
 
-echo "=== update_migrate.sh started at $(date -Iseconds) ===" > "$LOG_FILE"
+svc_stop() {
+    if [ "$SERVICE_NAME" != "-" ]; then
+        systemctl --user stop "$SERVICE_NAME"
+    else
+        [ -n "$SERVER_PID" ] || return 1
+        kill "$SERVER_PID" 2>/dev/null || true
+        for _ in $(seq 1 20); do
+            kill -0 "$SERVER_PID" 2>/dev/null || return 0
+            sleep 0.5
+        done
+        kill -9 "$SERVER_PID" 2>/dev/null || true
+    fi
+}
+
+STARTED=0
+svc_start() {
+    # guard: the EXIT trap re-runs this after the normal-path start; a second
+    # bare-uvicorn spawn would just lose the port race, so start only once
+    [ "$STARTED" = 1 ] && return 0
+    STARTED=1
+    if [ "$SERVICE_NAME" != "-" ]; then
+        systemctl --user start "$SERVICE_NAME"
+    else
+        cd "$PROJECT_DIR" && nohup "$PYTHON_BIN" -m uvicorn backend.main:app \
+            --host 0.0.0.0 --port "$PORT" >> "/tmp/ccm-restart-${PORT}.log" 2>&1 &
+    fi
+}
+
+echo "=== update_migrate.sh started at $(date -Iseconds) (mode=$MODE) ===" > "$LOG_FILE"
 
 # 1. Stop service
 write_status "stopping" "正在停止服务..." "stop_service"
-if ! systemctl --user stop "$SERVICE_NAME"; then
-    write_status "failed" "停止服务失败，中止迁移" "stop_service"
+if ! svc_stop; then
+    write_status "failed" "停止服务失败，中止" "stop_service"
     exit 1
 fi
+# From here on the service is down: whatever happens to this script (crash,
+# SIGTERM, timeout), always bring the service back up. Start is idempotent,
+# and on boot init_db() runs `alembic upgrade head` anyway.
+trap 'svc_start || true' EXIT
 sleep 1
+
+if [ "$MODE" = "rollback" ]; then
+    # Rollback: restore DB backup + reset code, service is already down so
+    # touching the SQLite files is safe (no live connections).
+    write_status "rolling_back" "正在回滚..." "rollback"
+    echo "=== Rollback mode: restoring $BACKUP_FILE, reset to $OLD_COMMIT ===" >> "$LOG_FILE"
+    if [ -n "$BACKUP_FILE" ] && [ -f "$BACKUP_FILE" ]; then
+        rm -f "${DB_FILE}-wal" "${DB_FILE}-shm"
+        cp "$BACKUP_FILE" "$DB_FILE"
+    fi
+    git reset --hard "$OLD_COMMIT" >> "$LOG_FILE" 2>&1
+    uv sync >> "$LOG_FILE" 2>&1 || true
+    svc_start
+    write_status "rolled_back" "已回滚到 $OLD_COMMIT" "rollback"
+    echo "=== update_migrate.sh (rollback) finished at $(date -Iseconds) ===" >> "$LOG_FILE"
+    exit 0
+fi
 
 # 2. Run migration with timeout
 write_status "migrating" "正在执行数据库迁移..." "alembic_upgrade"
 if timeout 120 uv run alembic upgrade head >> "$LOG_FILE" 2>&1; then
     write_status "starting" "迁移成功，正在启动服务..." "start_service"
-    systemctl --user start "$SERVICE_NAME"
+    svc_start
     write_status "completed" "更新完成" "start_service"
 else
     EXIT_CODE=$?
@@ -57,7 +112,7 @@ else
     git reset --hard "$OLD_COMMIT"
     uv sync >> "$LOG_FILE" 2>&1 || true
 
-    systemctl --user start "$SERVICE_NAME"
+    svc_start
     write_status "rolled_back" "迁移失败，已回滚到 $OLD_COMMIT" "alembic_upgrade"
 fi
 

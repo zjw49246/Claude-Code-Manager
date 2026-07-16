@@ -159,6 +159,7 @@ class UpdateService:
             "npm": _find_tool("npm"),
             "bash": _find_tool("bash"),
             "systemctl": _find_tool("systemctl"),
+            "systemd-run": _find_tool("systemd-run"),
         }
         logger.info("Resolved tool paths: %s", self._tools)
 
@@ -187,7 +188,9 @@ class UpdateService:
                     s.status = "completed"
                 self._current = state
                 logger.info("Recovered update status: %s (from %s)", status, step_name)
-            elif status == "restarting":
+            elif status in ("restarting", "starting"):
+                # "starting": migration script succeeded and was about to (or did)
+                # start us — since we are running, treat it as completed.
                 state = UpdateState(
                     update_id=f"recovered_{int(time.time())}",
                     status="completed",
@@ -198,6 +201,28 @@ class UpdateService:
                 state.steps = [StepInfo(name=n, status="completed") for n in STEP_NAMES]
                 self._current = state
                 logger.info("Recovered from restart — marking completed")
+            elif status in ("stopping", "migrating", "rolling_back"):
+                # The external update script died mid-way (e.g. killed together
+                # with the service cgroup). We are running again, but the update
+                # never finished — surface it as failed so the user can retry.
+                step_name = data.get("step", "")
+                state = UpdateState(
+                    update_id=f"recovered_{int(time.time())}",
+                    status="failed",
+                    old_commit=data.get("old_commit", ""),
+                    backup_file=data.get("backup_file", ""),
+                    completed_at=data.get("timestamp", ""),
+                    error=f"更新脚本在「{STEP_LABELS.get(step_name, step_name)}」阶段意外中断，请重新触发更新",
+                )
+                state.steps = [StepInfo(name=n) for n in STEP_NAMES]
+                for s in state.steps:
+                    if s.name == step_name:
+                        s.status = "failed"
+                        s.message = state.error
+                        break
+                    s.status = "completed"
+                self._current = state
+                logger.warning("Recovered interrupted update (stuck at %s) — marking failed", step_name)
         except Exception:
             logger.exception("Failed to recover update status")
 
@@ -319,22 +344,15 @@ class UpdateService:
         async with self._lock:
             await self._broadcast("step_update", step="rollback", status="running", message="正在回滚...")
 
-            if backup_file and Path(backup_file).exists():
-                db_path = self.db_path
-                for ext in ("-wal", "-shm"):
-                    p = db_path.with_suffix(db_path.suffix + ext)
-                    if p.exists():
-                        p.unlink()
-                shutil.copy2(backup_file, db_path)
-
-            await self._run_cmd(["git", "reset", "--hard", old_commit])
-            await self._run_cmd(["uv", "sync"], timeout=300)
-
-            self._write_status_file("restarting", "回滚完成，正在重启...", old_commit=old_commit)
-            await self._broadcast("restarting", message="服务即将重启...")
+            # Never restore the SQLite file while this process still holds open
+            # connections — a later write/checkpoint through the live connection
+            # corrupts the restored DB (2026-07-16 test-env rollback incident).
+            # The script stops the service (systemctl or kill, per deployment)
+            # BEFORE touching the DB, then resets code and starts it again.
+            self._write_status_file("restarting", "正在停服回滚...", old_commit=old_commit)
+            await self._broadcast("restarting", message="服务即将停止进行回滚，请等待自动重连...")
             await asyncio.sleep(1)
-
-            self._restart_service()
+            self._spawn_update_script("rollback", old_commit, backup_file or "")
             return {"status": "rolling_back", "old_commit": old_commit}
 
     # ---- Pipeline implementation ----
@@ -526,7 +544,7 @@ class UpdateService:
             await self._fast_restart_path(state)
 
     async def _migration_path(self, state: UpdateState):
-        """Has new migrations: launch external script via nohup (steps 8-10)."""
+        """Has new migrations: launch external script that survives our own stop (steps 8-10)."""
         step8 = state.steps[7]
         step9 = state.steps[8]
         step10 = state.steps[9]
@@ -540,6 +558,13 @@ class UpdateService:
                               message="即将停服进行数据库迁移...")
         await asyncio.sleep(1)
 
+        self._spawn_update_script("migrate", state.old_commit, state.backup_file)
+
+        state.status = "restarting"
+        await self._broadcast("restarting", message="服务即将停止进行迁移，请等待自动重连...")
+
+    def _spawn_update_script(self, mode: str, old_commit: str, backup_file: str):
+        """Launch update_migrate.sh so it survives this service being stopped."""
         script = Path(self.project_dir) / "scripts" / "update_migrate.sh"
         log_file = f"/tmp/ccm-update-migrate-{self.port}.log"
 
@@ -549,24 +574,44 @@ class UpdateService:
             if tool_dir not in env.get("PATH", ""):
                 env["PATH"] = tool_dir + ":" + env.get("PATH", "")
 
-        subprocess.Popen(
-            [
-                self._tools["bash"], str(script),
-                self.project_dir,
-                state.old_commit,
-                state.backup_file,
-                str(self.port),
-                str(self.db_path),
-                self._service_name,
-            ],
-            stdout=open(log_file, "a"),
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-            env=env,
-        )
+        managed = self._is_managed_by_systemd()
+        script_argv = [
+            self._tools["bash"], str(script),
+            self.project_dir,
+            old_commit,
+            backup_file,
+            str(self.port),
+            str(self.db_path),
+            # "-" tells the script to stop/start via kill/respawn instead of
+            # systemctl (bare-uvicorn deployments)
+            self._service_name if managed else "-",
+            mode,
+            str(os.getpid()),
+            sys.executable,
+        ]
 
-        state.status = "restarting"
-        await self._broadcast("restarting", message="服务即将停止进行迁移，请等待自动重连...")
+        if managed:
+            # start_new_session only escapes the process group, NOT the service's
+            # cgroup — `systemctl stop` kills the whole cgroup including the script,
+            # leaving the service stopped with nobody left to start it again.
+            # systemd-run puts the script in its own transient unit (own cgroup).
+            subprocess.Popen(
+                [
+                    self._tools["systemd-run"], "--user", "--collect",
+                    f"--unit=ccm-update-{self.port}",
+                    f"--setenv=PATH={env['PATH']}",
+                    f"--property=StandardOutput=append:{log_file}",
+                    "--property=StandardError=inherit",
+                ] + script_argv,
+            )
+        else:
+            subprocess.Popen(
+                script_argv,
+                stdout=open(log_file, "a"),
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+                env=env,
+            )
 
     async def _fast_restart_path(self, state: UpdateState):
         """No migration: skip steps 8-9, do nohup restart for step 10."""
@@ -595,14 +640,23 @@ class UpdateService:
 
     # ---- Helpers ----
 
+    def _cgroup_text(self) -> str:
+        return Path("/proc/self/cgroup").read_text()
+
     def _is_managed_by_systemd(self) -> bool:
-        """Check if this process was started by systemd."""
+        """True only if THIS process runs inside the service's own cgroup.
+
+        `systemctl is-active` is not enough: a manually launched uvicorn can
+        coexist with an active (but port-less) systemd unit — it would then
+        believe it is systemd-managed and stop/start the *other* instance
+        (2026-07-16 test-env orphan incident). /proc/self/cgroup answers for
+        this very process; on non-Linux it raises → False → fallback path.
+        """
+        name = self._service_name
+        if not name.endswith(".service"):
+            name += ".service"
         try:
-            result = subprocess.run(
-                [self._tools["systemctl"], "--user", "is-active", self._service_name],
-                capture_output=True, text=True, timeout=5,
-            )
-            return result.stdout.strip() == "active"
+            return f"/{name}" in self._cgroup_text()
         except Exception:
             return False
 
