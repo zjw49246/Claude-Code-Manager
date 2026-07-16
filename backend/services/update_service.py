@@ -7,7 +7,6 @@ import json
 import logging
 import os
 import shutil
-import signal
 import subprocess
 import sys
 import time
@@ -618,8 +617,10 @@ class UpdateService:
                 start_new_session=True,
             )
         else:
+            # Fallback: hardcoded uvicorn args — flags the user originally
+            # passed (--reload, --workers, etc.) are not preserved.
             uvicorn_cmd = (
-                f"sleep 2 && kill {os.getpid()} && sleep 1 && "
+                f"sleep 2 && kill {os.getpid()}; sleep 1; "
                 f"cd {self.project_dir} && "
                 f"{sys.executable} -m uvicorn backend.main:app "
                 f"--host 0.0.0.0 --port {self.port}"
