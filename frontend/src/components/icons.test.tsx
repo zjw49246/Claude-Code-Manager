@@ -83,6 +83,17 @@ describe('中央图标模块', () => {
     expect(sSolid.container.innerHTML).not.toBe(sHollow.container.innerHTML); // IoStar vs IoStarOutline
   });
 
+  it('dark/light 回退 Lucide 时保留 svg 根的 fill="none"（实心黑块回归，2026-07-17）', () => {
+    // wrapper 若把 fill={undefined} 显式传给 lucide，spread 会覆盖其默认
+    // fill="none" → 闭合形状（Mail 的 rect 等）被默认黑色填充成实心块
+    const { container } = render(<Star size={16} />);
+    const svg = container.querySelector('svg')!;
+    expect(svg.getAttribute('fill'), 'lucide svg 根必须保留 fill="none"').toBe('none');
+    // 显式传 fill 的用法不受影响
+    const solid = render(<Star size={16} fill="currentColor" />);
+    expect(solid.container.querySelector('svg')!.getAttribute('fill')).toBe('currentColor');
+  });
+
   it('无映射图标（如 Bot 品牌标识）在任何主题下都渲染 Lucide 原样', () => {
     act(() => setTheme('feishu'));
     const { container } = render(<Bot size={18} />);

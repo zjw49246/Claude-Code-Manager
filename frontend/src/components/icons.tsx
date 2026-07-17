@@ -307,7 +307,13 @@ function themed(
         </span>
       );
     }
-    return <Lucide size={size} fill={fill as string | undefined} {...rest} />;
+    // fill 未显式传入时绝不能带上（fill={undefined} 会在 spread 时覆盖掉
+    // lucide svg 根的 fill="none" 默认属性 → 闭合形状被浏览器默认黑色填充，
+    // 深色/浅色主题下 Mail 等图标变实心黑块（2026-07-17 用户反馈"图标好丑"）
+    if (fill === undefined) {
+      return <Lucide size={size} {...rest} />;
+    }
+    return <Lucide size={size} fill={fill as string} {...rest} />;
   }
   return ThemedIcon;
 }
