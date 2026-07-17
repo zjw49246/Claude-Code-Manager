@@ -49,11 +49,14 @@ describe('AppShell layout and z-index architecture', () => {
   });
 
   describe('header stacking context', () => {
-    it('header uses backdrop-blur-md which creates a containing block for fixed descendants', async () => {
+    it('header is a solid surface with no backdrop-blur utility (7a1bc7c: 自定义主题的透明度由变量 alpha 承担)', async () => {
       renderShell();
       const header = document.querySelector('header');
       expect(header).toBeTruthy();
-      expect(header!.className).toContain('backdrop-blur');
+      expect(header!.className).toContain('bg-gray-900');
+      // backdrop-filter 会为 fixed 后代创建 containing block——若重新引入
+      // blur（如 per-theme CSS 覆盖），必须保证 header 内没有 fixed 元素（见下一个测试）
+      expect(header!.className).not.toContain('backdrop-blur');
     });
 
     it('header uses sticky positioning with z-30', async () => {
