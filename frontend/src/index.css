@@ -183,6 +183,15 @@ html[data-theme='feishu'] {
   background-color: #ecedef;
   color-scheme: light;
 
+  /* 形状语言：紧凑方正——飞书官网 CSS 圆角以 4/6/8px 为主（feishucdn
+     app-*.css 实测统计：4px×12 / 6px×9 / 8px×5 为最高频取值）。
+     与 apple 的大圆角、light 的默认圆角形成一眼可辨的差异（2026-07-17） */
+  --radius-sm: 0.25rem;
+  --radius-md: 0.375rem;
+  --radius-lg: 0.375rem;
+  --radius-xl: 0.5rem;
+  --radius-2xl: 0.625rem;
+
   --color-foreground: #1f2329;
   --scrollbar-thumb: oklch(0% 0 0 / 0.14);
   --scrollbar-thumb-hover: oklch(0% 0 0 / 0.26);
@@ -257,8 +266,16 @@ html[data-theme='feishu'] {
  * - skill §1/§12/§14 的交互规则见本块之后的三条附属规则
  */
 html[data-theme='apple'] {
-  background-color: #e8e8ed;
+  background-color: #f2f2f7;
   color-scheme: light;
+
+  /* 形状语言：大圆角——apple.com 卡片 16-28px、iOS 分组卡片 10pt 起。
+     与 feishu 的紧凑方正、light 的默认圆角形成一眼可辨的差异（2026-07-17） */
+  --radius-sm: 0.5rem;
+  --radius-md: 0.75rem;
+  --radius-lg: 1rem;
+  --radius-xl: 1.25rem;
+  --radius-2xl: 1.5rem;
 
   /* §15 Typography：系统字体优先。同时覆盖 Tailwind 的 default-font 链
      （文档默认字体）与 --font-sans/--font-mono（font-sans/mono 工具类） */
@@ -274,8 +291,9 @@ html[data-theme='apple'] {
   --scrollbar-thumb-hover: oklch(0% 0 0 / 0.26);
   --ring: #0071e3;
 
-  /* 中性色反转：950 侧栏壳 < 900 画布(apple.com 灰) < 800 卡片(纯白) */
-  --color-gray-950: #e8e8ed;
+  /* 中性色：侧栏壳与画布近乎连续（iPad Settings 的 systemGrouped 连续面，
+     区别于 light「壳明显深于画布」的分层结构）；卡片纯白靠软阴影浮起 */
+  --color-gray-950: #f2f2f7;
   --color-gray-900: #f5f5f7;
   --color-gray-800: #ffffff;
   --color-gray-750: #f2f2f7; /* iOS systemGray6：卡片内 hover/嵌套底 */
@@ -345,6 +363,16 @@ html[data-theme='apple'] {
       backdrop-filter: none;
     }
   }
+}
+
+/* apple §12：卡片软阴影悬浮——iOS 分组卡片是「白卡浮在灰画布上」的表面语言，
+   区别于 light 的线框卡片 / feishu 的发丝线平面卡片。:not([class*='shadow'])
+   避免覆盖 shadow-* 工具类（弹层/下拉需要更重的自带阴影） */
+html[data-theme='apple'] [class~='bg-gray-800']:not([class*='shadow']) {
+  box-shadow:
+    0 0 0 0.5px oklch(0% 0 0 / 0.04),
+    0 1px 2px oklch(0% 0 0 / 0.05),
+    0 2px 8px oklch(0% 0 0 / 0.04);
 }
 
 /* apple §1 Response：按压即时反馈（pointer-down 上的 :active，而非 release）。

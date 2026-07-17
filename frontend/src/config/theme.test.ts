@@ -14,7 +14,9 @@ const indexCss = readFileSync(join(process.cwd(), 'src/index.css'), 'utf-8');
 function themeBlock(theme: string): string {
   const sel = `html[data-theme='${theme}']`;
   const blocks: string[] = [];
-  const ruleStart = /html\[data-theme=[^{]*\{/g;
+  // ^ 锚定行首：文件头注释里也会出现 `html[data-theme='x']：...` 字样，
+  // 不锚定会把注释误当规则起点、一路吞到 @theme 块（2026-07-17 发现）
+  const ruleStart = /^html\[data-theme=[^{]*\{/gm;
   let m: RegExpExecArray | null;
   while ((m = ruleStart.exec(indexCss)) !== null) {
     const selectors = m[0].slice(0, -1).split(',').map((s) => s.trim());
@@ -52,7 +54,7 @@ describe('theme config', () => {
     expect(apple).toBeDefined();
     expect(apple!.group).toBe('modern');
     expect(apple!.scheme).toBe('light');
-    expect(apple!.themeColor).toBe('#e8e8ed');
+    expect(apple!.themeColor).toBe('#f2f2f7');
   });
 
   it('主题 value 无重复', () => {
@@ -134,6 +136,7 @@ describe('index.css 主题变量覆盖完整性', () => {
     expect(block).toContain('--color-indigo-500: #0077ed'); // hover 向亮走一档（apple.com 实测）
     expect(block).toContain('--color-gray-900: #f5f5f7'); // 画布 = apple.com 页面灰
     expect(block).toContain('--color-gray-800: #ffffff'); // 卡片纯白
+    expect(block).toContain('--color-gray-950: #f2f2f7'); // 壳=画布连续面（iPad Settings 语言）
     expect(block).toContain('--color-gray-750: #f2f2f7'); // iOS systemGray6
     expect(block).toContain('--color-gray-700: #e5e5ea'); // 分隔线 = iOS systemGray5
     expect(block).toContain('--color-gray-500: #8e8e93'); // iOS systemGray
@@ -172,6 +175,31 @@ describe('index.css 主题变量覆盖完整性', () => {
     expect(themeBlock('apple')).toContain('--color-gray-900: #f5f5f7');
     expect(themeBlock('feishu')).toContain('--color-gray-900: #fbfbfc');
     expect(themeBlock('light')).toContain('--color-gray-900: oklch(95.8% 0.002 286)');
+  });
+
+  it('三个现代浅色主题以形状语言互相区分（圆角差异化，2026-07-17）', () => {
+    // 用户反馈三浅色主题肉眼无差异后确立：屏幕 90% 是白卡片，画布灰度 hex
+    // 撑不起辨识度，必须有一眼可辨的形状/表面语言差异。
+    // feishu 紧凑方正：官网 CSS 圆角以 4/6/8px 为主（feishucdn app-*.css 实测统计）
+    const feishu = themeBlock('feishu');
+    expect(feishu).toContain('--radius-md: 0.375rem');
+    expect(feishu).toContain('--radius-lg: 0.375rem');
+    expect(feishu).toContain('--radius-xl: 0.5rem');
+    // apple 大圆角：apple.com 卡片 16-28px、iOS 分组卡片 10pt 起
+    const apple = themeBlock('apple');
+    expect(apple).toContain('--radius-lg: 1rem');
+    expect(apple).toContain('--radius-xl: 1.25rem');
+    expect(apple).toContain('--radius-2xl: 1.5rem');
+    // light 保持默认圆角（不覆盖），作为中间基准
+    expect(themeBlock('light')).not.toContain('--radius-');
+  });
+
+  it('苹果主题卡片用软阴影悬浮（iOS 分组卡片语言），不覆盖 shadow-* 工具类', () => {
+    const idx = indexCss.indexOf(
+      "html[data-theme='apple'] [class~='bg-gray-800']:not([class*='shadow'])",
+    );
+    expect(idx, '缺卡片软阴影规则').toBeGreaterThan(-1);
+    expect(indexCss.slice(idx, idx + 400)).toContain('box-shadow');
   });
 
   it('品牌蓝实底上有白色选中高亮覆盖（蓝底蓝高亮不可见问题）', () => {
