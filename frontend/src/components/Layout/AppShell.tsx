@@ -3,8 +3,8 @@ import type { ReactNode } from 'react';
 import {
   Bot, Menu, X, LayoutDashboard, ListTodo, FolderGit2, KeyRound,
   FolderOpen, MessagesSquare, GitPullRequest, Server, Sparkles, Users, Globe,
-} from 'lucide-react';
-import type { LucideIcon } from 'lucide-react';
+} from '../icons';
+import type { ComponentType } from 'react';
 import { api } from '../../api/client';
 import { isCapacitor } from '../../config/server';
 import { useWebSocket } from '../../hooks/useWebSocket';
@@ -26,7 +26,8 @@ interface AppShellProps {
 interface NavItem {
   key: string;
   label: string;
-  icon: LucideIcon;
+  /** 中央图标模块（components/icons）的主题化组件；Lucide 兼容 props */
+  icon: ComponentType<{ size?: number | string; className?: string }>;
   show: boolean;
 }
 

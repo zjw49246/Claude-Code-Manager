@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import type { Project } from '../api/client';
-import { ChevronDown, FolderOpen } from 'lucide-react';
+import { ChevronDown, FolderOpen } from './icons';
 import { resolveTagColor } from './TagColors';
 
 function TagBadge({ tag, colorKey }: { tag: string; colorKey?: string }) {

@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { api } from '../../api/client';
 import type { LogEntry } from '../../api/client';
 import { useWebSocket } from '../../hooks/useWebSocket';
-import { X } from 'lucide-react';
+import { X } from '../icons';
 
 interface InstanceLogProps {
   instanceId: number;

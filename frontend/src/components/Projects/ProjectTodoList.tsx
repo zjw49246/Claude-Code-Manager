@@ -13,7 +13,7 @@ import {
   Save,
   Trash2,
   X,
-} from 'lucide-react';
+} from '../icons';
 import { api } from '../../api/client';
 import type { ProjectTodo } from '../../api/client';
 

@@ -1,5 +1,5 @@
 import { useState, useRef } from 'react';
-import { Mic, MicOff, Loader } from 'lucide-react';
+import { Mic, MicOff, Loader } from '../icons';
 
 interface VoiceButtonProps {
   onTranscribed: (text: string) => void;

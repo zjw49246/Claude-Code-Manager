@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { api } from '../../api/client';
 import type { Secret } from '../../api/client';
-import { KeyRound, Check } from 'lucide-react';
+import { KeyRound, Check } from '../icons';
 
 interface SecretPickerProps {
   selectedIds: number[];

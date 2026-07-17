@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { ArrowUpCircle, RefreshCw } from 'lucide-react';
+import { ArrowUpCircle, RefreshCw } from '../icons';
 import { api } from '../../api/client';
 import { useWebSocket } from '../../hooks/useWebSocket';
 

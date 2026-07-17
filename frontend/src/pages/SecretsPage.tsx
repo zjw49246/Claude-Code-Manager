@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { api } from '../api/client';
 import type { Secret } from '../api/client';
-import { Plus, Trash2, Pencil, X, Eye, EyeOff, KeyRound } from 'lucide-react';
+import { Plus, Trash2, Pencil, X, Eye, EyeOff, KeyRound } from '../components/icons';
 
 function SecretModal({ secret, onClose, onSaved }: { secret?: Secret; onClose: () => void; onSaved: () => void }) {
   const [name, setName] = useState(secret?.name ?? '');

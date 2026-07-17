@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { api } from '../api/client';
 import type { DiscussionListItem, Project } from '../api/client';
 import { DiscussionView } from '../components/Discussion/DiscussionView';
-import { Plus, MessageSquare, Trash2 } from 'lucide-react';
+import { Plus, MessageSquare, Trash2 } from '../components/icons';
 
 export function DiscussionsPage() {
   const [discussions, setDiscussions] = useState<DiscussionListItem[]>([]);

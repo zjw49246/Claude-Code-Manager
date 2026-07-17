@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { api } from '../../api/client';
 import type { QuickPhrase } from '../../api/client';
-import { Zap, Plus, Trash2, Pencil, Check, X, GripVertical } from 'lucide-react';
+import { Zap, Plus, Trash2, Pencil, Check, X, GripVertical } from '../icons';
 
 interface QuickPhraseDropdownProps {
   onSelect: (content: string) => void;

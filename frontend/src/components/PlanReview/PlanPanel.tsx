@@ -1,6 +1,6 @@
 import { api } from '../../api/client';
 import type { Task } from '../../api/client';
-import { Check, X } from 'lucide-react';
+import { Check, X } from '../icons';
 
 interface PlanPanelProps {
   tasks: Task[];

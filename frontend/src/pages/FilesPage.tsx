@@ -3,7 +3,7 @@ import {
   ChevronRight, ChevronDown, Folder, FolderOpen, FileText,
   AlertCircle, Loader2, Plus, Trash2, Server, HardDrive, Download, Upload,
   GitBranch, RefreshCw,
-} from 'lucide-react';
+} from '../components/icons';
 import { api, getToken } from '../api/client';
 import type { Project } from '../api/client';
 

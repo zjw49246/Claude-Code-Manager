@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { api } from '../api/client';
 import type { Project } from '../api/client';
-import { Plus, Trash2, Edit2, X, Search, Check } from 'lucide-react';
+import { Plus, Trash2, Edit2, X, Search, Check } from './icons';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 

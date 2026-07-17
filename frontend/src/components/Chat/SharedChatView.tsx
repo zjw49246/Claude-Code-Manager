@@ -3,7 +3,7 @@ import { api } from '../../api/client';
 import type { SharedTaskReceived } from '../../api/client';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { ArrowLeft, Send, RefreshCw, Wifi, WifiOff, Loader2 } from 'lucide-react';
+import { ArrowLeft, Send, RefreshCw, Wifi, WifiOff, Loader2 } from '../icons';
 
 interface SharedChatViewProps {
   shared: SharedTaskReceived;

@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { api } from '../../api/client';
 import type { MonitorSession, MonitorCheck } from '../../api/client';
-import { X, StopCircle, ChevronDown, ChevronRight, Activity, AlertCircle, CheckCircle2 } from 'lucide-react';
+import { X, StopCircle, ChevronDown, ChevronRight, Activity, AlertCircle, CheckCircle2 } from '../icons';
 
 interface MonitorPanelProps {
   taskId: number;

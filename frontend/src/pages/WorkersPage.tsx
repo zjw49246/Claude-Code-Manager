@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { api } from '../api/client';
 import { useWebSocket } from '../hooks/useWebSocket';
 import type { Worker, TeamUser } from '../api/client';
-import { Plus, X, RefreshCw, Trash2, Power, Play, Server, ScrollText, Pencil } from 'lucide-react';
+import { Plus, X, RefreshCw, Trash2, Power, Play, Server, ScrollText, Pencil } from '../components/icons';
 
 const STATUS_COLORS: Record<string, string> = {
   creating: 'bg-blue-500/20 text-blue-400',

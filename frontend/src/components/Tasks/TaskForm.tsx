@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { api } from '../../api/client';
 import type { Project, TagItem, Task } from '../../api/client';
-import { Plus, Paperclip, X, Star, Wrench, Settings, Loader2, AlertCircle, Pin } from 'lucide-react';
+import { Plus, Paperclip, X, Star, Wrench, Settings, Loader2, AlertCircle, Pin } from '../icons';
 import { ProjectSelect } from '../ProjectSelect';
 import { VoiceButton } from '../Voice/VoiceButton';
 import { SecretPicker } from '../Secrets/SecretPicker';

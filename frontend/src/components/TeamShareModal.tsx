@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { X, Check, Users } from 'lucide-react';
+import { X, Check, Users } from './icons';
 import { api } from '../api/client';
 import type { TeamUser } from '../api/client';
 

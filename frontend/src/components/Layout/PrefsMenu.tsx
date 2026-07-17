@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Palette, Globe, Settings, LogOut, KeyRound, Image as ImageIcon } from 'lucide-react';
+import { Palette, Globe, Settings, LogOut, KeyRound, Image as ImageIcon } from '../icons';
 import { api, clearToken } from '../../api/client';
 import type { RuntimeSettings } from '../../api/client';
 import { getTheme, setTheme as persistTheme, THEME_OPTIONS, type Theme } from '../../config/theme';

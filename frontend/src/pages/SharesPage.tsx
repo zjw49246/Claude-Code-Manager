@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { api } from '../api/client';
 import type { SharedTaskReceived } from '../api/client';
-import { RefreshCw, MessageCircle, X, Search } from 'lucide-react';
+import { RefreshCw, MessageCircle, X, Search } from '../components/icons';
 import { SharedChatView } from '../components/Chat/SharedChatView';
 
 export default function SharesPage() {

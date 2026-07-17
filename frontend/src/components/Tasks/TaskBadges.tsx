@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Wrench, Users, Settings } from 'lucide-react';
+import { Wrench, Users, Settings } from '../icons';
 import { api } from '../../api/client';
 import type { Task, SubAgentSummary } from '../../api/client';
 

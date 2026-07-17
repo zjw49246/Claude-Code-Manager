@@ -4,7 +4,7 @@ import remarkGfm from 'remark-gfm';
 import { api } from '../../api/client';
 import type { ChatMessage, Task } from '../../api/client';
 import { useWebSocket } from '../../hooks/useWebSocket';
-import { ArrowLeft, ChevronDown, ChevronRight, Copy, Check, XCircle, ArrowDown } from 'lucide-react';
+import { ArrowLeft, ChevronDown, ChevronRight, Copy, Check, XCircle, ArrowDown } from '../icons';
 
 interface LoopChatViewProps {
   task: Task;

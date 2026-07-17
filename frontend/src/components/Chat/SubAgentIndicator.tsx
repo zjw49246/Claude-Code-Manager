@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { Users } from 'lucide-react';
+import { Users } from '../icons';
 import { api } from '../../api/client';
 import type { SubAgentSummary } from '../../api/client';
 

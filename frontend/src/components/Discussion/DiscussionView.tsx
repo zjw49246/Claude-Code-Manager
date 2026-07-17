@@ -22,7 +22,7 @@ import {
   Wrench,
   Clock,
   UserPlus,
-} from 'lucide-react';
+} from '../icons';
 import { QuickPhraseDropdown } from '../QuickPhrases/QuickPhraseDropdown';
 
 const AGENT_COLORS = [

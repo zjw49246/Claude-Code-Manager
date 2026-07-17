@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { setToken } from '../api/client';
 import { getApiBase, getServerUrl, setServerUrl } from '../config/server';
-import { ChevronDown, ChevronRight, Bot } from 'lucide-react';
+import { ChevronDown, ChevronRight, Bot } from '../components/icons';
 
 interface LoginPageProps {
   onLogin: () => void;

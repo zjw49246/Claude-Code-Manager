@@ -705,6 +705,7 @@ uv run python -m pytest backend/tests/test_api_tasks.py -k broadcasts_status_cha
 - `cd frontend && npx tsc --noEmit` — 类型检查
 - `cd frontend && npm run build` — 构建（字体 woff2 应打进 dist/assets）
 - `cd frontend && npx vitest run` — 组件测试（注意：main 上存在历史失败基线，对比失败数是否增加）
+- `cd frontend && npx vitest run src/components/icons.test.tsx` — 中央图标模块：架构守卫（禁止值导入 lucide-react）、三主题实时切换、className 透传、fill 实心/空心语义、无映射回退
 - `cd frontend && npx vitest run src/config/iconSets.test.tsx` — 主题图标集：声明的 iconSet 必已注册、每个集合覆盖全部导航 key 且渲染出 svg、缺失回退 Lucide、飞书 two-tone 双色取值
 - `cd frontend && npx vitest run src/config/theme.test.ts` — 主题注册表 + index.css 变量覆盖完整性（gray/indigo 全档、浅色主题 color-scheme 与 accent 300/400 深色化、飞书/苹果官方 token 抽查、三浅色主题画布防趋同、苹果主题 skill 规则守卫——系统字体 / 按压反馈的 reduced-motion 守卫 / 材质顶栏的 reduced-transparency 回退）
 
@@ -713,7 +714,8 @@ uv run python -m pytest backend/tests/test_api_tasks.py -k broadcasts_status_cha
 - [ ] 苹果主题：#f7f7f7 画布 + 侧栏 #f9f9f9（Settings 实测，略亮于画布）+ 纯白卡片大圆角（16px+）软阴影浮起；侧栏 = macOS Settings：顶部灰底 Search 框、账户行在搜索框下、彩色 squircle 图标、选中行实底蓝白字；主按钮 apple.com CTA 蓝 #0071e3（hover 微亮 #0077ed）；正文系统字体（Mac 上应为 SF Pro / 苹方）；顶栏毛玻璃（内容滚过时半透明模糊）；按钮按下轻微缩小（0.97）、系统开启「减弱动态效果」后无缩放
 - [ ] 三浅色形状语言一眼可辨：feishu 卡片/按钮方正（≈6px）、light 默认（≈10px）、apple 明显更圆（≈16px）；截图角落放大或并排切换应立见差异
 - [ ] 飞书主题桌面端：侧栏为 76px 窄图标 rail（头像置顶、图标上 10px 小字下、IconPark 双色图标（未选中深灰+白填充、选中飞书蓝）），选中项 = 白色圆角 tile 包住图标+文字 + 飞书蓝；移动端抽屉保持常规行布局
-- [ ] 主题图标集即时切换：齿轮切主题后侧栏图标立刻变（feishu→IconPark 双色 / apple→Ionicons 填充式 / 其余→Lucide），无需刷新页面
+- [ ] 主题图标集即时切换：齿轮切主题后全站图标（侧栏、按钮、列表操作、聊天工具条等）立刻变（feishu→IconPark 双色 / apple→Ionicons 填充式 / 其余→Lucide），无需刷新页面
+- [ ] 收藏星标实心/空心状态在三套图标下都正确（TaskForm/TaskList/ChatView 的 Star fill 切换）
 - [ ] 苹果主题：侧栏每项一个 iOS 系统色 squircle 图标（白线稿彩底），选中行实底蓝 #0071e3 白字；按钮为胶囊形（导航项除外）；输入框 10px 圆角
 - [ ] 飞书主题：白底为主（#fbfbfc 近白画布 + 纯白卡片，发丝线分隔）+ #ecedef 侧栏（飞书 rail 灰）；主按钮经典飞书蓝 #3370ff，hover 加深（#245bdb）；主文字 #1f2329；低边框风（#e8eaed，弱线框）；选中项浅蓝 pill #e1eaff + 蓝字
 - [ ] 浅色 vs 飞书肉眼可区分：浅色 = 灰调分层（壳 oklch 92.5% / 画布 95.8%），飞书 = 大面积白（画布 #fbfbfc）；并排切换主画布白度应有明显差异

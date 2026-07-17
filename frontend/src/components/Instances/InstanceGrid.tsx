@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { api } from '../../api/client';
 import type { Instance } from '../../api/client';
-import { Square, Trash2, Plus, Zap, ZapOff, Eraser } from 'lucide-react';
+import { Square, Trash2, Plus, Zap, ZapOff, Eraser } from '../icons';
 
 interface InstanceGridProps {
   instances: Instance[];

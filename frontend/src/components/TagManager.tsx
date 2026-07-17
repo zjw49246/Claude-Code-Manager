@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { api } from '../api/client';
 import type { TagItem } from '../api/client';
-import { X, Pencil, Trash2, Check, Plus } from 'lucide-react';
+import { X, Pencil, Trash2, Check, Plus } from './icons';
 import { TAG_COLOR_OPTIONS, resolveTagColor } from './TagColors';
 
 interface TagManagerProps {

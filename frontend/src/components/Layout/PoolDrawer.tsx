@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Plus, RefreshCw, X, Users, Settings } from 'lucide-react';
+import { Plus, RefreshCw, X, Users, Settings } from '../icons';
 import { api } from '../../api/client';
 import type { PoolAccountUsage, PoolUsageStatus, PoolUsageWindow } from '../../api/client';
 

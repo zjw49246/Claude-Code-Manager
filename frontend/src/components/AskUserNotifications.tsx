@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { HelpCircle, X } from 'lucide-react';
+import { HelpCircle, X } from './icons';
 import { api } from '../api/client';
 import { useWebSocket } from '../hooks/useWebSocket';
 

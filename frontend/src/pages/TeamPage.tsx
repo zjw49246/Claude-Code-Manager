@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { api } from '../api/client';
 import type { TeamUser, Worker } from '../api/client';
-import { Plus, X, Trash2, UserPlus, Users, Shield, ShieldCheck, User } from 'lucide-react';
+import { Plus, X, Trash2, UserPlus, Users, Shield, ShieldCheck, User } from '../components/icons';
 
 interface UserGroup {
   id: number;
