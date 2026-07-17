@@ -54,7 +54,7 @@ describe('theme config', () => {
     expect(apple).toBeDefined();
     expect(apple!.group).toBe('modern');
     expect(apple!.scheme).toBe('light');
-    expect(apple!.themeColor).toBe('#f2f2f7');
+    expect(apple!.themeColor).toBe('#f9f9f9');
   });
 
   it('主题 value 无重复', () => {
@@ -134,9 +134,9 @@ describe('index.css 主题变量覆盖完整性', () => {
     const block = themeBlock('apple');
     expect(block).toContain('--color-indigo-600: #0071e3'); // apple.com CTA 按钮蓝（官网 CSS 实测）
     expect(block).toContain('--color-indigo-500: #0077ed'); // hover 向亮走一档（apple.com 实测）
-    expect(block).toContain('--color-gray-900: #f5f5f7'); // 画布 = apple.com 页面灰
+    expect(block).toContain('--color-gray-900: #f7f7f7'); // 画布 = Settings 内容区（官方手册截图实测）
     expect(block).toContain('--color-gray-800: #ffffff'); // 卡片纯白
-    expect(block).toContain('--color-gray-950: #f2f2f7'); // 壳=画布连续面（iPad Settings 语言）
+    expect(block).toContain('--color-gray-950: #f9f9f9'); // 侧栏 = Settings 侧栏（略亮于画布，实测）
     expect(block).toContain('--color-gray-750: #f2f2f7'); // iOS systemGray6
     expect(block).toContain('--color-gray-700: #e5e5ea'); // 分隔线 = iOS systemGray5
     expect(block).toContain('--color-gray-500: #8e8e93'); // iOS systemGray
@@ -170,9 +170,8 @@ describe('index.css 主题变量覆盖完整性', () => {
   });
 
   it('三个现代浅色主题画布互不趋同（light 灰调分层 / feishu 近白 / apple 苹果灰）', () => {
-    // 回归守卫：apple 画布 #f5f5f7 介于 feishu 近白与 light 分层灰之间，
-    // 三者取值必须保持可区分（沿用 2026-07-16 light vs feishu 防趋同教训）
-    expect(themeBlock('apple')).toContain('--color-gray-900: #f5f5f7');
+    // 回归守卫：三者取值必须保持可区分（沿用 2026-07-16 light vs feishu 防趋同教训）
+    expect(themeBlock('apple')).toContain('--color-gray-900: #f7f7f7');
     expect(themeBlock('feishu')).toContain('--color-gray-900: #fbfbfc');
     expect(themeBlock('light')).toContain('--color-gray-900: oklch(95.8% 0.002 286)');
   });
@@ -210,8 +209,14 @@ describe('index.css 主题变量覆盖完整性', () => {
     expect(mediaIdx, '飞书 rail 必须包在 lg+ media query 内（移动端抽屉保持行布局）').toBeGreaterThan(-1);
     // 主列 padding 必须跟随 rail 宽度，否则内容被 240px 空档顶开
     expect(indexCss).toContain("html[data-theme='feishu'] [data-shell-main]");
-    // 选中项 = B100 蓝 tint 方块（飞书 rail 选中语言）
-    expect(indexCss).toContain('background: #e1eaff');
+    // 选中项 = 白色圆角 tile 包住图标+文字（iPad 官方截图实测 tile ≈白）
+    expect(indexCss).toMatch(
+      /html\[data-theme='feishu'\] \[data-shell-sidebar\] \[data-nav-item\]\[data-active='true'\] \{\s*background: #ffffff;\s*color: #3370ff;/,
+    );
+    // 头像置顶（飞书 rail 顶部 = 用户头像）
+    expect(indexCss).toMatch(
+      /html\[data-theme='feishu'\] \[data-shell-user-footer\] \{\s*order: -1;/,
+    );
   });
 
   it('结构级复刻层：苹果 macOS Settings 侧栏 + 胶囊按钮', () => {
@@ -222,9 +227,12 @@ describe('index.css 主题变量覆盖完整性', () => {
     expect(indexCss).toMatch(
       /html\[data-theme='apple'\] \[data-nav-item\]\[data-active='true'\] \{\s*background: #0071e3;\s*color: #ffffff;/,
     );
-    // apple.com 语言：按钮胶囊化；导航项以更高优先级覆盖回 8px
+    // apple.com 语言：按钮胶囊化；导航项以更高优先级覆盖回 Settings 的 6px
     expect(indexCss).toMatch(/html\[data-theme='apple'\] button \{\s*border-radius: 9999px;/);
-    expect(indexCss).toMatch(/html\[data-theme='apple'\] \[data-nav-item\] \{[^}]*border-radius: 8px;/);
+    expect(indexCss).toMatch(/html\[data-theme='apple'\] \[data-nav-item\] \{[^}]*border-radius: 6px;/);
+    // Settings 侧栏顶部搜索框（装饰性）+ 用户行上移（Apple 账户行位置）
+    expect(indexCss).toContain("html[data-theme='apple'] [data-shell-sidebar]::before");
+    expect(indexCss).toMatch(/\[data-shell-sidebar\]::before \{\s*content: 'Search';/);
   });
 
   it('品牌蓝实底上有白色选中高亮覆盖（蓝底蓝高亮不可见问题）', () => {
