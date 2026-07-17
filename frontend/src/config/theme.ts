@@ -12,13 +12,15 @@ export interface ThemeOption {
   scheme: 'dark' | 'light';
   /** 移动端状态栏 / PWA theme-color（≈ 各主题的壳背景色；custom 运行时取用户所选背景） */
   themeColor: string;
+  /** 可选：导航图标集（config/iconSets.tsx 的注册名）。缺省 = Lucide 默认图标 */
+  iconSet?: string;
 }
 
 export const THEME_OPTIONS = [
   { value: 'dark', label: '深色', group: 'modern', scheme: 'dark', themeColor: '#131316' },
   { value: 'light', label: '浅色', group: 'modern', scheme: 'light', themeColor: '#e9e9ec' },
-  { value: 'feishu', label: '飞书', group: 'modern', scheme: 'light', themeColor: '#ecedef' },
-  { value: 'apple', label: '苹果', group: 'modern', scheme: 'light', themeColor: '#f9f9f9' },
+  { value: 'feishu', label: '飞书', group: 'modern', scheme: 'light', themeColor: '#ecedef', iconSet: 'feishu' },
+  { value: 'apple', label: '苹果', group: 'modern', scheme: 'light', themeColor: '#f9f9f9', iconSet: 'sf' },
   { value: 'legacy', label: '经典深色', group: 'legacy', scheme: 'dark', themeColor: '#030712' },
   { value: 'ocean', label: '海蓝', group: 'legacy', scheme: 'dark', themeColor: '#06131f' },
   { value: 'forest', label: '森林', group: 'legacy', scheme: 'dark', themeColor: '#07130d' },
@@ -30,6 +32,20 @@ export type Theme = typeof THEME_OPTIONS[number]['value'];
 
 const THEME_MAP = new Map(THEME_OPTIONS.map((t) => [t.value, t]));
 
+export function getThemeOption(theme: Theme): ThemeOption {
+  return THEME_MAP.get(theme) ?? THEME_OPTIONS[0];
+}
+
+/** 主题变更订阅（useTheme hook 用 useSyncExternalStore 接入，
+ *  解决换主题后 React 侧图标集不重渲染的问题） */
+const themeListeners = new Set<() => void>();
+export function subscribeTheme(fn: () => void): () => void {
+  themeListeners.add(fn);
+  return () => {
+    themeListeners.delete(fn);
+  };
+}
+
 export function getTheme(): Theme {
   const stored = localStorage.getItem(STORAGE_KEY);
   return stored && THEME_MAP.has(stored as Theme) ? (stored as Theme) : 'dark';
@@ -38,6 +54,7 @@ export function getTheme(): Theme {
 export function setTheme(theme: Theme) {
   localStorage.setItem(STORAGE_KEY, theme);
   applyTheme(theme);
+  themeListeners.forEach((fn) => fn());
 }
 
 export function applyTheme(theme?: Theme) {

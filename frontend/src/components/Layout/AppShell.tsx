@@ -8,6 +8,9 @@ import type { LucideIcon } from 'lucide-react';
 import { api } from '../../api/client';
 import { isCapacitor } from '../../config/server';
 import { useWebSocket } from '../../hooks/useWebSocket';
+import { useTheme } from '../../hooks/useTheme';
+import { getThemeOption } from '../../config/theme';
+import { getNavIcon } from '../../config/iconSets';
 import { PoolDrawer } from './PoolDrawer';
 import { UpdateButton } from '../System/UpdateButton';
 import { PrefsMenu } from './PrefsMenu';
@@ -32,6 +35,9 @@ interface NavItem {
  * 高度 = h-12 (3rem) + 底边框。 */
 export function AppShell({ currentPage, onNavigate, wide, children }: AppShellProps) {
   const [drawerOpen, setDrawerOpen] = useState(false);
+  // 主题图标集：feishu → IconPark two-tone / apple → Ionicons；其余 Lucide
+  const theme = useTheme();
+  const iconSet = getThemeOption(theme).iconSet;
 
   const ccUser = JSON.parse(localStorage.getItem('cc_user') || '{}');
   const isAdmin = ccUser.role === 'admin' || ccUser.role === 'super_admin' || !ccUser.id;
@@ -95,7 +101,16 @@ export function AppShell({ currentPage, onNavigate, wide, children }: AppShellPr
                 : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800/70'
             }`}
           >
-            <Icon size={16} className={active ? 'text-indigo-400' : 'text-gray-500'} />
+            {(() => {
+              const themed = getNavIcon(iconSet, p.key);
+              return themed ? (
+                <span data-icon-set={iconSet} className="contents">
+                  {themed({ size: 16, active })}
+                </span>
+              ) : (
+                <Icon size={16} className={active ? 'text-indigo-400' : 'text-gray-500'} />
+              );
+            })()}
             {p.label}
           </button>
         );

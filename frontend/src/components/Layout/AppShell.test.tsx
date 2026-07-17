@@ -1,7 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, screen, waitFor, cleanup } from '@testing-library/react';
+import { render, screen, waitFor, cleanup, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { AppShell } from './AppShell';
+import { setTheme } from '../../config/theme';
 
 vi.mock('../../api/client', () => ({
   api: {
@@ -121,6 +122,31 @@ describe('AppShell layout and z-index architecture', () => {
       renderShell();
       const sidebar = document.querySelector('aside[class*="lg:flex"]');
       expect(sidebar!.className).toContain('z-40');
+    });
+
+    it('switching theme swaps nav icon sets live (feishu → IconPark, apple → Ionicons, 其余 → Lucide)', async () => {
+      renderShell();
+      // 默认 dark：无 iconSet 包装（Lucide 直渲）
+      expect(document.querySelector('[data-nav-item] [data-icon-set]')).toBeNull();
+
+      await act(async () => { setTheme('feishu'); });
+      for (const el of document.querySelectorAll('[data-nav-item]')) {
+        expect(
+          el.querySelector("[data-icon-set='feishu'] svg"),
+          `feishu 集缺 "${el.textContent}" 的图标（回退成了 Lucide）`,
+        ).toBeTruthy();
+      }
+
+      await act(async () => { setTheme('apple'); });
+      for (const el of document.querySelectorAll('[data-nav-item]')) {
+        expect(
+          el.querySelector("[data-icon-set='sf'] svg"),
+          `sf 集缺 "${el.textContent}" 的图标（回退成了 Lucide）`,
+        ).toBeTruthy();
+      }
+
+      await act(async () => { setTheme('dark'); });
+      expect(document.querySelector('[data-nav-item] [data-icon-set]')).toBeNull();
     });
 
     it('exposes theme-agnostic data hooks for per-theme structural CSS (feishu rail / apple squircles)', () => {

@@ -445,7 +445,6 @@ html[data-theme='apple'] [class~='bg-gray-800']:not([class*='shadow']) {
     padding: 5px;
     box-sizing: border-box;
     border-radius: 8px;
-    stroke-width: 2.4; /* 飞书 rail 图标是 duotone 填充风，线稿加粗贴近观感 */
   }
   /* 选中态 = 白色圆角 tile 包住「图标+文字」整体（实测 tile #fcfbf9≈白），
      图标与文字都变飞书蓝——非蓝 tint 方块 */
