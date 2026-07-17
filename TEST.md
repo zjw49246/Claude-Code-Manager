@@ -705,10 +705,11 @@ uv run python -m pytest backend/tests/test_api_tasks.py -k broadcasts_status_cha
 - `cd frontend && npx tsc --noEmit` — 类型检查
 - `cd frontend && npm run build` — 构建（字体 woff2 应打进 dist/assets）
 - `cd frontend && npx vitest run` — 组件测试（注意：main 上存在历史失败基线，对比失败数是否增加）
-- `cd frontend && npx vitest run src/config/theme.test.ts` — 主题注册表 + index.css 变量覆盖完整性（gray/indigo 全档、浅色主题 color-scheme 与 accent 300/400 深色化、飞书官方 token 抽查）
+- `cd frontend && npx vitest run src/config/theme.test.ts` — 主题注册表 + index.css 变量覆盖完整性（gray/indigo 全档、浅色主题 color-scheme 与 accent 300/400 深色化、飞书/苹果官方 token 抽查、三浅色主题画布防趋同、苹果主题 skill 规则守卫——系统字体 / 按压反馈的 reduced-motion 守卫 / 材质顶栏的 reduced-transparency 回退）
 
 ### 手动验证（每个主题 × 桌面/移动端）
-- [ ] 齿轮 → 主题下拉分「现代 / Legacy」两组：深色、浅色、飞书、经典深色、海蓝、森林、莓红
+- [ ] 齿轮 → 主题下拉分「现代 / Legacy」两组：深色、浅色、飞书、苹果、经典深色、海蓝、森林、莓红
+- [ ] 苹果主题：#f5f5f7 画布（apple.com 灰）+ 纯白卡片 + #e8e8ed 侧栏；主按钮 apple.com CTA 蓝 #0071e3（hover 微亮 #0077ed）；正文系统字体（Mac 上应为 SF Pro / 苹方）；顶栏毛玻璃（内容滚过时半透明模糊）；按钮按下轻微缩小（0.97）、系统开启「减弱动态效果」后无缩放
 - [ ] 飞书主题：白底为主（#fbfbfc 近白画布 + 纯白卡片，发丝线分隔）+ #ecedef 侧栏（飞书 rail 灰）；主按钮经典飞书蓝 #3370ff，hover 加深（#245bdb）；主文字 #1f2329；低边框风（#e8eaed，弱线框）；选中项浅蓝 pill #e1eaff + 蓝字
 - [ ] 浅色 vs 飞书肉眼可区分：浅色 = 灰调分层（壳 oklch 92.5% / 画布 95.8%），飞书 = 大面积白（画布 #fbfbfc）；并排切换主画布白度应有明显差异
 - [ ] 蓝色用户气泡内鼠标选中文字：高亮为白色半透明覆盖（亮一档的蓝），清晰可见；灰底消息选中仍是品牌蓝 tint（所有主题通用）

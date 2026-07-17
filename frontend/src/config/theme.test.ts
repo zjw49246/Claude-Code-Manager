@@ -47,6 +47,14 @@ describe('theme config', () => {
     expect(feishu!.themeColor).toBe('#ecedef');
   });
 
+  it('注册了苹果主题（modern 组浅色）', () => {
+    const apple = THEME_OPTIONS.find((o) => o.value === 'apple');
+    expect(apple).toBeDefined();
+    expect(apple!.group).toBe('modern');
+    expect(apple!.scheme).toBe('light');
+    expect(apple!.themeColor).toBe('#e8e8ed');
+  });
+
   it('主题 value 无重复', () => {
     const values = THEME_OPTIONS.map((o) => o.value);
     expect(new Set(values).size).toBe(values.length);
@@ -118,6 +126,52 @@ describe('index.css 主题变量覆盖完整性', () => {
     // light 画布保持色调分层灰（tonal zinc），确保没人把两边改成同一取值
     expect(light).toContain('--color-gray-900: oklch(95.8% 0.002 286)');
     expect(light).toContain('--color-gray-950: oklch(92.5% 0.003 286)');
+  });
+
+  it('苹果主题使用 Apple 官方色板 token（apple.com CSS / iOS systemGray 系）', () => {
+    const block = themeBlock('apple');
+    expect(block).toContain('--color-indigo-600: #0071e3'); // apple.com CTA 按钮蓝（官网 CSS 实测）
+    expect(block).toContain('--color-indigo-500: #0077ed'); // hover 向亮走一档（apple.com 实测）
+    expect(block).toContain('--color-gray-900: #f5f5f7'); // 画布 = apple.com 页面灰
+    expect(block).toContain('--color-gray-800: #ffffff'); // 卡片纯白
+    expect(block).toContain('--color-gray-750: #f2f2f7'); // iOS systemGray6
+    expect(block).toContain('--color-gray-700: #e5e5ea'); // 分隔线 = iOS systemGray5
+    expect(block).toContain('--color-gray-500: #8e8e93'); // iOS systemGray
+    expect(block).toContain('--color-gray-100: #1d1d1f'); // apple.com 主文字
+    expect(block).toContain('--ring: #0071e3');
+  });
+
+  it('苹果主题遵循 apple-design skill §15：平台系统字体优先', () => {
+    // skill §15：系统字体自带 optical sizing 与 tracking 表，优先于自定义字体
+    const block = themeBlock('apple');
+    expect(block).toMatch(/--font-sans:\s*-apple-system/);
+    expect(block).toMatch(/--font-mono:\s*ui-monospace/);
+  });
+
+  it('苹果主题交互细节遵循 skill §1/§12/§14', () => {
+    // §1 Response：按压即时反馈。用独立 scale 属性（不覆盖 transform 工具类）
+    const pressIdx = indexCss.indexOf("html[data-theme='apple'] button:active");
+    expect(pressIdx, '缺按压反馈规则').toBeGreaterThan(-1);
+    // §14：按压动效必须包在 prefers-reduced-motion 守卫内
+    const motionGuard = indexCss.lastIndexOf(
+      '@media (prefers-reduced-motion: no-preference)',
+      pressIdx,
+    );
+    expect(motionGuard, '按压反馈未被 reduced-motion 守卫').toBeGreaterThan(-1);
+    // §12 Materials：半透明材质顶栏（backdrop blur，内容从下方滚过）
+    const chromeIdx = indexCss.indexOf("html[data-theme='apple'] header.sticky");
+    expect(chromeIdx, '缺材质顶栏规则').toBeGreaterThan(-1);
+    expect(indexCss.slice(chromeIdx, chromeIdx + 500)).toContain('backdrop-filter');
+    // §14：prefers-reduced-transparency 时回退实底
+    expect(indexCss).toContain('@media (prefers-reduced-transparency: reduce)');
+  });
+
+  it('三个现代浅色主题画布互不趋同（light 灰调分层 / feishu 近白 / apple 苹果灰）', () => {
+    // 回归守卫：apple 画布 #f5f5f7 介于 feishu 近白与 light 分层灰之间，
+    // 三者取值必须保持可区分（沿用 2026-07-16 light vs feishu 防趋同教训）
+    expect(themeBlock('apple')).toContain('--color-gray-900: #f5f5f7');
+    expect(themeBlock('feishu')).toContain('--color-gray-900: #fbfbfc');
+    expect(themeBlock('light')).toContain('--color-gray-900: oklch(95.8% 0.002 286)');
   });
 
   it('品牌蓝实底上有白色选中高亮覆盖（蓝底蓝高亮不可见问题）', () => {
