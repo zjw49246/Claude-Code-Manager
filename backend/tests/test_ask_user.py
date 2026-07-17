@@ -1,10 +1,16 @@
 """Tests for ask_user：拦截 AskUserQuestion → 前端卡片 → 答案喂回模型。
 
-覆盖纯逻辑（registry / format / settings 注入）；完整 HTTP+claude 回环由
+覆盖纯逻辑（registry / format / settings 注入）+ hook 脚本决策输出
+（subprocess + 单次 stub HTTP server）；完整 HTTP+claude 回环由
 集成测试在真实环境验证（见 PROGRESS.md task ask_user）。
 """
 import asyncio
 import json
+import subprocess
+import sys
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 
 import pytest
 
@@ -183,3 +189,77 @@ def test_inject_creates_missing_dir(tmp_path):
     assert sp.exists()
     d = json.loads(sp.read_text())
     assert any(_is_our_pretool_entry(e) for e in d["hooks"]["PreToolUse"])
+
+
+def test_inject_hook_carries_cli_timeout(tmp_path):
+    """hook 项必须带显式 timeout：CLI 默认 600s 杀 hook 命令，会把 /wait
+    阻塞中的 hook 杀掉 → fail-open 弹原生交互框冻死 PTY turn（task 32）。"""
+    from backend.config import settings
+
+    _set_enabled(True)
+    ensure_ask_user_hook(str(tmp_path))
+    d = json.loads((tmp_path / "settings.json").read_text())
+    ours = [e for e in d["hooks"]["PreToolUse"] if _is_our_pretool_entry(e)]
+    assert ours[0]["hooks"][0]["timeout"] == int(settings.ask_user_timeout) + 60
+
+
+# -------------------------------------------------------------- hook script
+
+_HOOK_SCRIPT = Path(__file__).resolve().parents[1] / "hooks" / "ask_user_hook.py"
+
+
+def _run_hook_against(response_body: dict) -> subprocess.CompletedProcess:
+    """跑真实 hook 脚本，stub 后端返回给定 /wait 响应。"""
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            body = json.dumps(response_body).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):  # 静音测试输出
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), _Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        payload = json.dumps({
+            "tool_name": "AskUserQuestion",
+            "session_id": "sid-hook-test",
+            "tool_input": {"questions": [{"question": "?"}]},
+        })
+        return subprocess.run(
+            [sys.executable, str(_HOOK_SCRIPT),
+             "--api-base", f"http://127.0.0.1:{srv.server_address[1]}",
+             "--timeout", "10"],
+            input=payload, capture_output=True, text=True, timeout=30,
+        )
+    finally:
+        srv.shutdown()
+
+
+def test_hook_script_answer_feeds_deny_reason():
+    cp = _run_hook_against({"answered": True, "reason": "The user picked A."})
+    assert cp.returncode == 0
+    out = json.loads(cp.stdout)
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert out["hookSpecificOutput"]["permissionDecisionReason"] == "The user picked A."
+
+
+def test_hook_script_timed_out_denies_not_fail_open():
+    """超时不放行：PTY 下原生 AskUserQuestion 会冻死 turn（task 32, 2026-07-17）。"""
+    cp = _run_hook_against({"answered": False, "timed_out": True})
+    assert cp.returncode == 0
+    out = json.loads(cp.stdout)
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert "best judgment" in out["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_hook_script_no_session_fails_open():
+    cp = _run_hook_against({"answered": False, "no_session": True})
+    assert cp.returncode == 0
+    assert cp.stdout.strip() == ""  # 无决策输出 = 放行原生工具

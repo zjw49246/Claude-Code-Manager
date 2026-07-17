@@ -10,8 +10,9 @@
      CCM 广播卡片、等用户在前端回答；
   2. 拿到 {answered:true, reason} → 打印 PreToolUse deny + permissionDecisionReason，
      deny 的 reason 会作为 tool_result（is_error）喂回模型，模型据此当作"用户回答"继续；
-  3. 任何失败/超时/非 CCM session → 不输出（exit 0），放行原生 AskUserQuestion 兜底，
-     绝不因 CCM 不可用而打断会话。
+  3. 超时（timed_out）→ deny +「用户未回应，按你的判断继续」——PTY 下放行原生
+     AskUserQuestion 会弹无人应答的交互框、冻死整个 turn，绝不能放行；
+  4. CCM 不可达 / 非托管 session / 其它异常 → 不输出（exit 0），放行原生工具兜底。
 
 仅用标准库（urllib），不依赖 httpx，任何 python3 都能跑。
 """
@@ -80,7 +81,23 @@ def main() -> None:
         return
 
     if not data.get("answered"):
-        # 超时 / 非 CCM session → 放行原生工具
+        if data.get("timed_out"):
+            # 超时不再放行：PTY 下原生 AskUserQuestion 会弹无人应答的交互框，
+            # 冻死整个 turn。deny + 引导模型自行决策继续（-p 模式同样适用）。
+            print(json.dumps({
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": (
+                        "No user response within the waiting window. Do not call "
+                        "AskUserQuestion again for this decision. Proceed with your "
+                        "best judgment, state the assumption you chose, and let the "
+                        "user correct it later."
+                    ),
+                }
+            }))
+            sys.exit(0)
+        # 非 CCM session / 后端异常 → 放行原生工具
         _fail_open(f"ask_user_hook: not answered ({data})")
         return
 
