@@ -385,6 +385,110 @@ html[data-theme='apple'] [class~='bg-gray-800']:not([class*='shadow']) {
   }
 }
 
+/* ==================== 结构级复刻层（feishu / apple，2026-07-17） ==================== */
+/*
+ * 用户要求飞书/苹果主题「激进地完美复刻」原产品，仅靠变量换肤撑不起辨识度。
+ * 本层通过 AppShell 的主题无关 data 钩子（data-shell-sidebar / data-shell-main /
+ * data-nav-item[data-active] / data-shell-brand-* / data-shell-user-*）做主题
+ * 作用域下的结构重排——组件类名与其他主题行为完全不受影响。
+ */
+
+/* ---- 飞书：桌面侧栏复刻飞书客户端「窄图标 rail」 ----
+ * 实证（App Store iPad 官方截图）：左 rail ~76px、图标在上 11px 小字在下、
+ * 选中项 = 蓝 tint 圆角方块 #e1eaff + 飞书蓝图标/文字。仅 lg+ 生效（移动端
+ * 抽屉保持常规行布局）。 */
+@media (min-width: 64rem) {
+  html[data-theme='feishu'] [data-shell-sidebar] {
+    width: 4.75rem;
+  }
+  html[data-theme='feishu'] [data-shell-main] {
+    padding-left: 4.75rem;
+  }
+  html[data-theme='feishu'] [data-shell-brand-text],
+  html[data-theme='feishu'] [data-shell-user-meta] {
+    display: none;
+  }
+  html[data-theme='feishu'] [data-shell-brand-row],
+  html[data-theme='feishu'] [data-shell-user-footer] {
+    justify-content: center;
+    padding-left: 0;
+    padding-right: 0;
+  }
+  html[data-theme='feishu'] [data-shell-sidebar] nav {
+    padding-left: 0.375rem;
+    padding-right: 0.375rem;
+  }
+  html[data-theme='feishu'] [data-shell-sidebar] [data-nav-item] {
+    flex-direction: column;
+    gap: 3px;
+    justify-content: center;
+    text-align: center;
+    font-size: 0.625rem;
+    font-weight: 400;
+    letter-spacing: -0.01em;
+    padding: 7px 2px 8px;
+    overflow: hidden;
+    white-space: nowrap;
+  }
+  html[data-theme='feishu'] [data-shell-sidebar] [data-nav-item] svg {
+    width: 30px;
+    height: 30px;
+    padding: 5px;
+    box-sizing: border-box;
+    border-radius: 8px;
+  }
+  html[data-theme='feishu'] [data-shell-sidebar] [data-nav-item][data-active='true'] {
+    background: transparent;
+    color: #3370ff;
+  }
+  html[data-theme='feishu'] [data-shell-sidebar] [data-nav-item][data-active='true'] svg {
+    background: #e1eaff;
+    color: #3370ff;
+  }
+}
+
+/* ---- 苹果：侧栏复刻 macOS System Settings ----
+ * 每个导航项一个 iOS 系统色「squircle」图标（白色线稿 + 彩色圆角方块），
+ * 选中行 = 实底 systemBlue 白字（macOS 侧栏选中语言）。移动端抽屉共享
+ * squircle（无布局风险），选中行同样生效。 */
+html[data-theme='apple'] [data-nav-item] {
+  font-size: 0.8125rem; /* macOS 侧栏 13px */
+  border-radius: 8px;   /* 覆盖下方的全局胶囊按钮规则 */
+}
+html[data-theme='apple'] [data-nav-item] svg {
+  width: 22px;
+  height: 22px;
+  padding: 3px;
+  box-sizing: border-box;
+  border-radius: 6px;
+  color: #ffffff;
+  flex-shrink: 0;
+}
+/* iOS 系统色轮换（红/橙/黄/绿/青/蓝/靛/紫/粉/灰） */
+html[data-theme='apple'] [data-nav-item]:nth-of-type(10n + 1) svg { background: #007aff; }
+html[data-theme='apple'] [data-nav-item]:nth-of-type(10n + 2) svg { background: #ff9500; }
+html[data-theme='apple'] [data-nav-item]:nth-of-type(10n + 3) svg { background: #34c759; }
+html[data-theme='apple'] [data-nav-item]:nth-of-type(10n + 4) svg { background: #8e8e93; }
+html[data-theme='apple'] [data-nav-item]:nth-of-type(10n + 5) svg { background: #5856d6; }
+html[data-theme='apple'] [data-nav-item]:nth-of-type(10n + 6) svg { background: #af52de; }
+html[data-theme='apple'] [data-nav-item]:nth-of-type(10n + 7) svg { background: #ff3b30; }
+html[data-theme='apple'] [data-nav-item]:nth-of-type(10n + 8) svg { background: #f0a30a; }
+html[data-theme='apple'] [data-nav-item]:nth-of-type(10n + 9) svg { background: #5ac8fa; }
+html[data-theme='apple'] [data-nav-item]:nth-of-type(10n + 10) svg { background: #ff2d55; }
+html[data-theme='apple'] [data-nav-item][data-active='true'] {
+  background: #0071e3;
+  color: #ffffff;
+}
+
+/* apple.com 语言：按钮全面胶囊化（导航项在上方以 8px 覆盖回来），
+   输入类控件收敛到 10px（避免 --radius-lg 16px 过于气泡） */
+html[data-theme='apple'] button {
+  border-radius: 9999px;
+}
+html[data-theme='apple'] :is(input, select, textarea) {
+  border-radius: 10px;
+}
+
 /* ========================== 经典深色（Legacy v1） ========================== */
 /* 完整还原升级前的默认外观：Tailwind 原生 gray / indigo 色板 */
 html[data-theme='legacy'] {

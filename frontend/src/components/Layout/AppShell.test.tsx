@@ -122,6 +122,19 @@ describe('AppShell layout and z-index architecture', () => {
       const sidebar = document.querySelector('aside[class*="lg:flex"]');
       expect(sidebar!.className).toContain('z-40');
     });
+
+    it('exposes theme-agnostic data hooks for per-theme structural CSS (feishu rail / apple squircles)', () => {
+      // index.css 的结构级复刻层依赖这些钩子；改名/删除会让飞书与苹果主题
+      // 的侧栏结构静默失效（回归为普通列表）
+      renderShell();
+      expect(document.querySelector('aside[data-shell-sidebar]')).toBeTruthy();
+      expect(document.querySelector('[data-shell-main]')).toBeTruthy();
+      expect(document.querySelector('[data-shell-brand-row]')).toBeTruthy();
+      expect(document.querySelector('[data-shell-brand-text]')).toBeTruthy();
+      const items = document.querySelectorAll('[data-nav-item]');
+      expect(items.length).toBeGreaterThan(3);
+      expect(document.querySelectorAll("[data-nav-item][data-active='true']").length).toBe(1);
+    });
   });
 
   describe('page content area', () => {

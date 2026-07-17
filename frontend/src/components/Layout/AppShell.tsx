@@ -74,7 +74,7 @@ export function AppShell({ currentPage, onNavigate, wide, children }: AppShellPr
       <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-500 to-indigo-700 text-white shadow-md shadow-indigo-600/25">
         <Bot size={18} />
       </div>
-      <span className="text-sm font-semibold tracking-tight text-foreground truncate">Claude Manager</span>
+      <span data-shell-brand-text className="text-sm font-semibold tracking-tight text-foreground truncate">Claude Manager</span>
     </div>
   );
 
@@ -86,6 +86,8 @@ export function AppShell({ currentPage, onNavigate, wide, children }: AppShellPr
         return (
           <button
             key={p.key}
+            data-nav-item
+            data-active={active}
             onClick={() => navigate(p.key)}
             className={`w-full flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium transition-colors text-left ${
               active
@@ -102,11 +104,11 @@ export function AppShell({ currentPage, onNavigate, wide, children }: AppShellPr
   );
 
   const userFooter = ccUser.name ? (
-    <div className="border-t border-gray-800 px-4 py-3 flex items-center gap-2.5">
+    <div data-shell-user-footer className="border-t border-gray-800 px-4 py-3 flex items-center gap-2.5">
       <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-gray-800 text-xs font-semibold text-gray-300 uppercase">
         {String(ccUser.name).slice(0, 1)}
       </div>
-      <div className="min-w-0">
+      <div data-shell-user-meta className="min-w-0">
         <p className="text-xs font-medium text-gray-300 truncate">{ccUser.name}</p>
         {ccUser.role && <p className="text-[10px] text-gray-500 truncate">{ccUser.role}</p>}
       </div>
@@ -116,8 +118,8 @@ export function AppShell({ currentPage, onNavigate, wide, children }: AppShellPr
   return (
     <div className="min-h-screen bg-gray-900 text-foreground overflow-x-clip">
       {/* 桌面侧栏 */}
-      <aside className="hidden lg:flex fixed inset-y-0 left-0 z-40 w-60 flex-col bg-gray-950 border-r border-gray-800">
-        <div className="h-14 shrink-0 flex items-center px-4 border-b border-gray-800/70">
+      <aside data-shell-sidebar className="hidden lg:flex fixed inset-y-0 left-0 z-40 w-60 flex-col bg-gray-950 border-r border-gray-800">
+        <div data-shell-brand-row className="h-14 shrink-0 flex items-center px-4 border-b border-gray-800/70">
           {brand}
         </div>
         {navList}
@@ -145,7 +147,7 @@ export function AppShell({ currentPage, onNavigate, wide, children }: AppShellPr
       )}
 
       {/* 右侧主列：sticky 顶栏 + 页面内容 */}
-      <div className="lg:pl-60 flex flex-col min-h-screen">
+      <div data-shell-main className="lg:pl-60 flex flex-col min-h-screen">
         <header className="sticky top-0 z-30 bg-gray-900 border-b border-gray-800 pt-[env(safe-area-inset-top)]">
           <div className="h-12 flex items-center gap-2 px-3 sm:px-4">
             <button

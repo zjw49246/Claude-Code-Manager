@@ -202,6 +202,31 @@ describe('index.css 主题变量覆盖完整性', () => {
     expect(indexCss.slice(idx, idx + 400)).toContain('box-shadow');
   });
 
+  it('结构级复刻层：飞书窄图标 rail（仅桌面端）+ 选中蓝 tint 方块', () => {
+    // 2026-07-17 用户要求激进复刻后确立：飞书桌面侧栏 = 76px 图标 rail
+    const railIdx = indexCss.indexOf("html[data-theme='feishu'] [data-shell-sidebar]");
+    expect(railIdx, '缺飞书 rail 规则').toBeGreaterThan(-1);
+    const mediaIdx = indexCss.lastIndexOf('@media (min-width: 64rem)', railIdx);
+    expect(mediaIdx, '飞书 rail 必须包在 lg+ media query 内（移动端抽屉保持行布局）').toBeGreaterThan(-1);
+    // 主列 padding 必须跟随 rail 宽度，否则内容被 240px 空档顶开
+    expect(indexCss).toContain("html[data-theme='feishu'] [data-shell-main]");
+    // 选中项 = B100 蓝 tint 方块（飞书 rail 选中语言）
+    expect(indexCss).toContain('background: #e1eaff');
+  });
+
+  it('结构级复刻层：苹果 macOS Settings 侧栏 + 胶囊按钮', () => {
+    // iOS 系统色 squircle 图标轮换
+    expect(indexCss).toContain(':nth-of-type(10n + 1) svg { background: #007aff; }');
+    expect(indexCss).toContain(':nth-of-type(10n + 10) svg { background: #ff2d55; }');
+    // 选中行 = 实底 systemBlue 白字（macOS 侧栏选中语言）
+    expect(indexCss).toMatch(
+      /html\[data-theme='apple'\] \[data-nav-item\]\[data-active='true'\] \{\s*background: #0071e3;\s*color: #ffffff;/,
+    );
+    // apple.com 语言：按钮胶囊化；导航项以更高优先级覆盖回 8px
+    expect(indexCss).toMatch(/html\[data-theme='apple'\] button \{\s*border-radius: 9999px;/);
+    expect(indexCss).toMatch(/html\[data-theme='apple'\] \[data-nav-item\] \{[^}]*border-radius: 8px;/);
+  });
+
   it('品牌蓝实底上有白色选中高亮覆盖（蓝底蓝高亮不可见问题）', () => {
     // 回归守卫：全局 ::selection 是品牌蓝，用户气泡/主按钮是 bg-indigo-600
     // 实底蓝，必须有词级匹配的白色半透明覆盖（2026-07-16 用户反馈）
