@@ -1,8 +1,12 @@
+from datetime import datetime, timezone
+
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from backend.config import settings
+
+JWT_REFRESH_THRESHOLD_DAYS = 7
 
 
 class TokenAuthMiddleware(BaseHTTPMiddleware):
@@ -73,6 +77,12 @@ class TokenAuthMiddleware(BaseHTTPMiddleware):
                 request.state.user_id = payload.get("user_id")
                 request.state.user_role = payload.get("role", "member")
                 request.state.auth_type = "jwt"
+                # Sliding refresh: if token expires within threshold, flag for refresh
+                exp = payload.get("exp")
+                if exp:
+                    remaining = datetime.fromtimestamp(exp, tz=timezone.utc) - datetime.now(timezone.utc)
+                    if remaining.total_seconds() < JWT_REFRESH_THRESHOLD_DAYS * 86400:
+                        request.state._refresh_jwt = True
             else:
                 return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
 
@@ -84,7 +94,21 @@ class TokenAuthMiddleware(BaseHTTPMiddleware):
                     if path.startswith(prefix):
                         return JSONResponse(status_code=403, content={"detail": "Admin only"})
 
-        return await call_next(request)
+        response = await call_next(request)
+
+        if getattr(request.state, "_refresh_jwt", False):
+            try:
+                from backend.api.auth import create_jwt
+                from backend.database import async_session
+                from backend.models.user import User
+                async with async_session() as db:
+                    user = await db.get(User, request.state.user_id)
+                    if user:
+                        response.headers["X-Refreshed-Token"] = create_jwt(user)
+            except Exception:
+                pass
+
+        return response
 
     @classmethod
     async def _resolve_admin_id(cls):
