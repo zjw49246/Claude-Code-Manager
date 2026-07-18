@@ -1227,7 +1227,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
       )}
 
       {/* Messages */}
-      <div ref={messagesContainerRef} className="flex-1 overflow-y-auto p-4 space-y-3 min-h-0">
+      <div ref={messagesContainerRef} className="flex-1 overflow-y-auto overscroll-contain p-4 space-y-3 min-h-0">
         {messages.length === 0 && historyLoading && (
           <div className="flex items-center justify-center gap-2 text-gray-500 mt-20">
             <Loader2 size={16} className="animate-spin" />
