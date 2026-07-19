@@ -80,6 +80,11 @@ async def distill_skills(db: AsyncSession = Depends(get_db)):
     return await analyze_patterns(db)
 
 
+import re
+
+_BRANCH_RE = re.compile(r'^[a-zA-Z0-9._/\-]+$')
+
+
 class UpdateRequest(BaseModel):
     skip_frontend_build: bool = False
     dry_run: bool = False
@@ -96,6 +101,8 @@ def _get_update_service():
 
 @router.post("/update")
 async def start_update(req: UpdateRequest):
+    if req.branch and not _BRANCH_RE.match(req.branch):
+        raise HTTPException(status_code=400, detail="Invalid branch name")
     svc = _get_update_service()
     if req.dry_run:
         return await svc.dry_run(branch=req.branch)
