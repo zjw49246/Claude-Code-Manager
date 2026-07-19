@@ -118,7 +118,7 @@ class Settings(BaseSettings):
     service_name: str = "ccm.service"  # systemd service to restart (e.g. ccm-dev.service)
     service_scope: str = "auto"        # auto | user | system
 
-    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
+    model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
 
 
 settings = Settings()
