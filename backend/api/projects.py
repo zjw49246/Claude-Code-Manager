@@ -413,7 +413,7 @@ rebase 发生冲突时：
 > **以下文件都由 Claude Code 自主维护，每次功能变更后必须同步更新。**
 
 - **CLAUDE.md**（本文件）：架构、约定、关键路径变化时更新，只改变化的部分，保持简洁
-- **AGENTS.md**：指向本文件的 symlink（Codex CLI 读取），单一事实源，不要改成独立文件
+- **AGENTS.md**（Codex 读取）：**与 CLAUDE.md 保持关键内容同步**。正常状态是指向本文件的 symlink（改任一路径即同步），不要改成独立文件；若两者已分离，无论用 Claude Code 还是 Codex 开发，改动一份必须把关键意思同步到另一份，并优先恢复 symlink（`ln -sf CLAUDE.md AGENTS.md`）
 - **README.md**：面向用户的文档，功能、使用流程变化时同步更新，保持与实际代码一致
 - **TEST.md**：测试指南，新增功能时同步添加测试用例和文档
 - **PROGRESS.md**：见下方「经验教训沉淀」
@@ -463,7 +463,10 @@ def _inject_agents_md(local_path: str) -> bool:
             f.write(
                 "# AGENTS.md\n\n"
                 "本项目的完整规范（含任务生命周期和 git 流程）在 [CLAUDE.md](./CLAUDE.md)，"
-                "请先完整阅读它再开始工作。\n"
+                "请先完整阅读它再开始工作。\n\n"
+                "本文件与 CLAUDE.md 必须保持关键内容同步：如果你要往本文件写入独立内容，"
+                "同样的关键意思必须同步进 CLAUDE.md（反之亦然）；"
+                "在支持 symlink 的平台上，优先用 `ln -sf CLAUDE.md AGENTS.md` 恢复单一事实源。\n"
             )
     return True
 

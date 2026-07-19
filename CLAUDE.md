@@ -284,7 +284,8 @@ uv run alembic history         # 查看历史
 
 > **四个文件都由 Claude Code 自主维护，每次功能变更后必须同步更新。**
 
-- **CLAUDE.md**（本文件）：架构、约定、关键路径变化时更新，只改变化的部分，保持简洁。**AGENTS.md 是指向本文件的 symlink**（Codex CLI 读取 AGENTS.md），单一事实源，不要把它改成独立文件
+- **CLAUDE.md**（本文件）：架构、约定、关键路径变化时更新，只改变化的部分，保持简洁
+- **AGENTS.md**（Codex CLI 读取）：**与 CLAUDE.md 必须保持关键内容同步**。正常状态下它是指向 CLAUDE.md 的 symlink——同一份内容，改任一路径即同步，不要把它改成独立文件。若发现两者已变成独立文件（symlink 被解开、或平台不支持 symlink 的回退），无论用 Claude Code 还是 Codex 开发：① 改动其中一份时必须把关键意思同步到另一份（不要求逐字一致）；② 优先直接恢复 symlink（`ln -sf CLAUDE.md AGENTS.md`）回到单一事实源
 - **README.md**：面向用户的文档，功能、API、使用流程变化时同步更新，保持与实际代码一致
 - **TEST.md**：测试指南，新增功能时同步添加测试用例和文档
 - **PROGRESS.md**：见下方「经验教训沉淀」
