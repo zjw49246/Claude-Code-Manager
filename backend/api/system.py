@@ -21,7 +21,7 @@ _GIT_COMMIT: str = git_head_commit()
 
 @router.get("/health")
 async def health():
-    return {"status": "ok", "commit": _GIT_COMMIT}
+    return {"status": "ok", "commit": _GIT_COMMIT, "scope_test": True}
 
 
 @router.get("/stats")
