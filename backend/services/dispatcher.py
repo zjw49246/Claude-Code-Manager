@@ -50,6 +50,15 @@ def _agent_doc_name(provider: str | None) -> str:
     return "AGENTS.md" if (provider or "claude").lower() == "codex" else "CLAUDE.md"
 
 
+# CLAUDE.md/AGENTS.md 同步纪律：靠 agent 编码时自觉执行、不做程序化同步。
+# 经 prompt 前导下发是唯一覆盖所有被开发项目的注入点（老项目的文档里没有这条规则）。
+_DOC_SYNC_NOTE = (
+    "注意：如需修改 CLAUDE.md 或 AGENTS.md，两个文件的关键内容必须保持同步——"
+    "往其中一个写入新内容时，把相同的意思也写进另一个（不要求逐字一致；"
+    "若两者是 symlink 关系则改一处即可，无需额外操作）。"
+)
+
+
 def _agent_doc_preamble(provider: str | None) -> str:
     """First-line prompt preamble pointing the agent at the project doc.
 
@@ -57,8 +66,10 @@ def _agent_doc_preamble(provider: str | None) -> str:
     所以给 codex 的措辞带 CLAUDE.md 回退。
     """
     if (provider or "claude").lower() == "codex":
-        return "请阅读项目根目录的 AGENTS.md（若不存在则读 CLAUDE.md）了解项目规范和任务完成后的 git 流程。"
-    return "请阅读项目根目录的 CLAUDE.md 了解项目规范和任务完成后的 git 流程。"
+        read_line = "请阅读项目根目录的 AGENTS.md（若不存在则读 CLAUDE.md）了解项目规范和任务完成后的 git 流程。"
+    else:
+        read_line = "请阅读项目根目录的 CLAUDE.md 了解项目规范和任务完成后的 git 流程。"
+    return f"{read_line}\n{_DOC_SYNC_NOTE}"
 
 
 # Priority levels for the per-task message queue

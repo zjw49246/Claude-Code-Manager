@@ -2953,9 +2953,19 @@ async def test_build_task_prompt_provider_doc(db_factory):
     codex_prompt = await d._build_task_prompt(
         Task(title="t", description="do X", provider="codex")
     )
-    assert "CLAUDE.md" in claude_prompt
-    assert "AGENTS.md" not in claude_prompt
-    assert "AGENTS.md" in codex_prompt
+    assert "请阅读项目根目录的 CLAUDE.md" in claude_prompt
+    assert "请阅读项目根目录的 AGENTS.md" in codex_prompt
+
+
+@pytest.mark.asyncio
+async def test_build_task_prompt_carries_doc_sync_note(db_factory):
+    """两种 provider 的 prompt 前导都下发 CLAUDE.md/AGENTS.md 同步纪律。"""
+    d = _make_dispatcher(db_factory)
+    for provider in ("claude", "codex"):
+        prompt = await d._build_task_prompt(
+            Task(title="t", description="do X", provider=provider)
+        )
+        assert "关键内容必须保持同步" in prompt
 
 
 @pytest.mark.asyncio
