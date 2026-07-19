@@ -1166,25 +1166,35 @@ class InstanceManager:
                 "role": "assistant",
                 "content": text,
             })
-        elif codex_type == "item.completed" and item_type == "file_change":
-            # file_change 只以 completed 形态出现（patch 成功或失败）
+        elif item_type == "file_change":
+            # 实测（CLI 0.144.6 真实事件流）file_change 有 started + completed
+            # 两态——源码注释声称 completed-only 不可信
             changes = item.get("changes") or []
             status = item.get("status") or "completed"
-            lines = [
-                f"{c.get('kind', 'update')} {c.get('path', '')}".strip()
-                for c in changes if isinstance(c, dict)
-            ]
-            summary = f"Patch {status}"
-            if lines:
-                summary += "\n" + "\n".join(lines)
-            event.update({
-                "event_type": "tool_result",
-                "role": "tool",
-                "tool_name": "FileChange",
-                "tool_input": json.dumps({"changes": changes}, ensure_ascii=False),
-                "tool_output": summary,
-                "is_error": status == "failed",
-            })
+            tool_input = json.dumps({"changes": changes}, ensure_ascii=False)
+            if codex_type == "item.started":
+                event.update({
+                    "event_type": "tool_use",
+                    "role": "assistant",
+                    "tool_name": "FileChange",
+                    "tool_input": tool_input,
+                })
+            else:
+                lines = [
+                    f"{c.get('kind', 'update')} {c.get('path', '')}".strip()
+                    for c in changes if isinstance(c, dict)
+                ]
+                summary = f"Patch {status}"
+                if lines:
+                    summary += "\n" + "\n".join(lines)
+                event.update({
+                    "event_type": "tool_result",
+                    "role": "tool",
+                    "tool_name": "FileChange",
+                    "tool_input": tool_input,
+                    "tool_output": summary,
+                    "is_error": status == "failed",
+                })
         elif item_type == "mcp_tool_call":
             server = item.get("server") or ""
             tool = item.get("tool") or ""

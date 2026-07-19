@@ -1976,3 +1976,18 @@ def test_parse_codex_turn_failed_extracts_nested_message():
     assert event["event_type"] == "system_event"
     assert event["is_error"] is True
     assert event["content"] == "stream disconnected before completion: transport error"
+
+
+def test_parse_codex_file_change_started_is_tool_use():
+    # 实测（CLI 0.144.6）file_change 也发 item.started——不映射会退化成
+    # 一条 "in_progress" 噪音 system_event
+    im = InstanceManager(MagicMock(), MagicMock())
+    event = im._parse_codex_line(json.dumps({
+        "type": "item.started",
+        "item": {"id": "i", "type": "file_change",
+                 "changes": [{"path": "probe.txt", "kind": "add"}],
+                 "status": "in_progress"},
+    }))
+    assert event["event_type"] == "tool_use"
+    assert event["tool_name"] == "FileChange"
+    assert "probe.txt" in event["tool_input"]
