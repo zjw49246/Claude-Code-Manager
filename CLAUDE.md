@@ -111,6 +111,7 @@ claude-manager/
 - **Resume**: `claude -p [follow-up] --resume [session_id]` — 必须使用和原始 session 相同的 cwd
 - **Model 配置**: 默认 `claude-opus-4-6`，支持全称模型 ID（`claude-sonnet-5`, `claude-fable-5`, `claude-opus-4-6`, `claude-opus-4-7`, `claude-opus-4-8`, `claude-sonnet-4-6`, `claude-haiku-4-5`）。`[1m]` 后缀开启 1M context（计费翻倍）
 - **Effort Level**: 默认 `medium`，支持 `low/medium/high/xhigh/max`。优先级链：Task.effort_level → Instance.effort_level → settings.default_effort。通过 CLI `--effort` 参数传递
+- **Codex 模型**: GPT-5.6 是**三个模型**（`gpt-5.6-sol` 旗舰 / `gpt-5.6-terra` 均衡 / `gpt-5.6-luna` 快速），**无裸 `gpt-5.6` ID**（Codex 服务端模型列表 `~/.codex/models_cache.json` 实证）。effort 按模型区分：sol/terra 支持到 `ultra`、luna 到 `max`、gpt-5.5 及更早只到 `xhigh`——集中在 `backend/services/codex_models.py`（`CODEX_MODEL_EFFORTS` + `clamp_codex_effort`，不支持的高档位向下夹而非静默丢弃），经 `/api/system/config` 的 `codex_model_efforts` 下发前端按所选模型过滤档位
 - **Extended Thinking 预算**: Instance 上的 `thinking_budget` 字段 → 子进程 `MAX_THINKING_TOKENS` env var；NULL = 用 CLI 默认
 - **Thinking 解析**: stream_parser 兼容多种字段名（`thinking` / `text` / 嵌套 content blocks）；加密 thinking 显示为 `[encrypted thinking ...]` 标记
 - **上下文自动压缩**: 会话 context 利用率达阈值 → dispatcher 自动摘要换新 session，并写入/广播 system_event 在聊天中提示用户。阈值优先级：GlobalSettings.context_compact_threshold（前端 Header 齿轮「压缩阈值」可改，PUT /api/settings/runtime）→ settings.context_compact_threshold（env 默认 0.80）。**别设回 0.9**：超大 context 请求在服务端易挂起（2026-07-08 task 22/27 连环 stall 均发生在 ~90% 区间）

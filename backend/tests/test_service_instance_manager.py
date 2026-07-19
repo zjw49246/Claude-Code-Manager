@@ -1798,3 +1798,38 @@ async def test_process_event_no_reactivate_on_stale_events(db_factory, flag):
         t = await db.get(Task, task_id)
         assert t.status == "completed"
     assert _status_change_payloads(broadcaster) == []
+
+
+# === GPT-5.6 per-model effort in codex command ===
+
+
+def test_build_command_codex_gpt56_passes_max_effort():
+    # 旧代码把 max 一律丢弃（"codex 无 max"），但 gpt-5.6-sol 支持 max
+    im = InstanceManager(MagicMock(), MagicMock())
+    cmd = im._build_command(provider="codex", prompt="hi", model="gpt-5.6-sol", resume_session_id=None, effort_level="max")
+    assert 'model_reasoning_effort="max"' in cmd
+
+
+def test_build_command_codex_gpt56_passes_ultra_effort():
+    im = InstanceManager(MagicMock(), MagicMock())
+    cmd = im._build_command(provider="codex", prompt="hi", model="gpt-5.6-terra", resume_session_id=None, effort_level="ultra")
+    assert 'model_reasoning_effort="ultra"' in cmd
+
+
+def test_build_command_codex_old_model_clamps_max_to_xhigh():
+    # gpt-5.5 不支持 max：夹到 xhigh 而不是静默丢弃
+    im = InstanceManager(MagicMock(), MagicMock())
+    cmd = im._build_command(provider="codex", prompt="hi", model="gpt-5.5", resume_session_id=None, effort_level="max")
+    assert 'model_reasoning_effort="xhigh"' in cmd
+
+
+def test_build_command_codex_luna_clamps_ultra_to_max():
+    im = InstanceManager(MagicMock(), MagicMock())
+    cmd = im._build_command(provider="codex", prompt="hi", model="gpt-5.6-luna", resume_session_id=None, effort_level="ultra")
+    assert 'model_reasoning_effort="max"' in cmd
+
+
+def test_build_command_codex_supported_effort_still_passed():
+    im = InstanceManager(MagicMock(), MagicMock())
+    cmd = im._build_command(provider="codex", prompt="hi", model="gpt-5.5", resume_session_id=None, effort_level="high")
+    assert 'model_reasoning_effort="high"' in cmd

@@ -141,6 +141,7 @@ export function SubAgentsBadge({ task }: { task: Task }) {
 interface ConfigOptions {
   claude: string[]; codex: string[];
   effort: string[]; codexEffort: string[];
+  codexModelEfforts: Record<string, string[]>;
 }
 let _configOptionsCache: ConfigOptions | null = null;
 async function fetchConfigOptions(): Promise<ConfigOptions> {
@@ -151,6 +152,7 @@ async function fetchConfigOptions(): Promise<ConfigOptions> {
     codex: c.codex_model_options.filter((m) => m !== 'default'),
     effort: c.effort_options,
     codexEffort: c.codex_effort_options,
+    codexModelEfforts: c.codex_model_efforts || {},
   };
   return _configOptionsCache;
 }
@@ -270,7 +272,10 @@ export function TaskConfigBadge({ task, onRefresh, openUp, align }: { task: Task
 
   const isCodex = task.provider === 'codex';
   const models = opts ? (isCodex ? opts.codex : opts.claude) : [];
-  const efforts = opts ? (isCodex ? opts.codexEffort : opts.effort) : [];
+  // GPT-5.6 系列按模型区分档位（sol/terra 到 ultra，luna 到 max）
+  const efforts = opts
+    ? (isCodex ? (task.model && opts.codexModelEfforts[task.model]) || opts.codexEffort : opts.effort)
+    : [];
 
   return (
     <div className="relative" data-task-config>

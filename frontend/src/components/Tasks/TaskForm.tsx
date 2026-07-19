@@ -37,6 +37,8 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   const [codexModelOptions, setCodexModelOptions] = useState<string[]>([]);
   const [effortOptions, setEffortOptions] = useState<string[]>([]);
   const [codexEffortOptions, setCodexEffortOptions] = useState<string[]>([]);
+  // GPT-5.6 系列按模型区分档位（sol/terra 到 ultra，luna 到 max），未列出的模型用 codexEffortOptions
+  const [codexModelEfforts, setCodexModelEfforts] = useState<Record<string, string[]>>({});
   const [defaultEffort, setDefaultEffort] = useState('medium');
   const [todoFilePath, setTodoFilePath] = useState('');
   const [maxIterations, setMaxIterations] = useState('50');
@@ -83,6 +85,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
       setDefaultEffort(c.default_effort);
       setEffortOptions(c.effort_options);
       setCodexEffortOptions(c.codex_effort_options || ['low', 'medium', 'high', 'xhigh']);
+      setCodexModelEfforts(c.codex_model_efforts || {});
     }).catch(() => {});
   }, []);
 
@@ -201,7 +204,16 @@ export function TaskForm({ onCreated }: TaskFormProps) {
 
   const activeDefaultModel = provider === 'codex' ? defaultCodexModel : defaultModel;
   const activeModelOptions = provider === 'codex' ? codexModelOptions : modelOptions;
-  const activeEffortOptions = provider === 'codex' ? codexEffortOptions : effortOptions;
+  const activeEffortOptions = provider === 'codex'
+    ? (codexModelEfforts[model || defaultCodexModel] ?? codexEffortOptions)
+    : effortOptions;
+
+  // 切换 codex 模型后，已选档位可能不再受支持（如 max 换到 gpt-5.5）——回落默认
+  useEffect(() => {
+    if (provider !== 'codex' || !effort) return;
+    const supported = codexModelEfforts[model || defaultCodexModel] ?? codexEffortOptions;
+    if (supported.length && !supported.includes(effort)) setEffort('');
+  }, [provider, model, effort, codexModelEfforts, codexEffortOptions, defaultCodexModel]);
 
   const handleProjectChange = (val: string) => {
     if (val === NEW_PROJECT_VALUE) {

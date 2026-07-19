@@ -15,6 +15,7 @@ from backend.models.instance import Instance
 from backend.models.task import Task
 
 from backend.models.log_entry import LogEntry
+from backend.services.codex_models import clamp_codex_effort
 from backend.services.stream_parser import StreamParser
 from backend.services.ws_broadcaster import WebSocketBroadcaster
 
@@ -548,8 +549,9 @@ class InstanceManager:
             ])
             if model and model != "default":
                 cmd.extend(["--model", model])
-            if effort_level and effort_level != "max":
-                cmd.extend(["-c", f'model_reasoning_effort="{effort_level}"'])
+            codex_effort = clamp_codex_effort(model, effort_level)
+            if codex_effort:
+                cmd.extend(["-c", f'model_reasoning_effort="{codex_effort}"'])
             if resume_session_id:
                 cmd.append(resume_session_id)
             cmd.append(prompt)

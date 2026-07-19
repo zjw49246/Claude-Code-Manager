@@ -353,6 +353,19 @@ cd frontend && npx tsc --noEmit
 | `test_process_event_usage_limit_does_not_set_transient_flag` | 额度横幅**不**置标记（应走换号而非同号重试） |
 | `test_process_event_clean_event_leaves_flag_unset` / `test_launch_resets_transient_flag` | 干净事件不置位 / 新 `launch()` 重置标记 |
 | `test_process_event_orphan_overload_does_not_set_transient_flag` | resume 回放的旧 api_error（`orphan`）与后台子 agent 报错（`autonomous`）**不**置标记——否则成功 resume 被误判 failed（task #729 recover-then-failed） |
+| `test_build_command_codex_gpt56_passes_max_effort` / `..._ultra_effort` | GPT-5.6 sol/terra 的 `max`/`ultra` 档位真实传给 codex CLI（旧代码把 max 一律丢弃） |
+| `test_build_command_codex_old_model_clamps_max_to_xhigh` / `..._luna_clamps_ultra_to_max` | 不支持的高档位向下夹到该模型最高档，而非静默丢弃 |
+
+##### `test_codex_models.py` — Codex 模型目录（GPT-5.6 三模型）
+
+| 测试 | 验证内容 |
+|------|---------|
+| `test_codex_model_options_contain_all_three_gpt56_models` | 选项含 `gpt-5.6-sol`/`-terra`/`-luna` 三个模型 |
+| `test_codex_model_options_have_no_bare_gpt56` | **关键**：裸 `gpt-5.6` 不是有效模型 ID（服务端列表实证） |
+| `test_gpt56_*_support_*` / `test_older_models_fall_back_*` | 按模型区分档位：sol/terra 到 ultra、luna 到 max、旧模型到 xhigh |
+| `test_clamp_*` | `clamp_codex_effort` 透传受支持档位 / 向下夹不支持档位 / None 与未知输入安全 |
+
+（前端配套：`TaskForm.test.tsx` 的 "Codex GPT-5.6 per-model effort options" 套件——模型下拉列三模型、effort 选项按模型过滤、切模型后失效档位自动回落默认）
 
 ##### `test_service_worktree_manager.py` — Worktree 管理器
 

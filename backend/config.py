@@ -14,8 +14,10 @@ class Settings(BaseSettings):
     default_model: str = "claude-opus-4-6"
     model_options: str = "default,claude-sonnet-5,claude-sonnet-5[1m],claude-fable-5,claude-fable-5[1m],claude-opus-4-6,claude-opus-4-6[1m],claude-opus-4-7,claude-opus-4-7[1m],claude-opus-4-8,claude-opus-4-8[1m],claude-sonnet-4-6,claude-sonnet-4-6[1m],claude-haiku-4-5"  # comma-separated
     default_codex_model: str = "gpt-5.5"
-    codex_model_options: str = "default,gpt-5.6,gpt-5.5,gpt-5.4,gpt-5.4-mini,gpt-5.3-codex-spark"  # comma-separated
-    codex_effort_options: str = "low,medium,high,xhigh"  # codex supports reasoning levels, no 'max'
+    # GPT-5.6 是三个模型（sol/terra/luna），无裸 "gpt-5.6" ID（Codex 服务端模型列表实证）
+    codex_model_options: str = "default,gpt-5.6-sol,gpt-5.6-terra,gpt-5.6-luna,gpt-5.5,gpt-5.4,gpt-5.4-mini,gpt-5.3-codex-spark"  # comma-separated
+    # 基线档位（gpt-5.5 及更早）；gpt-5.6 系列的 max/ultra 见 services/codex_models.py
+    codex_effort_options: str = "low,medium,high,xhigh"
     default_codex_goal_evaluator_model: str = "gpt-5.4-mini"
     default_effort: str = "medium"
     effort_options: str = "low,medium,high,xhigh,max"  # comma-separated
