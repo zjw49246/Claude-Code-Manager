@@ -139,3 +139,33 @@ async def test_reclone_local_project_rejected(client, mock_bg_tasks):
     resp = await client.post(f"/api/projects/{project_id}/reclone")
     assert resp.status_code == 400
     assert "local project" in resp.json()["detail"].lower()
+
+
+# === AGENTS.md injection (Codex instruction file) ===
+
+
+def test_inject_agents_md_creates_symlink(tmp_path):
+    from backend.api.projects import _inject_agents_md
+    (tmp_path / "CLAUDE.md").write_text("# guide\n")
+    assert _inject_agents_md(str(tmp_path)) is True
+    agents = tmp_path / "AGENTS.md"
+    assert agents.exists()
+    # Symlink (or fallback pointer file) must surface CLAUDE.md's guidance
+    if agents.is_symlink():
+        assert agents.read_text() == "# guide\n"
+    else:
+        assert "CLAUDE.md" in agents.read_text()
+
+
+def test_inject_agents_md_noop_without_claude_md(tmp_path):
+    from backend.api.projects import _inject_agents_md
+    assert _inject_agents_md(str(tmp_path)) is False
+    assert not (tmp_path / "AGENTS.md").exists()
+
+
+def test_inject_agents_md_noop_when_exists(tmp_path):
+    from backend.api.projects import _inject_agents_md
+    (tmp_path / "CLAUDE.md").write_text("# guide\n")
+    (tmp_path / "AGENTS.md").write_text("custom\n")
+    assert _inject_agents_md(str(tmp_path)) is False
+    assert (tmp_path / "AGENTS.md").read_text() == "custom\n"

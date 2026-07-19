@@ -45,6 +45,22 @@ def _default_provider() -> str:
     return provider if isinstance(provider, str) and provider else "claude"
 
 
+def _agent_doc_name(provider: str | None) -> str:
+    """Instruction file for the given CLI provider (Codex reads AGENTS.md)."""
+    return "AGENTS.md" if (provider or "claude").lower() == "codex" else "CLAUDE.md"
+
+
+def _agent_doc_preamble(provider: str | None) -> str:
+    """First-line prompt preamble pointing the agent at the project doc.
+
+    Codex 老项目可能还没有 AGENTS.md（新建项目由 projects.py 注入），
+    所以给 codex 的措辞带 CLAUDE.md 回退。
+    """
+    if (provider or "claude").lower() == "codex":
+        return "请阅读项目根目录的 AGENTS.md（若不存在则读 CLAUDE.md）了解项目规范和任务完成后的 git 流程。"
+    return "请阅读项目根目录的 CLAUDE.md 了解项目规范和任务完成后的 git 流程。"
+
+
 # Priority levels for the per-task message queue
 PRIORITY_USER = 0
 PRIORITY_MONITOR_COMPLETE = 1
@@ -862,13 +878,16 @@ class GlobalDispatcher:
         image_paths = metadata.get("image_paths") or []
         secret_ids = metadata.get("secret_ids") or []
         secrets_block = await _build_secrets_block(self.db_factory, secret_ids)
-        parts = ["请阅读项目根目录的 CLAUDE.md 了解项目规范和任务完成后的 git 流程。"]
+        parts = [_agent_doc_preamble(task.provider)]
         if secrets_block:
             parts.append(secrets_block)
         if image_paths:
             image_list = "\n".join(f"- {p}" for p in image_paths)
             parts.append(f"用户提供了以下参考图片，请先用 Read 工具查看：\n{image_list}")
-        if task.enabled_skills:
+        # Skill 模板描述的是 MCP 工具，而 MCP config 只注入 claude CLI
+        # （instance_manager.launch 里 provider == "claude" 才 generate_mcp_config），
+        # codex 任务注入这些模板只会让它调用不存在的工具。
+        if task.enabled_skills and (task.provider or "claude").lower() != "codex":
             from backend.services.command_registry import COMMAND_REGISTRY
             for skill_name, enabled in task.enabled_skills.items():
                 if enabled and skill_name in COMMAND_REGISTRY:
@@ -1909,7 +1928,7 @@ class GlobalDispatcher:
 
     def _build_goal_initial_prompt(self, task: Task) -> str:
         """Build the first-turn prompt for a goal task."""
-        parts = ["请阅读项目根目录的 CLAUDE.md 了解项目规范和任务完成后的 git 流程。"]
+        parts = [_agent_doc_preamble(task.provider)]
 
         metadata = task.metadata_ or {}
         image_paths = metadata.get("image_paths") or []
@@ -1983,6 +2002,7 @@ class GlobalDispatcher:
         is already covered by CLAUDE.md — no need to repeat it here.
         """
         parts = []
+        doc = _agent_doc_name(task.provider)
         max_iterations = task.max_iterations or 50
         remaining = max_iterations - iteration
 
@@ -2019,7 +2039,7 @@ class GlobalDispatcher:
         if task.must_complete and iteration == 0:
             # First iteration of must_complete: require planning
             parts.append(f"""\
-请遵循 CLAUDE.md 中的所有要求和项目约定。
+请遵循 {doc} 中的所有要求和项目约定。
 
 这是一个必须全部完成的循环任务，你总共有 {max_iterations} 轮来完成所有任务项。
 
@@ -2056,7 +2076,7 @@ class GlobalDispatcher:
                         pass
 
             parts.append(f"""\
-请遵循 CLAUDE.md 中的所有要求和项目约定。
+请遵循 {doc} 中的所有要求和项目约定。
 
 这是一个必须全部完成的循环任务的第 {iteration + 1} 轮，还剩 {remaining} 轮。
 
@@ -2085,13 +2105,13 @@ class GlobalDispatcher:
                 total_note = f"\n注意：任务总数已确定为 {anchored_total}，progress 分母必须始终为 {anchored_total}，不要重新计数。"
 
             parts.append(f"""\
-请遵循 CLAUDE.md 中的所有要求和项目约定。
+请遵循 {doc} 中的所有要求和项目约定。
 
 这是一个持续循环任务的第 {iteration + 1} 轮。
 
 你的职责：
 1. 打开 {task.todo_file_path}，理解其结构，找到下一个待完成的任务项
-2. 根据 CLAUDE.md 的要求执行该任务项
+2. 根据 {doc} 的要求执行该任务项
 3. 在 todo 文件中将该项标记为已完成
 
 完成后，将以下 JSON 写入 {signal_path}：

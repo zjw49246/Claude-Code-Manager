@@ -2926,3 +2926,65 @@ async def test_queued_message_skips_launching_instance(db_factory, monkeypatch):
     # The pre-existing claim on id1 is untouched; id2's transient claim is freed.
     assert id1 in d._launching_instances
     assert id2 not in d._launching_instances
+
+
+# === Codex provider prompt tests (provider-aware agent doc) ===
+
+
+@pytest.mark.asyncio
+async def test_goal_initial_prompt_codex_references_agents_md(db_factory):
+    """Codex goal tasks are pointed at AGENTS.md instead of CLAUDE.md."""
+    d = _make_dispatcher(db_factory)
+    task = Task(
+        title="t", description="implement X", mode="goal",
+        goal_condition="all tests pass", goal_max_turns=10, provider="codex",
+    )
+    prompt = d._build_goal_initial_prompt(task)
+    assert "AGENTS.md" in prompt
+
+
+@pytest.mark.asyncio
+async def test_build_task_prompt_provider_doc(db_factory):
+    """Task prompt preamble follows the task's provider."""
+    d = _make_dispatcher(db_factory)
+    claude_prompt = await d._build_task_prompt(
+        Task(title="t", description="do X", provider="claude")
+    )
+    codex_prompt = await d._build_task_prompt(
+        Task(title="t", description="do X", provider="codex")
+    )
+    assert "CLAUDE.md" in claude_prompt
+    assert "AGENTS.md" not in claude_prompt
+    assert "AGENTS.md" in codex_prompt
+
+
+@pytest.mark.asyncio
+async def test_build_task_prompt_codex_skips_skill_templates(db_factory, monkeypatch):
+    """Skill 模板描述 MCP 工具，MCP config 只注入 claude —— codex 不应收到模板。"""
+    from backend.services.command_registry import COMMAND_REGISTRY, Command
+    monkeypatch.setitem(COMMAND_REGISTRY, "fakeskill", Command(
+        name="fakeskill", description="test", prompt_template="FAKESKILL_TEMPLATE",
+    ))
+    d = _make_dispatcher(db_factory)
+    claude_prompt = await d._build_task_prompt(
+        Task(title="t", description="do X", provider="claude",
+             enabled_skills={"fakeskill": True})
+    )
+    codex_prompt = await d._build_task_prompt(
+        Task(title="t", description="do X", provider="codex",
+             enabled_skills={"fakeskill": True})
+    )
+    assert "FAKESKILL_TEMPLATE" in claude_prompt
+    assert "FAKESKILL_TEMPLATE" not in codex_prompt
+
+
+def test_loop_prompt_codex_references_agents_md(db_factory):
+    """Loop prompts reference AGENTS.md for codex tasks."""
+    d = _make_dispatcher(db_factory)
+    task = Task(
+        title="t", description="bg", mode="loop", todo_file_path="TODO.md",
+        provider="codex", max_iterations=5,
+    )
+    prompt = d._build_loop_prompt(task, 0, "/tmp/sig.json")
+    assert "AGENTS.md" in prompt
+    assert "CLAUDE.md" not in prompt

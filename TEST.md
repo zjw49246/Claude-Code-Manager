@@ -367,6 +367,16 @@ cd frontend && npx tsc --noEmit
 
 （前端配套：`TaskForm.test.tsx` 的 "Codex GPT-5.6 per-model effort options" 套件——模型下拉列三模型、effort 选项按模型过滤、切模型后失效档位自动回落默认）
 
+##### Codex provider 对等逻辑（AGENTS.md，2026-07-19）
+
+| 测试 | 验证内容 |
+|------|---------|
+| `test_service_dispatcher.py::test_goal_initial_prompt_codex_references_agents_md` | codex goal 任务的 prompt 指向 AGENTS.md |
+| `test_service_dispatcher.py::test_build_task_prompt_provider_doc` | task prompt 前导按 provider 引用 CLAUDE.md / AGENTS.md |
+| `test_service_dispatcher.py::test_build_task_prompt_codex_skips_skill_templates` | skills 模板只注入 claude（MCP 工具 codex 不可用） |
+| `test_service_dispatcher.py::test_loop_prompt_codex_references_agents_md` | loop prompt 按 provider 引用文档 |
+| `test_api_projects.py::test_inject_agents_md_*` | project 创建注入 AGENTS.md symlink：正常创建 / 无 CLAUDE.md 不动 / 已存在不覆盖 |
+
 ##### `test_service_worktree_manager.py` — Worktree 管理器
 
 | 测试 | 验证内容 |
