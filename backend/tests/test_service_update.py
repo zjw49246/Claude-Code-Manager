@@ -51,7 +51,7 @@ async def test_migration_path_uses_systemd_run_when_managed(tmp_path):
     svc = _make_service(tmp_path)
     state = _make_state()
 
-    with patch.object(svc, "_is_managed_by_systemd", return_value=True), \
+    with patch.object(svc, "_systemd_scope", return_value="user"), \
          patch("backend.services.update_service.subprocess.Popen") as popen, \
          patch("backend.services.update_service.asyncio.sleep", new=AsyncMock()):
         await svc._migration_path(state)
@@ -68,11 +68,27 @@ async def test_migration_path_uses_systemd_run_when_managed(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_migration_path_uses_system_systemd_run_for_system_service(tmp_path):
+    svc = _make_service(tmp_path)
+    state = _make_state()
+
+    with patch.object(svc, "_systemd_scope", return_value="system"), \
+         patch("backend.services.update_service.subprocess.Popen") as popen, \
+         patch("backend.services.update_service.asyncio.sleep", new=AsyncMock()):
+        await svc._migration_path(state)
+
+    argv = popen.call_args[0][0]
+    assert argv[:4] == [svc._tools["sudo"], "-n", svc._tools["systemd-run"], "--collect"]
+    assert "--user" not in argv
+    assert argv[-1] == "system"
+
+
+@pytest.mark.asyncio
 async def test_migration_path_plain_popen_when_not_managed(tmp_path):
     svc = _make_service(tmp_path)
     state = _make_state()
 
-    with patch.object(svc, "_is_managed_by_systemd", return_value=False), \
+    with patch.object(svc, "_systemd_scope", return_value=None), \
          patch("backend.services.update_service.subprocess.Popen") as popen, \
          patch("backend.services.update_service.asyncio.sleep", new=AsyncMock()):
         await svc._migration_path(state)
@@ -133,7 +149,7 @@ async def test_rollback_delegates_to_script_when_managed(tmp_path):
     backup.write_text("db")
     svc._current.backup_file = str(backup)
 
-    with patch.object(svc, "_is_managed_by_systemd", return_value=True), \
+    with patch.object(svc, "_systemd_scope", return_value="user"), \
          patch("backend.services.update_service.subprocess.Popen") as popen, \
          patch("backend.services.update_service.asyncio.sleep", new=AsyncMock()):
         result = await svc.rollback()
@@ -152,7 +168,7 @@ async def test_rollback_non_systemd_delegates_to_script_kill_mode(tmp_path):
     backup.write_text("db")
     svc._current.backup_file = str(backup)
 
-    with patch.object(svc, "_is_managed_by_systemd", return_value=False), \
+    with patch.object(svc, "_systemd_scope", return_value=None), \
          patch("backend.services.update_service.subprocess.Popen") as popen, \
          patch("backend.services.update_service.asyncio.sleep", new=AsyncMock()):
         result = await svc.rollback()
@@ -173,6 +189,11 @@ def test_is_managed_true_only_when_self_in_service_cgroup(tmp_path):
     with patch.object(svc, "_cgroup_text",
                       return_value="0::/user.slice/user-1000.slice/user@1000.service/app.slice/ccm.service\n"):
         assert svc._is_managed_by_systemd() is True
+        assert svc._systemd_scope() == "user"
+    with patch.object(svc, "_cgroup_text",
+                      return_value="0::/system.slice/ccm.service\n"):
+        assert svc._is_managed_by_systemd() is True
+        assert svc._systemd_scope() == "system"
     # orphan uvicorn in a login session — unit may be active, but WE are not it
     with patch.object(svc, "_cgroup_text",
                       return_value="0::/user.slice/user-1000.slice/session-19215.scope\n"):
@@ -220,17 +241,25 @@ def test_migrate_script_rollback_mode(tmp_path):
 
 
 def _script_env(tmp_path: Path) -> tuple[dict, Path]:
-    """Stub systemctl/uv into PATH; systemctl logs its calls."""
+    """Stub service-management tools into PATH; systemctl logs its calls.
+
+    The test runner itself may live under /system.slice. update_migrate.sh can
+    then choose system scope and call `sudo -n systemctl ...`, so sudo must be
+    stubbed too; otherwise this test can escape the fake PATH and touch real
+    systemd units.
+    """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     call_log = tmp_path / "systemctl.log"
 
     systemctl = bin_dir / "systemctl"
     systemctl.write_text(f'#!/bin/bash\necho "$@" >> {call_log}\nexit 0\n')
+    sudo = bin_dir / "sudo"
+    sudo.write_text('#!/bin/bash\nif [ "${1:-}" = "-n" ]; then shift; fi\nexec "$@"\n')
     # stub uv: alembic hangs so the test can kill the script mid-migration
     uv = bin_dir / "uv"
     uv.write_text('#!/bin/bash\nif [[ "$*" == *alembic* ]]; then sleep 30; fi\nexit 0\n')
-    for f in (systemctl, uv):
+    for f in (systemctl, sudo, uv):
         f.chmod(f.stat().st_mode | stat.S_IEXEC)
 
     env = os.environ.copy()

@@ -146,6 +146,7 @@ export function UpdateButton() {
   const startReconnectPolling = () => {
     if (reconnectTimer.current) clearInterval(reconnectTimer.current);
     let attempts = 0;
+    let sawDown = false;
     setReconnectSlow(false);
 
     const poll = async () => {
@@ -153,6 +154,12 @@ export function UpdateButton() {
       setReconnectCount(attempts);
       try {
         await api.health();
+        if (!sawDown) {
+          // Server hasn't gone down yet — the restart command fires with
+          // a 2s delay so early polls can hit the OLD still-alive server.
+          // Wait until it actually dies before accepting a success.
+          return;
+        }
         if (reconnectTimer.current) clearInterval(reconnectTimer.current);
         reconnectTimer.current = null;
         setReconnectSlow(false);
@@ -166,11 +173,14 @@ export function UpdateButton() {
             setPhase('failed');
           } else {
             setPhase('completed');
+            setTimeout(() => window.location.reload(), 1500);
           }
         } catch {
           setPhase('completed');
+          setTimeout(() => window.location.reload(), 1500);
         }
       } catch {
+        sawDown = true;
         // After 120s (60 fast polls), switch to slow polling instead of giving up
         if (attempts === 60) {
           setReconnectSlow(true);

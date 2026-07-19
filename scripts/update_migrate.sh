@@ -15,8 +15,40 @@ SERVICE_NAME="${6:-ccm.service}"
 MODE="${7:-migrate}"     # migrate | rollback
 SERVER_PID="${8:-}"      # only used when SERVICE_NAME="-"
 PYTHON_BIN="${9:-python3}"
+SYSTEMD_SCOPE="${10:-auto}"  # auto | user | system
 STATUS_FILE="/tmp/ccm-update-status-${PORT}.json"
 LOG_FILE="/tmp/ccm-update-migrate-${PORT}.log"
+
+cgroup_text() {
+    cat /proc/self/cgroup 2>/dev/null || true
+}
+
+resolve_scope() {
+    if [ "$SYSTEMD_SCOPE" = "user" ] || [ "$SYSTEMD_SCOPE" = "system" ]; then
+        echo "$SYSTEMD_SCOPE"
+        return
+    fi
+    case "$(cgroup_text)" in
+        *"/system.slice/"*) echo "system" ;;
+        *) echo "user" ;;
+    esac
+}
+
+systemctl_cmd() {
+    if [ "$(resolve_scope)" = "system" ]; then
+        sudo -n systemctl "$@"
+    else
+        systemctl --user "$@"
+    fi
+}
+
+systemd_run_cmd() {
+    if [ "$(resolve_scope)" = "system" ]; then
+        sudo -n systemd-run "$@"
+    else
+        systemd-run --user "$@"
+    fi
+}
 
 # ---- self-escape trampoline -------------------------------------------------
 # Old (pre-systemd-run) backends spawn this script as a plain uvicorn child, so
@@ -29,14 +61,15 @@ LOG_FILE="/tmp/ccm-update-migrate-${PORT}.log"
 SELF="$(readlink -f "$0")"
 if [ -z "${CCM_ESCAPED:-}" ] && [ "$SERVICE_NAME" != "-" ] \
     && command -v systemd-run >/dev/null 2>&1; then
-    case "$(cat /proc/self/cgroup 2>/dev/null)" in
+    case "$(cgroup_text)" in
         *"/${SERVICE_NAME}"*)
             # transient units inherit neither cwd nor env — pin both, and pass
             # $SELF (absolute) because a relative $0 breaks after the re-exec
-            if systemd-run --user --collect --unit="ccm-update-escape-${PORT}-$$" \
+            if systemd_run_cmd --collect --unit="ccm-update-escape-${PORT}-$$" \
                 --working-directory="$PROJECT_DIR" \
                 --setenv=CCM_ESCAPED=1 \
                 --setenv=PATH="$PATH" \
+                --setenv=SYSTEMD_SCOPE="$(resolve_scope)" \
                 --property=StandardOutput="append:${LOG_FILE}" \
                 --property=StandardError=inherit \
                 /bin/bash "$SELF" "$@"; then
@@ -68,7 +101,7 @@ EOJSON
 
 svc_stop() {
     if [ "$SERVICE_NAME" != "-" ]; then
-        systemctl --user stop "$SERVICE_NAME"
+        systemctl_cmd stop "$SERVICE_NAME"
     else
         [ -n "$SERVER_PID" ] || return 1
         kill "$SERVER_PID" 2>/dev/null || true
@@ -87,7 +120,7 @@ svc_start() {
     [ "$STARTED" = 1 ] && return 0
     STARTED=1
     if [ "$SERVICE_NAME" != "-" ]; then
-        systemctl --user start "$SERVICE_NAME"
+        systemctl_cmd start "$SERVICE_NAME"
     else
         cd "$PROJECT_DIR" && nohup "$PYTHON_BIN" -m uvicorn backend.main:app \
             --host 0.0.0.0 --port "$PORT" >> "/tmp/ccm-restart-${PORT}.log" 2>&1 &
@@ -95,7 +128,7 @@ svc_start() {
 }
 
 echo "=== update_migrate.sh started at $(date -Iseconds) (mode=$MODE) ===" > "$LOG_FILE"
-echo "cgroup: $(cat /proc/self/cgroup 2>/dev/null) (escaped=${CCM_ESCAPED:-0})" >> "$LOG_FILE"
+echo "cgroup: $(cgroup_text) (escaped=${CCM_ESCAPED:-0}, scope=$(resolve_scope))" >> "$LOG_FILE"
 
 # 1. Stop service
 write_status "stopping" "正在停止服务..." "stop_service"
