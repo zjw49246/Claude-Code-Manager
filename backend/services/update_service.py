@@ -266,7 +266,8 @@ class UpdateService:
     async def dry_run(self, branch: str | None = None) -> dict[str, Any]:
         """Check for available updates without applying them."""
         target_branch = branch or "main"
-        result = await self._run_cmd(["git", "fetch", "origin", target_branch], timeout=60)
+        refspec = f"+refs/heads/{target_branch}:refs/remotes/origin/{target_branch}"
+        result = await self._run_cmd(["git", "fetch", "origin", refspec], timeout=60)
         if result["returncode"] != 0:
             return {"has_updates": False, "error": result["stderr"]}
 
