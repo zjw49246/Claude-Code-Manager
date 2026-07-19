@@ -266,7 +266,8 @@ class UpdateService:
     async def dry_run(self, branch: str | None = None) -> dict[str, Any]:
         """Check for available updates without applying them."""
         target_branch = branch or "main"
-        result = await self._run_cmd(["git", "fetch", "origin", target_branch], timeout=60)
+        refspec = f"+refs/heads/{target_branch}:refs/remotes/origin/{target_branch}"
+        result = await self._run_cmd(["git", "fetch", "origin", refspec], timeout=60)
         if result["returncode"] != 0:
             return {"has_updates": False, "error": result["stderr"]}
 
@@ -405,6 +406,28 @@ class UpdateService:
                 return
             stashed = True
             await self._broadcast("log_line", step="git_pull", log=f"已暂存 {len(dirty_files)} 个本地改动", status="running")
+
+        # Checkout target branch before pulling (keeps main clean when
+        # updating to a feature branch for testing)
+        current_branch = (await self._run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"]))["stdout"].strip()
+        if current_branch != target_branch:
+            refspec = f"+refs/heads/{target_branch}:refs/remotes/origin/{target_branch}"
+            fetch_result = await self._run_cmd(["git", "fetch", "origin", refspec], timeout=60, step=step)
+            if fetch_result["returncode"] != 0:
+                if stashed:
+                    await self._run_cmd(["git", "stash", "pop"])
+                await self._fail_step(step, state, f"git fetch 失败: {fetch_result['stderr']}")
+                return
+            # Create or reset local branch to match remote
+            checkout_result = await self._run_cmd(
+                ["git", "checkout", "-B", target_branch, f"origin/{target_branch}"], step=step
+            )
+            if checkout_result["returncode"] != 0:
+                if stashed:
+                    await self._run_cmd(["git", "stash", "pop"])
+                await self._fail_step(step, state, f"git checkout 失败: {checkout_result['stderr']}")
+                return
+            await self._broadcast("log_line", step="git_pull", log=f"已切换到分支 {target_branch}", status="running")
 
         result = await self._run_cmd(["git", "pull", "--rebase", "origin", target_branch], timeout=60, step=step)
         if result["returncode"] != 0:

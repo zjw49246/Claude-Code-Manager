@@ -815,14 +815,17 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
 
   // Prevent scroll/touch events on the entire ChatView from reaching parent
   // scroll containers (task list). Allows scrolling inside the messages area
-  // but blocks propagation when touching non-scrollable zones (header, input)
-  // or when messages content is shorter than the viewport.
+  // but blocks propagation when touching non-scrollable zones (header, input),
+  // when content is shorter than the viewport, or when scrolled to boundary.
   useEffect(() => {
     const root = chatRootRef.current;
     const msgEl = messagesContainerRef.current;
     if (!root) return;
     const handleWheel = (e: WheelEvent) => {
       if (!msgEl) { e.preventDefault(); return; }
+      // Wheel outside messages area (header, input) → always block
+      const target = e.target as Node;
+      if (!msgEl.contains(target)) { e.preventDefault(); return; }
       const atTop = msgEl.scrollTop <= 0 && e.deltaY < 0;
       const atBottom = msgEl.scrollTop + msgEl.clientHeight >= msgEl.scrollHeight - 1 && e.deltaY > 0;
       const notScrollable = msgEl.scrollHeight <= msgEl.clientHeight;
@@ -830,17 +833,33 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
         e.preventDefault();
       }
     };
-    const handleTouch = (e: TouchEvent) => {
+    let touchStartY = 0;
+    const handleTouchStart = (e: TouchEvent) => {
+      touchStartY = e.touches[0].clientY;
+    };
+    const handleTouchMove = (e: TouchEvent) => {
       if (!msgEl) { e.preventDefault(); return; }
-      if (msgEl.scrollHeight <= msgEl.clientHeight) {
+      // Touch outside messages area (header, input) → always block
+      const target = e.target as Node;
+      if (!msgEl.contains(target)) { e.preventDefault(); return; }
+      const notScrollable = msgEl.scrollHeight <= msgEl.clientHeight;
+      if (notScrollable) { e.preventDefault(); return; }
+      const deltaY = touchStartY - e.touches[0].clientY;
+      const scrollingDown = deltaY > 0;
+      const scrollingUp = deltaY < 0;
+      const atTop = msgEl.scrollTop <= 0 && scrollingUp;
+      const atBottom = msgEl.scrollTop + msgEl.clientHeight >= msgEl.scrollHeight - 1 && scrollingDown;
+      if (atTop || atBottom) {
         e.preventDefault();
       }
     };
     root.addEventListener('wheel', handleWheel, { passive: false });
-    root.addEventListener('touchmove', handleTouch, { passive: false });
+    root.addEventListener('touchstart', handleTouchStart, { passive: true });
+    root.addEventListener('touchmove', handleTouchMove, { passive: false });
     return () => {
       root.removeEventListener('wheel', handleWheel);
-      root.removeEventListener('touchmove', handleTouch);
+      root.removeEventListener('touchstart', handleTouchStart);
+      root.removeEventListener('touchmove', handleTouchMove);
     };
   }, []);
 
@@ -1010,7 +1029,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
   };
 
   return (
-    <div ref={chatRootRef} className={inline ? "flex flex-col h-full bg-gray-950 overscroll-none" : "fixed inset-0 bg-gray-950 flex flex-col z-50 overscroll-none"}>
+    <div ref={chatRootRef} className={inline ? "flex flex-col h-full bg-gray-950 overflow-hidden overscroll-none" : "fixed inset-0 bg-gray-950 flex flex-col z-50 overflow-hidden overscroll-none"}>
       {/* Header — two rows */}
       <div className="px-3 sm:px-4 py-1.5 pt-[max(0.375rem,env(safe-area-inset-top))] border-b border-gray-800 bg-gray-900">
         {/* Row 1: back + task info + action buttons */}
