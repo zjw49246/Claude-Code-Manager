@@ -517,6 +517,38 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
   );
 
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarWidth, setSidebarWidth] = useState(() => {
+    const saved = localStorage.getItem('ccm-sidebar-width');
+    return saved ? Math.max(200, Math.min(600, Number(saved))) : 260;
+  });
+  const isDragging = useRef(false);
+  const dragStartX = useRef(0);
+  const dragStartWidth = useRef(260);
+
+  const handleDragStart = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    isDragging.current = true;
+    dragStartX.current = e.clientX;
+    dragStartWidth.current = sidebarWidth;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+
+    const onMove = (ev: MouseEvent) => {
+      if (!isDragging.current) return;
+      const newWidth = Math.max(200, Math.min(600, dragStartWidth.current + ev.clientX - dragStartX.current));
+      setSidebarWidth(newWidth);
+    };
+    const onUp = () => {
+      isDragging.current = false;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      setSidebarWidth(w => { localStorage.setItem('ccm-sidebar-width', String(w)); return w; });
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  }, [sidebarWidth]);
 
   if (splitMode) {
     const sidebarStatusColors: Record<string, string> = {
@@ -531,7 +563,7 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
     return (
       <div className="flex h-[calc(100vh-49px)] -m-4">
         {sidebarOpen && (
-          <div className="w-[260px] shrink-0 flex flex-col border-r border-gray-800 bg-gray-900/50">
+          <div className="shrink-0 flex flex-col border-r border-gray-800 bg-gray-900/50" style={{ width: sidebarWidth }}>
             <div className="px-3 py-2 border-b border-gray-800 flex items-center justify-between shrink-0">
               <span className="text-xs font-medium text-gray-400">Tasks</span>
               <button
@@ -628,6 +660,12 @@ export function TasksPage({ chatTaskId, onChatTaskChange }: TasksPageProps) {
               </div>
             )}
           </div>
+        )}
+        {sidebarOpen && (
+          <div
+            onMouseDown={handleDragStart}
+            className="w-1 shrink-0 cursor-col-resize bg-transparent hover:bg-indigo-500/40 active:bg-indigo-500/60 transition-colors"
+          />
         )}
         {!sidebarOpen && (
           <div className="shrink-0 border-r border-gray-800 bg-gray-900/50 flex flex-col items-center pt-2">
