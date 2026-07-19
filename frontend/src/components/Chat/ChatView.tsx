@@ -1077,6 +1077,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
             sessions={monitorSessions}
             onSessionsChange={setMonitorSessions}
             onClose={() => setShowMonitorPanel(false)}
+            provider={task.provider}
           />
         </div>
       )}

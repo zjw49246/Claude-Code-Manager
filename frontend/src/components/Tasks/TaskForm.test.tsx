@@ -377,3 +377,35 @@ describe('Codex GPT-5.6 per-model effort options', () => {
     await waitFor(() => expect(effortSelect).toHaveValue(''));
   });
 });
+
+describe('Codex provider UI gating', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  async function renderAndOpenConfig() {
+    render(<TaskForm onCreated={vi.fn()} />);
+    await openConfigPanel();
+    return waitFor(() => screen.getByDisplayValue('Claude'));
+  }
+
+  it('hides the Thinking budget dropdown for codex (backend ignores it)', async () => {
+    const cliSelect = await renderAndOpenConfig();
+    expect(screen.getByText('Thinking')).toBeInTheDocument();
+
+    await userEvent.selectOptions(cliSelect, 'codex');
+    expect(screen.queryByText('Thinking')).not.toBeInTheDocument();
+
+    // 切回 claude 恢复
+    await userEvent.selectOptions(cliSelect, 'claude');
+    expect(screen.getByText('Thinking')).toBeInTheDocument();
+  });
+
+  it('shows an explicit claude-only note instead of silently hiding Skills/Monitor', async () => {
+    const cliSelect = await renderAndOpenConfig();
+    expect(screen.queryByText('Skills / Monitor 仅支持 Claude')).not.toBeInTheDocument();
+
+    await userEvent.selectOptions(cliSelect, 'codex');
+    expect(screen.getByText('Skills / Monitor 仅支持 Claude')).toBeInTheDocument();
+  });
+});

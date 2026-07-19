@@ -1991,3 +1991,60 @@ def test_parse_codex_file_change_started_is_tool_use():
     assert event["event_type"] == "tool_use"
     assert event["tool_name"] == "FileChange"
     assert "probe.txt" in event["tool_input"]
+
+
+@pytest.mark.asyncio
+async def test_process_event_codex_window_backfill(db_factory):
+    """codex 任务的 usage 不带 context_window → 按 codex 窗口表回填
+    （gpt-5.6-terra = 272K，而不是 claude 的 200K 默认）。"""
+    async with db_factory() as db:
+        from backend.models.instance import Instance
+        from backend.models.task import Task
+        inst = Instance(name="codex-ctx-inst")
+        db.add(inst)
+        await db.commit()
+        await db.refresh(inst)
+        inst_id = inst.id
+
+        task = Task(title="codex ctx", provider="codex", model="gpt-5.6-terra")
+        db.add(task)
+        await db.commit()
+        await db.refresh(task)
+        task_id = task.id
+
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    im = InstanceManager(db_factory, broadcaster)
+
+    event = {
+        "event_type": "system_event",
+        "role": None,
+        "content": "turn.completed",
+        "tool_name": None,
+        "tool_input": None,
+        "tool_output": None,
+        "raw_json": "{}",
+        "is_error": False,
+        "timestamp": "2024-01-01T00:00:00",
+        "context_usage": {
+            "input_tokens": 5000,
+            "cache_read_input_tokens": 30000,
+            "cache_creation_input_tokens": 0,
+            "output_tokens": 100,
+            "total_input_tokens": 35000,
+        },
+    }
+    await im._process_event(inst_id, task_id, event)
+
+    ctx_calls = [
+        c for c in broadcaster.broadcast.call_args_list
+        if c[0][0] == f"task:{task_id}" and c[0][1].get("event_type") == "context_usage"
+    ]
+    assert len(ctx_calls) == 1
+    assert ctx_calls[0][0][1]["context_window"] == 272_000
+
+    # 落库的 usage 也带正确窗口（dispatcher 压缩阈值读的就是它）
+    async with db_factory() as db:
+        from backend.models.task import Task
+        t = await db.get(Task, task_id)
+        assert t.context_window_usage["context_window"] == 272_000

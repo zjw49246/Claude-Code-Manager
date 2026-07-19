@@ -350,3 +350,28 @@ async def test_webhook_self_pr_allowed_when_whitelisted(client, session_factory,
         resp = await _post_webhook(client, repo["webhook_secret"], payload)
     assert resp.status_code == 200
     assert resp.json()["status"] != "ignored"
+
+
+@pytest.mark.asyncio
+async def test_create_repo_with_codex_provider(client):
+    data = await _create_repo(client, repo_full_name="owner/codex-repo", provider="codex")
+    assert data["provider"] == "codex"
+
+
+@pytest.mark.asyncio
+async def test_create_repo_defaults_to_claude_provider(client):
+    data = await _create_repo(client, repo_full_name="owner/default-repo")
+    assert data["provider"] == "claude"
+
+
+@pytest.mark.asyncio
+async def test_update_repo_provider(client):
+    data = await _create_repo(client, repo_full_name="owner/switch-repo")
+    resp = await client.put(
+        f"/api/pr-monitor/repos/{data['id']}",
+        json={"provider": "codex", "review_model": None},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["provider"] == "codex"
+    assert body["review_model"] is None  # 显式 null 清空旧模型（防跨家族残留）

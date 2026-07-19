@@ -153,3 +153,19 @@ class TestResolveResumeConfigDir:
         )
         disp.pool = None
         assert await disp._resolve_resume_config_dir("sess-x") is None
+
+
+class TestResolveResumeConfigDirCodexGate:
+    @pytest.mark.asyncio
+    async def test_codex_provider_returns_none_even_with_pool(self, dispatcher, pool, tmp_path):
+        """codex 任务不选号：即使 session 落在某个 claude 账号里也返回 None
+        （launch 对 codex 不用 config_dir；选号只会白白 select+migrate）。"""
+        _seed_session(tmp_path / "claude-1", "sess-codex")
+        result = await dispatcher._resolve_resume_config_dir("sess-codex", "codex")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_claude_provider_unaffected(self, dispatcher, pool, tmp_path):
+        _seed_session(tmp_path / "claude-1", "sess-claude")
+        result = await dispatcher._resolve_resume_config_dir("sess-claude", "claude")
+        assert result == str(tmp_path / "claude-1")

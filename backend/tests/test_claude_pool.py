@@ -915,3 +915,137 @@ class TestChatPoolRotationCodexGate:
 
         assert ok is False
         im.launch.assert_not_awaited()
+
+
+def _async_db_ctx(task):
+    """db_factory 替身：async with db_factory() as db 里 db.get 返回 task。"""
+    db = AsyncMock()
+    db.get = AsyncMock(return_value=task)
+    ctx = MagicMock()
+    ctx.__aenter__ = AsyncMock(return_value=db)
+    ctx.__aexit__ = AsyncMock(return_value=False)
+    return MagicMock(return_value=ctx)
+
+
+class TestDispatcherRotationCodexGate:
+    """dispatcher._check_rate_limit_and_rotate 的 provider gate：
+    codex 限额文案命中 claude 正则也绝不轮换/冷却。"""
+
+    def _dispatcher(self, pool, task):
+        from backend.services.dispatcher import GlobalDispatcher
+        disp = GlobalDispatcher(
+            db_factory=_async_db_ctx(task),
+            instance_manager=MagicMock(),
+            broadcaster=MagicMock(),
+        )
+        disp.pool = pool
+        disp.broadcaster.broadcast = AsyncMock()
+        return disp
+
+    @pytest.mark.asyncio
+    async def test_codex_task_never_rotates_nor_cools_down(self, pool):
+        task = MagicMock()
+        task.provider = "codex"
+        task.session_id = None
+        disp = self._dispatcher(pool, task)
+
+        result = await disp._check_rate_limit_and_rotate(
+            1, 42, 1, combined="You've hit your usage limit for gpt-5.6-sol."
+        )
+
+        assert result is None
+        assert pool._cooldowns == {}  # 没有任何账号被冷却
+
+    @pytest.mark.asyncio
+    async def test_claude_task_still_rotates(self, pool, tmp_path):
+        """正向对照：同一段限速文案，claude 任务照常轮换 + 冷却旧号。"""
+        task = MagicMock()
+        task.provider = "claude"
+        task.session_id = None  # 无 session → 跳过 migrate
+        disp = self._dispatcher(pool, task)
+        disp.instance_manager.get_config_dir = MagicMock(
+            return_value=str(tmp_path / "claude-1")
+        )
+        # validate=True 会起 claude -p 探测子进程，测试里直接 stub 选号结果
+        disp._pool_select = AsyncMock(return_value=str(tmp_path / "claude-2"))
+
+        result = await disp._check_rate_limit_and_rotate(
+            1, 42, 1, combined="You've hit your limit, resets 3pm (UTC)"
+        )
+
+        assert result is not None
+        assert result["config_dir"] == str(tmp_path / "claude-2")
+        assert "acc-1" in pool._cooldowns  # 旧号进冷却
+
+
+class TestChatTransientRetryCodex:
+    """instance_manager._try_chat_transient_retry 的 codex 链路：
+    codex 文案触发重试且 relaunch 带 provider=codex（丢 provider 会用
+    claude --resume 重启 codex session）。"""
+
+    def _im(self, provider, log_text, monkeypatch):
+        from backend.services.instance_manager import InstanceManager
+        monkeypatch.setattr("backend.config.settings.transient_retry_base_delay", 0.01)
+        monkeypatch.setattr("backend.config.settings.transient_retry_max_delay", 0.02)
+
+        task = MagicMock()
+        task.session_id = "thread-1"
+        task.last_cwd = "/repo"
+        task.target_repo = None
+
+        broadcaster = MagicMock()
+        broadcaster.broadcast = AsyncMock()
+        im = InstanceManager(db_factory=_async_db_ctx(task), broadcaster=broadcaster)
+        im._launch_params[1] = {"prompt": "hello", "provider": provider}
+        im.get_recent_log_contents = AsyncMock(return_value=[log_text])
+        im.launch = AsyncMock()
+        return im
+
+    @pytest.mark.asyncio
+    async def test_codex_transient_relaunches_with_codex_provider(self, monkeypatch):
+        im = self._im(
+            "codex",
+            "stream disconnected before completion: transport error",
+            monkeypatch,
+        )
+        ok = await im._try_chat_transient_retry(1, 42, 1, "")
+        assert ok is True
+        im.launch.assert_awaited_once()
+        assert im.launch.await_args.kwargs["provider"] == "codex"
+        assert im.launch.await_args.kwargs["resume_session_id"] == "thread-1"
+
+    @pytest.mark.asyncio
+    async def test_claude_wording_does_not_trigger_codex_retry(self, monkeypatch):
+        # claude 的 transient 文案对 codex 任务不生效（provider 分流）
+        im = self._im(
+            "codex",
+            "API Error: Server is temporarily limiting requests (not your usage limit)",
+            monkeypatch,
+        )
+        ok = await im._try_chat_transient_retry(1, 42, 1, "")
+        assert ok is False
+        im.launch.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_codex_usage_limit_does_not_trigger_retry(self, monkeypatch):
+        # 限额不是 transient：退避重试救不了，应走正常失败路径
+        im = self._im(
+            "codex",
+            "You've hit your usage limit for gpt-5.6-sol.",
+            monkeypatch,
+        )
+        ok = await im._try_chat_transient_retry(1, 42, 1, "")
+        assert ok is False
+        im.launch.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_claude_transient_still_relaunches_claude(self, monkeypatch):
+        """正向对照：claude 任务 + claude 文案照常重试，provider 透传 claude。"""
+        im = self._im(
+            "claude",
+            "API Error: Server is temporarily limiting requests (not your usage limit)",
+            monkeypatch,
+        )
+        ok = await im._try_chat_transient_retry(1, 42, 1, "")
+        assert ok is True
+        assert im.launch.await_args.kwargs["provider"] == "claude"

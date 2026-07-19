@@ -768,6 +768,15 @@ export function TaskForm({ onCreated }: TaskFormProps) {
             )}
           </div>
         )}
+        {/* codex 下 Skills / Plugins（含 Monitor）整体不可用——显式标注而非静默消失 */}
+        {provider === 'codex' && (
+          <span
+            className="text-xs text-gray-500 px-1 py-1.5 whitespace-nowrap"
+            title="Skills / Monitor / Sub-Agent 基于 MCP 注入，仅 Claude CLI 支持，Codex 任务暂不可用"
+          >
+            Skills / Monitor 仅支持 Claude
+          </span>
+        )}
         {/* Plugins dropdown */}
         {AVAILABLE_PLUGINS.length > 0 && (
           <div ref={pluginsRef} className="relative">

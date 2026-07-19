@@ -393,7 +393,15 @@ cd frontend && npx tsc --noEmit
 | `test_task_migrator.py::test_migrate_codex_task_uses_codex_session_mover` 等 | 迁移按 provider 分流搬 session；rollout 文件 glob 定位 |
 | `test_api_monitor.py::test_create_monitor_rejects_codex_task` / `test_create_sub_agent_rejects_codex_task` | monitor / sub-agent 对 codex 任务显式 400（不静默跑成 Claude 子进程） |
 | `test_service_pr_review.py::test_create_pr_review_task_codex_provider` | PR 审核 task 透传 repo.provider，codex 未配模型时补默认 |
+| `test_claude_pool.py::TestDispatcherRotationCodexGate` | dispatcher 轮换 gate 正反两例：codex 限额文案不轮换不冷却任何账号；同类 claude 文案照常轮换 |
+| `test_claude_pool.py::TestChatTransientRetryCodex` | chat transient retry 全链路：codex 文案触发重试且 relaunch 带 `provider=codex`；claude 文案对 codex 任务不生效；限额不触发重试；claude 正向对照 |
+| `test_resume_config_dir.py::TestResolveResumeConfigDirCodexGate` | resume 选号对 codex 返回 None（不 select 不 migrate），claude 不受影响 |
+| `test_service_instance_manager.py::test_process_event_codex_window_backfill` | codex usage 无窗口时回填 272K（落库 + 广播都验证） |
+| `test_service_instance_manager.py::test_parse_codex_file_change_started_is_tool_use` | file_change 的 item.started → tool_use（真实事件流实证 started 存在，源码注释不实） |
+| `test_api_pr_monitor.py::test_create_repo_with_codex_provider` 等 | PR Monitor API 层 provider 创建/默认/更新（含显式 null 清空模型防跨家族残留） |
 | 前端 `ProjectTodoList.test.tsx` | Todo Run 建 task 带 provider |
+| 前端 `TaskForm.test.tsx::Codex provider UI gating` | codex 下 Thinking 隐藏、显式「Skills / Monitor 仅支持 Claude」标注（非静默消失） |
+| 前端 `MonitorPanel.test.tsx` | codex 任务的 Monitor 面板显示「暂不支持 Codex」横幅，claude 无横幅 |
 
 ##### `test_service_worktree_manager.py` — Worktree 管理器
 
