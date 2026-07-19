@@ -9,6 +9,7 @@ import pytest
 
 from backend.services.codex_app_server import (
     CodexAppServer,
+    CodexAppServerError,
     CodexTurnProcess,
 )
 
@@ -101,6 +102,94 @@ async def test_notifications_stream_delta_and_finish_process():
         "usage": {"input_tokens": 100, "cached_input_tokens": 80, "output_tokens": 5},
     }
     assert await process.wait() == 0
+
+
+@pytest.mark.asyncio
+async def test_interleaved_notifications_are_isolated_by_turn():
+    """Concurrent tasks must never receive another thread's output."""
+    server = CodexAppServer("codex")
+    server._process = SimpleNamespace(pid=4321, returncode=None)
+    server.ensure_started = AsyncMock()
+    server._request = AsyncMock(side_effect=[
+        {"thread": {"id": "thread-a"}},
+        {"turn": {"id": "turn-a"}},
+        {"thread": {"id": "thread-b"}},
+        {"turn": {"id": "turn-b"}},
+    ])
+    process_a, _ = await server.start_turn(
+        prompt="a", cwd="/tmp", model="gpt-5.5", effort="low",
+        resume_session_id=None, git_env=None, task_id=1,
+    )
+    process_b, _ = await server.start_turn(
+        prompt="b", cwd="/tmp", model="gpt-5.5", effort="low",
+        resume_session_id=None, git_env=None, task_id=2,
+    )
+    await process_a.stdout.readline()
+    await process_b.stdout.readline()
+
+    # Deliberately deliver B before A, as happens under real concurrent turns.
+    for thread, turn, item, text in (
+        ("thread-b", "turn-b", "msg-b", "B"),
+        ("thread-a", "turn-a", "msg-a", "A"),
+    ):
+        server._handle_notification("item/agentMessage/delta", {
+            "threadId": thread, "turnId": turn, "itemId": item, "delta": text,
+        })
+        server._handle_notification("item/completed", {
+            "threadId": thread, "turnId": turn,
+            "item": {"type": "agentMessage", "id": item, "text": text},
+        })
+        server._handle_notification("turn/completed", {
+            "threadId": thread,
+            "turn": {"id": turn, "status": "completed", "error": None},
+        })
+
+    async def read_all(process):
+        rows = []
+        while line := await process.stdout.readline():
+            rows.append(json.loads(line))
+        return rows
+
+    rows_a, rows_b = await asyncio.gather(read_all(process_a), read_all(process_b))
+    assert [row.get("delta") for row in rows_a if "delta" in row] == ["A"]
+    assert [row.get("delta") for row in rows_b if "delta" in row] == ["B"]
+    assert rows_a[1]["item"]["text"] == "A"
+    assert rows_b[1]["item"]["text"] == "B"
+    assert await process_a.wait() == await process_b.wait() == 0
+
+
+@pytest.mark.asyncio
+async def test_reader_exit_fails_pending_requests_and_active_turns():
+    """A crashed shared process must unblock every waiter instead of hanging."""
+    server = CodexAppServer("codex")
+    server._process = SimpleNamespace(pid=4321, returncode=None)
+    server.ensure_started = AsyncMock()
+    server._request = AsyncMock(side_effect=[
+        {"thread": {"id": "thread-1"}},
+        {"turn": {"id": "turn-1"}},
+    ])
+    turn_process, _ = await server.start_turn(
+        prompt="hi", cwd="/tmp", model="gpt-5.5", effort="low",
+        resume_session_id=None, git_env=None, task_id=1,
+    )
+    await turn_process.stdout.readline()
+    pending = asyncio.get_running_loop().create_future()
+    server._pending[99] = pending
+
+    stdout = asyncio.StreamReader()
+    stdout.feed_eof()
+    fake_process = SimpleNamespace(
+        stdout=stdout,
+        wait=AsyncMock(return_value=1),
+    )
+    await server._read_loop(fake_process)
+
+    assert await turn_process.wait() == 1
+    assert not server._contexts_by_thread
+    assert not server._contexts_by_turn
+    assert not server._pending
+    with pytest.raises(CodexAppServerError, match="exited unexpectedly"):
+        await pending
 
 
 def test_normalize_app_server_command_item():

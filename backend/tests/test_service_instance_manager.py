@@ -4,11 +4,13 @@ import json
 import os
 import signal
 import pytest
+from sqlalchemy import select
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from backend.services.instance_manager import InstanceManager
 from backend.config import settings
 from backend.models.instance import Instance
+from backend.models.log_entry import LogEntry
 from backend.models.task import Task
 
 
@@ -33,6 +35,46 @@ def test_parse_codex_agent_message():
     assert event["role"] == "assistant"
     assert event["content"] == "Done"
     assert event["is_error"] is False
+
+
+@pytest.mark.asyncio
+async def test_codex_app_server_delta_is_broadcast_but_not_persisted(db_factory):
+    """Streaming improves TTFT without turning every token into a DB row."""
+    async with db_factory() as db:
+        inst = Instance(name="delta-inst")
+        task = Task(title="delta-task", status="executing", provider="codex")
+        db.add_all([inst, task])
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    im = InstanceManager(db_factory, broadcaster)
+    await im._process_event(inst.id, task.id, {
+        "event_type": "message_delta",
+        "role": "assistant",
+        "content": "Hel",
+        "item_id": "msg-1",
+        "raw_json": '{"large":"payload"}',
+        "is_error": False,
+    })
+
+    async with db_factory() as db:
+        rows = (await db.execute(
+            select(LogEntry).where(LogEntry.task_id == task.id)
+        )).scalars().all()
+    assert rows == []
+    assert broadcaster.broadcast.await_args_list == [
+        ((f"instance:{inst.id}", {
+            "event_type": "message_delta", "role": "assistant",
+            "content": "Hel", "item_id": "msg-1", "is_error": False,
+        }),),
+        ((f"task:{task.id}", {
+            "event_type": "message_delta", "role": "assistant",
+            "content": "Hel", "item_id": "msg-1", "is_error": False,
+        }),),
+    ]
 
 
 def test_parse_codex_command_started():

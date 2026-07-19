@@ -92,6 +92,7 @@ claude-manager/
 │       └── hooks/useWebSocket.ts
 ├── scripts/
 │   ├── dev.sh                   # 一键启动开发环境
+│   ├── benchmark_codex_transport.py # 真实 Codex exec/app-server 延迟 A/B（手动、消耗额度）
 │   └── tunnel.sh                # ngrok 隧道
 ├── .env                         # AUTH_TOKEN, OPENAI_API_KEY, DATABASE_URL
 └── pyproject.toml
