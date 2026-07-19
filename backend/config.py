@@ -115,7 +115,8 @@ class Settings(BaseSettings):
     backup_oss_secret_key: str = ""
 
     # --- One-click update & restart ---
-    service_name: str = "ccm.service"  # systemd user service to restart (e.g. ccm-dev.service)
+    service_name: str = "ccm.service"  # systemd service to restart (e.g. ccm-dev.service)
+    service_scope: str = "auto"        # auto | user | system
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 

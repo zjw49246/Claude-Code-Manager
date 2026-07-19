@@ -153,6 +153,7 @@ class UpdateService:
         self._status_file = Path(f"/tmp/ccm-update-status-{port}.json")
         from backend.config import settings
         self._service_name = settings.service_name
+        self._service_scope = settings.service_scope
         self._tools = {
             "git": _find_tool("git"),
             "uv": _find_tool("uv"),
@@ -160,6 +161,7 @@ class UpdateService:
             "bash": _find_tool("bash"),
             "systemctl": _find_tool("systemctl"),
             "systemd-run": _find_tool("systemd-run"),
+            "sudo": _find_tool("sudo"),
         }
         logger.info("Resolved tool paths: %s", self._tools)
 
@@ -234,9 +236,11 @@ class UpdateService:
     async def _needs_restart(self) -> bool:
         """Check if the running service is older than the code on disk."""
         try:
-            systemctl = self._tools["systemctl"]
+            scope = self._systemd_scope()
+            if not scope:
+                return False
             result = await self._run_cmd(
-                [systemctl, "--user", "show", self._service_name,
+                self._systemctl_cmd(scope) + ["show", self._service_name,
                  "-p", "ActiveEnterTimestamp", "--value"],
             )
             ts_str = result["stdout"].strip()
@@ -603,7 +607,8 @@ class UpdateService:
             if tool_dir not in env.get("PATH", ""):
                 env["PATH"] = tool_dir + ":" + env.get("PATH", "")
 
-        managed = self._is_managed_by_systemd()
+        scope = self._systemd_scope()
+        managed = scope is not None
         script_argv = [
             self._tools["bash"], str(script),
             self.project_dir,
@@ -617,6 +622,7 @@ class UpdateService:
             mode,
             str(os.getpid()),
             sys.executable,
+            scope or "auto",
         ]
 
         if managed:
@@ -625,8 +631,8 @@ class UpdateService:
             # leaving the service stopped with nobody left to start it again.
             # systemd-run puts the script in its own transient unit (own cgroup).
             subprocess.Popen(
-                [
-                    self._tools["systemd-run"], "--user", "--collect",
+                self._systemd_run_cmd(scope) + [
+                    "--collect",
                     f"--unit=ccm-update-{self.port}",
                     # transient units do NOT inherit our cwd — without this the
                     # script's git/uv/alembic would run from systemd's default dir
@@ -675,8 +681,14 @@ class UpdateService:
     def _cgroup_text(self) -> str:
         return Path("/proc/self/cgroup").read_text()
 
-    def _is_managed_by_systemd(self) -> bool:
-        """True only if THIS process runs inside the service's own cgroup.
+    def _normalized_service_name(self) -> str:
+        name = self._service_name
+        if not name.endswith(".service"):
+            name += ".service"
+        return name
+
+    def _systemd_scope(self) -> str | None:
+        """Return user/system only if THIS process is in its service cgroup.
 
         `systemctl is-active` is not enough: a manually launched uvicorn can
         coexist with an active (but port-less) systemd unit — it would then
@@ -684,20 +696,41 @@ class UpdateService:
         (2026-07-16 test-env orphan incident). /proc/self/cgroup answers for
         this very process; on non-Linux it raises → False → fallback path.
         """
-        name = self._service_name
-        if not name.endswith(".service"):
-            name += ".service"
         try:
-            return f"/{name}" in self._cgroup_text()
+            text = self._cgroup_text()
         except Exception:
-            return False
+            return None
+        if f"/{self._normalized_service_name()}" not in text:
+            return None
+        configured = (self._service_scope or "auto").strip().lower()
+        if configured in {"user", "system"}:
+            return configured
+        if "/system.slice/" in text:
+            return "system"
+        if "/user.slice/" in text:
+            return "user"
+        return "user"
+
+    def _is_managed_by_systemd(self) -> bool:
+        return self._systemd_scope() is not None
+
+    def _systemctl_cmd(self, scope: str) -> list[str]:
+        if scope == "system":
+            return [self._tools["sudo"], "-n", self._tools["systemctl"]]
+        return [self._tools["systemctl"], "--user"]
+
+    def _systemd_run_cmd(self, scope: str | None) -> list[str]:
+        if scope == "system":
+            return [self._tools["sudo"], "-n", self._tools["systemd-run"]]
+        return [self._tools["systemd-run"], "--user"]
 
     def _restart_service(self):
         """Restart via systemd if managed, otherwise re-exec the process."""
-        if self._is_managed_by_systemd():
+        scope = self._systemd_scope()
+        if scope:
+            cmd = self._systemctl_cmd(scope) + ["restart", self._service_name]
             subprocess.Popen(
-                [self._tools["bash"], "-c",
-                 f"sleep 2 && {self._tools['systemctl']} --user restart {self._service_name}"],
+                [self._tools["bash"], "-c", "sleep 2 && exec \"$@\"", "ccm-restart", *cmd],
                 stdout=open(f"/tmp/ccm-restart-{self.port}.log", "w"),
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
