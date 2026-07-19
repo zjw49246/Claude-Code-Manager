@@ -240,6 +240,11 @@ sudo systemctl stop ccm-backend      # 停止后端
 sudo journalctl -u ccm-backend -f    # 查看后端日志
 sudo journalctl -u ccm-tunnel -f     # 查看 tunnel 日志
 # 开机自启已通过 systemctl enable 配置
+
+# 自动更新的 systemd 服务配置（.env）:
+#   SERVICE_NAME=ccm-backend   # 服务单元名（不含 .service 后缀），默认 ccm
+#   SERVICE_SCOPE=auto         # auto | user | system，auto 从 cgroup 自动检测
+# 非默认服务名的部署必须显式配置，否则更新机制无法正确 restart
 ```
 
 ## 数据库
