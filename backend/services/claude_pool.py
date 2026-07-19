@@ -142,6 +142,80 @@ def is_transient_overload(text: str) -> bool:
     return bool(_TRANSIENT_OVERLOAD_RE.search(text))
 
 
+# ---------------------------------------------------------------------------
+# Codex (OpenAI) counterparts — exact texts from codex-rs protocol/src/error.rs
+# (rust-v0.144.6, 与本机 CLI 同版实证)。Codex 无号池：usage-limit / auth 失败
+# 不轮换（无号可换），只用于与 transient 互斥；transient 对应 CLI 自身
+# is_retryable=true 的错误（外加 ServerOverloaded——CLI 只是想让用户换模型，
+# 对 CCM 而言退避重试同样有效）。
+# ---------------------------------------------------------------------------
+
+_CODEX_USAGE_LIMIT_RE = re.compile(
+    r"hit your usage limit"          # UsageLimitReached
+    r"|quota exceeded"               # QuotaExceeded
+    r"|out of credits"               # workspace credits depleted
+    r"|spend cap"                    # workspace spend cap
+    r"|upgrade to plus",             # UsageNotIncluded
+    re.IGNORECASE,
+)
+
+_CODEX_AUTH_FAIL_RE = re.compile(
+    r"token has been invalidated"    # 401 identity_authorization_error（实测）
+    r"|refresh token was revoked"    # RefreshTokenFailed（实测）
+    r"|log out and sign in again"
+    r"|try signing in again"
+    r"|401 unauthorized",
+    re.IGNORECASE,
+)
+
+_CODEX_TRANSIENT_RE = re.compile(
+    r"stream disconnected before completion"      # CodexErr::Stream
+    r"|request timed out"                         # RequestTimeout
+    r"|connection failed:"                        # ConnectionFailed（带冒号防误报）
+    r"|error while reading the server response"   # ResponseStreamFailed
+    r"|currently experiencing high demand"        # InternalServerError
+    r"|selected model is at capacity"             # ServerOverloaded
+    r"|too many requests"                         # 429 状态行文案
+    r"|unexpected status (?:429|5\d\d)"           # UnexpectedStatus 429/5xx
+    r"|exceeded retry limit, last status: (?:429|5\d\d)",  # RetryLimit 429/5xx
+    re.IGNORECASE,
+)
+
+
+def is_codex_usage_limited(text: str) -> bool:
+    if not text:
+        return False
+    return bool(_CODEX_USAGE_LIMIT_RE.search(text))
+
+
+def is_codex_auth_failure(text: str) -> bool:
+    if not text:
+        return False
+    return bool(_CODEX_AUTH_FAIL_RE.search(text))
+
+
+def is_codex_transient(text: str) -> bool:
+    """Codex-side transient failure — wait-and-retry the SAME account.
+
+    Usage-limit / auth failures take precedence (they are not retryable within
+    the backoff budget; codex has no account pool to rotate to, so they fall
+    through to the normal fail path with the CLI's message intact).
+    """
+    if not text:
+        return False
+    if is_codex_usage_limited(text) or is_codex_auth_failure(text):
+        return False
+    return bool(_CODEX_TRANSIENT_RE.search(text))
+
+
+def is_transient_for(provider: str | None, text: str) -> bool:
+    """Provider-aware transient detection (claude → is_transient_overload,
+    codex → is_codex_transient). All retry paths should go through this."""
+    if (provider or "claude").lower() == "codex":
+        return is_codex_transient(text)
+    return is_transient_overload(text)
+
+
 def transient_retry_delay(attempt: int, base: float, cap: float) -> float:
     """Exponential backoff (with jitter) for transient-overload retries.
 

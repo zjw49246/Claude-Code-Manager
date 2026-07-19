@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config import settings
 from backend.database import get_db, async_session
+from backend.services.agent_docs import inject_agents_md
 from backend.models.project import Project
 from backend.api.deps import get_current_user_id, get_current_user_role
 from backend.models.project_todo import ProjectTodo
@@ -413,6 +414,7 @@ rebase 发生冲突时：
 > **以下文件都由 Claude Code 自主维护，每次功能变更后必须同步更新。**
 
 - **CLAUDE.md**（本文件）：架构、约定、关键路径变化时更新，只改变化的部分，保持简洁
+- **AGENTS.md**（Codex 读取）：**与 CLAUDE.md 保持关键内容同步**——这是 CC/Codex coding 时的行为纪律：往其中一个写新内容时，把相同的意思也写进另一个（不要求逐字一致）。正常状态它是指向本文件的 symlink（改一处即同步），不要改成独立文件；若两者已是独立文件，不要用 symlink 覆盖已有内容，逐次同步意思即可
 - **README.md**：面向用户的文档，功能、使用流程变化时同步更新，保持与实际代码一致
 - **TEST.md**：测试指南，新增功能时同步添加测试用例和文档
 - **PROGRESS.md**：见下方「经验教训沉淀」
@@ -441,6 +443,28 @@ rebase 发生冲突时：
 - 在 worktree 中工作时，不要切换到其他分支
 - 完成任务后确保代码可运行、测试通过
 """
+
+
+# 实现移到 services/agent_docs.py（dispatcher 惰性补齐存量项目时复用）
+_inject_agents_md = inject_agents_md
+
+
+async def _commit_files(local_path: str, files: list[str], message: str):
+    """git add + commit the given files; best-effort (repo may lack user config)."""
+    proc = await asyncio.create_subprocess_exec(
+        "git", "add", *files,
+        cwd=local_path,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    await proc.communicate()
+    proc = await asyncio.create_subprocess_exec(
+        "git", "commit", "-m", message,
+        cwd=local_path,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    return await proc.communicate(), proc.returncode
 
 
 async def _clone_repo(project_id: int, git_url: str, local_path: str, project_name: str, default_branch: str, git_config: dict | None = None):
@@ -485,29 +509,23 @@ async def _clone_repo(project_id: int, git_url: str, local_path: str, project_na
         if git_config:
             await _apply_git_config(local_path, git_config)
 
-        # Generate CLAUDE.md if not exists
+        # Generate agent docs if not exists: CLAUDE.md (claude) + AGENTS.md (codex)
+        created_files = []
         claude_md_path = os.path.join(local_path, "CLAUDE.md")
         if not os.path.exists(claude_md_path):
             with open(claude_md_path, "w") as f:
                 f.write(_generate_claude_md(project_name, git_url, default_branch))
+            created_files.append("CLAUDE.md")
+        if _inject_agents_md(local_path):
+            created_files.append("AGENTS.md")
 
-            # Stage and commit CLAUDE.md so it's not left untracked
-            proc = await asyncio.create_subprocess_exec(
-                "git", "add", "CLAUDE.md",
-                cwd=local_path,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+        if created_files:
+            # Stage and commit so they're not left untracked
+            # (don't fail on commit error — repo may have no user config yet)
+            await _commit_files(
+                local_path, created_files,
+                f"Add {' + '.join(created_files)} for Claude Code Manager",
             )
-            await proc.communicate()
-
-            proc = await asyncio.create_subprocess_exec(
-                "git", "commit", "-m", "Add CLAUDE.md for Claude Code Manager",
-                cwd=local_path,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            await proc.communicate()
-            # Don't fail on commit error — repo may have no user config yet
 
         # Auto-scan for .env files after clone
         env_files = _scan_env_files(local_path)
@@ -556,29 +574,25 @@ async def _init_local_repo(project_id: int, local_path: str, project_name: str, 
             if git_config:
                 await _apply_git_config(local_path, git_config)
 
-            # Generate CLAUDE.md
+            # Generate agent docs: CLAUDE.md (claude) + AGENTS.md (codex)。
+            # 目录可能是「已有文件但尚未 git init」的存量目录——已有的
+            # CLAUDE.md/AGENTS.md 一律不覆盖（AGENTS.md 由 inject 内部守卫）
+            files = []
             claude_md_path = os.path.join(local_path, "CLAUDE.md")
-            with open(claude_md_path, "w") as f:
-                f.write(_generate_claude_md(project_name, None, default_branch))
+            if not os.path.exists(claude_md_path):
+                with open(claude_md_path, "w") as f:
+                    f.write(_generate_claude_md(project_name, None, default_branch))
+                files.append("CLAUDE.md")
+            if _inject_agents_md(local_path):
+                files.append("AGENTS.md")
 
-            # Initial commit
-            proc = await asyncio.create_subprocess_exec(
-                "git", "add", "CLAUDE.md",
-                cwd=local_path,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            await proc.communicate()
-
-            proc = await asyncio.create_subprocess_exec(
-                "git", "commit", "-m", "Initial commit with CLAUDE.md",
-                cwd=local_path,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            _, stderr = await proc.communicate()
-            if proc.returncode != 0:
-                raise RuntimeError(f"git commit failed: {stderr.decode()}")
+            # Initial commit（只提交本次创建的文件；两者都已存在时无事可提）
+            if files:
+                (_, stderr), returncode = await _commit_files(
+                    local_path, files, f"Initial commit with {' + '.join(files)}",
+                )
+                if returncode != 0:
+                    raise RuntimeError(f"git commit failed: {stderr.decode()}")
 
         # Auto-scan for .env files after init
         env_files = _scan_env_files(local_path)

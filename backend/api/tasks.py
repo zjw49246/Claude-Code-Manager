@@ -17,8 +17,13 @@ from backend.api.deps import get_current_user_id, get_current_user_role, require
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
 
-def _find_session_jsonl(session_id: str) -> Path | None:
-    """Locate a session JSONL on disk, pool-aware.
+def _find_session_jsonl(session_id: str, provider: str = "claude") -> Path | None:
+    """Locate a provider session JSONL on disk.
+
+    Codex stores rollouts under ``$CODEX_HOME/sessions/YYYY/MM/DD``.  This
+    branch must run before the Claude pool lookup: treating a valid Codex
+    rollout as a missing Claude session makes every follow-up abandon native
+    history/cache and start a new thread.
 
     Pool deployments split sessions across multiple ~/.claude-account-N dirs,
     so a lookup that only checks ~/.claude / CLAUDE_CONFIG_DIR (and only the
@@ -27,6 +32,18 @@ def _find_session_jsonl(session_id: str) -> Path | None:
     We reuse the pool's own locator (searches every account dir) and glob across
     all project subdirs so cwd-encoding differences don't hide the file either.
     """
+    if (provider or "claude").lower() == "codex":
+        codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+        try:
+            return next(
+                codex_home.glob(
+                    f"sessions/*/*/*/rollout-*-{session_id}.jsonl"
+                ),
+                None,
+            )
+        except OSError:
+            return None
+
     config_dir: str | None = None
     try:
         from backend.main import dispatcher
@@ -75,7 +92,13 @@ async def _clone_session(source_task_id: int, db: AsyncSession) -> dict | None:
     if not source or not source.session_id or not source.last_cwd:
         return None
 
-    source_jsonl = _find_session_jsonl(source.session_id)
+    # A Codex rollout embeds its thread id in both the filename and session
+    # metadata.  Copying it under a random filename does not create a valid new
+    # thread, so keep this legacy clone operation Claude-only.
+    if (source.provider or "claude").lower() != "claude":
+        return None
+
+    source_jsonl = _find_session_jsonl(source.session_id, provider="claude")
     if source_jsonl is None:
         return None
 
@@ -206,6 +229,14 @@ async def create_task(request: Request, body: TaskCreate, queue: TaskQueue = Dep
         data["effort_level"] = app_settings.default_effort
 
     task = await queue.create(**data)
+    # Eliminate the dispatcher's historical 0-2s polling delay.  Importing
+    # here avoids a module cycle during application construction.
+    try:
+        from backend.main import dispatcher
+        if dispatcher:
+            dispatcher.wake()
+    except Exception:
+        pass
 
     # Auto-share if project has active project-level shares
     if task.project_id:
@@ -490,6 +521,12 @@ async def approve_plan(task_id: int, request: Request, queue: TaskQueue = Depend
     if task.mode != "plan" or task.status != "plan_review":
         raise HTTPException(400, "Task is not in plan review state")
     task = await queue.update_task(task_id, plan_approved=True, status="pending")
+    try:
+        from backend.main import dispatcher
+        if dispatcher:
+            dispatcher.wake()
+    except Exception:
+        pass
     from backend.services.task_events import broadcast_status_change
     await broadcast_status_change(task_id, "pending")
     return task

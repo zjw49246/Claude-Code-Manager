@@ -353,6 +353,55 @@ cd frontend && npx tsc --noEmit
 | `test_process_event_usage_limit_does_not_set_transient_flag` | 额度横幅**不**置标记（应走换号而非同号重试） |
 | `test_process_event_clean_event_leaves_flag_unset` / `test_launch_resets_transient_flag` | 干净事件不置位 / 新 `launch()` 重置标记 |
 | `test_process_event_orphan_overload_does_not_set_transient_flag` | resume 回放的旧 api_error（`orphan`）与后台子 agent 报错（`autonomous`）**不**置标记——否则成功 resume 被误判 failed（task #729 recover-then-failed） |
+| `test_build_command_codex_gpt56_passes_max_effort` / `..._ultra_effort` | GPT-5.6 sol/terra 的 `max`/`ultra` 档位真实传给 codex CLI（旧代码把 max 一律丢弃） |
+| `test_build_command_codex_old_model_clamps_max_to_xhigh` / `..._luna_clamps_ultra_to_max` | 不支持的高档位向下夹到该模型最高档，而非静默丢弃 |
+
+##### `test_codex_models.py` — Codex 模型目录（GPT-5.6 三模型）
+
+| 测试 | 验证内容 |
+|------|---------|
+| `test_codex_model_options_contain_all_three_gpt56_models` | 选项含 `gpt-5.6-sol`/`-terra`/`-luna` 三个模型 |
+| `test_codex_model_options_have_no_bare_gpt56` | **关键**：裸 `gpt-5.6` 不是有效模型 ID（服务端列表实证） |
+| `test_gpt56_*_support_*` / `test_older_models_fall_back_*` | 按模型区分档位：sol/terra 到 ultra、luna 到 max、旧模型到 xhigh |
+| `test_clamp_*` | `clamp_codex_effort` 透传受支持档位 / 向下夹不支持档位 / None 与未知输入安全 |
+
+（前端配套：`TaskForm.test.tsx` 的 "Codex GPT-5.6 per-model effort options" 套件——模型下拉列三模型、effort 选项按模型过滤、切模型后失效档位自动回落默认）
+
+##### Codex provider 对等逻辑（AGENTS.md，2026-07-19）
+
+| 测试 | 验证内容 |
+|------|---------|
+| `test_service_dispatcher.py::test_goal_initial_prompt_codex_references_agents_md` | codex goal 任务的 prompt 指向 AGENTS.md |
+| `test_service_dispatcher.py::test_build_task_prompt_provider_doc` | task prompt 前导按 provider 引用 CLAUDE.md / AGENTS.md |
+| `test_service_dispatcher.py::test_build_task_prompt_carries_doc_sync_note` | 两种 provider 的 prompt 前导都下发 CLAUDE.md/AGENTS.md 关键内容同步纪律 |
+| `test_service_dispatcher.py::test_build_task_prompt_codex_skips_skill_templates` | skills 模板只注入 claude（MCP 工具 codex 不可用） |
+| `test_service_dispatcher.py::test_loop_prompt_codex_references_agents_md` | loop prompt 按 provider 引用文档 |
+| `test_api_projects.py::test_inject_agents_md_*` | project 创建注入 AGENTS.md symlink：正常创建 / 无 CLAUDE.md 不动 / 已存在不覆盖（实现在 `services/agent_docs.py`） |
+| `test_service_dispatcher.py::test_lifecycle_backfills_agents_md` | 存量项目惰性补齐：任务启动时对 target_repo 补 AGENTS.md symlink |
+| `test_api_projects.py::test_init_local_repo_preserves_existing_claude_md` / `..._preserves_both_existing_docs` | **不覆盖原有文件**：存量目录（有文件未 git init）建本地项目时，已有 CLAUDE.md/AGENTS.md 原样保留（红→绿实证） |
+
+##### Codex 对等补齐（2026-07-19，文案/字段全部 codex-rs 0.144.6 源码实证）
+
+| 测试 | 验证内容 |
+|------|---------|
+| `test_claude_pool.py::TestCodexTransientDetection` | codex transient 检测：stream disconnected / request timed out / high demand / at capacity / 429/5xx 命中；401、usage limit、quota **不**命中（互斥） |
+| `test_claude_pool.py::TestCodexUsageAndAuthDetection` | codex 限额/认证失败文案检测 |
+| `test_claude_pool.py::TestProviderAwareTransientRouting` | `is_transient_for` 按 provider 分流；**危险重叠回归锚点**：codex 限额文案会命中 claude `_RATE_LIMIT_RE` |
+| `test_claude_pool.py::TestChatPoolRotationCodexGate` | codex 任务绝不进 claude 号池轮换（不 gate 会用 claude --resume 重启 codex session） |
+| `test_service_instance_manager.py::test_parse_codex_reasoning_becomes_thinking` 等 | codex 解析器：reasoning→thinking、file_change/mcp_tool_call/web_search→tool 事件、todo_list、error item、turn.failed 嵌套 message |
+| `test_codex_models.py::TestCodexContextWindow` | codex 模型窗口表（272K/128K，models_cache.json 实测）与回退 |
+| `test_task_migrator.py::test_migrate_codex_task_uses_codex_session_mover` 等 | 迁移按 provider 分流搬 session；rollout 文件 glob 定位 |
+| `test_api_monitor.py::test_create_monitor_rejects_codex_task` / `test_create_sub_agent_rejects_codex_task` | monitor / sub-agent 对 codex 任务显式 400（不静默跑成 Claude 子进程） |
+| `test_service_pr_review.py::test_create_pr_review_task_codex_provider` | PR 审核 task 透传 repo.provider，codex 未配模型时补默认 |
+| `test_claude_pool.py::TestDispatcherRotationCodexGate` | dispatcher 轮换 gate 正反两例：codex 限额文案不轮换不冷却任何账号；同类 claude 文案照常轮换 |
+| `test_claude_pool.py::TestChatTransientRetryCodex` | chat transient retry 全链路：codex 文案触发重试且 relaunch 带 `provider=codex`；claude 文案对 codex 任务不生效；限额不触发重试；claude 正向对照 |
+| `test_resume_config_dir.py::TestResolveResumeConfigDirCodexGate` | resume 选号对 codex 返回 None（不 select 不 migrate），claude 不受影响 |
+| `test_service_instance_manager.py::test_process_event_codex_window_backfill` | codex usage 无窗口时回填 272K（落库 + 广播都验证） |
+| `test_service_instance_manager.py::test_parse_codex_file_change_started_is_tool_use` | file_change 的 item.started → tool_use（真实事件流实证 started 存在，源码注释不实） |
+| `test_api_pr_monitor.py::test_create_repo_with_codex_provider` 等 | PR Monitor API 层 provider 创建/默认/更新（含显式 null 清空模型防跨家族残留） |
+| 前端 `ProjectTodoList.test.tsx` | Todo Run 建 task 带 provider |
+| 前端 `TaskForm.test.tsx::Codex provider UI gating` | codex 下 Thinking 隐藏、显式「Skills / Monitor 仅支持 Claude」标注（非静默消失） |
+| 前端 `MonitorPanel.test.tsx` | codex 任务的 Monitor 面板显示「暂不支持 Codex」横幅，claude 无横幅 |
 
 ##### `test_service_worktree_manager.py` — Worktree 管理器
 
@@ -728,6 +777,12 @@ uv run python -m pytest backend/tests/test_api_tasks.py -k broadcasts_status_cha
 - [ ] 移动端：汉堡 → 抽屉滑出导航，点遮罩关闭；safe-area 顶部不遮挡
 - [ ] 切主题后手机状态栏 / PWA theme-color 跟随（meta 同步）
 - [ ] 刷新后主题保持（localStorage cc_theme）；旧值 ocean/forest/rose 直接沿用，无迁移丢失
+
+## 聊天消息复制
+
+| 测试文件 | 测试用例 | 说明 |
+|----------|----------|------|
+| `frontend/src/components/Chat/ChatView.test.tsx` | `copies a user message without its sender prefix` | 用户消息保留 `[发送者]` 的界面显示，但复制时只写入消息正文 |
 
 ## 开发规范
 

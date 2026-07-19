@@ -7,6 +7,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from backend.services.instance_manager import InstanceManager
+from backend.config import settings
 from backend.models.instance import Instance
 from backend.models.task import Task
 
@@ -109,6 +110,20 @@ def test_parse_codex_thread_started_session_id():
     assert event["event_type"] == "system_event"
     assert event["content"] == "thread.started"
     assert event["session_id"] == "test-thread-123"
+
+
+def test_parse_codex_app_server_message_delta():
+    im = InstanceManager(MagicMock(), MagicMock())
+    event = im._parse_codex_line(json.dumps({
+        "type": "item.agent_message.delta",
+        "item_id": "msg-1",
+        "delta": "Hel",
+    }))
+
+    assert event["event_type"] == "message_delta"
+    assert event["role"] == "assistant"
+    assert event["content"] == "Hel"
+    assert event["item_id"] == "msg-1"
 
 
 # === _build_command tests ===
@@ -521,8 +536,9 @@ async def test_launch_with_effort_level(db_factory):
 
 
 @pytest.mark.asyncio
-async def test_launch_codex_provider_command(db_factory):
+async def test_launch_codex_provider_command(db_factory, monkeypatch):
     """launch(provider='codex') constructs codex exec command."""
+    monkeypatch.setattr(settings, "codex_app_server_enabled", False)
     async with db_factory() as db:
         inst = Instance(name="codex-inst")
         db.add(inst)
@@ -550,8 +566,63 @@ async def test_launch_codex_provider_command(db_factory):
 
 
 @pytest.mark.asyncio
-async def test_launch_codex_no_thinking_budget_env(db_factory):
+async def test_launch_codex_prefers_persistent_app_server(db_factory, monkeypatch):
+    monkeypatch.setattr(settings, "codex_app_server_enabled", True)
+    async with db_factory() as db:
+        inst = Instance(name="codex-app-inst")
+        db.add(inst)
+        await db.commit()
+        await db.refresh(inst)
+
+    im = InstanceManager(db_factory, MagicMock())
+    im._launch_codex_app_server = AsyncMock(return_value=4321)
+    with patch(
+        "backend.services.instance_manager.asyncio.create_subprocess_exec",
+        new_callable=AsyncMock,
+    ) as exec_mock:
+        pid = await im.launch(
+            instance_id=inst.id, prompt="hi", cwd="/tmp", provider="codex",
+            resume_session_id="thread-1",
+        )
+
+    assert pid == 4321
+    im._launch_codex_app_server.assert_awaited_once()
+    assert im._launch_codex_app_server.await_args.kwargs["resume_session_id"] == "thread-1"
+    exec_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_launch_codex_falls_back_to_exec_when_app_server_fails(db_factory, monkeypatch):
+    monkeypatch.setattr(settings, "codex_app_server_enabled", True)
+    async with db_factory() as db:
+        inst = Instance(name="codex-fallback-inst")
+        db.add(inst)
+        await db.commit()
+        await db.refresh(inst)
+
+    mock_proc = _make_mock_process()
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    im = InstanceManager(db_factory, broadcaster)
+    im._launch_codex_app_server = AsyncMock(side_effect=RuntimeError("bad protocol"))
+    with patch(
+        "backend.services.instance_manager.asyncio.create_subprocess_exec",
+        new_callable=AsyncMock,
+        return_value=mock_proc,
+    ) as exec_mock:
+        await im.launch(
+            instance_id=inst.id, prompt="fallback", cwd="/tmp", provider="codex",
+        )
+
+    assert exec_mock.await_args.args[1] == "exec"
+    assert "fallback" in exec_mock.await_args.args
+    await asyncio.sleep(0.1)
+
+
+@pytest.mark.asyncio
+async def test_launch_codex_no_thinking_budget_env(db_factory, monkeypatch):
     """launch(provider='codex', thinking_budget=N) does NOT set MAX_THINKING_TOKENS."""
+    monkeypatch.setattr(settings, "codex_app_server_enabled", False)
     async with db_factory() as db:
         inst = Instance(name="codex-think-inst")
         db.add(inst)
@@ -829,6 +900,40 @@ async def test_process_event_sets_has_unread_on_assistant_message(db_factory):
     async with db_factory() as db:
         task = await db.get(Task, task_id)
     assert task.has_unread is True
+
+
+@pytest.mark.asyncio
+async def test_process_event_keeps_short_complete_codex_reply(db_factory):
+    """Codex answers like 'OK' are final items, not Claude stream fragments."""
+    from sqlalchemy import func, select
+    from backend.models.log_entry import LogEntry
+
+    async with db_factory() as db:
+        inst = Instance(name="short-codex-reply-inst")
+        db.add(inst)
+        await db.commit()
+        await db.refresh(inst)
+        inst_id = inst.id
+
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    im = InstanceManager(db_factory, broadcaster)
+    raw = json.dumps({
+        "type": "item.completed",
+        "item": {"id": "msg-1", "type": "agent_message", "text": "OK"},
+    })
+    event = im._parse_codex_line(raw)
+
+    await im._process_event(inst_id, None, event)
+
+    async with db_factory() as db:
+        count = await db.scalar(
+            select(func.count()).select_from(LogEntry).where(
+                LogEntry.instance_id == inst_id,
+                LogEntry.content == "OK",
+            )
+        )
+    assert count == 1
 
 
 @pytest.mark.asyncio
@@ -1798,3 +1903,253 @@ async def test_process_event_no_reactivate_on_stale_events(db_factory, flag):
         t = await db.get(Task, task_id)
         assert t.status == "completed"
     assert _status_change_payloads(broadcaster) == []
+
+
+# === GPT-5.6 per-model effort in codex command ===
+
+
+def test_build_command_codex_gpt56_passes_max_effort():
+    # 旧代码把 max 一律丢弃（"codex 无 max"），但 gpt-5.6-sol 支持 max
+    im = InstanceManager(MagicMock(), MagicMock())
+    cmd = im._build_command(provider="codex", prompt="hi", model="gpt-5.6-sol", resume_session_id=None, effort_level="max")
+    assert 'model_reasoning_effort="max"' in cmd
+
+
+def test_build_command_codex_gpt56_passes_ultra_effort():
+    im = InstanceManager(MagicMock(), MagicMock())
+    cmd = im._build_command(provider="codex", prompt="hi", model="gpt-5.6-terra", resume_session_id=None, effort_level="ultra")
+    assert 'model_reasoning_effort="ultra"' in cmd
+
+
+def test_build_command_codex_old_model_clamps_max_to_xhigh():
+    # gpt-5.5 不支持 max：夹到 xhigh 而不是静默丢弃
+    im = InstanceManager(MagicMock(), MagicMock())
+    cmd = im._build_command(provider="codex", prompt="hi", model="gpt-5.5", resume_session_id=None, effort_level="max")
+    assert 'model_reasoning_effort="xhigh"' in cmd
+
+
+def test_build_command_codex_luna_clamps_ultra_to_max():
+    im = InstanceManager(MagicMock(), MagicMock())
+    cmd = im._build_command(provider="codex", prompt="hi", model="gpt-5.6-luna", resume_session_id=None, effort_level="ultra")
+    assert 'model_reasoning_effort="max"' in cmd
+
+
+def test_build_command_codex_supported_effort_still_passed():
+    im = InstanceManager(MagicMock(), MagicMock())
+    cmd = im._build_command(provider="codex", prompt="hi", model="gpt-5.5", resume_session_id=None, effort_level="high")
+    assert 'model_reasoning_effort="high"' in cmd
+
+
+# ---------------------------------------------------------------------------
+# Codex event parsing — reasoning / file_change / mcp_tool_call / web_search /
+# todo_list / error item / turn.failed（字段名来自 codex-rs rust-v0.144.6
+# exec/src/exec_events.rs 实证）
+# ---------------------------------------------------------------------------
+
+def test_parse_codex_reasoning_becomes_thinking():
+    im = InstanceManager(MagicMock(), MagicMock())
+    event = im._parse_codex_line(json.dumps({
+        "type": "item.completed",
+        "item": {"id": "item_1", "type": "reasoning", "text": "Let me check the tests first."},
+    }))
+
+    assert event["event_type"] == "thinking"
+    assert event["role"] == "assistant"
+    assert event["content"] == "Let me check the tests first."
+
+
+def test_parse_codex_empty_reasoning_skipped():
+    im = InstanceManager(MagicMock(), MagicMock())
+    assert im._parse_codex_line(json.dumps({
+        "type": "item.completed",
+        "item": {"id": "item_1", "type": "reasoning", "text": ""},
+    })) is None
+
+
+def test_parse_codex_file_change():
+    im = InstanceManager(MagicMock(), MagicMock())
+    event = im._parse_codex_line(json.dumps({
+        "type": "item.completed",
+        "item": {
+            "id": "item_2",
+            "type": "file_change",
+            "changes": [{"path": "src/app.py", "kind": "update"},
+                        {"path": "src/new.py", "kind": "add"}],
+            "status": "completed",
+        },
+    }))
+
+    assert event["event_type"] == "tool_result"
+    assert event["tool_name"] == "FileChange"
+    assert "update src/app.py" in event["tool_output"]
+    assert "add src/new.py" in event["tool_output"]
+    assert event["is_error"] is False
+
+
+def test_parse_codex_file_change_failed_is_error():
+    im = InstanceManager(MagicMock(), MagicMock())
+    event = im._parse_codex_line(json.dumps({
+        "type": "item.completed",
+        "item": {"id": "i", "type": "file_change", "changes": [], "status": "failed"},
+    }))
+    assert event["is_error"] is True
+
+
+def test_parse_codex_mcp_tool_call_started_and_completed():
+    im = InstanceManager(MagicMock(), MagicMock())
+    started = im._parse_codex_line(json.dumps({
+        "type": "item.started",
+        "item": {"id": "i", "type": "mcp_tool_call", "server": "ccm", "tool": "create_monitor",
+                 "arguments": {"interval": 60}, "status": "in_progress"},
+    }))
+    assert started["event_type"] == "tool_use"
+    assert started["tool_name"] == "ccm.create_monitor"
+    assert json.loads(started["tool_input"]) == {"interval": 60}
+
+    completed = im._parse_codex_line(json.dumps({
+        "type": "item.completed",
+        "item": {"id": "i", "type": "mcp_tool_call", "server": "ccm", "tool": "create_monitor",
+                 "result": {"ok": True}, "status": "completed"},
+    }))
+    assert completed["event_type"] == "tool_result"
+    assert completed["tool_name"] == "ccm.create_monitor"
+    assert json.loads(completed["tool_output"]) == {"ok": True}
+    assert completed["is_error"] is False
+
+
+def test_parse_codex_mcp_tool_call_failed():
+    im = InstanceManager(MagicMock(), MagicMock())
+    event = im._parse_codex_line(json.dumps({
+        "type": "item.completed",
+        "item": {"id": "i", "type": "mcp_tool_call", "server": "ccm", "tool": "x",
+                 "error": {"message": "boom"}, "status": "failed"},
+    }))
+    assert event["event_type"] == "tool_result"
+    assert event["is_error"] is True
+    assert "boom" in event["tool_output"]
+
+
+def test_parse_codex_web_search():
+    im = InstanceManager(MagicMock(), MagicMock())
+    started = im._parse_codex_line(json.dumps({
+        "type": "item.started",
+        "item": {"id": "i", "type": "web_search", "query": "fastapi websocket"},
+    }))
+    assert started["event_type"] == "tool_use"
+    assert started["tool_name"] == "WebSearch"
+
+    completed = im._parse_codex_line(json.dumps({
+        "type": "item.completed",
+        "item": {"id": "i", "type": "web_search", "query": "fastapi websocket"},
+    }))
+    assert completed["event_type"] == "tool_result"
+    assert "fastapi websocket" in completed["tool_output"]
+
+
+def test_parse_codex_todo_list():
+    im = InstanceManager(MagicMock(), MagicMock())
+    event = im._parse_codex_line(json.dumps({
+        "type": "item.updated",
+        "item": {"id": "i", "type": "todo_list",
+                 "items": [{"text": "write tests", "completed": True},
+                           {"text": "run tests", "completed": False}]},
+    }))
+    assert event["event_type"] == "system_event"
+    assert "✓ write tests" in event["content"]
+    assert "○ run tests" in event["content"]
+
+
+def test_parse_codex_error_item():
+    im = InstanceManager(MagicMock(), MagicMock())
+    event = im._parse_codex_line(json.dumps({
+        "type": "item.completed",
+        "item": {"id": "i", "type": "error", "message": "non-fatal oops"},
+    }))
+    assert event["event_type"] == "system_event"
+    assert event["is_error"] is True
+    assert event["content"] == "non-fatal oops"
+
+
+def test_parse_codex_turn_failed_extracts_nested_message():
+    # 实测形状（codex exec --json 认证失败捕获）：
+    # {"type":"turn.failed","error":{"message":"..."}}
+    im = InstanceManager(MagicMock(), MagicMock())
+    event = im._parse_codex_line(json.dumps({
+        "type": "turn.failed",
+        "error": {"message": "stream disconnected before completion: transport error"},
+    }))
+    assert event["event_type"] == "system_event"
+    assert event["is_error"] is True
+    assert event["content"] == "stream disconnected before completion: transport error"
+
+
+def test_parse_codex_file_change_started_is_tool_use():
+    # 实测（CLI 0.144.6）file_change 也发 item.started——不映射会退化成
+    # 一条 "in_progress" 噪音 system_event
+    im = InstanceManager(MagicMock(), MagicMock())
+    event = im._parse_codex_line(json.dumps({
+        "type": "item.started",
+        "item": {"id": "i", "type": "file_change",
+                 "changes": [{"path": "probe.txt", "kind": "add"}],
+                 "status": "in_progress"},
+    }))
+    assert event["event_type"] == "tool_use"
+    assert event["tool_name"] == "FileChange"
+    assert "probe.txt" in event["tool_input"]
+
+
+@pytest.mark.asyncio
+async def test_process_event_codex_window_backfill(db_factory):
+    """codex 任务的 usage 不带 context_window → 按 codex 窗口表回填
+    （gpt-5.6-terra = 272K，而不是 claude 的 200K 默认）。"""
+    async with db_factory() as db:
+        from backend.models.instance import Instance
+        from backend.models.task import Task
+        inst = Instance(name="codex-ctx-inst")
+        db.add(inst)
+        await db.commit()
+        await db.refresh(inst)
+        inst_id = inst.id
+
+        task = Task(title="codex ctx", provider="codex", model="gpt-5.6-terra")
+        db.add(task)
+        await db.commit()
+        await db.refresh(task)
+        task_id = task.id
+
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    im = InstanceManager(db_factory, broadcaster)
+
+    event = {
+        "event_type": "system_event",
+        "role": None,
+        "content": "turn.completed",
+        "tool_name": None,
+        "tool_input": None,
+        "tool_output": None,
+        "raw_json": "{}",
+        "is_error": False,
+        "timestamp": "2024-01-01T00:00:00",
+        "context_usage": {
+            "input_tokens": 5000,
+            "cache_read_input_tokens": 30000,
+            "cache_creation_input_tokens": 0,
+            "output_tokens": 100,
+            "total_input_tokens": 35000,
+        },
+    }
+    await im._process_event(inst_id, task_id, event)
+
+    ctx_calls = [
+        c for c in broadcaster.broadcast.call_args_list
+        if c[0][0] == f"task:{task_id}" and c[0][1].get("event_type") == "context_usage"
+    ]
+    assert len(ctx_calls) == 1
+    assert ctx_calls[0][0][1]["context_window"] == 272_000
+
+    # 落库的 usage 也带正确窗口（dispatcher 压缩阈值读的就是它）
+    async with db_factory() as db:
+        from backend.models.task import Task
+        t = await db.get(Task, task_id)
+        assert t.context_window_usage["context_window"] == 272_000

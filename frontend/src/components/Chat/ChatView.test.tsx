@@ -13,10 +13,10 @@ vi.mock('../../api/client', () => ({
     stopTaskSession: vi.fn().mockResolvedValue({}),
     uploadImages: vi.fn().mockResolvedValue([]),
     listMonitorSessions: vi.fn().mockResolvedValue([]),
+    getAskUserPending: vi.fn().mockResolvedValue({ pending: [] }),
     getRuntimeSettings: vi.fn().mockResolvedValue({ use_pty_mode: false, pty_available: false }),
     config: vi.fn().mockResolvedValue({ model_options: ['claude-opus-4-6'], codex_model_options: [] }),
     injectTaskMessage: vi.fn().mockResolvedValue({ ok: true, injected: true }),
-    getAskUserPending: vi.fn().mockResolvedValue({ pending: [] }),
     listQuickPhrases: vi.fn().mockResolvedValue([]),
     createQuickPhrase: vi.fn().mockResolvedValue({}),
     updateQuickPhrase: vi.fn().mockResolvedValue({}),
@@ -93,6 +93,7 @@ describe('ChatView', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    (api.getTaskChatHistory as ReturnType<typeof vi.fn>).mockResolvedValue([]);
   });
 
   describe('Initial prompt bubble', () => {
@@ -301,6 +302,32 @@ describe('ChatView', () => {
 
       expect(capturedOnReconnect).toBeDefined();
       expect(typeof capturedOnReconnect).toBe('function');
+    });
+
+    it('copies a user message without its sender prefix', async () => {
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      Object.assign(navigator, { clipboard: { writeText } });
+      const msgs: ChatMessage[] = [{
+        id: 1,
+        role: 'user',
+        event_type: 'user_message',
+        content: '[Admin] 现在进度怎么样了',
+        tool_name: null,
+        tool_input: null,
+        tool_output: null,
+        is_error: false,
+        loop_iteration: null,
+        timestamp: '2024-01-01T00:00:00Z',
+        image_urls: null,
+        attachments: null,
+      }];
+      (api.getTaskChatHistory as ReturnType<typeof vi.fn>).mockResolvedValue(msgs);
+
+      render(<ChatView task={makeTask({ description: null })} projects={projects} onBack={onBack} />);
+
+      await userEvent.click(await screen.findByTitle('Copy message'));
+
+      expect(writeText).toHaveBeenCalledWith('现在进度怎么样了');
     });
   });
 
@@ -660,5 +687,44 @@ describe('聊天图片附件展示（2026-07-16 用户反馈：发图后图片�
     render(<ChatView task={task} projects={projects} onBack={onBack} onTaskUpdated={onTaskUpdated} />);
     const img = document.querySelector('img[src*="/api/uploads/init.png"]');
     expect(img).not.toBeNull();
+  });
+});
+
+describe('Codex app-server 增量消息', () => {
+  const projects: Project[] = [];
+  const onBack = vi.fn();
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    (api.getTaskChatHistory as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+  });
+
+  it('按 item_id 合并 delta，并用最终消息原位替换而不重复', async () => {
+    const task = makeTask({ id: 21, provider: 'codex' });
+    render(<ChatView task={task} projects={projects} onBack={onBack} />);
+    await waitFor(() => expect(api.getTaskChatHistory).toHaveBeenCalled());
+
+    await act(async () => {
+      capturedOnMessage!({
+        channel: 'task:21',
+        data: { event_type: 'message_delta', item_id: 'msg-1', content: 'Hel' },
+      });
+      capturedOnMessage!({
+        channel: 'task:21',
+        data: { event_type: 'message_delta', item_id: 'msg-1', content: 'lo' },
+      });
+    });
+    expect(screen.getAllByText('Hello')).toHaveLength(1);
+
+    await act(async () => {
+      capturedOnMessage!({
+        channel: 'task:21',
+        data: {
+          event_type: 'message', item_id: 'msg-1', role: 'assistant',
+          content: 'Hello', is_error: false,
+        },
+      });
+    });
+    expect(screen.getAllByText('Hello')).toHaveLength(1);
   });
 });

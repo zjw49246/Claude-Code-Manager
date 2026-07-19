@@ -197,6 +197,8 @@ export interface ChatMessage {
   image_urls: string[] | null;
   attachments: FileAttachment[] | null;
   source?: string | null;
+  /** Live-only app-server item id used to merge streamed deltas into the final message. */
+  stream_item_id?: string | null;
   // 权限透传卡片（event_type === 'permission_request' 时存在）
   request_id?: string | null;
   permission_status?: 'pending' | 'allow' | 'deny' | 'expired' | null;
@@ -364,6 +366,7 @@ export interface MonitoredRepo {
   enabled: boolean;
   auto_merge: boolean;
   webhook_secret: string;
+  provider: string;
   review_model: string | null;
   default_branch: string;
   allowed_authors: string[];
@@ -933,9 +936,9 @@ export const api = {
   // PR Monitor
   getMonitoredRepos: () =>
     request<MonitoredRepo[]>('/api/pr-monitor/repos'),
-  createMonitoredRepo: (data: { repo_full_name: string; project_id?: number; worker_id?: number; auto_merge?: boolean; review_model?: string; default_branch?: string; allowed_authors?: string[] }) =>
+  createMonitoredRepo: (data: { repo_full_name: string; project_id?: number; worker_id?: number; auto_merge?: boolean; provider?: string; review_model?: string; default_branch?: string; allowed_authors?: string[] }) =>
     request<MonitoredRepo>('/api/pr-monitor/repos', { method: 'POST', body: JSON.stringify(data) }),
-  updateMonitoredRepo: (id: number, data: { project_id?: number; auto_merge?: boolean; review_model?: string; default_branch?: string; allowed_authors?: string[]; enabled?: boolean }) =>
+  updateMonitoredRepo: (id: number, data: { project_id?: number; auto_merge?: boolean; provider?: string; review_model?: string | null; default_branch?: string; allowed_authors?: string[]; enabled?: boolean }) =>
     request<MonitoredRepo>(`/api/pr-monitor/repos/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteMonitoredRepo: (id: number) =>
     request<{ ok: boolean }>(`/api/pr-monitor/repos/${id}`, { method: 'DELETE' }),
@@ -1036,7 +1039,7 @@ export const api = {
   // System
   health: () => request<{ status: string; commit?: string }>('/api/system/health'),
   stats: () => request<{ tasks: Record<string, number>; running_instances: number }>('/api/system/stats'),
-  config: () => request<{ default_provider: string; provider_options: string[]; default_model: string; model_options: string[]; default_codex_model: string; codex_model_options: string[]; default_effort: string; effort_options: string[]; codex_effort_options: string[] }>('/api/system/config'),
+  config: () => request<{ default_provider: string; provider_options: string[]; default_model: string; model_options: string[]; default_codex_model: string; codex_model_options: string[]; default_effort: string; effort_options: string[]; codex_effort_options: string[]; codex_model_efforts: Record<string, string[]> }>('/api/system/config'),
   listSkills: () => request<{ key: string; label: string; description: string; always: boolean; priority: number; tags: string[] }[]>('/api/system/skills'),
   listSkillsCached: () => listSkillsCached(),
   listUserSkillsCached: () => listUserSkillsCached(),

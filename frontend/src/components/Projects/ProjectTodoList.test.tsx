@@ -10,6 +10,7 @@ vi.mock('../../api/client', () => ({
     updateProjectTodo: vi.fn(),
     deleteProjectTodo: vi.fn(),
     createTask: vi.fn(),
+    config: vi.fn(() => Promise.resolve({ provider_options: ['claude', 'codex'], default_provider: 'claude' })),
   },
 }));
 
@@ -94,6 +95,7 @@ describe('ProjectTodoList', () => {
         title: 'Refactor auth',
         description: 'Write a focused patch.',
         project_id: 7,
+        provider: 'claude',
       });
     });
     // Closing the loop: the source todo is marked done + linked to the new task.

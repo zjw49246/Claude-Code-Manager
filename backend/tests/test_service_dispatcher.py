@@ -462,7 +462,7 @@ async def test_loop_iteration_passes_pool_config_dir(db_factory, tmp_path):
     # Pool was consulted, and its choice flowed into the launch.
     d._resolve_resume_config_dir.assert_awaited()
     # iteration 0 has no session to resume yet → resolver called with None
-    assert d._resolve_resume_config_dir.await_args.args == (None,)
+    assert d._resolve_resume_config_dir.await_args.args == (None, "claude")
     assert d.instance_manager.launch.await_args.kwargs["config_dir"] == "/pool/acc-7"
 
 
@@ -2007,7 +2007,7 @@ async def test_goal_turn_passes_pool_config_dir(db_factory):
 
     d._resolve_resume_config_dir.assert_awaited()
     # turn 0 launches a fresh session → resolver called with None
-    assert d._resolve_resume_config_dir.await_args.args == (None,)
+    assert d._resolve_resume_config_dir.await_args.args == (None, "claude")
     assert d.instance_manager.launch.await_args.kwargs["config_dir"] == "/pool/acc-9"
 
 
@@ -2855,7 +2855,11 @@ async def _setup_queued_msg_two_idle(db_factory, monkeypatch):
     from backend.services.dispatcher import QueuedMessage, PRIORITY_USER
 
     # Session JSONL "present" → skip the failed/session-gone recovery branch.
-    monkeypatch.setattr(tasks_mod, "_find_session_jsonl", lambda sid: "/tmp/fake.jsonl")
+    monkeypatch.setattr(
+        tasks_mod,
+        "_find_session_jsonl",
+        lambda sid, provider="claude": "/tmp/fake.jsonl",
+    )
 
     d = _make_dispatcher(db_factory)
     d._resolve_resume_config_dir = AsyncMock(return_value=None)
@@ -2926,3 +2930,127 @@ async def test_queued_message_skips_launching_instance(db_factory, monkeypatch):
     # The pre-existing claim on id1 is untouched; id2's transient claim is freed.
     assert id1 in d._launching_instances
     assert id2 not in d._launching_instances
+
+
+@pytest.mark.asyncio
+async def test_failed_codex_task_reuses_present_native_thread(db_factory, monkeypatch):
+    """A failed turn must not clone/replace a valid Codex rollout."""
+    import backend.api.tasks as tasks_mod
+
+    d, _id1, _id2, task_id, msg = await _setup_queued_msg_two_idle(
+        db_factory, monkeypatch
+    )
+    clone = AsyncMock()
+    monkeypatch.setattr(tasks_mod, "_clone_session", clone)
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+        task.provider = "codex"
+        task.status = "failed"
+        await db.commit()
+
+    await d._process_queued_message(task_id, msg)
+
+    clone.assert_not_awaited()
+    assert d.instance_manager.launch.await_args.kwargs["resume_session_id"] == "sess-1"
+
+
+# === Codex provider prompt tests (provider-aware agent doc) ===
+
+
+@pytest.mark.asyncio
+async def test_goal_initial_prompt_codex_references_agents_md(db_factory):
+    """Codex goal tasks are pointed at AGENTS.md instead of CLAUDE.md."""
+    d = _make_dispatcher(db_factory)
+    task = Task(
+        title="t", description="implement X", mode="goal",
+        goal_condition="all tests pass", goal_max_turns=10, provider="codex",
+    )
+    prompt = d._build_goal_initial_prompt(task)
+    assert "AGENTS.md" in prompt
+
+
+@pytest.mark.asyncio
+async def test_build_task_prompt_provider_doc(db_factory):
+    """Task prompt preamble follows the task's provider."""
+    d = _make_dispatcher(db_factory)
+    claude_prompt = await d._build_task_prompt(
+        Task(title="t", description="do X", provider="claude")
+    )
+    codex_prompt = await d._build_task_prompt(
+        Task(title="t", description="do X", provider="codex")
+    )
+    assert "请阅读项目根目录的 CLAUDE.md" in claude_prompt
+    # Codex loads AGENTS.md natively; explicitly asking it to read the file
+    # again turns trivial prompts into redundant shell/file work.
+    assert "请阅读项目根目录的 AGENTS.md" not in codex_prompt
+    assert "关键内容必须保持同步" in codex_prompt
+
+
+@pytest.mark.asyncio
+async def test_build_task_prompt_carries_doc_sync_note(db_factory):
+    """两种 provider 的 prompt 前导都下发 CLAUDE.md/AGENTS.md 同步纪律。"""
+    d = _make_dispatcher(db_factory)
+    for provider in ("claude", "codex"):
+        prompt = await d._build_task_prompt(
+            Task(title="t", description="do X", provider=provider)
+        )
+        assert "关键内容必须保持同步" in prompt
+
+
+@pytest.mark.asyncio
+async def test_build_task_prompt_codex_skips_skill_templates(db_factory, monkeypatch):
+    """Skill 模板描述 MCP 工具，MCP config 只注入 claude —— codex 不应收到模板。"""
+    from backend.services.command_registry import COMMAND_REGISTRY, Command
+    monkeypatch.setitem(COMMAND_REGISTRY, "fakeskill", Command(
+        name="fakeskill", description="test", prompt_template="FAKESKILL_TEMPLATE",
+    ))
+    d = _make_dispatcher(db_factory)
+    claude_prompt = await d._build_task_prompt(
+        Task(title="t", description="do X", provider="claude",
+             enabled_skills={"fakeskill": True})
+    )
+    codex_prompt = await d._build_task_prompt(
+        Task(title="t", description="do X", provider="codex",
+             enabled_skills={"fakeskill": True})
+    )
+    assert "FAKESKILL_TEMPLATE" in claude_prompt
+    assert "FAKESKILL_TEMPLATE" not in codex_prompt
+
+
+def test_loop_prompt_codex_references_agents_md(db_factory):
+    """Loop prompts reference AGENTS.md for codex tasks."""
+    d = _make_dispatcher(db_factory)
+    task = Task(
+        title="t", description="bg", mode="loop", todo_file_path="TODO.md",
+        provider="codex", max_iterations=5,
+    )
+    prompt = d._build_loop_prompt(task, 0, "/tmp/sig.json")
+    assert "AGENTS.md" in prompt
+    assert "CLAUDE.md" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_backfills_agents_md(db_factory, tmp_path):
+    """任务启动时把 AGENTS.md 惰性补进有 CLAUDE.md 的存量项目。"""
+    (tmp_path / "CLAUDE.md").write_text("# guide\n")
+    d = _make_dispatcher(db_factory)
+
+    async with db_factory() as db:
+        inst = Instance(name="worker-1")
+        db.add(inst)
+        task = Task(title="t", description="do X", target_repo=str(tmp_path))
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_obj = task
+
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.wait = AsyncMock(return_value=0)
+    d.instance_manager.processes = {inst_id: mock_proc}
+
+    await d._run_task_lifecycle(inst_id, task_obj)
+
+    assert (tmp_path / "AGENTS.md").exists()

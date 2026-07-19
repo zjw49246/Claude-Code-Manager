@@ -45,6 +45,34 @@ def _default_provider() -> str:
     return provider if isinstance(provider, str) and provider else "claude"
 
 
+def _agent_doc_name(provider: str | None) -> str:
+    """Instruction file for the given CLI provider (Codex reads AGENTS.md)."""
+    return "AGENTS.md" if (provider or "claude").lower() == "codex" else "CLAUDE.md"
+
+
+# CLAUDE.md/AGENTS.md 同步纪律：靠 agent 编码时自觉执行、不做程序化同步。
+# 经 prompt 前导下发是唯一覆盖所有被开发项目的注入点（老项目的文档里没有这条规则）。
+_DOC_SYNC_NOTE = (
+    "注意：如需修改 CLAUDE.md 或 AGENTS.md，两个文件的关键内容必须保持同步——"
+    "往其中一个写入新内容时，把相同的意思也写进另一个（不要求逐字一致；"
+    "若两者是 symlink 关系则改一处即可，无需额外操作）。"
+)
+
+
+def _agent_doc_preamble(provider: str | None) -> str:
+    """First-line prompt preamble pointing the agent at the project doc.
+
+    Codex automatically loads AGENTS.md.  Explicitly telling it to read the
+    same file again makes even a trivial task perform redundant shell/file
+    operations.  Keep only the cross-document synchronization rule for Codex;
+    Claude still needs the explicit CLAUDE.md workflow reminder.
+    """
+    if (provider or "claude").lower() == "codex":
+        return _DOC_SYNC_NOTE
+    read_line = "请阅读项目根目录的 CLAUDE.md 了解项目规范和任务完成后的 git 流程。"
+    return f"{read_line}\n{_DOC_SYNC_NOTE}"
+
+
 # Priority levels for the per-task message queue
 PRIORITY_USER = 0
 PRIORITY_MONITOR_COMPLETE = 1
@@ -243,6 +271,9 @@ class GlobalDispatcher:
         self.instance_manager = instance_manager
         self.broadcaster = broadcaster
         self._dispatch_task: asyncio.Task | None = None
+        # New tasks wake the loop immediately.  The 2s timeout remains as a
+        # safety poll for tasks inserted by legacy/direct DB paths.
+        self._dispatch_wakeup = asyncio.Event()
         self._running_tasks: dict[int, asyncio.Task] = {}  # instance_id -> lifecycle task
         # Instances mid-launch by the queued-message path. Their DB status is
         # still "idle" until launch() flips it to "running", so without an
@@ -294,6 +325,10 @@ class GlobalDispatcher:
         self._dispatch_task = asyncio.create_task(self._dispatch_loop())
         self._curator_task = asyncio.create_task(self._curator_loop())
         logger.info("GlobalDispatcher started")
+
+    def wake(self) -> None:
+        """Wake the task dispatcher after a pending task is committed."""
+        self._dispatch_wakeup.set()
 
     async def _cleanup_stale_state(self):
         """Reset instances and tasks stuck in active states after a crash/restart."""
@@ -521,9 +556,10 @@ class GlobalDispatcher:
                 logger.exception("curator: error in curator loop")
 
     async def _dispatch_loop(self):
-        """Poll for idle instances + pending tasks and dispatch."""
+        """Dispatch pending tasks, event-driven with a low-frequency poll fallback."""
         while self._running:
             try:
+                self._dispatch_wakeup.clear()
                 # Top up idle workers before looking for capacity
                 await self._ensure_min_idle_instances()
 
@@ -576,7 +612,10 @@ class GlobalDispatcher:
                         self._run_task_lifecycle(instance.id, task, git_env)
                     )
 
-                await asyncio.sleep(2)
+                try:
+                    await asyncio.wait_for(self._dispatch_wakeup.wait(), timeout=2)
+                except asyncio.TimeoutError:
+                    pass
 
             except asyncio.CancelledError:
                 break
@@ -684,8 +723,13 @@ class GlobalDispatcher:
         # each) — must run off the event loop
         return await self.pool.select_async(exclude=exclude, validate=True)
 
-    async def _resolve_resume_config_dir(self, session_id: str | None) -> str | None:
+    async def _resolve_resume_config_dir(
+        self, session_id: str | None, provider: str | None = "claude"
+    ) -> str | None:
         """Resolve the CLAUDE_CONFIG_DIR for a (possibly resuming) launch.
+
+        Codex 任务直接返回 None：号池/CLAUDE_CONFIG_DIR 是 claude 专属，
+        为 codex 选号只会白白 select+migrate（污染轮转指针），launch 也不会用。
 
         Prefers a fresh, validated pool account and migrates the session JSONL
         into it. The critical case is when the pool can hand out **no** healthy
@@ -701,6 +745,8 @@ class GlobalDispatcher:
         Returns a config_dir, or None when there is no pool (default account)
         or no session to anchor a fallback to.
         """
+        if (provider or "claude").lower() != "claude":
+            return None
         if not (self.pool and self.pool.enabled):
             return None
 
@@ -785,6 +831,14 @@ class GlobalDispatcher:
         if not self.pool or exit_code == 0 or exit_code in (-2, 130):
             return None
 
+        # 号池是 claude 专属；codex 的限额文案（"hit your usage limit"）会误命中
+        # claude 的 _RATE_LIMIT_RE——不拦会冷却无辜的 claude 账号并把 codex
+        # session 迁进 claude config_dir，必须按 provider 显式挡掉。
+        async with self.db_factory() as db:
+            t = await db.get(Task, task_id)
+            if t and (t.provider or "claude").lower() != "claude":
+                return None
+
         from backend.services.claude_pool import is_pool_rotatable, is_auth_failure, is_rate_limited
         from backend.services.claude_pool import migrate_session, collect_process_output_for_detection
 
@@ -862,13 +916,16 @@ class GlobalDispatcher:
         image_paths = metadata.get("image_paths") or []
         secret_ids = metadata.get("secret_ids") or []
         secrets_block = await _build_secrets_block(self.db_factory, secret_ids)
-        parts = ["请阅读项目根目录的 CLAUDE.md 了解项目规范和任务完成后的 git 流程。"]
+        parts = [_agent_doc_preamble(task.provider)]
         if secrets_block:
             parts.append(secrets_block)
         if image_paths:
             image_list = "\n".join(f"- {p}" for p in image_paths)
             parts.append(f"用户提供了以下参考图片，请先用 Read 工具查看：\n{image_list}")
-        if task.enabled_skills:
+        # Skill 模板描述的是 MCP 工具，而 MCP config 只注入 claude CLI
+        # （instance_manager.launch 里 provider == "claude" 才 generate_mcp_config），
+        # codex 任务注入这些模板只会让它调用不存在的工具。
+        if task.enabled_skills and (task.provider or "claude").lower() != "codex":
             from backend.services.command_registry import COMMAND_REGISTRY
             for skill_name, enabled in task.enabled_skills.items():
                 if enabled and skill_name in COMMAND_REGISTRY:
@@ -957,7 +1014,7 @@ class GlobalDispatcher:
         failure is no longer transient (or the budget is exhausted) we hand off
         to account rotation, then to the normal retry/fail path.
         """
-        from backend.services.claude_pool import is_transient_overload, transient_retry_delay
+        from backend.services.claude_pool import is_transient_for, transient_retry_delay
 
         delay = transient_retry_delay(
             attempt,
@@ -1027,7 +1084,7 @@ class GlobalDispatcher:
         if (
             settings.transient_retry_enabled
             and attempt < settings.transient_retry_max
-            and (still_transient or is_transient_overload(combined))
+            and (still_transient or is_transient_for(task.provider, combined))
         ):
             await self._run_transient_retry(
                 instance_id, task, cwd, git_env,
@@ -1090,6 +1147,12 @@ class GlobalDispatcher:
             # === Step 2: Determine cwd and update task ===
             # 必须是绝对路径：PTY 模式按 cwd 推导 JSONL 轮询路径，"." 会落空
             cwd = task.last_cwd or task.target_repo or os.getcwd()
+
+            # 存量项目统一补 AGENTS.md（Codex 指令文件）：有 CLAUDE.md 而无
+            # AGENTS.md 时注入 symlink，任何项目下次跑任务时自动补齐。
+            # 不 commit（由 agent 的正常 git 流程带入），幂等且绝不阻断任务。
+            from backend.services.agent_docs import ensure_agents_md
+            ensure_agents_md(task.target_repo or cwd)
             thinking_budget = task.thinking_budget
             effort_level = task.effort_level or settings.default_effort
             async with self.db_factory() as db:
@@ -1128,7 +1191,7 @@ class GlobalDispatcher:
             # task that already has a session) this also anchors to the session's
             # resident dir when the pool is exhausted, so --resume doesn't miss
             # the JSONL and hard-fail with "No conversation found" (prod #734/#740).
-            pool_config_dir = await self._resolve_resume_config_dir(task.session_id)
+            pool_config_dir = await self._resolve_resume_config_dir(task.session_id, task.provider)
 
             await self.instance_manager.launch(
                 instance_id=instance_id,
@@ -1204,12 +1267,12 @@ class GlobalDispatcher:
                 self.instance_manager._pty_rate_limit_seen.discard(instance_id)
 
             if exit_code != 0:
-                from backend.services.claude_pool import is_transient_overload
+                from backend.services.claude_pool import is_transient_for
                 combined = await self._collect_failure_output(instance_id, task.id)
 
                 # Transient overload that only surfaced on stderr (subprocess
                 # mode) — the flag above may miss it, so re-check the text.
-                if settings.transient_retry_enabled and is_transient_overload(combined):
+                if settings.transient_retry_enabled and is_transient_for(task.provider, combined):
                     await self._run_transient_retry(
                         instance_id, task, cwd, git_env,
                         thinking_budget=thinking_budget,
@@ -1587,7 +1650,7 @@ class GlobalDispatcher:
             # account and die with "No conversation found". For a resume it
             # anchors to the session's resident account (no config_dir drift →
             # PTY hot session preserved); fresh iterations get a healthy pick.
-            config_dir = await self._resolve_resume_config_dir(resume_sid)
+            config_dir = await self._resolve_resume_config_dir(resume_sid, task.provider)
 
             await self.instance_manager.launch(
                 instance_id=instance_id,
@@ -1775,7 +1838,7 @@ class GlobalDispatcher:
                 # config_dir=None and silently inherited the hardcoded systemd
                 # CLAUDE_CONFIG_DIR — the pool was never consulted. See loop fix
                 # (#770); goal had the identical gap.
-                config_dir = await self._resolve_resume_config_dir(None)
+                config_dir = await self._resolve_resume_config_dir(None, task.provider)
                 await self.instance_manager.launch(
                     instance_id=instance_id,
                     prompt=prompt,
@@ -1795,7 +1858,7 @@ class GlobalDispatcher:
                 follow_up = self._build_goal_followup_prompt(last_reason, turn, max_turns)
                 # Resume on the session's resident account (no config_dir drift →
                 # PTY hot session preserved); migrate / fall back if cooled down.
-                config_dir = await self._resolve_resume_config_dir(session_id)
+                config_dir = await self._resolve_resume_config_dir(session_id, task.provider)
                 await self.instance_manager.launch(
                     instance_id=instance_id,
                     prompt=follow_up,
@@ -1909,7 +1972,7 @@ class GlobalDispatcher:
 
     def _build_goal_initial_prompt(self, task: Task) -> str:
         """Build the first-turn prompt for a goal task."""
-        parts = ["请阅读项目根目录的 CLAUDE.md 了解项目规范和任务完成后的 git 流程。"]
+        parts = [_agent_doc_preamble(task.provider)]
 
         metadata = task.metadata_ or {}
         image_paths = metadata.get("image_paths") or []
@@ -1983,6 +2046,7 @@ class GlobalDispatcher:
         is already covered by CLAUDE.md — no need to repeat it here.
         """
         parts = []
+        doc = _agent_doc_name(task.provider)
         max_iterations = task.max_iterations or 50
         remaining = max_iterations - iteration
 
@@ -2019,7 +2083,7 @@ class GlobalDispatcher:
         if task.must_complete and iteration == 0:
             # First iteration of must_complete: require planning
             parts.append(f"""\
-请遵循 CLAUDE.md 中的所有要求和项目约定。
+请遵循 {doc} 中的所有要求和项目约定。
 
 这是一个必须全部完成的循环任务，你总共有 {max_iterations} 轮来完成所有任务项。
 
@@ -2056,7 +2120,7 @@ class GlobalDispatcher:
                         pass
 
             parts.append(f"""\
-请遵循 CLAUDE.md 中的所有要求和项目约定。
+请遵循 {doc} 中的所有要求和项目约定。
 
 这是一个必须全部完成的循环任务的第 {iteration + 1} 轮，还剩 {remaining} 轮。
 
@@ -2085,13 +2149,13 @@ class GlobalDispatcher:
                 total_note = f"\n注意：任务总数已确定为 {anchored_total}，progress 分母必须始终为 {anchored_total}，不要重新计数。"
 
             parts.append(f"""\
-请遵循 CLAUDE.md 中的所有要求和项目约定。
+请遵循 {doc} 中的所有要求和项目约定。
 
 这是一个持续循环任务的第 {iteration + 1} 轮。
 
 你的职责：
 1. 打开 {task.todo_file_path}，理解其结构，找到下一个待完成的任务项
-2. 根据 CLAUDE.md 的要求执行该任务项
+2. 根据 {doc} 的要求执行该任务项
 3. 在 todo 文件中将该项标记为已完成
 
 完成后，将以下 JSON 写入 {signal_path}：
@@ -2157,7 +2221,7 @@ class GlobalDispatcher:
         # Same pool anchoring as the main loop launch: resume on the session's
         # resident account, not the inherited systemd default (else --resume
         # misses the JSONL on the wrong account).
-        config_dir = await self._resolve_resume_config_dir(resume_sid)
+        config_dir = await self._resolve_resume_config_dir(resume_sid, task.provider)
 
         logger.info(f"Loop task {task.id} iter {iteration}: resuming session {resume_sid} to fix missing signal")
         await self.instance_manager.launch(
@@ -2865,7 +2929,10 @@ class GlobalDispatcher:
             # is always sacrificed to flip the task to "failed"; only the SECOND
             # message reaches this branch and recovers (prod task #725).
             from backend.api.tasks import _clone_session, _find_session_jsonl
-            session_gone = bool(task.session_id) and _find_session_jsonl(task.session_id) is None
+            provider = (task.provider or "claude").lower()
+            session_gone = bool(task.session_id) and _find_session_jsonl(
+                task.session_id, provider=provider
+            ) is None
             if task.session_id and (task.status == "failed" or session_gone):
                 if task.status == "failed":
                     logger.info("Task %d session crashed, recovering session...", task_id)
@@ -2875,11 +2942,16 @@ class GlobalDispatcher:
                         "(would otherwise hard-fail with 'No conversation found')",
                         task_id, task.session_id,
                     )
-                cloned = await _clone_session(task_id, db)
+                # A present Codex rollout remains resumable after a failed
+                # turn.  Unlike Claude's flat JSONL, it cannot be made into a
+                # new thread by merely copying/renaming the file because the
+                # thread id is embedded in its metadata.
+                keep_codex_session = provider == "codex" and not session_gone
+                cloned = None if keep_codex_session else await _clone_session(task_id, db)
                 if cloned:
                     task.session_id = cloned["session_id"]
                     logger.info("Task %d cloned session -> %s", task_id, task.session_id)
-                else:
+                elif not keep_codex_session:
                     # JSONL file missing, fall back to compact summary
                     logger.warning("Task %d JSONL not found, falling back to compact summary", task_id)
                     summary = await self._compact_session(task_id, task.session_id, db)
@@ -2890,6 +2962,11 @@ class GlobalDispatcher:
                             f"[上下文摘要 — 之前的对话记录（会话异常中断后恢复）]\n{summary}\n\n"
                             f"---\n\n[新消息]\n{msg.prompt}"
                         )
+                else:
+                    logger.info(
+                        "Task %d reusing existing Codex session %s after failed turn",
+                        task_id, task.session_id,
+                    )
                 # 关键：不能设成 "pending"——否则主调度循环 (dequeue) 会把它当作
                 # 新任务抢走一个空闲 instance 从头执行 task 描述，导致同一 task 出现
                 # 两个 Claude session（一个回应聊天、一个重跑任务）。设成 "in_progress"
@@ -2959,7 +3036,7 @@ class GlobalDispatcher:
             # — crucially — when the pool is exhausted still anchors --resume to
             # the session's resident dir instead of letting it fall through to an
             # inherited CLAUDE_CONFIG_DIR that lacks the JSONL (prod #734/#740).
-            config_dir = await self._resolve_resume_config_dir(task.session_id)
+            config_dir = await self._resolve_resume_config_dir(task.session_id, task.provider)
 
             logger.info(
                 f"Processing queued message for task {task_id}: source={msg.source} "
@@ -2981,11 +3058,18 @@ class GlobalDispatcher:
             if task.session_id and task.context_window_usage:
                 usage = task.context_window_usage
                 total_input = (usage.get("input_tokens") or 0) + (usage.get("cache_read_input_tokens") or 0) + (usage.get("cache_creation_input_tokens") or 0)
-                # context_window 可能被 CC 低报（1M 模型报 200K），用模型名兜底
-                window = usage.get("context_window") or 200_000
-                model_lower = (msg.model_override or task.model or "").lower()
-                if "[1m]" in model_lower or "fable" in model_lower:
-                    window = max(window, 1_000_000)
+                # context_window 可能被 CC 低报（1M 模型报 200K），用模型名兜底；
+                # codex 无该字段时查 codex 窗口表（272K/128K，非 claude 的 200K）
+                if (task.provider or "claude").lower() == "codex":
+                    from backend.services.codex_models import codex_context_window
+                    window = usage.get("context_window") or codex_context_window(
+                        msg.model_override or task.model
+                    )
+                else:
+                    window = usage.get("context_window") or 200_000
+                    model_lower = (msg.model_override or task.model or "").lower()
+                    if "[1m]" in model_lower or "fable" in model_lower:
+                        window = max(window, 1_000_000)
                 utilization = total_input / window if window else 0
                 # 阈值：GlobalSettings 覆盖 > env 默认（前端运行时设置可改）
                 gs = await db.get(GlobalSettings, 1)
@@ -3166,10 +3250,27 @@ class GlobalDispatcher:
                     logger.exception(f"Failed to restore enabled_skills for task {task_id}")
 
             # PTY mode: the persistent session stays alive after a turn, so
-            # _consume_output's process_exit broadcast never fires. The frontend
-            # relies on this event to clear the "thinking" spinner and re-enable
-            # the input box.
+            # _consume_output's process_exit broadcast never fires. Two things
+            # the frontend needs that _consume_output normally handles:
+            #  1. task.status back to "completed" in DB (poll-based fallback)
+            #  2. process_exit WS event (clears spinner immediately)
+            # Without (1) the 5s poll keeps seeing "executing" even after the
+            # spinner is cleared, re-pinning the UI into "running" state.
             if self.instance_manager.pty_mode_enabled:
+                try:
+                    async with self.db_factory() as db:
+                        result = await db.execute(
+                            update(Task)
+                            .where(Task.id == task_id, Task.status == "executing")
+                            .values(status="completed", completed_at=datetime.utcnow(), error_message=None)
+                        )
+                        await db.commit()
+                        if result.rowcount:
+                            from backend.services.task_events import broadcast_status_change
+                            await broadcast_status_change(task_id, "completed", inst_id)
+                except Exception:
+                    logger.exception("Failed to restore task %d status after PTY turn", task_id)
+
                 process = self.instance_manager.processes.get(inst_id)
                 exit_code = getattr(process, "returncode", 0) if process else 0
                 await self.broadcaster.broadcast(f"task:{task_id}", {

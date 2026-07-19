@@ -25,6 +25,21 @@ async def test_create_task(client):
 
 
 @pytest.mark.asyncio
+async def test_create_task_wakes_dispatcher_after_commit(client):
+    """New work should not wait for the dispatcher's 2-second safety poll."""
+    from backend.main import dispatcher
+
+    with patch.object(dispatcher, "wake") as wake:
+        resp = await client.post("/api/tasks", json={
+            "title": "Wake now",
+            "description": "Dispatch immediately",
+        })
+
+    assert resp.status_code == 201
+    wake.assert_called_once_with()
+
+
+@pytest.mark.asyncio
 async def test_create_task_with_project_id(client):
     resp = await client.post("/api/tasks", json={
         "title": "Test",

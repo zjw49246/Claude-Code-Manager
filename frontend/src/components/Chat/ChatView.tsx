@@ -614,6 +614,31 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
       return;
     }
 
+    // Codex app-server emits true token deltas.  Keep them live-only and merge
+    // by item id; item/completed later replaces this provisional bubble with
+    // the authoritative persisted message.
+    if (eventType === 'message_delta' || eventType === 'thinking_delta') {
+      const delta = (msg.data.content as string) || '';
+      const itemId = (msg.data.item_id as string) || null;
+      if (!delta || !itemId) return;
+      const renderedType = eventType === 'message_delta' ? 'message' : 'thinking';
+      setMessages((prev) => {
+        const index = prev.findIndex((entry) => entry.stream_item_id === itemId);
+        if (index >= 0) {
+          const next = [...prev];
+          next[index] = { ...next[index], content: `${next[index].content || ''}${delta}` };
+          return next;
+        }
+        return [...prev, {
+          id: Date.now() + Math.random(), role: 'assistant', event_type: renderedType,
+          content: delta, tool_name: null, tool_input: null, tool_output: null,
+          is_error: false, loop_iteration: null, timestamp: new Date().toISOString(),
+          image_urls: null, attachments: null, stream_item_id: itemId,
+        }];
+      });
+      return;
+    }
+
     const showTypes = ['message', 'result', 'tool_use', 'tool_result', 'system_init', 'system_event', 'thinking'];
     if (!showTypes.includes(eventType)) return;
 
@@ -642,7 +667,18 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
       attachments: (msg.data.attachments as FileAttachment[]) || null,
       source: (msg.data.source as string) || null,
     };
-    setMessages((prev) => [...prev, entry]);
+    const itemId = (msg.data.item_id as string) || null;
+    setMessages((prev) => {
+      if (itemId) {
+        const index = prev.findIndex((candidate) => candidate.stream_item_id === itemId);
+        if (index >= 0) {
+          const next = [...prev];
+          next[index] = entry;
+          return next;
+        }
+      }
+      return [...prev, entry];
+    });
   }, [task.id]);
 
   const fetchHistory = useCallback(() => {
@@ -771,6 +807,23 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
     };
   }, []);
 
+  // Prevent scroll/touch events from propagating to parent when messages
+  // container is not scrollable (content shorter than viewport)
+  useEffect(() => {
+    const el = messagesContainerRef.current;
+    if (!el) return;
+    const prevent = (e: Event) => {
+      if (el.scrollHeight <= el.clientHeight) {
+        e.preventDefault();
+      }
+    };
+    el.addEventListener('wheel', prevent, { passive: false });
+    el.addEventListener('touchmove', prevent, { passive: false });
+    return () => {
+      el.removeEventListener('wheel', prevent);
+      el.removeEventListener('touchmove', prevent);
+    };
+  }, []);
 
   const loadMoreRef = useRef(loadMoreHistory);
   loadMoreRef.current = loadMoreHistory;
@@ -1060,6 +1113,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
             sessions={monitorSessions}
             onSessionsChange={setMonitorSessions}
             onClose={() => setShowMonitorPanel(false)}
+            provider={task.provider}
           />
         </div>
       )}
@@ -1227,7 +1281,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
       )}
 
       {/* Messages */}
-      <div ref={messagesContainerRef} className="flex-1 overflow-y-auto p-4 space-y-3 min-h-0">
+      <div ref={messagesContainerRef} className="flex-1 overflow-y-auto overscroll-contain p-4 space-y-3 min-h-0">
         {messages.length === 0 && historyLoading && (
           <div className="flex items-center justify-center gap-2 text-gray-500 mt-20">
             <Loader2 size={16} className="animate-spin" />
@@ -1820,6 +1874,10 @@ function MessageCopyButton({ text }: { text: string }) {
   );
 }
 
+function stripSenderPrefix(text: string): string {
+  return text.replace(/^\[[^\]\r\n]+\][ \t]+/, '');
+}
+
 const remarkPlugins = [remarkGfm];
 
 const markdownComponents: Components = {
@@ -2281,7 +2339,7 @@ const MessageBubble = memo(function MessageBubble({ message, taskId }: { message
         </div>
         <div className={`flex items-center gap-1 mt-0.5 ${isUser ? 'justify-end pr-1' : 'pl-1'}`}>
           {message.timestamp && <MessageTimestamp timestamp={message.timestamp} />}
-          {message.content && <MessageCopyButton text={message.content} />}
+          {message.content && <MessageCopyButton text={isUser ? stripSenderPrefix(message.content) : message.content} />}
         </div>
       </div>
     </div>

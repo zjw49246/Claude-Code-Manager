@@ -139,3 +139,89 @@ async def test_reclone_local_project_rejected(client, mock_bg_tasks):
     resp = await client.post(f"/api/projects/{project_id}/reclone")
     assert resp.status_code == 400
     assert "local project" in resp.json()["detail"].lower()
+
+
+# === AGENTS.md injection (Codex instruction file) ===
+
+
+def test_inject_agents_md_creates_symlink(tmp_path):
+    from backend.api.projects import _inject_agents_md
+    (tmp_path / "CLAUDE.md").write_text("# guide\n")
+    assert _inject_agents_md(str(tmp_path)) is True
+    agents = tmp_path / "AGENTS.md"
+    assert agents.exists()
+    # Symlink (or fallback pointer file) must surface CLAUDE.md's guidance
+    if agents.is_symlink():
+        assert agents.read_text() == "# guide\n"
+    else:
+        assert "CLAUDE.md" in agents.read_text()
+
+
+def test_inject_agents_md_noop_without_claude_md(tmp_path):
+    from backend.api.projects import _inject_agents_md
+    assert _inject_agents_md(str(tmp_path)) is False
+    assert not (tmp_path / "AGENTS.md").exists()
+
+
+def test_inject_agents_md_noop_when_exists(tmp_path):
+    from backend.api.projects import _inject_agents_md
+    (tmp_path / "CLAUDE.md").write_text("# guide\n")
+    (tmp_path / "AGENTS.md").write_text("custom\n")
+    assert _inject_agents_md(str(tmp_path)) is False
+    assert (tmp_path / "AGENTS.md").read_text() == "custom\n"
+
+
+@pytest.mark.asyncio
+async def test_init_local_repo_preserves_existing_claude_md(db_factory, tmp_path, monkeypatch):
+    """存量目录（有文件但未 git init）里已有的 CLAUDE.md 不被模板覆盖。"""
+    from backend.api import projects as projects_mod
+    monkeypatch.setattr(projects_mod, "async_session", db_factory)
+
+    async with db_factory() as db:
+        p = Project(name="pre", local_path=str(tmp_path), status="pending")
+        db.add(p)
+        await db.commit()
+        await db.refresh(p)
+        pid = p.id
+
+    (tmp_path / "CLAUDE.md").write_text("# my existing guide\n")
+
+    await projects_mod._init_local_repo(
+        pid, str(tmp_path), "pre", "main",
+        git_config={"git_user_name": "t", "git_user_email": "t@t.co"},
+    )
+
+    assert (tmp_path / "CLAUDE.md").read_text() == "# my existing guide\n"
+    # AGENTS.md 补上了（指向未被覆盖的原 CLAUDE.md）
+    assert (tmp_path / "AGENTS.md").exists()
+    async with db_factory() as db:
+        p2 = await db.get(Project, pid)
+        assert p2.status == "ready"
+
+
+@pytest.mark.asyncio
+async def test_init_local_repo_preserves_both_existing_docs(db_factory, tmp_path, monkeypatch):
+    """两个文件都已存在时全部原样保留，且不因无事可提交而报错。"""
+    from backend.api import projects as projects_mod
+    monkeypatch.setattr(projects_mod, "async_session", db_factory)
+
+    async with db_factory() as db:
+        p = Project(name="pre2", local_path=str(tmp_path), status="pending")
+        db.add(p)
+        await db.commit()
+        await db.refresh(p)
+        pid = p.id
+
+    (tmp_path / "CLAUDE.md").write_text("# guide\n")
+    (tmp_path / "AGENTS.md").write_text("# my own agents doc\n")
+
+    await projects_mod._init_local_repo(
+        pid, str(tmp_path), "pre2", "main",
+        git_config={"git_user_name": "t", "git_user_email": "t@t.co"},
+    )
+
+    assert (tmp_path / "CLAUDE.md").read_text() == "# guide\n"
+    assert (tmp_path / "AGENTS.md").read_text() == "# my own agents doc\n"
+    async with db_factory() as db:
+        p2 = await db.get(Project, pid)
+        assert p2.status == "ready"

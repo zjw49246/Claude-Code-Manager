@@ -8,6 +8,7 @@ from backend.database import get_db
 from backend.models.task import Task
 from backend.models.instance import Instance
 
+from backend.services.codex_models import CODEX_MODEL_EFFORTS
 from backend.services.git_info import git_head_commit
 
 router = APIRouter(prefix="/api/system", tags=["system"])
@@ -53,6 +54,8 @@ async def get_config():
         "default_effort": settings.default_effort,
         "effort_options": [e.strip() for e in settings.effort_options.split(",") if e.strip()],
         "codex_effort_options": [e.strip() for e in settings.codex_effort_options.split(",") if e.strip()],
+        # GPT-5.6 系列按模型区分档位（sol/terra 到 ultra，luna 到 max）；未列出的模型用 codex_effort_options
+        "codex_model_efforts": CODEX_MODEL_EFFORTS,
     }
 
 

@@ -7,6 +7,7 @@ class MonitoredRepoCreate(BaseModel):
     project_id: int | None = None
     worker_id: int | None = None  # NULL = local, else Worker ID
     auto_merge: bool = False
+    provider: str = "claude"
     review_model: str | None = None
     default_branch: str = "main"
     allowed_authors: list[str] = []
@@ -22,6 +23,7 @@ class MonitoredRepoCreate(BaseModel):
 class MonitoredRepoUpdate(BaseModel):
     project_id: int | None = None
     auto_merge: bool | None = None
+    provider: str | None = None
     review_model: str | None = None
     default_branch: str | None = None
     allowed_authors: list[str] | None = None
@@ -36,6 +38,7 @@ class MonitoredRepoResponse(BaseModel):
     enabled: bool
     auto_merge: bool
     webhook_secret: str
+    provider: str = "claude"
     review_model: str | None
     default_branch: str
     allowed_authors: list[str]

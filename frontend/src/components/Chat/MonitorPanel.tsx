@@ -8,6 +8,8 @@ interface MonitorPanelProps {
   sessions: MonitorSession[];
   onSessionsChange: (sessions: MonitorSession[]) => void;
   onClose: () => void;
+  /** task 的执行 provider；codex 任务不支持子 agent，面板显式标注 */
+  provider?: string;
 }
 
 function StatusBadge({ status }: { status: string }) {
@@ -133,7 +135,7 @@ function MonitorSessionRow({ session, taskId, onStopped }: { session: MonitorSes
   );
 }
 
-export function MonitorPanel({ taskId, sessions, onSessionsChange, onClose }: MonitorPanelProps) {
+export function MonitorPanel({ taskId, sessions, onSessionsChange, onClose, provider }: MonitorPanelProps) {
   const refresh = useCallback(() => {
     api.listMonitorSessions(taskId).then(onSessionsChange).catch(() => {});
   }, [taskId, onSessionsChange]);
@@ -154,6 +156,11 @@ export function MonitorPanel({ taskId, sessions, onSessionsChange, onClose }: Mo
           <X size={16} />
         </button>
       </div>
+      {provider === 'codex' && (
+        <div className="mx-2 mt-2 rounded border border-amber-700/50 bg-amber-900/20 px-2 py-1.5 text-xs text-amber-300">
+          Monitor / Sub-Agent 暂不支持 Codex 任务（仅 Claude 可用）
+        </div>
+      )}
       <div className="p-2 space-y-2 max-h-64 overflow-y-auto">
         {sessions.length === 0 ? (
           <div className="text-xs text-gray-500 text-center py-3">No sub-agents</div>

@@ -15,6 +15,7 @@ from backend.models.instance import Instance
 from backend.models.task import Task
 
 from backend.models.log_entry import LogEntry
+from backend.services.codex_models import clamp_codex_effort
 from backend.services.stream_parser import StreamParser
 from backend.services.ws_broadcaster import WebSocketBroadcaster
 
@@ -52,6 +53,9 @@ class InstanceManager:
         # bridge HTTP 线程收到 CC 的权限请求后经 _loop 调度进事件循环
         self._pty_permissions: dict[str, dict] = {}
         self._loop = None  # 主事件循环，lifespan 启动时注入
+        # Codex persistent JSON-RPC backend.  Created lazily so Claude-only
+        # deployments never start an extra process.
+        self._codex_app_server = None
 
         # PTY persistent-session backend (claude provider only).
         # Runtime-switchable: env USE_PTY_MODE is the boot default, the
@@ -216,6 +220,30 @@ class InstanceManager:
             except Exception:
                 logger.debug("Container setup failed, falling back to bare process")
 
+        if provider == "codex" and settings.codex_app_server_enabled:
+            try:
+                return await self._launch_codex_app_server(
+                    instance_id=instance_id,
+                    prompt=prompt,
+                    task_id=task_id,
+                    cwd=cwd,
+                    model=model,
+                    resume_session_id=resume_session_id,
+                    loop_iteration=loop_iteration,
+                    git_env=git_env,
+                    effort_level=effort_level,
+                    chat_initiated=chat_initiated,
+                    enable_workflows=enable_workflows,
+                    enabled_skills=enabled_skills,
+                )
+            except Exception:
+                # App-server is an experimental Codex surface.  A CLI upgrade
+                # must not take all Codex tasks down; retain the proven exec
+                # path as an automatic compatibility fallback.
+                logger.exception(
+                    "Codex app-server launch failed; falling back to codex exec"
+                )
+
         if provider == "claude" and self.pty_mode_enabled:
             return await self._launch_pty(
                 instance_id=instance_id,
@@ -338,6 +366,7 @@ class InstanceManager:
                 "effort_level": effort_level,
                 "enable_workflows": enable_workflows,
                 "enabled_skills": enabled_skills,
+                "provider": provider,
             }
 
         # Update instance record
@@ -370,6 +399,100 @@ class InstanceManager:
         self._tasks[instance_id] = consumer
 
         return process.pid
+
+    async def _launch_codex_app_server(
+        self,
+        *,
+        instance_id: int,
+        prompt: str,
+        task_id: int | None,
+        cwd: str | None,
+        model: str | None,
+        resume_session_id: str | None,
+        loop_iteration: int | None,
+        git_env: dict | None,
+        effort_level: str | None,
+        chat_initiated: bool,
+        enable_workflows: bool,
+        enabled_skills: dict | None,
+    ) -> int:
+        """Launch one turn on the shared persistent Codex app-server."""
+        from backend.services.codex_app_server import CodexAppServer
+
+        if self._codex_app_server is None:
+            self._codex_app_server = CodexAppServer(
+                self._resolve_codex_binary(),
+                request_timeout=settings.codex_app_server_request_timeout,
+            )
+
+        actual_cwd = cwd or os.getcwd()
+        codex_effort = clamp_codex_effort(model, effort_level)
+        process, _thread_id = await self._codex_app_server.start_turn(
+            prompt=prompt,
+            cwd=actual_cwd,
+            model=model,
+            effort=codex_effort,
+            resume_session_id=resume_session_id,
+            git_env=git_env,
+            task_id=task_id,
+        )
+        self.processes[instance_id] = process
+
+        if chat_initiated:
+            self._launch_params[instance_id] = {
+                "prompt": prompt,
+                "task_id": task_id,
+                "cwd": cwd,
+                "model": model,
+                "git_env": git_env,
+                "thinking_budget": None,
+                "effort_level": effort_level,
+                "enable_workflows": enable_workflows,
+                "enabled_skills": enabled_skills,
+                "provider": "codex",
+            }
+
+        async with self.db_factory() as db:
+            await db.execute(
+                update(Instance)
+                .where(Instance.id == instance_id)
+                .values(
+                    pid=process.pid,
+                    status="running",
+                    current_task_id=task_id,
+                    started_at=datetime.utcnow(),
+                    last_heartbeat=datetime.utcnow(),
+                )
+            )
+            if task_id:
+                await db.execute(
+                    update(Task)
+                    .where(Task.id == task_id)
+                    .values(last_cwd=actual_cwd)
+                )
+            await db.commit()
+
+        consumer = asyncio.create_task(
+            self._consume_output(
+                instance_id,
+                task_id,
+                process,
+                loop_iteration,
+                chat_initiated,
+                "codex",
+            )
+        )
+        self._tasks[instance_id] = consumer
+        return process.pid
+
+    async def shutdown_codex_app_server(self) -> None:
+        """Stop the persistent Codex transport during application shutdown."""
+        if self._codex_app_server is None:
+            return
+        try:
+            await self._codex_app_server.shutdown()
+        finally:
+            self._codex_app_server = None
 
     async def _launch_pty(
         self,
@@ -548,8 +671,9 @@ class InstanceManager:
             ])
             if model and model != "default":
                 cmd.extend(["--model", model])
-            if effort_level and effort_level != "max":
-                cmd.extend(["-c", f'model_reasoning_effort="{effort_level}"'])
+            codex_effort = clamp_codex_effort(model, effort_level)
+            if codex_effort:
+                cmd.extend(["-c", f'model_reasoning_effort="{codex_effort}"'])
             if resume_session_id:
                 cmd.append(resume_session_id)
             cmd.append(prompt)
@@ -856,13 +980,15 @@ class InstanceManager:
                 return False
 
             from backend.services.claude_pool import (
-                is_transient_overload, transient_retry_delay,
+                is_transient_for, transient_retry_delay,
                 collect_process_output_for_detection,
             )
 
+            params = self._launch_params.get(instance_id) or {}
+            provider = params.get("provider") or "claude"
             log_contents = await self.get_recent_log_contents(task_id, limit=10)
             combined = collect_process_output_for_detection(stderr_text, log_contents)
-            if not is_transient_overload(combined):
+            if not is_transient_for(provider, combined):
                 # Non-transient failure — reset tally so the next genuine
                 # overload chain starts fresh.
                 self._transient_attempts.pop(instance_id, None)
@@ -877,7 +1003,6 @@ class InstanceManager:
                 self._transient_attempts.pop(instance_id, None)
                 return False
 
-            params = self._launch_params.get(instance_id)
             if not params:
                 return False
 
@@ -921,6 +1046,7 @@ class InstanceManager:
                 effort_level=params.get("effort_level"),
                 chat_initiated=True,
                 config_dir=config_dir,
+                provider=provider,
                 enable_workflows=params.get("enable_workflows", False),
                 enabled_skills=params.get("enabled_skills"),
             )
@@ -941,6 +1067,13 @@ class InstanceManager:
         try:
             from backend.main import dispatcher
             if not dispatcher or not dispatcher.pool or not dispatcher.pool.enabled:
+                return False
+
+            # 号池是 claude 专属；codex 的限额文案（"hit your usage limit"）会
+            # 误命中 claude 的 _RATE_LIMIT_RE，若不拦会把 codex session 用
+            # claude --resume 重启（provider 丢失），必须显式挡掉。
+            params = self._launch_params.get(instance_id, {})
+            if (params.get("provider") or "claude").lower() != "claude":
                 return False
 
             from backend.services.claude_pool import (
@@ -1008,7 +1141,6 @@ class InstanceManager:
                 "new_account": new_account_id,
             })
 
-            params = self._launch_params.get(instance_id, {})
             await self.launch(
                 instance_id=instance_id,
                 prompt=params.get("prompt", "continue"),
@@ -1110,7 +1242,21 @@ class InstanceManager:
 
         event = self._base_codex_event(line, now)
 
-        if codex_type == "item.completed" and item_type == "agent_message":
+        if codex_type == "item.agent_message.delta":
+            event.update({
+                "event_type": "message_delta",
+                "role": "assistant",
+                "content": data.get("delta") or "",
+                "item_id": data.get("item_id"),
+            })
+        elif codex_type == "item.reasoning.delta":
+            event.update({
+                "event_type": "thinking_delta",
+                "role": "assistant",
+                "content": data.get("delta") or "",
+                "item_id": data.get("item_id"),
+            })
+        elif codex_type == "item.completed" and item_type == "agent_message":
             event.update({
                 "event_type": "message",
                 "role": "assistant",
@@ -1144,6 +1290,113 @@ class InstanceManager:
                 "tool_output": output or summary,
                 "is_error": bool(exit_code not in (None, 0)),
             })
+        elif codex_type == "item.completed" and item_type == "reasoning":
+            # Codex 的 reasoning summary → 与 claude 同形的 thinking 事件，
+            # 前端复用现成的 thinking 折叠渲染
+            text = item.get("text") or ""
+            if not text:
+                return None
+            event.update({
+                "event_type": "thinking",
+                "role": "assistant",
+                "content": text,
+            })
+        elif item_type == "file_change":
+            # 实测（CLI 0.144.6 真实事件流）file_change 有 started + completed
+            # 两态——源码注释声称 completed-only 不可信
+            changes = item.get("changes") or []
+            status = item.get("status") or "completed"
+            tool_input = json.dumps({"changes": changes}, ensure_ascii=False)
+            if codex_type == "item.started":
+                event.update({
+                    "event_type": "tool_use",
+                    "role": "assistant",
+                    "tool_name": "FileChange",
+                    "tool_input": tool_input,
+                })
+            else:
+                lines = [
+                    f"{c.get('kind', 'update')} {c.get('path', '')}".strip()
+                    for c in changes if isinstance(c, dict)
+                ]
+                summary = f"Patch {status}"
+                if lines:
+                    summary += "\n" + "\n".join(lines)
+                event.update({
+                    "event_type": "tool_result",
+                    "role": "tool",
+                    "tool_name": "FileChange",
+                    "tool_input": tool_input,
+                    "tool_output": summary,
+                    "is_error": status == "failed",
+                })
+        elif item_type == "mcp_tool_call":
+            server = item.get("server") or ""
+            tool = item.get("tool") or ""
+            name = f"{server}.{tool}".strip(".") or "mcp_tool_call"
+            arguments = item.get("arguments")
+            tool_input = (
+                json.dumps(arguments, ensure_ascii=False)
+                if isinstance(arguments, (dict, list)) else arguments
+            )
+            if codex_type == "item.started":
+                event.update({
+                    "event_type": "tool_use",
+                    "role": "assistant",
+                    "tool_name": name,
+                    "tool_input": tool_input,
+                })
+            else:
+                status = item.get("status") or "completed"
+                result = item.get("result")
+                error = item.get("error")
+                if isinstance(result, (dict, list)):
+                    result = json.dumps(result, ensure_ascii=False)
+                if isinstance(error, (dict, list)):
+                    error = json.dumps(error, ensure_ascii=False)
+                event.update({
+                    "event_type": "tool_result",
+                    "role": "tool",
+                    "tool_name": name,
+                    "tool_input": tool_input,
+                    "tool_output": error or result or f"MCP call {status}",
+                    "is_error": status == "failed" or bool(error),
+                })
+        elif item_type == "web_search":
+            query = item.get("query") or ""
+            tool_input = json.dumps({"query": query}, ensure_ascii=False)
+            if codex_type == "item.started":
+                event.update({
+                    "event_type": "tool_use",
+                    "role": "assistant",
+                    "tool_name": "WebSearch",
+                    "tool_input": tool_input,
+                })
+            else:
+                event.update({
+                    "event_type": "tool_result",
+                    "role": "tool",
+                    "tool_name": "WebSearch",
+                    "tool_input": tool_input,
+                    "tool_output": f"Search completed: {query}",
+                })
+        elif item_type == "todo_list":
+            items = item.get("items") or []
+            lines = [
+                f"{'✓' if it.get('completed') else '○'} {it.get('text', '')}"
+                for it in items if isinstance(it, dict)
+            ]
+            event.update({
+                "event_type": "system_event",
+                "role": "assistant",
+                "content": "Todo:\n" + "\n".join(lines) if lines else "Todo list updated",
+            })
+        elif item_type == "error":
+            event.update({
+                "event_type": "system_event",
+                "content": str(item.get("message") or "codex error item"),
+                "is_error": True,
+            })
         elif codex_type == "turn.completed":
             usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
             event.update({
@@ -1152,7 +1405,13 @@ class InstanceManager:
                 "context_usage": self._codex_context_usage(usage) if usage else None,
             })
         elif "error" in codex_type.lower() or data.get("error"):
-            message = data.get("message") or data.get("error") or codex_type
+            # turn.failed 形如 {"type":"turn.failed","error":{"message":...}}（实测）
+            message = data.get("message")
+            err = data.get("error")
+            if message is None and isinstance(err, dict):
+                message = err.get("message") or err
+            if message is None:
+                message = err or codex_type
             if isinstance(message, (dict, list)):
                 message = json.dumps(message, ensure_ascii=False)
             event.update({
@@ -1186,6 +1445,8 @@ class InstanceManager:
         session_id = self._extract_codex_session_id(data)
         if session_id:
             event["session_id"] = session_id
+        if item.get("id"):
+            event["item_id"] = item["id"]
         return event
 
     def _base_codex_event(self, line: str, timestamp: str) -> dict:
@@ -1254,6 +1515,18 @@ class InstanceManager:
                 "autonomous": True,
             }
 
+        # App-server deltas are intentionally live-only: persisting every token
+        # would recreate the raw-json/DB amplification that this path is meant
+        # to avoid.  The final item/completed event is still stored normally.
+        if event.get("event_type") in ("message_delta", "thinking_delta"):
+            broadcast_data = {k: v for k, v in event.items() if k != "raw_json"}
+            if loop_iteration is not None:
+                broadcast_data["loop_iteration"] = loop_iteration
+            await self.broadcaster.broadcast(f"instance:{instance_id}", broadcast_data)
+            if task_id:
+                await self.broadcaster.broadcast(f"task:{task_id}", broadcast_data)
+            return
+
         # Native sub-agent lifecycle (model-spawned Agent/Monitor, observed by
         # the PTY layer) — register into the generic sub-agent tables so the
         # 前端徽章/面板 shows them next to $monitor sessions.
@@ -1266,23 +1539,6 @@ class InstanceManager:
                 logger.exception(
                     "Failed to upsert native sub-agent for task %s", task_id
                 )
-        if session_id and task_id:
-            async with self.db_factory() as db:
-                await db.execute(
-                    update(Task)
-                    .where(Task.id == task_id)
-                    .values(session_id=session_id)
-                )
-                await db.commit()
-        if cost_usd is not None:
-            async with self.db_factory() as db:
-                await db.execute(
-                    update(Instance)
-                    .where(Instance.id == instance_id)
-                    .values(total_cost_usd=cost_usd)
-                )
-                await db.commit()
-
         # Reactivate completed task if sub-agent produces new output.
         # 与 transient 打标同理（见下方 _transient_seen 处、task #729）：orphan
         # （resume 时 PTY 回放的上一 turn 旧事件）和 autonomous（后台子 agent
@@ -1320,14 +1576,19 @@ class InstanceManager:
                 import json as _json
                 try:
                     parsed = _json.loads(raw) if isinstance(raw, str) else raw
-                    stop = (parsed.get("message") or {}).get("stop_reason")
-                    if not stop:
+                    # This filter is specific to Claude stream-json envelopes.
+                    # Codex item.completed events have no top-level ``message``
+                    # object, and short answers such as "OK" are complete replies.
+                    message = parsed.get("message")
+                    if isinstance(message, dict) and not message.get("stop_reason"):
                         logger.debug("Dropping streaming fragment: %r", event["content"])
                         return
                 except (ValueError, TypeError):
                     pass
 
-        # Store in DB
+        # Store the event and related heartbeat/session/unread updates in one
+        # transaction.  The old path committed 2-4 times per Codex event,
+        # serializing the stream behind SQLite fsyncs before WebSocket delivery.
         async with self.db_factory() as db:
             entry = LogEntry(
                 instance_id=instance_id,
@@ -1343,14 +1604,29 @@ class InstanceManager:
                 loop_iteration=loop_iteration,
             )
             db.add(entry)
-            await db.commit()
-
-            # Update heartbeat
+            instance_values = {"last_heartbeat": datetime.utcnow()}
+            if cost_usd is not None:
+                instance_values["total_cost_usd"] = cost_usd
             await db.execute(
                 update(Instance)
                 .where(Instance.id == instance_id)
-                .values(last_heartbeat=datetime.utcnow())
+                .values(**instance_values)
             )
+            if task_id:
+                task_values = {}
+                if session_id:
+                    task_values["session_id"] = session_id
+                if (
+                    event.get("role") == "assistant"
+                    and event["event_type"] in ("message", "result")
+                ):
+                    task_values["has_unread"] = True
+                if task_values:
+                    await db.execute(
+                        update(Task)
+                        .where(Task.id == task_id)
+                        .values(**task_values)
+                    )
             await db.commit()
 
         # Per-turn transient-overload detection: a server-side 429/overload
@@ -1412,16 +1688,6 @@ class InstanceManager:
                     logger.info("PTY rate limit detected from assistant text (instance %s): %s",
                                 instance_id, content[:120])
 
-        # Mark task as unread when assistant produces a message or result
-        if task_id and event.get("role") == "assistant" and event["event_type"] in ("message", "result"):
-            async with self.db_factory() as db:
-                await db.execute(
-                    update(Task)
-                    .where(Task.id == task_id)
-                    .values(has_unread=True)
-                )
-                await db.commit()
-
         # Track last tool_use name for evolution (tool_result may not carry tool_name)
         if event["event_type"] == "tool_use" and event.get("tool_name"):
             self._last_tool_name = event["tool_name"]
@@ -1479,14 +1745,20 @@ class InstanceManager:
                     context_usage = stored
         elif context_usage and not context_usage.get("context_window"):
             # Per-request usage without a window (PTY interactive mode and -p
-            # assistant events). Fill from the task's model choice: [1m]
-            # variants get 1M, else 200K.
+            # assistant events; codex turn.completed usage). Fill from the
+            # task's model choice: codex 查窗口表，claude [1m] 变体 1M 其余 200K。
             model_name = ""
+            task_provider = "claude"
             if task_id:
                 async with self.db_factory() as db:
                     t = await db.get(Task, task_id)
                     model_name = (t.model or "") if t else ""
-            context_usage["context_window"] = _model_context_window(model_name)
+                    task_provider = ((t.provider if t else None) or "claude").lower()
+            if task_provider == "codex":
+                from backend.services.codex_models import codex_context_window
+                context_usage["context_window"] = codex_context_window(model_name)
+            else:
+                context_usage["context_window"] = _model_context_window(model_name)
         if context_usage and task_id:
             async with self.db_factory() as db:
                 await db.execute(

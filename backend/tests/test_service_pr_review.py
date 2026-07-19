@@ -324,3 +324,37 @@ async def test_review_task_assigned_to_pr_monitor_project(client, session_factor
         assert len(count) == 1
         t2 = await db.get(Task, review2.task_id)
         assert t2.project_id == proj.id
+
+
+# === provider 透传（codex 审核）===
+
+
+@pytest.mark.asyncio
+async def test_create_pr_review_task_codex_provider(db_session):
+    """repo.provider=codex → 审核 task 用 codex，未配 review_model 时补 codex 默认模型。"""
+    r = _make_repo(provider="codex", review_model=None)
+    db_session.add(r)
+    await db_session.commit()
+    await db_session.refresh(r)
+
+    mock_broadcaster = MagicMock()
+    mock_broadcaster.broadcast = AsyncMock()
+    with patch("backend.main.broadcaster", mock_broadcaster):
+        review = await create_pr_review_task(db_session, r, PR_DATA)
+
+    task = await db_session.get(Task, review.task_id)
+    assert task.provider == "codex"
+    from backend.config import settings as app_settings
+    assert task.model == app_settings.default_codex_model
+
+
+@pytest.mark.asyncio
+async def test_create_pr_review_task_default_provider_claude(db_session, repo):
+    mock_broadcaster = MagicMock()
+    mock_broadcaster.broadcast = AsyncMock()
+    with patch("backend.main.broadcaster", mock_broadcaster):
+        review = await create_pr_review_task(db_session, repo, PR_DATA)
+
+    task = await db_session.get(Task, review.task_id)
+    assert task.provider == "claude"
+    assert task.model == "claude-sonnet-4-6"  # review_model 原样保留

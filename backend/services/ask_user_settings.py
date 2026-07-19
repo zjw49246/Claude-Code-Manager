@@ -91,7 +91,14 @@ def ensure_ask_user_hook(config_dir: str) -> None:
         if enabled:
             new_pretool.append({
                 "matcher": _MATCHER,
-                "hooks": [{"type": "command", "command": _hook_command()}],
+                "hooks": [{
+                    "type": "command",
+                    "command": _hook_command(),
+                    # CLI 对 hook 命令默认 600s 就杀；必须显式抬到服务端等待窗口
+                    # 之上，否则 hook 在 /wait 阻塞中途被杀 → 放行原生
+                    # AskUserQuestion → PTY 弹无人应答的交互框冻死整个 turn。
+                    "timeout": int(getattr(settings, "ask_user_timeout", 1800)) + 60,
+                }],
             })
             changed = True
 

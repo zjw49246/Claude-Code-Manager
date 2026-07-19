@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,13 @@ from typing import Any
 import yaml
 
 logger = logging.getLogger(__name__)
+
+# Skill metadata is read by task-list/config endpoints as well as launches.
+# A short cache collapses request bursts without making edits feel stale.
+_DISCOVERY_CACHE_TTL = 1.0
+_discovery_cache: dict[
+    tuple[str, str | None], tuple[float, dict[str, "Skill"]]
+] = {}
 
 # Budget defaults (from agent-ml-research)
 MAX_ALWAYS_PROMPT_CHARS = 4000
@@ -123,32 +131,42 @@ def discover_skills(
 
     Filters by role, mode. Excludes names in `exclude` set.
     """
-    skills: dict[str, Skill] = {}
-
-    # 1. Global skills from CCM repo
     if ccm_repo_dir is None:
         ccm_repo_dir = Path(__file__).resolve().parents[2]
-    repo_skills = Path(ccm_repo_dir) / "skills"
-    if repo_skills.is_dir():
-        for skill_dir in sorted(repo_skills.iterdir()):
-            skill_md = skill_dir / "SKILL.md"
-            if skill_md.is_file():
-                skill = parse_skill(skill_md)
-                if skill:
-                    skill.scope = "global"
-                    skills[skill.name] = skill
+    cache_key = (
+        str(Path(ccm_repo_dir).resolve()),
+        str(Path(project_dir).resolve()) if project_dir else None,
+    )
+    now = time.monotonic()
+    cached = _discovery_cache.get(cache_key)
+    if cached and now - cached[0] < _DISCOVERY_CACHE_TTL:
+        skills = dict(cached[1])
+    else:
+        skills: dict[str, Skill] = {}
 
-    # 2. Project-level skills (override same-name)
-    if project_dir:
-        proj_skills = Path(project_dir) / ".ccm" / "skills"
-        if proj_skills.is_dir():
-            for skill_dir in sorted(proj_skills.iterdir()):
+        # 1. Global skills from CCM repo
+        repo_skills = Path(ccm_repo_dir) / "skills"
+        if repo_skills.is_dir():
+            for skill_dir in sorted(repo_skills.iterdir()):
                 skill_md = skill_dir / "SKILL.md"
                 if skill_md.is_file():
                     skill = parse_skill(skill_md)
                     if skill:
-                        skill.scope = "project"
+                        skill.scope = "global"
                         skills[skill.name] = skill
+
+        # 2. Project-level skills (override same-name)
+        if project_dir:
+            proj_skills = Path(project_dir) / ".ccm" / "skills"
+            if proj_skills.is_dir():
+                for skill_dir in sorted(proj_skills.iterdir()):
+                    skill_md = skill_dir / "SKILL.md"
+                    if skill_md.is_file():
+                        skill = parse_skill(skill_md)
+                        if skill:
+                            skill.scope = "project"
+                            skills[skill.name] = skill
+        _discovery_cache[cache_key] = (now, dict(skills))
 
     # Filter by role
     if role:

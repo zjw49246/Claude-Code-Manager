@@ -145,13 +145,21 @@ async def create_pr_review_task(
 
     prompt = build_review_prompt(repo, pr_data)
 
+    provider = (repo.provider or "claude").lower()
+    # 直接构造 ORM 会绕过 POST /api/tasks 的 per-provider 默认模型逻辑，
+    # codex 且未配 review_model 时补上默认，避免 CLI 侧模型漂移
+    model = repo.review_model
+    if not model and provider == "codex":
+        from backend.config import settings as app_settings
+        model = app_settings.default_codex_model
     task = Task(
         title=f"PR Review: {repo.repo_full_name}#{pr_data['number']}",
         description=prompt,
         mode="auto",
         tags=["pr-review"],
         metadata_={"pr_review_id": review.id},
-        model=repo.review_model,
+        provider=provider,
+        model=model,
         project_id=await _get_or_create_pr_monitor_project(db),
         worker_id=repo.worker_id,
     )
@@ -163,6 +171,13 @@ async def create_pr_review_task(
 
     await db.commit()
     await db.refresh(review)
+
+    try:
+        from backend.main import dispatcher
+        if dispatcher:
+            dispatcher.wake()
+    except Exception:
+        logger.debug("Could not wake dispatcher for PR review task", exc_info=True)
 
     logger.info(
         "Created PR review task %d for %s#%d",

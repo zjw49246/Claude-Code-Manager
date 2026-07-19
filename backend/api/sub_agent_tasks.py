@@ -66,6 +66,12 @@ async def create_sub_agent_session(
     task = await db.get(Task, task_id)
     if not task:
         raise HTTPException(404, "Task not found")
+    # 子 agent 硬编码跑 claude CLI（_launch_sub_agent），codex 任务显式拒绝
+    if (task.provider or "claude").lower() != "claude":
+        raise HTTPException(
+            400, "Sub-agents are claude-only; this task runs on "
+                 f"provider '{task.provider}'"
+        )
     skills = task.enabled_skills or {}
     if not skills.get("sub-agent"):
         raise HTTPException(403, "Sub-Agent skill not enabled for this task")

@@ -16,11 +16,16 @@ vi.mock('../../api/client', () => ({
       provider_options: ['claude', 'codex'],
       default_model: 'claude-opus-4-6',
       model_options: ['claude-opus-4-6', 'claude-sonnet-4-6'],
-      default_codex_model: 'gpt-5.1-codex-max',
-      codex_model_options: ['gpt-5.1-codex-max'],
+      default_codex_model: 'gpt-5.5',
+      codex_model_options: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5'],
       default_effort: 'medium',
       effort_options: ['low', 'medium', 'high'],
       codex_effort_options: ['low', 'medium', 'high', 'xhigh'],
+      codex_model_efforts: {
+        'gpt-5.6-sol': ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+        'gpt-5.6-terra': ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+        'gpt-5.6-luna': ['low', 'medium', 'high', 'xhigh', 'max'],
+      },
     }),
     createTask: vi.fn().mockResolvedValue({ id: 1 }),
     createProject: vi.fn().mockResolvedValue({ id: 2 }),
@@ -307,5 +312,100 @@ describe('TaskForm copy-context-from select overflow fix', () => {
     const { container } = render(<TaskForm onCreated={vi.fn()} />);
     const form = container.querySelector('form');
     expect(form?.className).toContain('overflow-visible');
+  });
+});
+
+describe('Codex GPT-5.6 per-model effort options', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  async function switchToCodex() {
+    render(<TaskForm onCreated={vi.fn()} />);
+    await openConfigPanel();
+    const cliSelect = await waitFor(() => screen.getByDisplayValue('Claude'));
+    await userEvent.selectOptions(cliSelect, 'codex');
+  }
+
+  it('lists all three GPT-5.6 models in the model dropdown', async () => {
+    await switchToCodex();
+    const modelSelect = screen.getByDisplayValue('gpt-5.5 (default)');
+    const values = Array.from(modelSelect.querySelectorAll('option')).map((o) => (o as HTMLOptionElement).value);
+    expect(values).toContain('gpt-5.6-sol');
+    expect(values).toContain('gpt-5.6-terra');
+    expect(values).toContain('gpt-5.6-luna');
+    expect(values).not.toContain('gpt-5.6');
+  });
+
+  it('shows max/ultra efforts for gpt-5.6-sol but not for gpt-5.5', async () => {
+    await switchToCodex();
+    const modelSelect = screen.getByDisplayValue('gpt-5.5 (default)');
+    await userEvent.selectOptions(modelSelect, 'gpt-5.6-sol');
+
+    const effortSelect = screen.getByDisplayValue('medium (default)');
+    let efforts = Array.from(effortSelect.querySelectorAll('option')).map((o) => (o as HTMLOptionElement).value);
+    expect(efforts).toContain('max');
+    expect(efforts).toContain('ultra');
+
+    await userEvent.selectOptions(modelSelect, 'gpt-5.5');
+    efforts = Array.from(effortSelect.querySelectorAll('option')).map((o) => (o as HTMLOptionElement).value);
+    expect(efforts).not.toContain('max');
+    expect(efforts).not.toContain('ultra');
+  });
+
+  it('shows max but not ultra for gpt-5.6-luna', async () => {
+    await switchToCodex();
+    const modelSelect = screen.getByDisplayValue('gpt-5.5 (default)');
+    await userEvent.selectOptions(modelSelect, 'gpt-5.6-luna');
+
+    const effortSelect = screen.getByDisplayValue('medium (default)');
+    const efforts = Array.from(effortSelect.querySelectorAll('option')).map((o) => (o as HTMLOptionElement).value);
+    expect(efforts).toContain('max');
+    expect(efforts).not.toContain('ultra');
+  });
+
+  it('resets a stale effort when switching to a model that does not support it', async () => {
+    await switchToCodex();
+    const modelSelect = screen.getByDisplayValue('gpt-5.5 (default)');
+    await userEvent.selectOptions(modelSelect, 'gpt-5.6-sol');
+
+    const effortSelect = screen.getByDisplayValue('medium (default)');
+    await userEvent.selectOptions(effortSelect, 'ultra');
+    expect(effortSelect).toHaveValue('ultra');
+
+    await userEvent.selectOptions(modelSelect, 'gpt-5.5');
+    await waitFor(() => expect(effortSelect).toHaveValue(''));
+  });
+});
+
+describe('Codex provider UI gating', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  async function renderAndOpenConfig() {
+    render(<TaskForm onCreated={vi.fn()} />);
+    await openConfigPanel();
+    return waitFor(() => screen.getByDisplayValue('Claude'));
+  }
+
+  it('hides the Thinking budget dropdown for codex (backend ignores it)', async () => {
+    const cliSelect = await renderAndOpenConfig();
+    expect(screen.getByText('Thinking')).toBeInTheDocument();
+
+    await userEvent.selectOptions(cliSelect, 'codex');
+    expect(screen.queryByText('Thinking')).not.toBeInTheDocument();
+
+    // 切回 claude 恢复
+    await userEvent.selectOptions(cliSelect, 'claude');
+    expect(screen.getByText('Thinking')).toBeInTheDocument();
+  });
+
+  it('shows an explicit claude-only note instead of silently hiding Skills/Monitor', async () => {
+    const cliSelect = await renderAndOpenConfig();
+    expect(screen.queryByText('Skills / Monitor 仅支持 Claude')).not.toBeInTheDocument();
+
+    await userEvent.selectOptions(cliSelect, 'codex');
+    expect(screen.getByText('Skills / Monitor 仅支持 Claude')).toBeInTheDocument();
   });
 });

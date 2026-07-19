@@ -236,3 +236,43 @@ async def test_task_cancel_cancels_monitors(client, session_factory):
     async with session_factory() as db:
         ms = await db.get(MonitorSession, ms_id)
         assert ms.status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_create_monitor_rejects_codex_task(client, session_factory):
+    """Monitor 子 agent 硬编码 claude CLI——codex 任务必须显式 400，
+    而不是静默起一个 Claude 子进程。"""
+    resp = await client.post("/api/tasks", json={
+        "title": "T", "description": "d", "target_repo": "/tmp",
+        "provider": "codex",
+        "enabled_skills": {"monitor": True},
+    })
+    task_id = resp.json()["id"]
+    async with session_factory() as db:
+        await db.execute(update(Task).where(Task.id == task_id).values(status="in_progress"))
+        await db.commit()
+
+    resp = await client.post(f"/api/tasks/{task_id}/monitor-sessions", json={
+        "description": "watch build",
+    })
+    assert resp.status_code == 400
+    assert "claude-only" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_create_sub_agent_rejects_codex_task(client, session_factory):
+    resp = await client.post("/api/tasks", json={
+        "title": "T", "description": "d", "target_repo": "/tmp",
+        "provider": "codex",
+        "enabled_skills": {"sub-agent": True},
+    })
+    task_id = resp.json()["id"]
+    async with session_factory() as db:
+        await db.execute(update(Task).where(Task.id == task_id).values(status="in_progress"))
+        await db.commit()
+
+    resp = await client.post(f"/api/tasks/{task_id}/sub-agent-sessions", json={
+        "name": "review", "prompt": "review the code",
+    })
+    assert resp.status_code == 400
+    assert "claude-only" in resp.json()["detail"]

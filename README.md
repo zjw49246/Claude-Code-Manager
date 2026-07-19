@@ -17,6 +17,7 @@ Web 端调度和管理多个 Claude Code 实例并行工作。灵感来自胡渊
 - **Git Worktree** — 每个实例在独立的 worktree 中工作，互不干扰
 
 ### 执行模式
+- **多 Provider（Claude / Codex）** — Task 级选择执行引擎：Claude Code（默认）或 OpenAI Codex CLI。Codex 任务支持完整生命周期、多轮对话（`codex exec resume`）、Goal 模式评估、Plan 审批、上下文自动压缩（按 codex 模型窗口表计算）、瞬时错误退避重试、跨 Worker 迁移（rollout session 搬运）、PR 自动审核与 Todo Run；指令文件读 `AGENTS.md`（自动注入）。PTY 热会话、多账号池、Skills/MCP、ask_user 为 Claude 专属（Codex 下显式隐藏/拒绝，不静默降级）
 - **PTY 持久会话模式** — 默认模式，Claude Code 以常驻交互会话运行，多轮免冷启动（热 session 复用），首次启动有 Cold Start 指示器
 - **Goal 模式** — `mode="goal"` 使用自然语言完成条件（`goal_condition`），每 turn 后由轻量评估器（默认 Haiku）自动判断是否达成目标
 - **Plan Mode** — 敏感任务先生成只读计划，人工审批后再执行
@@ -38,7 +39,7 @@ Web 端调度和管理多个 Claude Code 实例并行工作。灵感来自胡渊
 
 ### 可靠性
 - **Claude Pool** — 多账号池自动切换：撞限/认证失败时自动换号并硬链接 session 实现无缝 `--resume`；PTY 模式下支持主动限速轮换（仅在 5h 窗口利用率 >=90% 时触发）
-- **瞬时 429/过载自动重试** — Anthropic 基础设施侧的临时限流/过载（非账号额度用尽），指数退避+jitter 用同一账号自动 `--resume` 重试，最多 5 次
+- **瞬时 429/过载自动重试** — 基础设施侧的临时限流/过载（非账号额度用尽），指数退避+jitter 用同一账号自动 `--resume` 重试，最多 5 次；检测按 provider 分流（Claude / Codex 各自的 CLI 错误文案）
 - **进程超时保护** — 单任务最长执行时间可配置，超时后自动 kill
 
 ### 分布式
