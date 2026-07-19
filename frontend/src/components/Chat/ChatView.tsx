@@ -771,6 +771,24 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
     };
   }, []);
 
+  // Prevent scroll/touch events from propagating to parent when messages
+  // container is not scrollable (content shorter than viewport)
+  useEffect(() => {
+    const el = messagesContainerRef.current;
+    if (!el) return;
+    const prevent = (e: Event) => {
+      if (el.scrollHeight <= el.clientHeight) {
+        e.preventDefault();
+      }
+    };
+    el.addEventListener('wheel', prevent, { passive: false });
+    el.addEventListener('touchmove', prevent, { passive: false });
+    return () => {
+      el.removeEventListener('wheel', prevent);
+      el.removeEventListener('touchmove', prevent);
+    };
+  }, []);
+
 
   const loadMoreRef = useRef(loadMoreHistory);
   loadMoreRef.current = loadMoreHistory;
