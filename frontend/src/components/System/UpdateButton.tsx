@@ -303,7 +303,7 @@ export function UpdateButton() {
                       重新检查
                     </button>
                   </div>
-                  {branch && (
+                  {branch && branch !== 'main' && (
                     <p className="text-xs text-amber-400">⚠️ 将从分支 <span className="font-mono">{branch}</span> 更新（非 main）</p>
                   )}
 
