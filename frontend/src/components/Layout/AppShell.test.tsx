@@ -40,6 +40,19 @@ function renderShell(page = 'tasks') {
 
 describe('AppShell layout and z-index architecture', () => {
   beforeEach(() => {
+    Object.defineProperty(window, 'matchMedia', {
+      writable: true,
+      value: vi.fn().mockImplementation((query: string) => ({
+        matches: query === '(min-width: 1024px)',
+        media: query,
+        onchange: null,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    });
     localStorage.setItem('cc_user', JSON.stringify({ name: 'Test', role: 'admin' }));
   });
 
@@ -110,6 +123,21 @@ describe('AppShell layout and z-index architecture', () => {
   });
 
   describe('desktop sidebar', () => {
+    it('collapses, persists the preference, and expands again from the header', async () => {
+      const user = userEvent.setup();
+      renderShell();
+
+      expect(document.querySelector('aside[data-shell-sidebar]')).toBeTruthy();
+      await user.click(screen.getByLabelText('收起导航'));
+
+      expect(document.querySelector('aside[data-shell-sidebar]')).toBeNull();
+      expect(localStorage.getItem('ccm-nav-collapsed')).toBe('true');
+
+      await user.click(screen.getByLabelText('展开导航'));
+      expect(document.querySelector('aside[data-shell-sidebar]')).toBeTruthy();
+      expect(localStorage.getItem('ccm-nav-collapsed')).toBe('false');
+    });
+
     it('sidebar is rendered OUTSIDE the header', () => {
       renderShell();
       const header = document.querySelector('header');

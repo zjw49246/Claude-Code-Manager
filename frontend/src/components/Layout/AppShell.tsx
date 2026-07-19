@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import {
-  Bot, Menu, X, LayoutDashboard, ListTodo, FolderGit2, KeyRound,
+  Bot, Menu, X, PanelLeftClose, PanelLeftOpen, LayoutDashboard, ListTodo, FolderGit2, KeyRound,
   FolderOpen, MessagesSquare, GitPullRequest, Server, Sparkles, Users, Globe,
 } from '../icons';
 import type { ComponentType } from 'react';
@@ -36,6 +36,9 @@ interface NavItem {
  * 高度 = h-12 (3rem) + 底边框。 */
 export function AppShell({ currentPage, onNavigate, wide, children }: AppShellProps) {
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [navCollapsed, setNavCollapsed] = useState(
+    () => localStorage.getItem('ccm-nav-collapsed') === 'true',
+  );
 
   const [navWidth, setNavWidth] = useState(() => {
     const saved = localStorage.getItem('ccm-nav-width');
@@ -119,6 +122,14 @@ export function AppShell({ currentPage, onNavigate, wide, children }: AppShellPr
     setDrawerOpen(false);
   };
 
+  const toggleNavCollapsed = () => {
+    setNavCollapsed(collapsed => {
+      const next = !collapsed;
+      localStorage.setItem('ccm-nav-collapsed', String(next));
+      return next;
+    });
+  };
+
   const brand = (
     <div className="flex items-center gap-2.5 min-w-0">
       <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-indigo-500 to-indigo-700 text-white shadow-md shadow-indigo-600/25">
@@ -174,14 +185,27 @@ export function AppShell({ currentPage, onNavigate, wide, children }: AppShellPr
     </div>
   ) : null;
 
+  const collapseButton = (
+    <button
+      type="button"
+      onClick={toggleNavCollapsed}
+      className="hidden lg:inline-flex shrink-0 p-1.5 rounded-md text-gray-500 hover:text-gray-200 hover:bg-gray-800 transition-colors"
+      aria-label="收起导航"
+      title="收起导航"
+    >
+      <PanelLeftClose size={17} />
+    </button>
+  );
+
   return (
     <div className="min-h-screen bg-gray-900 text-foreground overflow-x-clip">
       {/* 桌面侧栏 */}
-      {navResizable ? (
+      {!navCollapsed && (navResizable ? (
         <>
           <aside data-shell-sidebar className="hidden lg:flex fixed inset-y-0 left-0 z-40 flex-col bg-gray-950 border-r border-gray-800" style={{ width: navWidth }}>
-            <div data-shell-brand-row className="h-14 shrink-0 flex items-center px-4 border-b border-gray-800/70">
+            <div data-shell-brand-row className="h-14 shrink-0 flex items-center justify-between gap-2 px-4 border-b border-gray-800/70">
               {brand}
+              {collapseButton}
             </div>
             {navList}
             {userFooter}
@@ -194,13 +218,14 @@ export function AppShell({ currentPage, onNavigate, wide, children }: AppShellPr
         </>
       ) : (
         <aside data-shell-sidebar className="hidden lg:flex fixed inset-y-0 left-0 z-40 w-60 flex-col bg-gray-950 border-r border-gray-800">
-          <div data-shell-brand-row className="h-14 shrink-0 flex items-center px-4 border-b border-gray-800/70">
+          <div data-shell-brand-row className="h-14 shrink-0 flex items-center justify-between gap-2 px-4 border-b border-gray-800/70">
             {brand}
+            {collapseButton}
           </div>
           {navList}
           {userFooter}
         </aside>
-      )}
+      ))}
 
       {/* 移动端抽屉 */}
       {drawerOpen && (
@@ -223,7 +248,7 @@ export function AppShell({ currentPage, onNavigate, wide, children }: AppShellPr
       )}
 
       {/* 右侧主列：sticky 顶栏 + 页面内容 */}
-      <div data-shell-main className={`flex flex-col min-h-screen ${navResizable ? '' : 'lg:pl-60'}`} style={navResizable && isLg ? { paddingLeft: navWidth } : undefined}>
+      <div data-shell-main className={`flex flex-col min-h-screen ${!navCollapsed && !navResizable ? 'lg:pl-60' : ''}`} style={!navCollapsed && navResizable && isLg ? { paddingLeft: navWidth } : undefined}>
         <header className="sticky top-0 z-30 bg-gray-900 border-b border-gray-800 pt-[env(safe-area-inset-top)]">
           <div className="h-12 flex items-center gap-2 px-3 sm:px-4">
             <button
@@ -238,6 +263,17 @@ export function AppShell({ currentPage, onNavigate, wide, children }: AppShellPr
                 {current?.label ?? 'Claude Manager'}
               </span>
             </div>
+            {navCollapsed && (
+              <button
+                type="button"
+                onClick={toggleNavCollapsed}
+                className="hidden lg:inline-flex p-1.5 -ml-1 rounded-md text-gray-400 hover:text-foreground hover:bg-gray-800 transition-colors"
+                aria-label="展开导航"
+                title="展开导航"
+              >
+                <PanelLeftOpen size={18} />
+              </button>
+            )}
             <span className="hidden lg:block text-sm font-semibold tracking-tight text-foreground">
               {current?.label ?? ''}
             </span>
