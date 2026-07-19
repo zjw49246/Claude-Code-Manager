@@ -462,7 +462,7 @@ async def test_loop_iteration_passes_pool_config_dir(db_factory, tmp_path):
     # Pool was consulted, and its choice flowed into the launch.
     d._resolve_resume_config_dir.assert_awaited()
     # iteration 0 has no session to resume yet → resolver called with None
-    assert d._resolve_resume_config_dir.await_args.args == (None,)
+    assert d._resolve_resume_config_dir.await_args.args == (None, "claude")
     assert d.instance_manager.launch.await_args.kwargs["config_dir"] == "/pool/acc-7"
 
 
@@ -2007,7 +2007,7 @@ async def test_goal_turn_passes_pool_config_dir(db_factory):
 
     d._resolve_resume_config_dir.assert_awaited()
     # turn 0 launches a fresh session → resolver called with None
-    assert d._resolve_resume_config_dir.await_args.args == (None,)
+    assert d._resolve_resume_config_dir.await_args.args == (None, "claude")
     assert d.instance_manager.launch.await_args.kwargs["config_dir"] == "/pool/acc-9"
 
 

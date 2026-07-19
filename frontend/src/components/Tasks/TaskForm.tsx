@@ -635,20 +635,26 @@ export function TaskForm({ onCreated }: TaskFormProps) {
                   ))}
                 </select>
 
-                <span className="text-gray-400">Thinking</span>
-                <select
-                  className="bg-gray-700 text-foreground rounded px-2 py-1 text-xs"
-                  value={thinkingBudget}
-                  onChange={(e) => setThinkingBudget(e.target.value)}
-                >
-                  <option value="">default</option>
-                  <option value="4096">4k</option>
-                  <option value="8192">8k</option>
-                  <option value="16384">16k</option>
-                  <option value="32768">32k</option>
-                  <option value="65536">64k</option>
-                  <option value="131072">128k</option>
-                </select>
+                {/* Thinking 预算走 MAX_THINKING_TOKENS，claude 专属
+                    （codex 的推理强度就是上面的 Effort）——codex 下隐藏幽灵选项 */}
+                {provider === 'claude' && (
+                  <>
+                    <span className="text-gray-400">Thinking</span>
+                    <select
+                      className="bg-gray-700 text-foreground rounded px-2 py-1 text-xs"
+                      value={thinkingBudget}
+                      onChange={(e) => setThinkingBudget(e.target.value)}
+                    >
+                      <option value="">default</option>
+                      <option value="4096">4k</option>
+                      <option value="8192">8k</option>
+                      <option value="16384">16k</option>
+                      <option value="32768">32k</option>
+                      <option value="65536">64k</option>
+                      <option value="131072">128k</option>
+                    </select>
+                  </>
+                )}
 
                 <span className="text-gray-400">Timeout</span>
                 <select
@@ -711,7 +717,9 @@ export function TaskForm({ onCreated }: TaskFormProps) {
         >
           <Star size={13} fill={starOnCreate ? 'currentColor' : 'none'} />
         </button>
-        {/* User Skills dropdown */}
+        {/* User Skills dropdown — skill 模板/注入是 claude 专属
+            （dispatcher 对 codex 跳过），codex 下隐藏幽灵选项 */}
+        {provider === 'claude' && (
         <div ref={skillsRef} className="relative">
             <button
               type="button"
@@ -759,6 +767,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
               </div>
             )}
           </div>
+        )}
         {/* Plugins dropdown */}
         {AVAILABLE_PLUGINS.length > 0 && (
           <div ref={pluginsRef} className="relative">

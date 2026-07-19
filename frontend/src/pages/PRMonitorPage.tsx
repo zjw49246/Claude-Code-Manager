@@ -5,12 +5,21 @@ import { Plus, ArrowLeft, X, Copy, RefreshCw, ToggleLeft, ToggleRight, Trash2, G
 
 const DEFAULT_WEBHOOK_URL = `${window.location.origin}/api/github/webhook`;
 
-function useModelOptions(): string[] {
-  const [options, setOptions] = useState<string[]>([]);
+function useProviderModels(): { providers: string[]; modelsFor: (p: string) => string[] } {
+  const [cfg, setCfg] = useState<{ providers: string[]; claude: string[]; codex: string[] }>({
+    providers: ['claude', 'codex'], claude: [], codex: [],
+  });
   useEffect(() => {
-    api.config().then((c) => setOptions(c.model_options.filter((m) => m !== 'default'))).catch(() => {});
+    api.config().then((c) => setCfg({
+      providers: c.provider_options?.length ? c.provider_options : ['claude', 'codex'],
+      claude: c.model_options.filter((m) => m !== 'default'),
+      codex: (c.codex_model_options || []).filter((m) => m !== 'default'),
+    })).catch(() => {});
   }, []);
-  return options;
+  return {
+    providers: cfg.providers,
+    modelsFor: (p: string) => (p === 'codex' ? cfg.codex : cfg.claude),
+  };
 }
 
 const STATUS_COLORS: Record<string, string> = {
@@ -30,8 +39,10 @@ function copyToClipboard(text: string) {
 function AddRepoModal({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
   const [repoName, setRepoName] = useState('');
   const [autoMerge, setAutoMerge] = useState(false);
+  const [provider, setProvider] = useState('claude');
   const [reviewModel, setReviewModel] = useState('');
-  const modelOptions = useModelOptions();
+  const { providers, modelsFor } = useProviderModels();
+  const modelOptions = modelsFor(provider);
   const [defaultBranch, setDefaultBranch] = useState('main');
   const [allowedAuthors, setAllowedAuthors] = useState('');
   const [workerId, setWorkerId] = useState('');
@@ -54,6 +65,7 @@ function AddRepoModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =
       await api.createMonitoredRepo({
         repo_full_name: repoName.trim(),
         auto_merge: autoMerge,
+        provider,
         review_model: reviewModel.trim() || undefined,
         default_branch: defaultBranch.trim() || 'main',
         allowed_authors: authors,
@@ -89,6 +101,15 @@ function AddRepoModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =
             <input type="checkbox" id="autoMerge" checked={autoMerge} onChange={(e) => setAutoMerge(e.target.checked)}
               className="rounded bg-gray-700 border-gray-600" />
             <label htmlFor="autoMerge" className="text-sm text-gray-300">Auto-merge approved PRs</label>
+          </div>
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">Provider</label>
+            <select
+              className="w-full bg-gray-700 text-foreground text-sm rounded px-3 py-2 outline-none focus:ring-1 focus:ring-indigo-500"
+              value={provider} onChange={(e) => { setProvider(e.target.value); setReviewModel(''); }}
+            >
+              {providers.map((p) => <option key={p} value={p}>{p === 'codex' ? 'Codex' : 'Claude Code'}</option>)}
+            </select>
           </div>
           <div>
             <label className="block text-xs text-gray-400 mb-1">Review Model (optional)</label>
@@ -143,8 +164,10 @@ function RepoDetail({ repo, onBack, onRefresh }: { repo: MonitoredRepo; onBack: 
   const [reviews, setReviews] = useState<PRReview[]>([]);
   const [page, setPage] = useState(1);
   const [autoMerge, setAutoMerge] = useState(repo.auto_merge);
+  const [provider, setProvider] = useState(repo.provider || 'claude');
   const [reviewModel, setReviewModel] = useState(repo.review_model || '');
-  const modelOptions = useModelOptions();
+  const { providers, modelsFor } = useProviderModels();
+  const modelOptions = modelsFor(provider);
   const [defaultBranch, setDefaultBranch] = useState(repo.default_branch);
   const [authorsInput, setAuthorsInput] = useState((repo.allowed_authors || []).join(', '));
   const [saving, setSaving] = useState(false);
@@ -179,7 +202,10 @@ function RepoDetail({ repo, onBack, onRefresh }: { repo: MonitoredRepo; onBack: 
       const authors = authorsInput.trim() ? authorsInput.split(',').map(a => a.trim()).filter(Boolean) : [];
       const updated = await api.updateMonitoredRepo(repo.id, {
         auto_merge: autoMerge,
-        review_model: reviewModel.trim() || undefined,
+        provider,
+        // 显式 null 才能清空（undefined 会被后端 exclude_unset 丢弃，
+        // 换 provider 后旧模型残留会让 CLI 拿到错家族的 --model）
+        review_model: reviewModel.trim() ? reviewModel.trim() : null,
         default_branch: defaultBranch.trim() || 'main',
         allowed_authors: authors,
       });
@@ -217,6 +243,13 @@ function RepoDetail({ repo, onBack, onRefresh }: { repo: MonitoredRepo; onBack: 
             <input type="checkbox" id="detailAutoMerge" checked={autoMerge} onChange={(e) => setAutoMerge(e.target.checked)}
               className="rounded bg-gray-700 border-gray-600" />
             <label htmlFor="detailAutoMerge" className="text-sm text-gray-300">Auto-merge approved PRs</label>
+          </div>
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">Provider</label>
+            <select className="w-full bg-gray-700 text-foreground text-sm rounded px-3 py-2 outline-none focus:ring-1 focus:ring-indigo-500"
+              value={provider} onChange={(e) => { setProvider(e.target.value); setReviewModel(''); }}>
+              {providers.map((p) => <option key={p} value={p}>{p === 'codex' ? 'Codex' : 'Claude Code'}</option>)}
+            </select>
           </div>
           <div>
             <label className="block text-xs text-gray-400 mb-1">Review Model</label>

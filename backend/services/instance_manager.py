@@ -339,6 +339,7 @@ class InstanceManager:
                 "effort_level": effort_level,
                 "enable_workflows": enable_workflows,
                 "enabled_skills": enabled_skills,
+                "provider": provider,
             }
 
         # Update instance record
@@ -858,13 +859,15 @@ class InstanceManager:
                 return False
 
             from backend.services.claude_pool import (
-                is_transient_overload, transient_retry_delay,
+                is_transient_for, transient_retry_delay,
                 collect_process_output_for_detection,
             )
 
+            params = self._launch_params.get(instance_id) or {}
+            provider = params.get("provider") or "claude"
             log_contents = await self.get_recent_log_contents(task_id, limit=10)
             combined = collect_process_output_for_detection(stderr_text, log_contents)
-            if not is_transient_overload(combined):
+            if not is_transient_for(provider, combined):
                 # Non-transient failure — reset tally so the next genuine
                 # overload chain starts fresh.
                 self._transient_attempts.pop(instance_id, None)
@@ -879,7 +882,6 @@ class InstanceManager:
                 self._transient_attempts.pop(instance_id, None)
                 return False
 
-            params = self._launch_params.get(instance_id)
             if not params:
                 return False
 
@@ -923,6 +925,7 @@ class InstanceManager:
                 effort_level=params.get("effort_level"),
                 chat_initiated=True,
                 config_dir=config_dir,
+                provider=provider,
                 enable_workflows=params.get("enable_workflows", False),
                 enabled_skills=params.get("enabled_skills"),
             )
@@ -943,6 +946,13 @@ class InstanceManager:
         try:
             from backend.main import dispatcher
             if not dispatcher or not dispatcher.pool or not dispatcher.pool.enabled:
+                return False
+
+            # 号池是 claude 专属；codex 的限额文案（"hit your usage limit"）会
+            # 误命中 claude 的 _RATE_LIMIT_RE，若不拦会把 codex session 用
+            # claude --resume 重启（provider 丢失），必须显式挡掉。
+            params = self._launch_params.get(instance_id, {})
+            if (params.get("provider") or "claude").lower() != "claude":
                 return False
 
             from backend.services.claude_pool import (
@@ -1010,7 +1020,6 @@ class InstanceManager:
                 "new_account": new_account_id,
             })
 
-            params = self._launch_params.get(instance_id, {})
             await self.launch(
                 instance_id=instance_id,
                 prompt=params.get("prompt", "continue"),
@@ -1146,6 +1155,103 @@ class InstanceManager:
                 "tool_output": output or summary,
                 "is_error": bool(exit_code not in (None, 0)),
             })
+        elif codex_type == "item.completed" and item_type == "reasoning":
+            # Codex 的 reasoning summary → 与 claude 同形的 thinking 事件，
+            # 前端复用现成的 thinking 折叠渲染
+            text = item.get("text") or ""
+            if not text:
+                return None
+            event.update({
+                "event_type": "thinking",
+                "role": "assistant",
+                "content": text,
+            })
+        elif codex_type == "item.completed" and item_type == "file_change":
+            # file_change 只以 completed 形态出现（patch 成功或失败）
+            changes = item.get("changes") or []
+            status = item.get("status") or "completed"
+            lines = [
+                f"{c.get('kind', 'update')} {c.get('path', '')}".strip()
+                for c in changes if isinstance(c, dict)
+            ]
+            summary = f"Patch {status}"
+            if lines:
+                summary += "\n" + "\n".join(lines)
+            event.update({
+                "event_type": "tool_result",
+                "role": "tool",
+                "tool_name": "FileChange",
+                "tool_input": json.dumps({"changes": changes}, ensure_ascii=False),
+                "tool_output": summary,
+                "is_error": status == "failed",
+            })
+        elif item_type == "mcp_tool_call":
+            server = item.get("server") or ""
+            tool = item.get("tool") or ""
+            name = f"{server}.{tool}".strip(".") or "mcp_tool_call"
+            arguments = item.get("arguments")
+            tool_input = (
+                json.dumps(arguments, ensure_ascii=False)
+                if isinstance(arguments, (dict, list)) else arguments
+            )
+            if codex_type == "item.started":
+                event.update({
+                    "event_type": "tool_use",
+                    "role": "assistant",
+                    "tool_name": name,
+                    "tool_input": tool_input,
+                })
+            else:
+                status = item.get("status") or "completed"
+                result = item.get("result")
+                error = item.get("error")
+                if isinstance(result, (dict, list)):
+                    result = json.dumps(result, ensure_ascii=False)
+                if isinstance(error, (dict, list)):
+                    error = json.dumps(error, ensure_ascii=False)
+                event.update({
+                    "event_type": "tool_result",
+                    "role": "tool",
+                    "tool_name": name,
+                    "tool_input": tool_input,
+                    "tool_output": error or result or f"MCP call {status}",
+                    "is_error": status == "failed" or bool(error),
+                })
+        elif item_type == "web_search":
+            query = item.get("query") or ""
+            tool_input = json.dumps({"query": query}, ensure_ascii=False)
+            if codex_type == "item.started":
+                event.update({
+                    "event_type": "tool_use",
+                    "role": "assistant",
+                    "tool_name": "WebSearch",
+                    "tool_input": tool_input,
+                })
+            else:
+                event.update({
+                    "event_type": "tool_result",
+                    "role": "tool",
+                    "tool_name": "WebSearch",
+                    "tool_input": tool_input,
+                    "tool_output": f"Search completed: {query}",
+                })
+        elif item_type == "todo_list":
+            items = item.get("items") or []
+            lines = [
+                f"{'✓' if it.get('completed') else '○'} {it.get('text', '')}"
+                for it in items if isinstance(it, dict)
+            ]
+            event.update({
+                "event_type": "system_event",
+                "role": "assistant",
+                "content": "Todo:\n" + "\n".join(lines) if lines else "Todo list updated",
+            })
+        elif item_type == "error":
+            event.update({
+                "event_type": "system_event",
+                "content": str(item.get("message") or "codex error item"),
+                "is_error": True,
+            })
         elif codex_type == "turn.completed":
             usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
             event.update({
@@ -1154,7 +1260,13 @@ class InstanceManager:
                 "context_usage": self._codex_context_usage(usage) if usage else None,
             })
         elif "error" in codex_type.lower() or data.get("error"):
-            message = data.get("message") or data.get("error") or codex_type
+            # turn.failed 形如 {"type":"turn.failed","error":{"message":...}}（实测）
+            message = data.get("message")
+            err = data.get("error")
+            if message is None and isinstance(err, dict):
+                message = err.get("message") or err
+            if message is None:
+                message = err or codex_type
             if isinstance(message, (dict, list)):
                 message = json.dumps(message, ensure_ascii=False)
             event.update({
@@ -1481,14 +1593,20 @@ class InstanceManager:
                     context_usage = stored
         elif context_usage and not context_usage.get("context_window"):
             # Per-request usage without a window (PTY interactive mode and -p
-            # assistant events). Fill from the task's model choice: [1m]
-            # variants get 1M, else 200K.
+            # assistant events; codex turn.completed usage). Fill from the
+            # task's model choice: codex 查窗口表，claude [1m] 变体 1M 其余 200K。
             model_name = ""
+            task_provider = "claude"
             if task_id:
                 async with self.db_factory() as db:
                     t = await db.get(Task, task_id)
                     model_name = (t.model or "") if t else ""
-            context_usage["context_window"] = _model_context_window(model_name)
+                    task_provider = ((t.provider if t else None) or "claude").lower()
+            if task_provider == "codex":
+                from backend.services.codex_models import codex_context_window
+                context_usage["context_window"] = codex_context_window(model_name)
+            else:
+                context_usage["context_window"] = _model_context_window(model_name)
         if context_usage and task_id:
             async with self.db_factory() as db:
                 await db.execute(

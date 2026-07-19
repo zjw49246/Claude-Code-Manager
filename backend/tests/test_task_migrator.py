@@ -49,6 +49,7 @@ def _migrator(db_factory, relay=None) -> TaskMigrator:
     # 文件搬运全替身（不碰 SSH/磁盘）
     m._sync_workspace = AsyncMock()
     m._move_session = AsyncMock()
+    m._move_codex_session = AsyncMock()
     m._sync_task_fields_from_worker = AsyncMock()
     m._ensure_worker_task = AsyncMock()
     return m
@@ -203,3 +204,49 @@ async def test_destroy_migrates_tasks_back(db_factory, session_factory, monkeypa
     assert "销毁迁移失败" in (b.error_message or "")
     prov.destroy_worker.assert_called_once_with(w.id)
     relay.stop_worker.assert_called_once_with(w.id)
+
+
+# ---------------------------------------------------------------------------
+# Codex session 搬运（rollout 文件在 ~/.codex/sessions/YYYY/MM/DD/）
+# ---------------------------------------------------------------------------
+
+async def test_migrate_codex_task_uses_codex_session_mover(db_factory, session_factory, monkeypatch):
+    w = await _mk_worker(session_factory)
+    t = await _mk_task(session_factory, session_id="019f0000-aaaa-bbbb-cccc-000000000001", provider="codex")
+    m = _migrator(db_factory)
+    proxy = AsyncMock()
+    proxy.ensure_worker_project.return_value = 9
+    monkeypatch.setattr(main_module, "worker_proxy", proxy)
+
+    await m.migrate(t.id, w.id)
+
+    m._move_codex_session.assert_called_once()
+    m._move_session.assert_not_called()
+
+
+async def test_migrate_claude_task_keeps_claude_session_mover(db_factory, session_factory, monkeypatch):
+    w = await _mk_worker(session_factory)
+    t = await _mk_task(session_factory, session_id="sess-claude", provider="claude")
+    m = _migrator(db_factory)
+    proxy = AsyncMock()
+    proxy.ensure_worker_project.return_value = 9
+    monkeypatch.setattr(main_module, "worker_proxy", proxy)
+
+    await m.migrate(t.id, w.id)
+
+    m._move_session.assert_called_once()
+    m._move_codex_session.assert_not_called()
+
+
+async def test_local_codex_session_glob_finds_rollout_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    sid = "019f0000-aaaa-bbbb-cccc-000000000002"
+    day_dir = tmp_path / ".codex" / "sessions" / "2026" / "07" / "19"
+    day_dir.mkdir(parents=True)
+    f = day_dir / f"rollout-2026-07-19T01-02-03-{sid}.jsonl"
+    f.write_text("{}")
+
+    matches = TaskMigrator._local_codex_session_glob(sid)
+    assert matches == [str(f)]
+    # 不同 session id 不应命中
+    assert TaskMigrator._local_codex_session_glob("other-id") == []

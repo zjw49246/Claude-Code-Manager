@@ -76,3 +76,32 @@ def test_effort_map_keys_are_valid_model_options():
     options = _option_list()
     for model in CODEX_MODEL_EFFORTS:
         assert model in options
+
+
+# ---------------------------------------------------------------------------
+# Context windows（~/.codex/models_cache.json 实测，2026-07-19）
+# ---------------------------------------------------------------------------
+
+from backend.services.codex_models import (
+    codex_context_window,
+    CODEX_CONTEXT_WINDOWS,
+    DEFAULT_CODEX_CONTEXT_WINDOW,
+)
+
+
+class TestCodexContextWindow:
+    def test_known_models(self):
+        assert codex_context_window("gpt-5.6-sol") == 272_000
+        assert codex_context_window("gpt-5.5") == 272_000
+        assert codex_context_window("gpt-5.3-codex-spark") == 128_000
+
+    def test_unknown_model_falls_back_to_default(self):
+        assert codex_context_window("gpt-9000") == DEFAULT_CODEX_CONTEXT_WINDOW
+
+    def test_none_and_default_use_configured_default_model(self):
+        from backend.config import settings
+        expected = CODEX_CONTEXT_WINDOWS.get(
+            settings.default_codex_model, DEFAULT_CODEX_CONTEXT_WINDOW
+        )
+        assert codex_context_window(None) == expected
+        assert codex_context_window("default") == expected

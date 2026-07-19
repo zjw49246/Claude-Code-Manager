@@ -21,6 +21,27 @@ CODEX_MODEL_EFFORTS: dict[str, list[str]] = {
 }
 
 
+# context_window per model（~/.codex/models_cache.json 实测，2026-07-19：
+# gpt-5.6-* / gpt-5.5 / gpt-5.4 / gpt-5.4-mini 均 272000，gpt-5.3-codex-spark 128000）
+CODEX_CONTEXT_WINDOWS: dict[str, int] = {
+    "gpt-5.6-sol": 272_000,
+    "gpt-5.6-terra": 272_000,
+    "gpt-5.6-luna": 272_000,
+    "gpt-5.5": 272_000,
+    "gpt-5.4": 272_000,
+    "gpt-5.4-mini": 272_000,
+    "gpt-5.3-codex-spark": 128_000,
+}
+DEFAULT_CODEX_CONTEXT_WINDOW = 272_000
+
+
+def codex_context_window(model: str | None) -> int:
+    """Context window for a codex model (falls back to the family default)."""
+    if not model or model == "default":
+        model = settings.default_codex_model
+    return CODEX_CONTEXT_WINDOWS.get(model, DEFAULT_CODEX_CONTEXT_WINDOW)
+
+
 def base_codex_efforts() -> list[str]:
     return [e.strip() for e in settings.codex_effort_options.split(",") if e.strip()]
 

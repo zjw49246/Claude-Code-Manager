@@ -40,6 +40,13 @@ async def create_monitor_session(
             task, "POST", f"/api/tasks/{task_id}/monitor-sessions",
             body=body.model_dump(),
         )
+    # Monitor 子 agent 硬编码跑 claude CLI（_launch_monitor_agent），对 codex
+    # 任务放行会静默起一个 Claude 子进程——显式拒绝，别让它悄悄跑错 provider
+    if (task.provider or "claude").lower() != "claude":
+        raise HTTPException(
+            400, "Monitor sub-agents are claude-only; this task runs on "
+                 f"provider '{task.provider}'"
+        )
     skills = task.enabled_skills or {}
     if not skills.get("monitor"):
         raise HTTPException(403, "Monitor skill not enabled for this task")

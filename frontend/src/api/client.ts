@@ -364,6 +364,7 @@ export interface MonitoredRepo {
   enabled: boolean;
   auto_merge: boolean;
   webhook_secret: string;
+  provider: string;
   review_model: string | null;
   default_branch: string;
   allowed_authors: string[];
@@ -933,9 +934,9 @@ export const api = {
   // PR Monitor
   getMonitoredRepos: () =>
     request<MonitoredRepo[]>('/api/pr-monitor/repos'),
-  createMonitoredRepo: (data: { repo_full_name: string; project_id?: number; worker_id?: number; auto_merge?: boolean; review_model?: string; default_branch?: string; allowed_authors?: string[] }) =>
+  createMonitoredRepo: (data: { repo_full_name: string; project_id?: number; worker_id?: number; auto_merge?: boolean; provider?: string; review_model?: string; default_branch?: string; allowed_authors?: string[] }) =>
     request<MonitoredRepo>('/api/pr-monitor/repos', { method: 'POST', body: JSON.stringify(data) }),
-  updateMonitoredRepo: (id: number, data: { project_id?: number; auto_merge?: boolean; review_model?: string; default_branch?: string; allowed_authors?: string[]; enabled?: boolean }) =>
+  updateMonitoredRepo: (id: number, data: { project_id?: number; auto_merge?: boolean; provider?: string; review_model?: string | null; default_branch?: string; allowed_authors?: string[]; enabled?: boolean }) =>
     request<MonitoredRepo>(`/api/pr-monitor/repos/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   deleteMonitoredRepo: (id: number) =>
     request<{ ok: boolean }>(`/api/pr-monitor/repos/${id}`, { method: 'DELETE' }),

@@ -786,3 +786,132 @@ class TestRateLimitEventActionable:
         assert rate_limit_event_is_actionable(
             {"status": "allowed_warning", "rateLimitType": "five_hour", "utilization": None}
         ) is False
+
+
+# ---------------------------------------------------------------------------
+# Codex-provider detection (texts from codex-rs rust-v0.144.6
+# protocol/src/error.rs — CLI 同版实证)
+# ---------------------------------------------------------------------------
+
+from backend.services.claude_pool import (
+    is_codex_transient,
+    is_codex_usage_limited,
+    is_codex_auth_failure,
+    is_transient_for,
+)
+
+
+class TestCodexTransientDetection:
+    def test_stream_disconnected(self):
+        assert is_codex_transient("stream disconnected before completion: transport error")
+
+    def test_request_timed_out(self):
+        assert is_codex_transient("request timed out")
+
+    def test_connection_failed(self):
+        assert is_codex_transient("Connection failed: error sending request")
+
+    def test_response_stream_failed(self):
+        assert is_codex_transient("Error while reading the server response: connection reset, request id: req_1")
+
+    def test_internal_server_error(self):
+        assert is_codex_transient("We're currently experiencing high demand, which may cause temporary errors.")
+
+    def test_server_overloaded(self):
+        assert is_codex_transient("Selected model is at capacity. Please try a different model.")
+
+    def test_unexpected_status_429(self):
+        assert is_codex_transient("unexpected status 429 Too Many Requests: rate limited")
+
+    def test_unexpected_status_500(self):
+        assert is_codex_transient("unexpected status 500 Internal Server Error: oops")
+
+    def test_retry_limit_429(self):
+        assert is_codex_transient("exceeded retry limit, last status: 429 Too Many Requests")
+
+    def test_unexpected_status_401_not_transient(self):
+        # 401 是认证失败，不能退避重试
+        assert not is_codex_transient(
+            "unexpected status 401 Unauthorized: Your authentication token has been invalidated."
+        )
+
+    def test_usage_limit_not_transient(self):
+        assert not is_codex_transient(
+            "You've hit your usage limit for gpt-5.6-sol. Switch to another model now, or retry after 5pm"
+        )
+
+    def test_quota_exceeded_not_transient(self):
+        assert not is_codex_transient("Quota exceeded. Check your plan and billing details.")
+
+    def test_auth_revoked_not_transient(self):
+        assert not is_codex_transient(
+            "Your access token could not be refreshed because your refresh token was revoked. "
+            "Please log out and sign in again."
+        )
+
+    def test_normal_output_not_transient(self):
+        assert not is_codex_transient("All tests passed, pushed to main.")
+        assert not is_codex_transient("")
+
+
+class TestCodexUsageAndAuthDetection:
+    def test_usage_limit_variants(self):
+        assert is_codex_usage_limited("You've hit your usage limit for codex.")
+        assert is_codex_usage_limited("Quota exceeded. Check your plan and billing details.")
+        assert is_codex_usage_limited("Your workspace is out of credits. Add credits to continue.")
+        assert is_codex_usage_limited("You hit your spend cap set in your workspace.")
+
+    def test_auth_variants(self):
+        assert is_codex_auth_failure("Your authentication token has been invalidated. Please try signing in again.")
+        assert is_codex_auth_failure("refresh token was revoked. Please log out and sign in again.")
+        assert is_codex_auth_failure("unexpected status 401 Unauthorized: nope")
+
+
+class TestProviderAwareTransientRouting:
+    def test_claude_provider_uses_claude_detector(self):
+        text = "API Error: Server is temporarily limiting requests (not your usage limit)"
+        assert is_transient_for("claude", text)
+        assert is_transient_for(None, text)  # 默认 claude
+        assert not is_transient_for("codex", text)
+
+    def test_codex_provider_uses_codex_detector(self):
+        text = "stream disconnected before completion: transport error"
+        assert is_transient_for("codex", text)
+        assert not is_transient_for("claude", text)
+
+    def test_codex_usage_limit_text_matches_claude_rate_limit_regex(self):
+        """危险重叠回归锚点：codex 的限额文案会命中 claude 的 _RATE_LIMIT_RE
+        （"hit your usage limit" ⊂ "hit your (\\w+ )?limit"）。号池轮换路径
+        因此必须按 provider 显式 gate（dispatcher._check_rate_limit_and_rotate /
+        instance_manager._try_chat_pool_rotation），否则 codex 撞限额会冷却
+        无辜的 claude 账号并用 claude --resume 重启 codex session。"""
+        codex_banner = "You've hit your usage limit for gpt-5.6-sol."
+        assert is_rate_limited(codex_banner)  # 重叠事实（若哪天不再重叠，gate 仍无害）
+        assert is_codex_usage_limited(codex_banner)
+        assert not is_transient_for("codex", codex_banner)
+
+
+class TestChatPoolRotationCodexGate:
+    """codex 任务绝不能进 claude 号池轮换：其限额文案会命中 claude 正则，
+    不 gate 会用 claude --resume 重启 codex session（provider 丢失）。"""
+
+    @pytest.mark.asyncio
+    async def test_codex_provider_skips_rotation(self, pool, monkeypatch):
+        from backend.services.instance_manager import InstanceManager
+
+        import backend.main
+        fake_dispatcher = MagicMock()
+        fake_dispatcher.pool = pool
+        monkeypatch.setattr(backend.main, "dispatcher", fake_dispatcher)
+
+        im = InstanceManager(db_factory=MagicMock(), broadcaster=MagicMock())
+        im._launch_params[1] = {"prompt": "hello", "provider": "codex"}
+        im.get_recent_log_contents = AsyncMock(
+            return_value=["You've hit your usage limit for gpt-5.6-sol."]
+        )
+        im.launch = AsyncMock()
+
+        ok = await im._try_chat_pool_rotation(1, 42, 1, "")
+
+        assert ok is False
+        im.launch.assert_not_awaited()

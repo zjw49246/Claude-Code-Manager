@@ -107,6 +107,7 @@ async def create_repo(request: Request, body: MonitoredRepoCreate, db: AsyncSess
         project_id=body.project_id,
         worker_id=worker_id,
         auto_merge=body.auto_merge,
+        provider=body.provider,
         review_model=body.review_model,
         default_branch=body.default_branch,
         allowed_authors=body.allowed_authors,

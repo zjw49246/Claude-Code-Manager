@@ -1833,3 +1833,146 @@ def test_build_command_codex_supported_effort_still_passed():
     im = InstanceManager(MagicMock(), MagicMock())
     cmd = im._build_command(provider="codex", prompt="hi", model="gpt-5.5", resume_session_id=None, effort_level="high")
     assert 'model_reasoning_effort="high"' in cmd
+
+
+# ---------------------------------------------------------------------------
+# Codex event parsing — reasoning / file_change / mcp_tool_call / web_search /
+# todo_list / error item / turn.failed（字段名来自 codex-rs rust-v0.144.6
+# exec/src/exec_events.rs 实证）
+# ---------------------------------------------------------------------------
+
+def test_parse_codex_reasoning_becomes_thinking():
+    im = InstanceManager(MagicMock(), MagicMock())
+    event = im._parse_codex_line(json.dumps({
+        "type": "item.completed",
+        "item": {"id": "item_1", "type": "reasoning", "text": "Let me check the tests first."},
+    }))
+
+    assert event["event_type"] == "thinking"
+    assert event["role"] == "assistant"
+    assert event["content"] == "Let me check the tests first."
+
+
+def test_parse_codex_empty_reasoning_skipped():
+    im = InstanceManager(MagicMock(), MagicMock())
+    assert im._parse_codex_line(json.dumps({
+        "type": "item.completed",
+        "item": {"id": "item_1", "type": "reasoning", "text": ""},
+    })) is None
+
+
+def test_parse_codex_file_change():
+    im = InstanceManager(MagicMock(), MagicMock())
+    event = im._parse_codex_line(json.dumps({
+        "type": "item.completed",
+        "item": {
+            "id": "item_2",
+            "type": "file_change",
+            "changes": [{"path": "src/app.py", "kind": "update"},
+                        {"path": "src/new.py", "kind": "add"}],
+            "status": "completed",
+        },
+    }))
+
+    assert event["event_type"] == "tool_result"
+    assert event["tool_name"] == "FileChange"
+    assert "update src/app.py" in event["tool_output"]
+    assert "add src/new.py" in event["tool_output"]
+    assert event["is_error"] is False
+
+
+def test_parse_codex_file_change_failed_is_error():
+    im = InstanceManager(MagicMock(), MagicMock())
+    event = im._parse_codex_line(json.dumps({
+        "type": "item.completed",
+        "item": {"id": "i", "type": "file_change", "changes": [], "status": "failed"},
+    }))
+    assert event["is_error"] is True
+
+
+def test_parse_codex_mcp_tool_call_started_and_completed():
+    im = InstanceManager(MagicMock(), MagicMock())
+    started = im._parse_codex_line(json.dumps({
+        "type": "item.started",
+        "item": {"id": "i", "type": "mcp_tool_call", "server": "ccm", "tool": "create_monitor",
+                 "arguments": {"interval": 60}, "status": "in_progress"},
+    }))
+    assert started["event_type"] == "tool_use"
+    assert started["tool_name"] == "ccm.create_monitor"
+    assert json.loads(started["tool_input"]) == {"interval": 60}
+
+    completed = im._parse_codex_line(json.dumps({
+        "type": "item.completed",
+        "item": {"id": "i", "type": "mcp_tool_call", "server": "ccm", "tool": "create_monitor",
+                 "result": {"ok": True}, "status": "completed"},
+    }))
+    assert completed["event_type"] == "tool_result"
+    assert completed["tool_name"] == "ccm.create_monitor"
+    assert json.loads(completed["tool_output"]) == {"ok": True}
+    assert completed["is_error"] is False
+
+
+def test_parse_codex_mcp_tool_call_failed():
+    im = InstanceManager(MagicMock(), MagicMock())
+    event = im._parse_codex_line(json.dumps({
+        "type": "item.completed",
+        "item": {"id": "i", "type": "mcp_tool_call", "server": "ccm", "tool": "x",
+                 "error": {"message": "boom"}, "status": "failed"},
+    }))
+    assert event["event_type"] == "tool_result"
+    assert event["is_error"] is True
+    assert "boom" in event["tool_output"]
+
+
+def test_parse_codex_web_search():
+    im = InstanceManager(MagicMock(), MagicMock())
+    started = im._parse_codex_line(json.dumps({
+        "type": "item.started",
+        "item": {"id": "i", "type": "web_search", "query": "fastapi websocket"},
+    }))
+    assert started["event_type"] == "tool_use"
+    assert started["tool_name"] == "WebSearch"
+
+    completed = im._parse_codex_line(json.dumps({
+        "type": "item.completed",
+        "item": {"id": "i", "type": "web_search", "query": "fastapi websocket"},
+    }))
+    assert completed["event_type"] == "tool_result"
+    assert "fastapi websocket" in completed["tool_output"]
+
+
+def test_parse_codex_todo_list():
+    im = InstanceManager(MagicMock(), MagicMock())
+    event = im._parse_codex_line(json.dumps({
+        "type": "item.updated",
+        "item": {"id": "i", "type": "todo_list",
+                 "items": [{"text": "write tests", "completed": True},
+                           {"text": "run tests", "completed": False}]},
+    }))
+    assert event["event_type"] == "system_event"
+    assert "✓ write tests" in event["content"]
+    assert "○ run tests" in event["content"]
+
+
+def test_parse_codex_error_item():
+    im = InstanceManager(MagicMock(), MagicMock())
+    event = im._parse_codex_line(json.dumps({
+        "type": "item.completed",
+        "item": {"id": "i", "type": "error", "message": "non-fatal oops"},
+    }))
+    assert event["event_type"] == "system_event"
+    assert event["is_error"] is True
+    assert event["content"] == "non-fatal oops"
+
+
+def test_parse_codex_turn_failed_extracts_nested_message():
+    # 实测形状（codex exec --json 认证失败捕获）：
+    # {"type":"turn.failed","error":{"message":"..."}}
+    im = InstanceManager(MagicMock(), MagicMock())
+    event = im._parse_codex_line(json.dumps({
+        "type": "turn.failed",
+        "error": {"message": "stream disconnected before completion: transport error"},
+    }))
+    assert event["event_type"] == "system_event"
+    assert event["is_error"] is True
+    assert event["content"] == "stream disconnected before completion: transport error"

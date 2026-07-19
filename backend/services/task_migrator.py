@@ -85,6 +85,7 @@ class TaskMigrator:
                 task = await db.get(Task, task_id)
                 session_id = task.session_id
                 project_id = task.project_id
+                provider = (task.provider or "claude").lower()
 
             # 2. 工作目录搬运（含 .git + 未提交改动，无过滤全量 rsync）
             local_path = None
@@ -95,9 +96,12 @@ class TaskMigrator:
             if local_path:
                 await self._sync_workspace(src, dst, local_path)
 
-            # 3. session 文件搬运（落目标机第一账号 ~/.claude）
+            # 3. session 文件搬运（claude 落目标机 ~/.claude；codex 落 ~/.codex/sessions）
             if session_id:
-                await self._move_session(src, dst, session_id)
+                if provider == "codex":
+                    await self._move_codex_session(src, dst, session_id)
+                else:
+                    await self._move_session(src, dst, session_id)
 
             # 4. 目标是 worker：确保项目记录 + 用同 ID 重建 task
             if dst is not None:
@@ -248,6 +252,49 @@ class TaskMigrator:
                 shutil.copy2(src_file, target)
         else:
             target = f"/home/{dst.ssh_user}/.claude/projects/{encoded}/{session_id}.jsonl"
+            await self._ssh(dst).copy_file(src_file, target)
+
+    # -- codex session 搬运 ---------------------------------------------
+    # codex 的 session 是 rollout 文件：~/.codex/sessions/YYYY/MM/DD/
+    # rollout-<timestamp>-<session_id>.jsonl（本机 CLI 0.144.6 实证）。
+    # `codex exec resume <id>` 按 id 扫描 sessions 树，故目标机保持源机的
+    # 相对路径（含日期目录）落盘即可。
+
+    @staticmethod
+    def _local_codex_session_glob(session_id: str) -> list[str]:
+        home = os.path.expanduser("~")
+        return glob.glob(f"{home}/.codex/sessions/*/*/*/rollout-*-{session_id}.jsonl")
+
+    async def _move_codex_session(self, src: Worker | None, dst: Worker | None, session_id: str):
+        codex_root = os.path.expanduser("~/.codex/sessions")
+        if src is None:
+            matches = self._local_codex_session_glob(session_id)
+            if not matches:
+                logger.warning("codex session %s 本机未找到，跳过 session 搬运", session_id)
+                return
+            src_file = matches[0]
+            rel = os.path.relpath(src_file, codex_root)
+        else:
+            ssh = self._ssh(src)
+            code, out = await ssh.run(
+                f"ls ~/.codex/sessions/*/*/*/rollout-*-{session_id}.jsonl 2>/dev/null | head -1"
+            )
+            remote_file = out.strip().splitlines()[0].strip() if out.strip() else ""
+            if not remote_file:
+                logger.warning("codex session %s 在 worker %s 未找到，跳过", session_id, src.id)
+                return
+            rel = os.path.relpath(remote_file, f"/home/{src.ssh_user}/.codex/sessions")
+            tmp = tempfile.mkdtemp(prefix="ccm-sess-")
+            src_file = os.path.join(tmp, os.path.basename(remote_file))
+            await ssh.rsync_from(remote_file, src_file, delete=False)
+
+        if dst is None:
+            target = os.path.join(codex_root, rel)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            if os.path.abspath(src_file) != os.path.abspath(target):
+                shutil.copy2(src_file, target)
+        else:
+            target = f"/home/{dst.ssh_user}/.codex/sessions/{rel}"
             await self._ssh(dst).copy_file(src_file, target)
 
     # -- 目标 worker 上重建 task ----------------------------------------

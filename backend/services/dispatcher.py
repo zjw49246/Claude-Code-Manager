@@ -711,8 +711,13 @@ class GlobalDispatcher:
         # each) — must run off the event loop
         return await self.pool.select_async(exclude=exclude, validate=True)
 
-    async def _resolve_resume_config_dir(self, session_id: str | None) -> str | None:
+    async def _resolve_resume_config_dir(
+        self, session_id: str | None, provider: str | None = "claude"
+    ) -> str | None:
         """Resolve the CLAUDE_CONFIG_DIR for a (possibly resuming) launch.
+
+        Codex 任务直接返回 None：号池/CLAUDE_CONFIG_DIR 是 claude 专属，
+        为 codex 选号只会白白 select+migrate（污染轮转指针），launch 也不会用。
 
         Prefers a fresh, validated pool account and migrates the session JSONL
         into it. The critical case is when the pool can hand out **no** healthy
@@ -728,6 +733,8 @@ class GlobalDispatcher:
         Returns a config_dir, or None when there is no pool (default account)
         or no session to anchor a fallback to.
         """
+        if (provider or "claude").lower() != "claude":
+            return None
         if not (self.pool and self.pool.enabled):
             return None
 
@@ -811,6 +818,14 @@ class GlobalDispatcher:
         """
         if not self.pool or exit_code == 0 or exit_code in (-2, 130):
             return None
+
+        # 号池是 claude 专属；codex 的限额文案（"hit your usage limit"）会误命中
+        # claude 的 _RATE_LIMIT_RE——不拦会冷却无辜的 claude 账号并把 codex
+        # session 迁进 claude config_dir，必须按 provider 显式挡掉。
+        async with self.db_factory() as db:
+            t = await db.get(Task, task_id)
+            if t and (t.provider or "claude").lower() != "claude":
+                return None
 
         from backend.services.claude_pool import is_pool_rotatable, is_auth_failure, is_rate_limited
         from backend.services.claude_pool import migrate_session, collect_process_output_for_detection
@@ -987,7 +1002,7 @@ class GlobalDispatcher:
         failure is no longer transient (or the budget is exhausted) we hand off
         to account rotation, then to the normal retry/fail path.
         """
-        from backend.services.claude_pool import is_transient_overload, transient_retry_delay
+        from backend.services.claude_pool import is_transient_for, transient_retry_delay
 
         delay = transient_retry_delay(
             attempt,
@@ -1057,7 +1072,7 @@ class GlobalDispatcher:
         if (
             settings.transient_retry_enabled
             and attempt < settings.transient_retry_max
-            and (still_transient or is_transient_overload(combined))
+            and (still_transient or is_transient_for(task.provider, combined))
         ):
             await self._run_transient_retry(
                 instance_id, task, cwd, git_env,
@@ -1164,7 +1179,7 @@ class GlobalDispatcher:
             # task that already has a session) this also anchors to the session's
             # resident dir when the pool is exhausted, so --resume doesn't miss
             # the JSONL and hard-fail with "No conversation found" (prod #734/#740).
-            pool_config_dir = await self._resolve_resume_config_dir(task.session_id)
+            pool_config_dir = await self._resolve_resume_config_dir(task.session_id, task.provider)
 
             await self.instance_manager.launch(
                 instance_id=instance_id,
@@ -1240,12 +1255,12 @@ class GlobalDispatcher:
                 self.instance_manager._pty_rate_limit_seen.discard(instance_id)
 
             if exit_code != 0:
-                from backend.services.claude_pool import is_transient_overload
+                from backend.services.claude_pool import is_transient_for
                 combined = await self._collect_failure_output(instance_id, task.id)
 
                 # Transient overload that only surfaced on stderr (subprocess
                 # mode) — the flag above may miss it, so re-check the text.
-                if settings.transient_retry_enabled and is_transient_overload(combined):
+                if settings.transient_retry_enabled and is_transient_for(task.provider, combined):
                     await self._run_transient_retry(
                         instance_id, task, cwd, git_env,
                         thinking_budget=thinking_budget,
@@ -1623,7 +1638,7 @@ class GlobalDispatcher:
             # account and die with "No conversation found". For a resume it
             # anchors to the session's resident account (no config_dir drift →
             # PTY hot session preserved); fresh iterations get a healthy pick.
-            config_dir = await self._resolve_resume_config_dir(resume_sid)
+            config_dir = await self._resolve_resume_config_dir(resume_sid, task.provider)
 
             await self.instance_manager.launch(
                 instance_id=instance_id,
@@ -1811,7 +1826,7 @@ class GlobalDispatcher:
                 # config_dir=None and silently inherited the hardcoded systemd
                 # CLAUDE_CONFIG_DIR — the pool was never consulted. See loop fix
                 # (#770); goal had the identical gap.
-                config_dir = await self._resolve_resume_config_dir(None)
+                config_dir = await self._resolve_resume_config_dir(None, task.provider)
                 await self.instance_manager.launch(
                     instance_id=instance_id,
                     prompt=prompt,
@@ -1831,7 +1846,7 @@ class GlobalDispatcher:
                 follow_up = self._build_goal_followup_prompt(last_reason, turn, max_turns)
                 # Resume on the session's resident account (no config_dir drift →
                 # PTY hot session preserved); migrate / fall back if cooled down.
-                config_dir = await self._resolve_resume_config_dir(session_id)
+                config_dir = await self._resolve_resume_config_dir(session_id, task.provider)
                 await self.instance_manager.launch(
                     instance_id=instance_id,
                     prompt=follow_up,
@@ -2194,7 +2209,7 @@ class GlobalDispatcher:
         # Same pool anchoring as the main loop launch: resume on the session's
         # resident account, not the inherited systemd default (else --resume
         # misses the JSONL on the wrong account).
-        config_dir = await self._resolve_resume_config_dir(resume_sid)
+        config_dir = await self._resolve_resume_config_dir(resume_sid, task.provider)
 
         logger.info(f"Loop task {task.id} iter {iteration}: resuming session {resume_sid} to fix missing signal")
         await self.instance_manager.launch(
@@ -2996,7 +3011,7 @@ class GlobalDispatcher:
             # — crucially — when the pool is exhausted still anchors --resume to
             # the session's resident dir instead of letting it fall through to an
             # inherited CLAUDE_CONFIG_DIR that lacks the JSONL (prod #734/#740).
-            config_dir = await self._resolve_resume_config_dir(task.session_id)
+            config_dir = await self._resolve_resume_config_dir(task.session_id, task.provider)
 
             logger.info(
                 f"Processing queued message for task {task_id}: source={msg.source} "
@@ -3018,11 +3033,18 @@ class GlobalDispatcher:
             if task.session_id and task.context_window_usage:
                 usage = task.context_window_usage
                 total_input = (usage.get("input_tokens") or 0) + (usage.get("cache_read_input_tokens") or 0) + (usage.get("cache_creation_input_tokens") or 0)
-                # context_window 可能被 CC 低报（1M 模型报 200K），用模型名兜底
-                window = usage.get("context_window") or 200_000
-                model_lower = (msg.model_override or task.model or "").lower()
-                if "[1m]" in model_lower or "fable" in model_lower:
-                    window = max(window, 1_000_000)
+                # context_window 可能被 CC 低报（1M 模型报 200K），用模型名兜底；
+                # codex 无该字段时查 codex 窗口表（272K/128K，非 claude 的 200K）
+                if (task.provider or "claude").lower() == "codex":
+                    from backend.services.codex_models import codex_context_window
+                    window = usage.get("context_window") or codex_context_window(
+                        msg.model_override or task.model
+                    )
+                else:
+                    window = usage.get("context_window") or 200_000
+                    model_lower = (msg.model_override or task.model or "").lower()
+                    if "[1m]" in model_lower or "fable" in model_lower:
+                        window = max(window, 1_000_000)
                 utilization = total_input / window if window else 0
                 # 阈值：GlobalSettings 覆盖 > env 默认（前端运行时设置可改）
                 gs = await db.get(GlobalSettings, 1)

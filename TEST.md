@@ -380,6 +380,21 @@ cd frontend && npx tsc --noEmit
 | `test_service_dispatcher.py::test_lifecycle_backfills_agents_md` | 存量项目惰性补齐：任务启动时对 target_repo 补 AGENTS.md symlink |
 | `test_api_projects.py::test_init_local_repo_preserves_existing_claude_md` / `..._preserves_both_existing_docs` | **不覆盖原有文件**：存量目录（有文件未 git init）建本地项目时，已有 CLAUDE.md/AGENTS.md 原样保留（红→绿实证） |
 
+##### Codex 对等补齐（2026-07-19，文案/字段全部 codex-rs 0.144.6 源码实证）
+
+| 测试 | 验证内容 |
+|------|---------|
+| `test_claude_pool.py::TestCodexTransientDetection` | codex transient 检测：stream disconnected / request timed out / high demand / at capacity / 429/5xx 命中；401、usage limit、quota **不**命中（互斥） |
+| `test_claude_pool.py::TestCodexUsageAndAuthDetection` | codex 限额/认证失败文案检测 |
+| `test_claude_pool.py::TestProviderAwareTransientRouting` | `is_transient_for` 按 provider 分流；**危险重叠回归锚点**：codex 限额文案会命中 claude `_RATE_LIMIT_RE` |
+| `test_claude_pool.py::TestChatPoolRotationCodexGate` | codex 任务绝不进 claude 号池轮换（不 gate 会用 claude --resume 重启 codex session） |
+| `test_service_instance_manager.py::test_parse_codex_reasoning_becomes_thinking` 等 | codex 解析器：reasoning→thinking、file_change/mcp_tool_call/web_search→tool 事件、todo_list、error item、turn.failed 嵌套 message |
+| `test_codex_models.py::TestCodexContextWindow` | codex 模型窗口表（272K/128K，models_cache.json 实测）与回退 |
+| `test_task_migrator.py::test_migrate_codex_task_uses_codex_session_mover` 等 | 迁移按 provider 分流搬 session；rollout 文件 glob 定位 |
+| `test_api_monitor.py::test_create_monitor_rejects_codex_task` / `test_create_sub_agent_rejects_codex_task` | monitor / sub-agent 对 codex 任务显式 400（不静默跑成 Claude 子进程） |
+| `test_service_pr_review.py::test_create_pr_review_task_codex_provider` | PR 审核 task 透传 repo.provider，codex 未配模型时补默认 |
+| 前端 `ProjectTodoList.test.tsx` | Todo Run 建 task 带 provider |
+
 ##### `test_service_worktree_manager.py` — Worktree 管理器
 
 | 测试 | 验证内容 |

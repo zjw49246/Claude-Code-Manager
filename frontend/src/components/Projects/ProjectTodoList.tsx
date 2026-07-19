@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import type { FormEvent } from 'react';
+import type { FormEvent, ReactNode } from 'react';
 import {
   Archive,
   CheckCircle2,
@@ -41,6 +41,8 @@ export function ProjectTodoList({ projectId }: ProjectTodoListProps) {
   const [editDraft, setEditDraft] = useState<TodoDraft>(emptyDraft);
   const [taskTodo, setTaskTodo] = useState<ProjectTodo | null>(null);
   const [taskDraft, setTaskDraft] = useState<TodoDraft>(emptyDraft);
+  const [taskProvider, setTaskProvider] = useState('claude');
+  const [providerOptions, setProviderOptions] = useState<string[]>(['claude', 'codex']);
   const [saving, setSaving] = useState(false);
   const [running, setRunning] = useState(false);
   const [updatingIds, setUpdatingIds] = useState<Set<number>>(() => new Set());
@@ -167,6 +169,10 @@ export function ProjectTodoList({ projectId }: ProjectTodoListProps) {
     setError('');
     setTaskTodo(todo);
     setTaskDraft({ title: todo.title, prompt: todo.prompt });
+    api.config().then((c) => {
+      if (c.provider_options?.length) setProviderOptions(c.provider_options);
+      if (c.default_provider) setTaskProvider(c.default_provider);
+    }).catch(() => {});
   };
 
   const createTask = async (event: FormEvent) => {
@@ -179,6 +185,7 @@ export function ProjectTodoList({ projectId }: ProjectTodoListProps) {
         title: taskDraft.title,
         description: taskDraft.prompt,
         project_id: projectId,
+        provider: taskProvider,
       });
       if (!task?.id) {
         throw new Error('Task was created but returned no id');
@@ -393,6 +400,20 @@ export function ProjectTodoList({ projectId }: ProjectTodoListProps) {
           error={error}
           onClose={() => setTaskTodo(null)}
           onSubmit={createTask}
+          extraFields={
+            <label className="block space-y-1.5">
+              <span className="text-sm text-gray-300">Provider</span>
+              <select
+                value={taskProvider}
+                onChange={(e) => setTaskProvider(e.target.value)}
+                className="w-full rounded border border-gray-600 bg-gray-700 px-3 py-2 text-sm text-foreground outline-none focus:border-indigo-500"
+              >
+                {providerOptions.map((p) => (
+                  <option key={p} value={p}>{p === 'codex' ? 'Codex' : 'Claude Code'}</option>
+                ))}
+              </select>
+            </label>
+          }
         />
       )}
     </div>
@@ -408,6 +429,7 @@ function TodoModal({
   error,
   onClose,
   onSubmit,
+  extraFields,
 }: {
   title: string;
   draft: TodoDraft;
@@ -417,6 +439,7 @@ function TodoModal({
   error?: string;
   onClose: () => void;
   onSubmit: (event: FormEvent) => void;
+  extraFields?: ReactNode;
 }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -465,6 +488,7 @@ function TodoModal({
               required
             />
           </label>
+          {extraFields}
           {error && (
             <div className="rounded bg-red-500/15 px-3 py-2 text-xs text-red-400">{error}</div>
           )}
