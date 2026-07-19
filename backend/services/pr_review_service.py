@@ -172,6 +172,13 @@ async def create_pr_review_task(
     await db.commit()
     await db.refresh(review)
 
+    try:
+        from backend.main import dispatcher
+        if dispatcher:
+            dispatcher.wake()
+    except Exception:
+        logger.debug("Could not wake dispatcher for PR review task", exc_info=True)
+
     logger.info(
         "Created PR review task %d for %s#%d",
         task.id, repo.repo_full_name, pr_data["number"],

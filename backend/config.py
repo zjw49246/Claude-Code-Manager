@@ -9,6 +9,10 @@ class Settings(BaseSettings):
     min_idle_instances: int = 2         # auto top-up idle instances (capped by max_concurrent)
     claude_binary: str = "claude"
     codex_binary: str = "codex"
+    # Keep one Codex app-server process and run task turns over JSON-RPC.
+    # Startup/protocol failures automatically fall back to `codex exec`.
+    codex_app_server_enabled: bool = True
+    codex_app_server_request_timeout: float = 30.0
     default_provider: str = "claude"
     provider_options: str = "claude,codex"
     default_model: str = "claude-opus-4-6"

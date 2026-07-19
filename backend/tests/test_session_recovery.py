@@ -72,6 +72,24 @@ class TestFindSessionJsonl:
         jsonl = _write_session(cfg, "-unrelated-encoding", "sid-x")
         assert _find_session_jsonl("sid-x") == jsonl
 
+    def test_finds_codex_rollout_under_codex_home(self, tmp_path, monkeypatch):
+        """Regression: every valid Codex follow-up was treated as session_gone."""
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+        sid = "019f7991-3ef9-75a1-8441-8bfd420ab006"
+        day = tmp_path / "codex-home" / "sessions" / "2026" / "07" / "19"
+        day.mkdir(parents=True)
+        rollout = day / f"rollout-2026-07-19T08-49-49-{sid}.jsonl"
+        rollout.write_text('{"type":"session_meta"}\n')
+
+        assert _find_session_jsonl(sid, provider="codex") == rollout
+
+    def test_codex_lookup_does_not_accept_claude_session(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
+        _write_session(tmp_path / "claude", "-repo", "same-sid")
+
+        assert _find_session_jsonl("same-sid", provider="codex") is None
+
 
 @pytest.mark.asyncio
 class TestCloneSessionPoolAware:
@@ -96,4 +114,16 @@ class TestCloneSessionPoolAware:
         db_session.add(task)
         await db_session.commit()
         await db_session.refresh(task)
+        assert await _clone_session(task.id, db_session) is None
+
+    async def test_codex_rollout_is_never_cloned_by_filename(self, tmp_path, db_session, monkeypatch):
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+        task = Task(
+            status="failed", provider="codex", session_id="codex-sid",
+            last_cwd="/repo",
+        )
+        db_session.add(task)
+        await db_session.commit()
+        await db_session.refresh(task)
+
         assert await _clone_session(task.id, db_session) is None

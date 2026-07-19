@@ -2855,7 +2855,11 @@ async def _setup_queued_msg_two_idle(db_factory, monkeypatch):
     from backend.services.dispatcher import QueuedMessage, PRIORITY_USER
 
     # Session JSONL "present" → skip the failed/session-gone recovery branch.
-    monkeypatch.setattr(tasks_mod, "_find_session_jsonl", lambda sid: "/tmp/fake.jsonl")
+    monkeypatch.setattr(
+        tasks_mod,
+        "_find_session_jsonl",
+        lambda sid, provider="claude": "/tmp/fake.jsonl",
+    )
 
     d = _make_dispatcher(db_factory)
     d._resolve_resume_config_dir = AsyncMock(return_value=None)
@@ -2928,6 +2932,28 @@ async def test_queued_message_skips_launching_instance(db_factory, monkeypatch):
     assert id2 not in d._launching_instances
 
 
+@pytest.mark.asyncio
+async def test_failed_codex_task_reuses_present_native_thread(db_factory, monkeypatch):
+    """A failed turn must not clone/replace a valid Codex rollout."""
+    import backend.api.tasks as tasks_mod
+
+    d, _id1, _id2, task_id, msg = await _setup_queued_msg_two_idle(
+        db_factory, monkeypatch
+    )
+    clone = AsyncMock()
+    monkeypatch.setattr(tasks_mod, "_clone_session", clone)
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+        task.provider = "codex"
+        task.status = "failed"
+        await db.commit()
+
+    await d._process_queued_message(task_id, msg)
+
+    clone.assert_not_awaited()
+    assert d.instance_manager.launch.await_args.kwargs["resume_session_id"] == "sess-1"
+
+
 # === Codex provider prompt tests (provider-aware agent doc) ===
 
 
@@ -2954,7 +2980,10 @@ async def test_build_task_prompt_provider_doc(db_factory):
         Task(title="t", description="do X", provider="codex")
     )
     assert "请阅读项目根目录的 CLAUDE.md" in claude_prompt
-    assert "请阅读项目根目录的 AGENTS.md" in codex_prompt
+    # Codex loads AGENTS.md natively; explicitly asking it to read the file
+    # again turns trivial prompts into redundant shell/file work.
+    assert "请阅读项目根目录的 AGENTS.md" not in codex_prompt
+    assert "关键内容必须保持同步" in codex_prompt
 
 
 @pytest.mark.asyncio

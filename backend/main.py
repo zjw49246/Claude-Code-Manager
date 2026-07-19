@@ -361,6 +361,10 @@ async def lifespan(app: FastAPI):
     # Stop all running Claude processes before shutdown
     for inst_id in list(instance_manager.processes.keys()):
         await instance_manager.stop(inst_id)
+    try:
+        await instance_manager.shutdown_codex_app_server()
+    except Exception:
+        logger.exception("Codex app-server shutdown failed")
 
     sub_agent_watcher.stop()
     if backup_svc:

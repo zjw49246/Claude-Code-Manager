@@ -62,13 +62,14 @@ _DOC_SYNC_NOTE = (
 def _agent_doc_preamble(provider: str | None) -> str:
     """First-line prompt preamble pointing the agent at the project doc.
 
-    Codex 老项目可能还没有 AGENTS.md（新建项目由 projects.py 注入），
-    所以给 codex 的措辞带 CLAUDE.md 回退。
+    Codex automatically loads AGENTS.md.  Explicitly telling it to read the
+    same file again makes even a trivial task perform redundant shell/file
+    operations.  Keep only the cross-document synchronization rule for Codex;
+    Claude still needs the explicit CLAUDE.md workflow reminder.
     """
     if (provider or "claude").lower() == "codex":
-        read_line = "请阅读项目根目录的 AGENTS.md（若不存在则读 CLAUDE.md）了解项目规范和任务完成后的 git 流程。"
-    else:
-        read_line = "请阅读项目根目录的 CLAUDE.md 了解项目规范和任务完成后的 git 流程。"
+        return _DOC_SYNC_NOTE
+    read_line = "请阅读项目根目录的 CLAUDE.md 了解项目规范和任务完成后的 git 流程。"
     return f"{read_line}\n{_DOC_SYNC_NOTE}"
 
 
@@ -270,6 +271,9 @@ class GlobalDispatcher:
         self.instance_manager = instance_manager
         self.broadcaster = broadcaster
         self._dispatch_task: asyncio.Task | None = None
+        # New tasks wake the loop immediately.  The 2s timeout remains as a
+        # safety poll for tasks inserted by legacy/direct DB paths.
+        self._dispatch_wakeup = asyncio.Event()
         self._running_tasks: dict[int, asyncio.Task] = {}  # instance_id -> lifecycle task
         # Instances mid-launch by the queued-message path. Their DB status is
         # still "idle" until launch() flips it to "running", so without an
@@ -321,6 +325,10 @@ class GlobalDispatcher:
         self._dispatch_task = asyncio.create_task(self._dispatch_loop())
         self._curator_task = asyncio.create_task(self._curator_loop())
         logger.info("GlobalDispatcher started")
+
+    def wake(self) -> None:
+        """Wake the task dispatcher after a pending task is committed."""
+        self._dispatch_wakeup.set()
 
     async def _cleanup_stale_state(self):
         """Reset instances and tasks stuck in active states after a crash/restart."""
@@ -548,9 +556,10 @@ class GlobalDispatcher:
                 logger.exception("curator: error in curator loop")
 
     async def _dispatch_loop(self):
-        """Poll for idle instances + pending tasks and dispatch."""
+        """Dispatch pending tasks, event-driven with a low-frequency poll fallback."""
         while self._running:
             try:
+                self._dispatch_wakeup.clear()
                 # Top up idle workers before looking for capacity
                 await self._ensure_min_idle_instances()
 
@@ -603,7 +612,10 @@ class GlobalDispatcher:
                         self._run_task_lifecycle(instance.id, task, git_env)
                     )
 
-                await asyncio.sleep(2)
+                try:
+                    await asyncio.wait_for(self._dispatch_wakeup.wait(), timeout=2)
+                except asyncio.TimeoutError:
+                    pass
 
             except asyncio.CancelledError:
                 break
@@ -2917,7 +2929,10 @@ class GlobalDispatcher:
             # is always sacrificed to flip the task to "failed"; only the SECOND
             # message reaches this branch and recovers (prod task #725).
             from backend.api.tasks import _clone_session, _find_session_jsonl
-            session_gone = bool(task.session_id) and _find_session_jsonl(task.session_id) is None
+            provider = (task.provider or "claude").lower()
+            session_gone = bool(task.session_id) and _find_session_jsonl(
+                task.session_id, provider=provider
+            ) is None
             if task.session_id and (task.status == "failed" or session_gone):
                 if task.status == "failed":
                     logger.info("Task %d session crashed, recovering session...", task_id)
@@ -2927,11 +2942,16 @@ class GlobalDispatcher:
                         "(would otherwise hard-fail with 'No conversation found')",
                         task_id, task.session_id,
                     )
-                cloned = await _clone_session(task_id, db)
+                # A present Codex rollout remains resumable after a failed
+                # turn.  Unlike Claude's flat JSONL, it cannot be made into a
+                # new thread by merely copying/renaming the file because the
+                # thread id is embedded in its metadata.
+                keep_codex_session = provider == "codex" and not session_gone
+                cloned = None if keep_codex_session else await _clone_session(task_id, db)
                 if cloned:
                     task.session_id = cloned["session_id"]
                     logger.info("Task %d cloned session -> %s", task_id, task.session_id)
-                else:
+                elif not keep_codex_session:
                     # JSONL file missing, fall back to compact summary
                     logger.warning("Task %d JSONL not found, falling back to compact summary", task_id)
                     summary = await self._compact_session(task_id, task.session_id, db)
@@ -2942,6 +2962,11 @@ class GlobalDispatcher:
                             f"[上下文摘要 — 之前的对话记录（会话异常中断后恢复）]\n{summary}\n\n"
                             f"---\n\n[新消息]\n{msg.prompt}"
                         )
+                else:
+                    logger.info(
+                        "Task %d reusing existing Codex session %s after failed turn",
+                        task_id, task.session_id,
+                    )
                 # 关键：不能设成 "pending"——否则主调度循环 (dequeue) 会把它当作
                 # 新任务抢走一个空闲 instance 从头执行 task 描述，导致同一 task 出现
                 # 两个 Claude session（一个回应聊天、一个重跑任务）。设成 "in_progress"

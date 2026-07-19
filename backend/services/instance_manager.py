@@ -53,6 +53,9 @@ class InstanceManager:
         # bridge HTTP 线程收到 CC 的权限请求后经 _loop 调度进事件循环
         self._pty_permissions: dict[str, dict] = {}
         self._loop = None  # 主事件循环，lifespan 启动时注入
+        # Codex persistent JSON-RPC backend.  Created lazily so Claude-only
+        # deployments never start an extra process.
+        self._codex_app_server = None
 
         # PTY persistent-session backend (claude provider only).
         # Runtime-switchable: env USE_PTY_MODE is the boot default, the
@@ -217,6 +220,30 @@ class InstanceManager:
             except Exception:
                 logger.debug("Container setup failed, falling back to bare process")
 
+        if provider == "codex" and settings.codex_app_server_enabled:
+            try:
+                return await self._launch_codex_app_server(
+                    instance_id=instance_id,
+                    prompt=prompt,
+                    task_id=task_id,
+                    cwd=cwd,
+                    model=model,
+                    resume_session_id=resume_session_id,
+                    loop_iteration=loop_iteration,
+                    git_env=git_env,
+                    effort_level=effort_level,
+                    chat_initiated=chat_initiated,
+                    enable_workflows=enable_workflows,
+                    enabled_skills=enabled_skills,
+                )
+            except Exception:
+                # App-server is an experimental Codex surface.  A CLI upgrade
+                # must not take all Codex tasks down; retain the proven exec
+                # path as an automatic compatibility fallback.
+                logger.exception(
+                    "Codex app-server launch failed; falling back to codex exec"
+                )
+
         if provider == "claude" and self.pty_mode_enabled:
             return await self._launch_pty(
                 instance_id=instance_id,
@@ -372,6 +399,100 @@ class InstanceManager:
         self._tasks[instance_id] = consumer
 
         return process.pid
+
+    async def _launch_codex_app_server(
+        self,
+        *,
+        instance_id: int,
+        prompt: str,
+        task_id: int | None,
+        cwd: str | None,
+        model: str | None,
+        resume_session_id: str | None,
+        loop_iteration: int | None,
+        git_env: dict | None,
+        effort_level: str | None,
+        chat_initiated: bool,
+        enable_workflows: bool,
+        enabled_skills: dict | None,
+    ) -> int:
+        """Launch one turn on the shared persistent Codex app-server."""
+        from backend.services.codex_app_server import CodexAppServer
+
+        if self._codex_app_server is None:
+            self._codex_app_server = CodexAppServer(
+                self._resolve_codex_binary(),
+                request_timeout=settings.codex_app_server_request_timeout,
+            )
+
+        actual_cwd = cwd or os.getcwd()
+        codex_effort = clamp_codex_effort(model, effort_level)
+        process, _thread_id = await self._codex_app_server.start_turn(
+            prompt=prompt,
+            cwd=actual_cwd,
+            model=model,
+            effort=codex_effort,
+            resume_session_id=resume_session_id,
+            git_env=git_env,
+            task_id=task_id,
+        )
+        self.processes[instance_id] = process
+
+        if chat_initiated:
+            self._launch_params[instance_id] = {
+                "prompt": prompt,
+                "task_id": task_id,
+                "cwd": cwd,
+                "model": model,
+                "git_env": git_env,
+                "thinking_budget": None,
+                "effort_level": effort_level,
+                "enable_workflows": enable_workflows,
+                "enabled_skills": enabled_skills,
+                "provider": "codex",
+            }
+
+        async with self.db_factory() as db:
+            await db.execute(
+                update(Instance)
+                .where(Instance.id == instance_id)
+                .values(
+                    pid=process.pid,
+                    status="running",
+                    current_task_id=task_id,
+                    started_at=datetime.utcnow(),
+                    last_heartbeat=datetime.utcnow(),
+                )
+            )
+            if task_id:
+                await db.execute(
+                    update(Task)
+                    .where(Task.id == task_id)
+                    .values(last_cwd=actual_cwd)
+                )
+            await db.commit()
+
+        consumer = asyncio.create_task(
+            self._consume_output(
+                instance_id,
+                task_id,
+                process,
+                loop_iteration,
+                chat_initiated,
+                "codex",
+            )
+        )
+        self._tasks[instance_id] = consumer
+        return process.pid
+
+    async def shutdown_codex_app_server(self) -> None:
+        """Stop the persistent Codex transport during application shutdown."""
+        if self._codex_app_server is None:
+            return
+        try:
+            await self._codex_app_server.shutdown()
+        finally:
+            self._codex_app_server = None
 
     async def _launch_pty(
         self,
@@ -1121,7 +1242,21 @@ class InstanceManager:
 
         event = self._base_codex_event(line, now)
 
-        if codex_type == "item.completed" and item_type == "agent_message":
+        if codex_type == "item.agent_message.delta":
+            event.update({
+                "event_type": "message_delta",
+                "role": "assistant",
+                "content": data.get("delta") or "",
+                "item_id": data.get("item_id"),
+            })
+        elif codex_type == "item.reasoning.delta":
+            event.update({
+                "event_type": "thinking_delta",
+                "role": "assistant",
+                "content": data.get("delta") or "",
+                "item_id": data.get("item_id"),
+            })
+        elif codex_type == "item.completed" and item_type == "agent_message":
             event.update({
                 "event_type": "message",
                 "role": "assistant",
@@ -1310,6 +1445,8 @@ class InstanceManager:
         session_id = self._extract_codex_session_id(data)
         if session_id:
             event["session_id"] = session_id
+        if item.get("id"):
+            event["item_id"] = item["id"]
         return event
 
     def _base_codex_event(self, line: str, timestamp: str) -> dict:
@@ -1378,6 +1515,18 @@ class InstanceManager:
                 "autonomous": True,
             }
 
+        # App-server deltas are intentionally live-only: persisting every token
+        # would recreate the raw-json/DB amplification that this path is meant
+        # to avoid.  The final item/completed event is still stored normally.
+        if event.get("event_type") in ("message_delta", "thinking_delta"):
+            broadcast_data = {k: v for k, v in event.items() if k != "raw_json"}
+            if loop_iteration is not None:
+                broadcast_data["loop_iteration"] = loop_iteration
+            await self.broadcaster.broadcast(f"instance:{instance_id}", broadcast_data)
+            if task_id:
+                await self.broadcaster.broadcast(f"task:{task_id}", broadcast_data)
+            return
+
         # Native sub-agent lifecycle (model-spawned Agent/Monitor, observed by
         # the PTY layer) — register into the generic sub-agent tables so the
         # 前端徽章/面板 shows them next to $monitor sessions.
@@ -1390,23 +1539,6 @@ class InstanceManager:
                 logger.exception(
                     "Failed to upsert native sub-agent for task %s", task_id
                 )
-        if session_id and task_id:
-            async with self.db_factory() as db:
-                await db.execute(
-                    update(Task)
-                    .where(Task.id == task_id)
-                    .values(session_id=session_id)
-                )
-                await db.commit()
-        if cost_usd is not None:
-            async with self.db_factory() as db:
-                await db.execute(
-                    update(Instance)
-                    .where(Instance.id == instance_id)
-                    .values(total_cost_usd=cost_usd)
-                )
-                await db.commit()
-
         # Reactivate completed task if sub-agent produces new output.
         # 与 transient 打标同理（见下方 _transient_seen 处、task #729）：orphan
         # （resume 时 PTY 回放的上一 turn 旧事件）和 autonomous（后台子 agent
@@ -1444,14 +1576,19 @@ class InstanceManager:
                 import json as _json
                 try:
                     parsed = _json.loads(raw) if isinstance(raw, str) else raw
-                    stop = (parsed.get("message") or {}).get("stop_reason")
-                    if not stop:
+                    # This filter is specific to Claude stream-json envelopes.
+                    # Codex item.completed events have no top-level ``message``
+                    # object, and short answers such as "OK" are complete replies.
+                    message = parsed.get("message")
+                    if isinstance(message, dict) and not message.get("stop_reason"):
                         logger.debug("Dropping streaming fragment: %r", event["content"])
                         return
                 except (ValueError, TypeError):
                     pass
 
-        # Store in DB
+        # Store the event and related heartbeat/session/unread updates in one
+        # transaction.  The old path committed 2-4 times per Codex event,
+        # serializing the stream behind SQLite fsyncs before WebSocket delivery.
         async with self.db_factory() as db:
             entry = LogEntry(
                 instance_id=instance_id,
@@ -1467,14 +1604,29 @@ class InstanceManager:
                 loop_iteration=loop_iteration,
             )
             db.add(entry)
-            await db.commit()
-
-            # Update heartbeat
+            instance_values = {"last_heartbeat": datetime.utcnow()}
+            if cost_usd is not None:
+                instance_values["total_cost_usd"] = cost_usd
             await db.execute(
                 update(Instance)
                 .where(Instance.id == instance_id)
-                .values(last_heartbeat=datetime.utcnow())
+                .values(**instance_values)
             )
+            if task_id:
+                task_values = {}
+                if session_id:
+                    task_values["session_id"] = session_id
+                if (
+                    event.get("role") == "assistant"
+                    and event["event_type"] in ("message", "result")
+                ):
+                    task_values["has_unread"] = True
+                if task_values:
+                    await db.execute(
+                        update(Task)
+                        .where(Task.id == task_id)
+                        .values(**task_values)
+                    )
             await db.commit()
 
         # Per-turn transient-overload detection: a server-side 429/overload
@@ -1535,16 +1687,6 @@ class InstanceManager:
                     self._pty_rate_limit_seen.add(instance_id)
                     logger.info("PTY rate limit detected from assistant text (instance %s): %s",
                                 instance_id, content[:120])
-
-        # Mark task as unread when assistant produces a message or result
-        if task_id and event.get("role") == "assistant" and event["event_type"] in ("message", "result"):
-            async with self.db_factory() as db:
-                await db.execute(
-                    update(Task)
-                    .where(Task.id == task_id)
-                    .values(has_unread=True)
-                )
-                await db.commit()
 
         # Track last tool_use name for evolution (tool_result may not carry tool_name)
         if event["event_type"] == "tool_use" and event.get("tool_name"):

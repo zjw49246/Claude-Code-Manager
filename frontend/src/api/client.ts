@@ -197,6 +197,8 @@ export interface ChatMessage {
   image_urls: string[] | null;
   attachments: FileAttachment[] | null;
   source?: string | null;
+  /** Live-only app-server item id used to merge streamed deltas into the final message. */
+  stream_item_id?: string | null;
   // 权限透传卡片（event_type === 'permission_request' 时存在）
   request_id?: string | null;
   permission_status?: 'pending' | 'allow' | 'deny' | 'expired' | null;

@@ -7,6 +7,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from backend.services.instance_manager import InstanceManager
+from backend.config import settings
 from backend.models.instance import Instance
 from backend.models.task import Task
 
@@ -109,6 +110,20 @@ def test_parse_codex_thread_started_session_id():
     assert event["event_type"] == "system_event"
     assert event["content"] == "thread.started"
     assert event["session_id"] == "test-thread-123"
+
+
+def test_parse_codex_app_server_message_delta():
+    im = InstanceManager(MagicMock(), MagicMock())
+    event = im._parse_codex_line(json.dumps({
+        "type": "item.agent_message.delta",
+        "item_id": "msg-1",
+        "delta": "Hel",
+    }))
+
+    assert event["event_type"] == "message_delta"
+    assert event["role"] == "assistant"
+    assert event["content"] == "Hel"
+    assert event["item_id"] == "msg-1"
 
 
 # === _build_command tests ===
@@ -521,8 +536,9 @@ async def test_launch_with_effort_level(db_factory):
 
 
 @pytest.mark.asyncio
-async def test_launch_codex_provider_command(db_factory):
+async def test_launch_codex_provider_command(db_factory, monkeypatch):
     """launch(provider='codex') constructs codex exec command."""
+    monkeypatch.setattr(settings, "codex_app_server_enabled", False)
     async with db_factory() as db:
         inst = Instance(name="codex-inst")
         db.add(inst)
@@ -550,8 +566,63 @@ async def test_launch_codex_provider_command(db_factory):
 
 
 @pytest.mark.asyncio
-async def test_launch_codex_no_thinking_budget_env(db_factory):
+async def test_launch_codex_prefers_persistent_app_server(db_factory, monkeypatch):
+    monkeypatch.setattr(settings, "codex_app_server_enabled", True)
+    async with db_factory() as db:
+        inst = Instance(name="codex-app-inst")
+        db.add(inst)
+        await db.commit()
+        await db.refresh(inst)
+
+    im = InstanceManager(db_factory, MagicMock())
+    im._launch_codex_app_server = AsyncMock(return_value=4321)
+    with patch(
+        "backend.services.instance_manager.asyncio.create_subprocess_exec",
+        new_callable=AsyncMock,
+    ) as exec_mock:
+        pid = await im.launch(
+            instance_id=inst.id, prompt="hi", cwd="/tmp", provider="codex",
+            resume_session_id="thread-1",
+        )
+
+    assert pid == 4321
+    im._launch_codex_app_server.assert_awaited_once()
+    assert im._launch_codex_app_server.await_args.kwargs["resume_session_id"] == "thread-1"
+    exec_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_launch_codex_falls_back_to_exec_when_app_server_fails(db_factory, monkeypatch):
+    monkeypatch.setattr(settings, "codex_app_server_enabled", True)
+    async with db_factory() as db:
+        inst = Instance(name="codex-fallback-inst")
+        db.add(inst)
+        await db.commit()
+        await db.refresh(inst)
+
+    mock_proc = _make_mock_process()
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    im = InstanceManager(db_factory, broadcaster)
+    im._launch_codex_app_server = AsyncMock(side_effect=RuntimeError("bad protocol"))
+    with patch(
+        "backend.services.instance_manager.asyncio.create_subprocess_exec",
+        new_callable=AsyncMock,
+        return_value=mock_proc,
+    ) as exec_mock:
+        await im.launch(
+            instance_id=inst.id, prompt="fallback", cwd="/tmp", provider="codex",
+        )
+
+    assert exec_mock.await_args.args[1] == "exec"
+    assert "fallback" in exec_mock.await_args.args
+    await asyncio.sleep(0.1)
+
+
+@pytest.mark.asyncio
+async def test_launch_codex_no_thinking_budget_env(db_factory, monkeypatch):
     """launch(provider='codex', thinking_budget=N) does NOT set MAX_THINKING_TOKENS."""
+    monkeypatch.setattr(settings, "codex_app_server_enabled", False)
     async with db_factory() as db:
         inst = Instance(name="codex-think-inst")
         db.add(inst)
@@ -829,6 +900,40 @@ async def test_process_event_sets_has_unread_on_assistant_message(db_factory):
     async with db_factory() as db:
         task = await db.get(Task, task_id)
     assert task.has_unread is True
+
+
+@pytest.mark.asyncio
+async def test_process_event_keeps_short_complete_codex_reply(db_factory):
+    """Codex answers like 'OK' are final items, not Claude stream fragments."""
+    from sqlalchemy import func, select
+    from backend.models.log_entry import LogEntry
+
+    async with db_factory() as db:
+        inst = Instance(name="short-codex-reply-inst")
+        db.add(inst)
+        await db.commit()
+        await db.refresh(inst)
+        inst_id = inst.id
+
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    im = InstanceManager(db_factory, broadcaster)
+    raw = json.dumps({
+        "type": "item.completed",
+        "item": {"id": "msg-1", "type": "agent_message", "text": "OK"},
+    })
+    event = im._parse_codex_line(raw)
+
+    await im._process_event(inst_id, None, event)
+
+    async with db_factory() as db:
+        count = await db.scalar(
+            select(func.count()).select_from(LogEntry).where(
+                LogEntry.instance_id == inst_id,
+                LogEntry.content == "OK",
+            )
+        )
+    assert count == 1
 
 
 @pytest.mark.asyncio

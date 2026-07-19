@@ -614,6 +614,31 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
       return;
     }
 
+    // Codex app-server emits true token deltas.  Keep them live-only and merge
+    // by item id; item/completed later replaces this provisional bubble with
+    // the authoritative persisted message.
+    if (eventType === 'message_delta' || eventType === 'thinking_delta') {
+      const delta = (msg.data.content as string) || '';
+      const itemId = (msg.data.item_id as string) || null;
+      if (!delta || !itemId) return;
+      const renderedType = eventType === 'message_delta' ? 'message' : 'thinking';
+      setMessages((prev) => {
+        const index = prev.findIndex((entry) => entry.stream_item_id === itemId);
+        if (index >= 0) {
+          const next = [...prev];
+          next[index] = { ...next[index], content: `${next[index].content || ''}${delta}` };
+          return next;
+        }
+        return [...prev, {
+          id: Date.now() + Math.random(), role: 'assistant', event_type: renderedType,
+          content: delta, tool_name: null, tool_input: null, tool_output: null,
+          is_error: false, loop_iteration: null, timestamp: new Date().toISOString(),
+          image_urls: null, attachments: null, stream_item_id: itemId,
+        }];
+      });
+      return;
+    }
+
     const showTypes = ['message', 'result', 'tool_use', 'tool_result', 'system_init', 'system_event', 'thinking'];
     if (!showTypes.includes(eventType)) return;
 
@@ -642,7 +667,18 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
       attachments: (msg.data.attachments as FileAttachment[]) || null,
       source: (msg.data.source as string) || null,
     };
-    setMessages((prev) => [...prev, entry]);
+    const itemId = (msg.data.item_id as string) || null;
+    setMessages((prev) => {
+      if (itemId) {
+        const index = prev.findIndex((candidate) => candidate.stream_item_id === itemId);
+        if (index >= 0) {
+          const next = [...prev];
+          next[index] = entry;
+          return next;
+        }
+      }
+      return [...prev, entry];
+    });
   }, [task.id]);
 
   const fetchHistory = useCallback(() => {
