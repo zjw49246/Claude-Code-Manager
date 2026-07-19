@@ -2998,3 +2998,30 @@ def test_loop_prompt_codex_references_agents_md(db_factory):
     prompt = d._build_loop_prompt(task, 0, "/tmp/sig.json")
     assert "AGENTS.md" in prompt
     assert "CLAUDE.md" not in prompt
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_backfills_agents_md(db_factory, tmp_path):
+    """任务启动时把 AGENTS.md 惰性补进有 CLAUDE.md 的存量项目。"""
+    (tmp_path / "CLAUDE.md").write_text("# guide\n")
+    d = _make_dispatcher(db_factory)
+
+    async with db_factory() as db:
+        inst = Instance(name="worker-1")
+        db.add(inst)
+        task = Task(title="t", description="do X", target_repo=str(tmp_path))
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_obj = task
+
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.wait = AsyncMock(return_value=0)
+    d.instance_manager.processes = {inst_id: mock_proc}
+
+    await d._run_task_lifecycle(inst_id, task_obj)
+
+    assert (tmp_path / "AGENTS.md").exists()

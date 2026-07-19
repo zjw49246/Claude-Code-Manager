@@ -1120,6 +1120,12 @@ class GlobalDispatcher:
             # === Step 2: Determine cwd and update task ===
             # 必须是绝对路径：PTY 模式按 cwd 推导 JSONL 轮询路径，"." 会落空
             cwd = task.last_cwd or task.target_repo or os.getcwd()
+
+            # 存量项目统一补 AGENTS.md（Codex 指令文件）：有 CLAUDE.md 而无
+            # AGENTS.md 时注入 symlink，任何项目下次跑任务时自动补齐。
+            # 不 commit（由 agent 的正常 git 流程带入），幂等且绝不阻断任务。
+            from backend.services.agent_docs import ensure_agents_md
+            ensure_agents_md(task.target_repo or cwd)
             thinking_budget = task.thinking_budget
             effort_level = task.effort_level or settings.default_effort
             async with self.db_factory() as db:

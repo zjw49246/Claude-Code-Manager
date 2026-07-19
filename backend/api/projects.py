@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config import settings
 from backend.database import get_db, async_session
+from backend.services.agent_docs import inject_agents_md
 from backend.models.project import Project
 from backend.api.deps import get_current_user_id, get_current_user_role
 from backend.models.project_todo import ProjectTodo
@@ -444,31 +445,8 @@ rebase 发生冲突时：
 """
 
 
-def _inject_agents_md(local_path: str) -> bool:
-    """Create AGENTS.md (Codex CLI 的指令文件) pointing at CLAUDE.md.
-
-    Symlink 保持单一事实源；不支持 symlink 的平台（如无特权 Windows）
-    回退为一个指向 CLAUDE.md 的普通 pointer 文件。CLAUDE.md 不存在或
-    AGENTS.md 已存在（含悬空链接）时不动。Returns True if created.
-    """
-    agents_path = os.path.join(local_path, "AGENTS.md")
-    if os.path.lexists(agents_path):
-        return False
-    if not os.path.exists(os.path.join(local_path, "CLAUDE.md")):
-        return False
-    try:
-        os.symlink("CLAUDE.md", agents_path)
-    except OSError:
-        with open(agents_path, "w") as f:
-            f.write(
-                "# AGENTS.md\n\n"
-                "本项目的完整规范（含任务生命周期和 git 流程）在 [CLAUDE.md](./CLAUDE.md)，"
-                "请先完整阅读它再开始工作。\n\n"
-                "本文件与 CLAUDE.md 必须保持关键内容同步：如果你要往本文件写入独立内容，"
-                "同样的关键意思必须同步进 CLAUDE.md（反之亦然）；"
-                "在支持 symlink 的平台上，优先用 `ln -sf CLAUDE.md AGENTS.md` 恢复单一事实源。\n"
-            )
-    return True
+# 实现移到 services/agent_docs.py（dispatcher 惰性补齐存量项目时复用）
+_inject_agents_md = inject_agents_md
 
 
 async def _commit_files(local_path: str, files: list[str], message: str):

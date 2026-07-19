@@ -376,7 +376,8 @@ cd frontend && npx tsc --noEmit
 | `test_service_dispatcher.py::test_build_task_prompt_carries_doc_sync_note` | 两种 provider 的 prompt 前导都下发 CLAUDE.md/AGENTS.md 关键内容同步纪律 |
 | `test_service_dispatcher.py::test_build_task_prompt_codex_skips_skill_templates` | skills 模板只注入 claude（MCP 工具 codex 不可用） |
 | `test_service_dispatcher.py::test_loop_prompt_codex_references_agents_md` | loop prompt 按 provider 引用文档 |
-| `test_api_projects.py::test_inject_agents_md_*` | project 创建注入 AGENTS.md symlink：正常创建 / 无 CLAUDE.md 不动 / 已存在不覆盖 |
+| `test_api_projects.py::test_inject_agents_md_*` | project 创建注入 AGENTS.md symlink：正常创建 / 无 CLAUDE.md 不动 / 已存在不覆盖（实现在 `services/agent_docs.py`） |
+| `test_service_dispatcher.py::test_lifecycle_backfills_agents_md` | 存量项目惰性补齐：任务启动时对 target_repo 补 AGENTS.md symlink |
 
 ##### `test_service_worktree_manager.py` — Worktree 管理器
 
