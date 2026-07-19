@@ -1,3 +1,5 @@
+import re
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select, func
@@ -79,8 +81,6 @@ async def distill_skills(db: AsyncSession = Depends(get_db)):
     from backend.services.skill_distill import analyze_patterns
     return await analyze_patterns(db)
 
-
-import re
 
 _BRANCH_RE = re.compile(r'^[a-zA-Z0-9._/\-]+$')
 

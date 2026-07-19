@@ -823,6 +823,9 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
     if (!root) return;
     const handleWheel = (e: WheelEvent) => {
       if (!msgEl) { e.preventDefault(); return; }
+      // Wheel outside messages area (header, input) → always block
+      const target = e.target as Node;
+      if (!msgEl.contains(target)) { e.preventDefault(); return; }
       const atTop = msgEl.scrollTop <= 0 && e.deltaY < 0;
       const atBottom = msgEl.scrollTop + msgEl.clientHeight >= msgEl.scrollHeight - 1 && e.deltaY > 0;
       const notScrollable = msgEl.scrollHeight <= msgEl.clientHeight;
@@ -836,6 +839,9 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
     };
     const handleTouchMove = (e: TouchEvent) => {
       if (!msgEl) { e.preventDefault(); return; }
+      // Touch outside messages area (header, input) → always block
+      const target = e.target as Node;
+      if (!msgEl.contains(target)) { e.preventDefault(); return; }
       const notScrollable = msgEl.scrollHeight <= msgEl.clientHeight;
       if (notScrollable) { e.preventDefault(); return; }
       const deltaY = touchStartY - e.touches[0].clientY;
