@@ -378,6 +378,7 @@ cd frontend && npx tsc --noEmit
 | `test_service_dispatcher.py::test_loop_prompt_codex_references_agents_md` | loop prompt 按 provider 引用文档 |
 | `test_api_projects.py::test_inject_agents_md_*` | project 创建注入 AGENTS.md symlink：正常创建 / 无 CLAUDE.md 不动 / 已存在不覆盖（实现在 `services/agent_docs.py`） |
 | `test_service_dispatcher.py::test_lifecycle_backfills_agents_md` | 存量项目惰性补齐：任务启动时对 target_repo 补 AGENTS.md symlink |
+| `test_api_projects.py::test_init_local_repo_preserves_existing_claude_md` / `..._preserves_both_existing_docs` | **不覆盖原有文件**：存量目录（有文件未 git init）建本地项目时，已有 CLAUDE.md/AGENTS.md 原样保留（红→绿实证） |
 
 ##### `test_service_worktree_manager.py` — Worktree 管理器
 

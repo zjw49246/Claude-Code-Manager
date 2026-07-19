@@ -574,20 +574,25 @@ async def _init_local_repo(project_id: int, local_path: str, project_name: str, 
             if git_config:
                 await _apply_git_config(local_path, git_config)
 
-            # Generate agent docs: CLAUDE.md (claude) + AGENTS.md (codex)
+            # Generate agent docs: CLAUDE.md (claude) + AGENTS.md (codex)。
+            # 目录可能是「已有文件但尚未 git init」的存量目录——已有的
+            # CLAUDE.md/AGENTS.md 一律不覆盖（AGENTS.md 由 inject 内部守卫）
+            files = []
             claude_md_path = os.path.join(local_path, "CLAUDE.md")
-            with open(claude_md_path, "w") as f:
-                f.write(_generate_claude_md(project_name, None, default_branch))
-            files = ["CLAUDE.md"]
+            if not os.path.exists(claude_md_path):
+                with open(claude_md_path, "w") as f:
+                    f.write(_generate_claude_md(project_name, None, default_branch))
+                files.append("CLAUDE.md")
             if _inject_agents_md(local_path):
                 files.append("AGENTS.md")
 
-            # Initial commit
-            (_, stderr), returncode = await _commit_files(
-                local_path, files, f"Initial commit with {' + '.join(files)}",
-            )
-            if returncode != 0:
-                raise RuntimeError(f"git commit failed: {stderr.decode()}")
+            # Initial commit（只提交本次创建的文件；两者都已存在时无事可提）
+            if files:
+                (_, stderr), returncode = await _commit_files(
+                    local_path, files, f"Initial commit with {' + '.join(files)}",
+                )
+                if returncode != 0:
+                    raise RuntimeError(f"git commit failed: {stderr.decode()}")
 
         # Auto-scan for .env files after init
         env_files = _scan_env_files(local_path)
