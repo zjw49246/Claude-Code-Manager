@@ -1,4 +1,7 @@
+import logging
 from datetime import datetime, timezone
+
+logger = logging.getLogger(__name__)
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -103,10 +106,10 @@ class TokenAuthMiddleware(BaseHTTPMiddleware):
                 from backend.models.user import User
                 async with async_session() as db:
                     user = await db.get(User, request.state.user_id)
-                    if user:
+                    if user and getattr(user, "is_active", True):
                         response.headers["X-Refreshed-Token"] = create_jwt(user)
             except Exception:
-                pass
+                logger.debug("JWT refresh failed for user %s", getattr(request.state, "user_id", "?"))
 
         return response
 
