@@ -77,6 +77,11 @@ class Settings(BaseSettings):
     pool_config_path: str = "~/.claude-pool/accounts.json"
     pool_cooldown_seconds: int = 300  # per-account cooldown after rate limit
 
+    # --- Codex account pool ---
+    codex_pool_enabled: bool = True
+    codex_pool_config_path: str = "~/.codex-pool/accounts.json"
+    codex_pool_cooldown_seconds: int = 300
+
     # --- Transient server-side 429 / overload auto-retry ---
     # Anthropic 基础设施侧的临时限流/过载（"Server is temporarily limiting
     # requests (not your usage limit)" / overloaded）——退避后用同一账号

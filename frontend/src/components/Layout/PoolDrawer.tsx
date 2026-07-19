@@ -38,7 +38,30 @@ function UsageBar({ label, window: w }: { label: string; window: PoolUsageWindow
   );
 }
 
-function AccountCard({ account, preferred, lastSelected, onClearCooldown, onSetPreferred, onRelogin, onRetryUsage, reloginState }: {
+// --- Codex quota helpers ---
+function formatResetCountdown(epochSec: number | null): string {
+  if (!epochSec) return '';
+  const now = Date.now() / 1000;
+  const diff = epochSec - now;
+  if (diff <= 0) return '已重置';
+  const d = Math.floor(diff / 86400);
+  const h = Math.floor((diff % 86400) / 3600);
+  const m = Math.floor((diff % 3600) / 60);
+  if (d > 0) return `${d}天${h}小时后重置`;
+  if (h > 0) return `${h}小时${m}分钟后重置`;
+  return `${m}分钟后重置`;
+}
+
+function formatWindowName(minutes: number | null): string {
+  if (!minutes) return '';
+  const days = Math.round(minutes / 60 / 24);
+  if (days >= 7) return '7天窗口';
+  if (days >= 1) return `${days}天窗口`;
+  const hours = Math.round(minutes / 60);
+  return `${hours}小时窗口`;
+}
+
+function AccountCard({ account, preferred, lastSelected, onClearCooldown, onSetPreferred, onRelogin, onRetryUsage, onDelete, reloginState }: {
   account: PoolAccountUsage;
   preferred: string | null;
   lastSelected: string | null;
@@ -46,6 +69,7 @@ function AccountCard({ account, preferred, lastSelected, onClearCooldown, onSetP
   onSetPreferred: (id: string | null) => void;
   onRelogin: (id: string) => void;
   onRetryUsage: () => void;
+  onDelete: (id: string) => void;
   reloginState?: { status: string; message?: string };
 }) {
   const statusDot = !account.enabled
@@ -72,7 +96,7 @@ function AccountCard({ account, preferred, lastSelected, onClearCooldown, onSetP
           </span>
         )}
         {isLastSelected && (
-          <span className="px-1.5 py-0.5 rounded bg-cyan-600/30 text-cyan-300 text-[10px] font-semibold" title="最近一次 launch 选中的账号（每次发消息时重新选号）">
+          <span className="px-1.5 py-0.5 rounded bg-cyan-600/30 text-cyan-300 text-[10px] font-semibold" title="最近一次 launch 选中的账号">
             最近使用
           </span>
         )}
@@ -99,19 +123,16 @@ function AccountCard({ account, preferred, lastSelected, onClearCooldown, onSetP
               <button
                 onClick={() => onSetPreferred(account.id)}
                 className="text-[10px] px-1.5 py-0.5 rounded border border-indigo-500/50 text-indigo-300 hover:bg-indigo-600/20"
-                title="下个 turn 起切换到此账号（session 自动迁移；若限流则自动回落其他账号）"
+                title="切换到此账号"
               >
                 切换到此账号
               </button>
             )
           )}
           <button
-            onClick={async () => {
-              if (!window.confirm(`从号池中删除 ${account.id}（${account.email}）？\nconfig_dir 文件夹保留，可以重新登录其他号。`)) return;
-              try { await api.poolDeleteAccount(account.id); window.location.reload(); } catch (e) { window.alert(String(e)); }
-            }}
+            onClick={() => onDelete(account.id)}
             className="text-[10px] px-1.5 py-0.5 rounded border border-gray-600 text-gray-400 hover:text-red-400 hover:border-red-500"
-            title="从号池删除（保留文件夹）"
+            title="从号池删除"
           >
             删除
           </button>
@@ -137,7 +158,6 @@ function AccountCard({ account, preferred, lastSelected, onClearCooldown, onSetP
                 onClick={() => onRelogin(account.id)}
                 disabled={reloginState?.status === 'running'}
                 className="shrink-0 text-[10px] px-1.5 py-0.5 rounded border border-red-500/50 text-red-300 hover:bg-red-600/20 disabled:opacity-50"
-                title="先尝试刷新 OAuth token；刷新失败则后台跑 auto_login 重新登录"
               >
                 {reloginState?.status === 'running' ? '登录中…' : '重新登录'}
               </button>
@@ -146,7 +166,6 @@ function AccountCard({ account, preferred, lastSelected, onClearCooldown, onSetP
               <button
                 onClick={onRetryUsage}
                 className="shrink-0 text-[10px] px-1.5 py-0.5 rounded border border-yellow-500/50 text-yellow-300 hover:bg-yellow-600/20"
-                title="临时错误，重新拉取额度"
               >
                 重试
               </button>
@@ -156,6 +175,129 @@ function AccountCard({ account, preferred, lastSelected, onClearCooldown, onSetP
             <div className="text-[10px] text-gray-400 whitespace-pre-wrap break-all">{reloginState.message}</div>
           )}
         </div>
+      )}
+    </div>
+  );
+}
+
+// --- Codex Account Card ---
+function CodexAccountCard({ account, onClearCooldown, onRelogin, onDelete, onRetryUsage, reloginState }: {
+  account: any;
+  onClearCooldown: (id: string) => void;
+  onRelogin: (id: string) => void;
+  onDelete: (id: string) => void;
+  onRetryUsage: () => void;
+  reloginState?: { status: string; message?: string };
+}) {
+  const statusDot = !account.enabled
+    ? { cls: 'bg-gray-500', label: '已禁用' }
+    : account.available
+      ? { cls: 'bg-green-500', label: '可用' }
+      : { cls: 'bg-yellow-500', label: '冷却中' };
+
+  const q = account.quota;
+
+  return (
+    <div className="rounded-lg border bg-gray-800 p-3 space-y-2 border-gray-700">
+      <div className="flex items-center gap-2">
+        <span className={`h-2 w-2 shrink-0 rounded-full ${statusDot.cls}`} title={statusDot.label} />
+        <span className="text-sm font-medium text-foreground truncate">{account.id}</span>
+        {account.plan_type && (
+          <span className="px-1.5 py-0.5 rounded bg-emerald-600/30 text-emerald-300 text-[10px] font-semibold uppercase">
+            {account.plan_type}
+          </span>
+        )}
+        {q?.has_credits && (
+          <span className="px-1.5 py-0.5 rounded bg-amber-600/30 text-amber-300 text-[10px] font-semibold">
+            Credits
+          </span>
+        )}
+        <div className="ml-auto flex items-center gap-2">
+          {!account.available && account.enabled && (
+            <button onClick={() => onClearCooldown(account.id)} className="text-[10px] text-gray-400 hover:text-foreground underline">
+              解除冷却
+            </button>
+          )}
+          <button
+            onClick={() => onRelogin(account.id)}
+            disabled={reloginState?.status === 'running'}
+            className="text-[10px] px-1.5 py-0.5 rounded border border-emerald-500/50 text-emerald-300 hover:bg-emerald-600/20 disabled:opacity-50"
+          >
+            {reloginState?.status === 'running' ? '登录中…' : '重新登录'}
+          </button>
+          <button
+            onClick={() => onDelete(account.id)}
+            className="text-[10px] px-1.5 py-0.5 rounded border border-gray-600 text-gray-400 hover:text-red-400 hover:border-red-500"
+          >
+            删除
+          </button>
+        </div>
+      </div>
+      {account.email && <div className="text-xs text-gray-500 truncate">{account.email}</div>}
+      {q ? (
+        <div className="space-y-2">
+          {/* Primary window */}
+          {q.primary_used_percent != null && (
+            <div className="space-y-1">
+              <div className="flex items-center justify-between text-[10px]">
+                <span className="text-gray-400">{formatWindowName(q.primary_window_minutes) || '主窗口'}</span>
+                <span className="text-gray-500">{formatResetCountdown(q.primary_resets_at)}</span>
+              </div>
+              <div className="flex items-center gap-2 text-xs">
+                <div className="flex-1 h-2.5 rounded-full bg-gray-700 overflow-hidden">
+                  <div className={`h-full rounded-full ${barColor(q.primary_used_percent)}`} style={{ width: `${Math.min(100, q.primary_used_percent)}%` }} />
+                </div>
+                <span className={`w-16 shrink-0 text-right font-medium ${textColor(q.primary_used_percent)}`}>
+                  已用 {q.primary_used_percent.toFixed(1)}%
+                </span>
+              </div>
+              <div className="text-[10px] text-gray-500">
+                剩余 {(100 - q.primary_used_percent).toFixed(1)}%
+              </div>
+            </div>
+          )}
+          {/* Secondary window */}
+          {q.secondary_used_percent != null && (
+            <div className="space-y-1">
+              <div className="flex items-center justify-between text-[10px]">
+                <span className="text-gray-400">{formatWindowName(q.secondary_window_minutes) || '副窗口'}</span>
+                <span className="text-gray-500">{formatResetCountdown(q.secondary_resets_at)}</span>
+              </div>
+              <div className="flex items-center gap-2 text-xs">
+                <div className="flex-1 h-2.5 rounded-full bg-gray-700 overflow-hidden">
+                  <div className={`h-full rounded-full ${barColor(q.secondary_used_percent)}`} style={{ width: `${Math.min(100, q.secondary_used_percent)}%` }} />
+                </div>
+                <span className={`w-16 shrink-0 text-right font-medium ${textColor(q.secondary_used_percent)}`}>
+                  已用 {q.secondary_used_percent.toFixed(1)}%
+                </span>
+              </div>
+            </div>
+          )}
+          {q.is_rate_limited && (
+            <div className="text-[10px] text-red-400 font-medium">已触发限速</div>
+          )}
+        </div>
+      ) : (
+        <div className="text-xs space-y-1">
+          <div className="flex items-center gap-2 text-gray-500">
+            <span>{account.quota_error === 'no_rollout_data' ? '暂无额度数据（使用后自动更新）' : (account.quota_error || '未知')}</span>
+            <button
+              onClick={onRetryUsage}
+              className="shrink-0 text-[10px] px-1.5 py-0.5 rounded border border-gray-600 text-gray-400 hover:text-foreground"
+            >
+              刷新
+            </button>
+          </div>
+        </div>
+      )}
+      {reloginState?.status === 'running' && (
+        <div className="text-xs text-blue-400">自动登录中…</div>
+      )}
+      {reloginState?.status === 'failed' && (
+        <div className="text-xs text-red-400 break-all">{reloginState.message}</div>
+      )}
+      {reloginState?.status === 'success' && (
+        <div className="text-xs text-green-400">登录成功</div>
       )}
     </div>
   );
@@ -198,7 +340,7 @@ function AddAccountModal({ onClose, onAdded }: { onClose: () => void; onAdded: (
     <div className="absolute inset-0 bg-gray-900/80 z-10 flex items-start justify-center pt-16">
       <div className="bg-gray-800 rounded-lg shadow-xl w-full max-w-xs">
         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700">
-          <h3 className="text-sm font-semibold text-foreground">添加账号</h3>
+          <h3 className="text-sm font-semibold text-foreground">添加 Claude 账号</h3>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-200"><X size={14} /></button>
         </div>
         <form onSubmit={handleSubmit} className="p-4 space-y-3">
@@ -229,6 +371,77 @@ function AddAccountModal({ onClose, onAdded }: { onClose: () => void; onAdded: (
             <button type="button" onClick={onClose} className="px-3 py-1.5 text-xs text-gray-300 hover:text-foreground">取消</button>
             <button type="submit" disabled={submitting || status === 'running' || !email.trim() || !token.trim()}
               className="px-3 py-1.5 text-xs bg-indigo-600 text-white rounded hover:bg-indigo-500 disabled:opacity-50">
+              {status === 'running' ? '登录中…' : '添加'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+
+function AddCodexAccountModal({ onClose, onAdded }: { onClose: () => void; onAdded: () => void }) {
+  const [email, setEmail] = useState('');
+  const [token, setToken] = useState('');
+  const [password, setPassword] = useState('');
+
+  const [status, setStatus] = useState<string | null>(null);
+  const [detail, setDetail] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!email.trim() || !token.trim()) return;
+    setSubmitting(true);
+    setDetail(null);
+    try {
+      await api.codexPoolAddAccount({ email: email.trim(), token: token.trim(), password: password || undefined });
+      setStatus('running');
+      const poll = async () => {
+        const s = await api.codexPoolAddStatus(email.trim());
+        if (s.status === 'running') { setTimeout(poll, 5000); return; }
+        setStatus(s.status);
+        if (s.status === 'failed') setDetail(s.detail?.slice(-500) || '登录失败');
+        if (s.status === 'success') { onAdded(); onClose(); }
+      };
+      setTimeout(poll, 5000);
+    } catch (e) {
+      setStatus('failed');
+      setDetail(e instanceof Error ? e.message : '请求失败');
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="absolute inset-0 bg-gray-900/80 z-10 flex items-start justify-center pt-16">
+      <div className="bg-gray-800 rounded-lg shadow-xl w-full max-w-xs">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700">
+          <h3 className="text-sm font-semibold text-foreground">添加 Codex 账号</h3>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-200"><X size={14} /></button>
+        </div>
+        <form onSubmit={handleSubmit} className="p-4 space-y-3">
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">OpenAI 邮箱</label>
+            <input className="w-full bg-gray-700 text-foreground text-xs rounded px-2.5 py-1.5 outline-none focus:ring-1 focus:ring-emerald-500"
+              value={email} onChange={e => setEmail(e.target.value)} placeholder="user@example.com" required />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">171mail 接码 Token</label>
+            <input className="w-full bg-gray-700 text-foreground text-xs rounded px-2.5 py-1.5 outline-none focus:ring-1 focus:ring-emerald-500"
+              value={token} onChange={e => setToken(e.target.value)} placeholder="171mail token" required />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">密码（留空=无密码登录 OTP）</label>
+            <input type="password" className="w-full bg-gray-700 text-foreground text-xs rounded px-2.5 py-1.5 outline-none focus:ring-1 focus:ring-emerald-500"
+              value={password} onChange={e => setPassword(e.target.value)} placeholder="可选" />
+          </div>
+          {status === 'running' && <p className="text-xs text-blue-400">登录中… 请等待（可能需要 1-3 分钟）</p>}
+          {status === 'failed' && <p className="text-xs text-red-400 break-all">{detail || '登录失败'}</p>}
+          <div className="flex justify-end gap-2 pt-1">
+            <button type="button" onClick={onClose} className="px-3 py-1.5 text-xs text-gray-300 hover:text-white">取消</button>
+            <button type="submit" disabled={submitting || status === 'running' || !email.trim() || !token.trim()}
+              className="px-3 py-1.5 text-xs bg-emerald-600 text-white rounded hover:bg-emerald-500 disabled:opacity-50">
               {status === 'running' ? '登录中…' : '添加'}
             </button>
           </div>
@@ -309,68 +522,87 @@ function CcSettingsModal({ onClose }: { onClose: () => void }) {
   );
 }
 
+type PoolTab = 'claude' | 'codex';
+
 export function PoolDrawer() {
-  const [poolEnabled, setPoolEnabled] = useState(false);
+  const [claudeEnabled, setClaudeEnabled] = useState(false);
+  const [codexEnabled, setCodexEnabled] = useState(false);
   const [open, setOpen] = useState(false);
-  const [status, setStatus] = useState<PoolUsageStatus | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [tab, setTab] = useState<PoolTab>('claude');
+
+  // Claude pool state
+  const [claudeStatus, setClaudeStatus] = useState<PoolUsageStatus | null>(null);
+  const [claudeLoading, setClaudeLoading] = useState(false);
+  const [claudeError, setClaudeError] = useState<string | null>(null);
+
+  // Codex pool state
+  const [codexStatus, setCodexStatus] = useState<any>(null);
+  const [codexLoading, setCodexLoading] = useState(false);
+  const [codexError, setCodexError] = useState<string | null>(null);
 
   useEffect(() => {
     api.getPoolStatus()
-      .then((s) => setPoolEnabled(s.enabled))
-      .catch(() => setPoolEnabled(false)); // pool 未启用时后端返回 404
+      .then((s) => setClaudeEnabled(s.enabled))
+      .catch(() => setClaudeEnabled(false));
+    api.getCodexPoolStatus()
+      .then(() => { setCodexEnabled(true); })
+      .catch(() => setCodexEnabled(false));
   }, []);
 
-  const loadUsage = useCallback(async (force?: boolean) => {
-    setLoading(true);
-    setError(null);
+  const loadClaudeUsage = useCallback(async (force?: boolean) => {
+    setClaudeLoading(true);
+    setClaudeError(null);
     try {
-      setStatus(await api.getPoolUsage(force));
+      setClaudeStatus(await api.getPoolUsage(force));
     } catch (e) {
-      setError(e instanceof Error ? e.message : '加载失败');
+      setClaudeError(e instanceof Error ? e.message : '加载失败');
     } finally {
-      setLoading(false);
+      setClaudeLoading(false);
+    }
+  }, []);
+
+  const loadCodexUsage = useCallback(async (force?: boolean) => {
+    setCodexLoading(true);
+    setCodexError(null);
+    try {
+      setCodexStatus(await api.getCodexPoolUsage(force));
+    } catch (e) {
+      setCodexError(e instanceof Error ? e.message : '加载失败');
+    } finally {
+      setCodexLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    if (open) loadUsage();
-  }, [open, loadUsage]);
-
-  const handleClearCooldown = useCallback(async (accountId: string) => {
-    try {
-      await api.clearPoolCooldown(accountId);
-      await loadUsage();
-    } catch {
-      // 失败时保持原状态
+    if (open) {
+      if (tab === 'claude') loadClaudeUsage();
+      else loadCodexUsage();
     }
-  }, [loadUsage]);
+  }, [open, tab, loadClaudeUsage, loadCodexUsage]);
 
-  const handleSetPreferred = useCallback(async (accountId: string | null) => {
-    try {
-      await api.setPoolPreferred(accountId);
-      await loadUsage();
-    } catch {
-      // 失败时保持原状态
-    }
-  }, [loadUsage]);
+  // Claude handlers
+  const handleClaudeClearCooldown = useCallback(async (accountId: string) => {
+    try { await api.clearPoolCooldown(accountId); await loadClaudeUsage(); } catch {}
+  }, [loadClaudeUsage]);
+
+  const handleClaudeSetPreferred = useCallback(async (accountId: string | null) => {
+    try { await api.setPoolPreferred(accountId); await loadClaudeUsage(); } catch {}
+  }, [loadClaudeUsage]);
 
   const [relogin, setRelogin] = useState<Record<string, { status: string; message?: string }>>({});
   const [showAdd, setShowAdd] = useState(false);
+  const [showCodexAdd, setShowCodexAdd] = useState(false);
   const [showCcSettings, setShowCcSettings] = useState(false);
 
-  const handleRelogin = useCallback(async (accountId: string) => {
+  const handleClaudeRelogin = useCallback(async (accountId: string) => {
     setRelogin((m) => ({ ...m, [accountId]: { status: 'running' } }));
     try {
       const res = await api.poolRelogin(accountId);
       if (res.status === 'success') {
-        // OAuth refresh 直接成功（最常见）
         setRelogin((m) => ({ ...m, [accountId]: { status: 'success' } }));
-        await loadUsage();
+        await loadClaudeUsage();
         return;
       }
-      // auto_login 后台跑，轮询直到结束
       const poll = async () => {
         const s = await api.poolReloginStatus(accountId);
         if (s.status === 'running') { setTimeout(poll, 5000); return; }
@@ -378,7 +610,7 @@ export function PoolDrawer() {
           status: s.status,
           message: s.status === 'failed' ? `登录失败：${(s.detail || '').slice(-300)}` : undefined,
         } }));
-        if (s.status === 'success') await loadUsage();
+        if (s.status === 'success') await loadClaudeUsage();
       };
       setTimeout(poll, 5000);
     } catch (e) {
@@ -387,16 +619,48 @@ export function PoolDrawer() {
         message: e instanceof Error ? e.message : '重新登录失败',
       } }));
     }
-  }, [loadUsage]);
+  }, [loadClaudeUsage]);
 
-  if (!poolEnabled) return null;
+  // Codex handlers
+  const handleCodexClearCooldown = useCallback(async (accountId: string) => {
+    try { await api.clearCodexPoolCooldown(accountId); await loadCodexUsage(); } catch {}
+  }, [loadCodexUsage]);
+
+  const [codexRelogin, setCodexRelogin] = useState<Record<string, { status: string; message?: string }>>({});
+
+  const handleCodexRelogin = useCallback(async (accountId: string) => {
+    setCodexRelogin((m) => ({ ...m, [accountId]: { status: 'running' } }));
+    try {
+      await api.codexPoolRelogin(accountId);
+      const poll = async () => {
+        const s = await api.codexPoolReloginStatus(accountId);
+        if (s.status === 'running') { setTimeout(poll, 5000); return; }
+        setCodexRelogin((m) => ({ ...m, [accountId]: {
+          status: s.status,
+          message: s.status === 'failed' ? `登录失败：${(s.detail || '').slice(-300)}` : undefined,
+        } }));
+        if (s.status === 'success') await loadCodexUsage();
+      };
+      setTimeout(poll, 5000);
+    } catch (e) {
+      setCodexRelogin((m) => ({ ...m, [accountId]: {
+        status: 'failed',
+        message: e instanceof Error ? e.message : '重新登录失败',
+      } }));
+    }
+  }, [loadCodexUsage]);
+
+  if (!claudeEnabled && !codexEnabled) return null;
+
+  const hasBothPools = claudeEnabled && codexEnabled;
+  const loading = tab === 'claude' ? claudeLoading : codexLoading;
 
   return (
     <>
       <button
         onClick={() => setOpen(true)}
         className="flex items-center gap-1 px-2 py-1 rounded bg-gray-800 border border-gray-700 hover:border-indigo-500 transition-colors"
-        title="Claude Pool 账号额度"
+        title="账号池额度"
       >
         <Users size={13} className="text-indigo-400" />
         <span className="text-xs font-semibold text-indigo-300">Pro</span>
@@ -407,29 +671,38 @@ export function PoolDrawer() {
           <div className="absolute right-0 top-0 h-full w-full max-w-sm bg-gray-900 border-l border-gray-700 shadow-xl flex flex-col pt-[env(safe-area-inset-top)]">
             <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-700">
               <Users size={16} className="text-indigo-400" />
-              <h2 className="text-sm font-semibold text-foreground">Claude Pool 额度</h2>
-              {status && (
+              <h2 className="text-sm font-semibold text-foreground">
+                {tab === 'claude' ? 'Claude Pool' : 'Codex Pool'}
+              </h2>
+              {tab === 'claude' && claudeStatus && (
                 <span className="text-xs text-gray-500">
-                  {status.available}/{status.total} 可用
+                  {claudeStatus.available}/{claudeStatus.total} 可用
+                </span>
+              )}
+              {tab === 'codex' && codexStatus && (
+                <span className="text-xs text-gray-500">
+                  {codexStatus.available}/{codexStatus.total} 可用
                 </span>
               )}
               <div className="ml-auto flex items-center gap-1">
+                {tab === 'claude' && (
+                  <button
+                    onClick={() => setShowCcSettings(true)}
+                    className="p-1.5 rounded text-gray-400 hover:text-foreground hover:bg-gray-800"
+                    title="CC Settings 模板"
+                  >
+                    <Settings size={14} />
+                  </button>
+                )}
                 <button
-                  onClick={() => setShowCcSettings(true)}
-                  className="p-1.5 rounded text-gray-400 hover:text-foreground hover:bg-gray-800"
-                  title="CC Settings 模板"
-                >
-                  <Settings size={14} />
-                </button>
-                <button
-                  onClick={() => setShowAdd(true)}
+                  onClick={() => tab === 'claude' ? setShowAdd(true) : setShowCodexAdd(true)}
                   className="p-1.5 rounded text-gray-400 hover:text-foreground hover:bg-gray-800"
                   title="添加账号"
                 >
                   <Plus size={14} />
                 </button>
                 <button
-                  onClick={() => loadUsage(true)}
+                  onClick={() => tab === 'claude' ? loadClaudeUsage(true) : loadCodexUsage(true)}
                   disabled={loading}
                   className="p-1.5 rounded text-gray-400 hover:text-foreground hover:bg-gray-800 disabled:opacity-50"
                   title="刷新"
@@ -444,24 +717,84 @@ export function PoolDrawer() {
                 </button>
               </div>
             </div>
+
+            {/* Tab bar */}
+            {hasBothPools && (
+              <div className="flex border-b border-gray-700">
+                <button
+                  onClick={() => setTab('claude')}
+                  className={`flex-1 py-2 text-xs font-medium text-center transition-colors ${
+                    tab === 'claude'
+                      ? 'text-indigo-300 border-b-2 border-indigo-500 bg-gray-800/50'
+                      : 'text-gray-500 hover:text-gray-300'
+                  }`}
+                >
+                  Claude
+                </button>
+                <button
+                  onClick={() => setTab('codex')}
+                  className={`flex-1 py-2 text-xs font-medium text-center transition-colors ${
+                    tab === 'codex'
+                      ? 'text-emerald-300 border-b-2 border-emerald-500 bg-gray-800/50'
+                      : 'text-gray-500 hover:text-gray-300'
+                  }`}
+                >
+                  Codex
+                </button>
+              </div>
+            )}
+
             <div className="flex-1 overflow-y-auto p-3 space-y-2 relative">
-              {showAdd && <AddAccountModal onClose={() => setShowAdd(false)} onAdded={loadUsage} />}
+              {showAdd && <AddAccountModal onClose={() => setShowAdd(false)} onAdded={loadClaudeUsage} />}
+              {showCodexAdd && <AddCodexAccountModal onClose={() => setShowCodexAdd(false)} onAdded={loadCodexUsage} />}
               {showCcSettings && <CcSettingsModal onClose={() => setShowCcSettings(false)} />}
-              {error && <div className="text-xs text-red-400">{error}</div>}
-              {loading && !status && <div className="text-xs text-gray-500">加载中…</div>}
-              {status?.accounts.map((a) => (
-                <AccountCard
-                  key={a.id}
-                  account={a}
-                  preferred={status?.preferred ?? null}
-                  lastSelected={status?.last_selected ?? null}
-                  onClearCooldown={handleClearCooldown}
-                  onSetPreferred={handleSetPreferred}
-                  onRelogin={handleRelogin}
-                  onRetryUsage={() => loadUsage(true)}
-                  reloginState={relogin[a.id]}
-                />
-              ))}
+
+              {/* Claude tab */}
+              {tab === 'claude' && (
+                <>
+                  {claudeError && <div className="text-xs text-red-400">{claudeError}</div>}
+                  {claudeLoading && !claudeStatus && <div className="text-xs text-gray-500">加载中…</div>}
+                  {claudeStatus?.accounts.map((a) => (
+                    <AccountCard
+                      key={a.id}
+                      account={a}
+                      preferred={claudeStatus?.preferred ?? null}
+                      lastSelected={claudeStatus?.last_selected ?? null}
+                      onClearCooldown={handleClaudeClearCooldown}
+                      onSetPreferred={handleClaudeSetPreferred}
+                      onRelogin={handleClaudeRelogin}
+                      onRetryUsage={() => loadClaudeUsage(true)}
+                      onDelete={async (id) => {
+                        if (!window.confirm(`从 Claude 号池中删除 ${id}？`)) return;
+                        try { await api.poolDeleteAccount(id); await loadClaudeUsage(); } catch (e) { window.alert(String(e)); }
+                      }}
+                      reloginState={relogin[a.id]}
+                    />
+                  ))}
+                </>
+              )}
+
+              {/* Codex tab */}
+              {tab === 'codex' && (
+                <>
+                  {codexError && <div className="text-xs text-red-400">{codexError}</div>}
+                  {codexLoading && !codexStatus && <div className="text-xs text-gray-500">加载中…</div>}
+                  {codexStatus?.accounts?.map((a: any) => (
+                    <CodexAccountCard
+                      key={a.id}
+                      account={a}
+                      onClearCooldown={handleCodexClearCooldown}
+                      onRelogin={handleCodexRelogin}
+                      onDelete={async (id) => {
+                        if (!window.confirm(`从 Codex 号池中删除 ${id}？`)) return;
+                        try { await api.codexPoolDeleteAccount(id); await loadCodexUsage(); } catch (e) { window.alert(String(e)); }
+                      }}
+                      onRetryUsage={() => loadCodexUsage(true)}
+                      reloginState={codexRelogin[a.id]}
+                    />
+                  ))}
+                </>
+              )}
             </div>
           </div>
         </div>,

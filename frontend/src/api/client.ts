@@ -1022,6 +1022,24 @@ export const api = {
   putCcSettings: (settings: Record<string, unknown>) =>
     request<{ ok: boolean; synced: number; settings: Record<string, unknown> }>('/api/pool/cc-settings', { method: 'PUT', body: JSON.stringify({ settings }) }),
 
+  // Codex Pool
+  getCodexPoolStatus: () => request<any>('/api/codex-pool/status'),
+  getCodexPoolUsage: (force?: boolean) => request<any>('/api/codex-pool/usage' + (force ? '?force=true' : '')),
+  clearCodexPoolCooldown: (accountId: string) =>
+    request<{ ok: boolean }>(`/api/codex-pool/accounts/${accountId}/clear-cooldown`, { method: 'POST' }),
+  codexPoolDeleteAccount: (accountId: string) =>
+    request<{ ok: boolean }>(`/api/codex-pool/accounts/${accountId}`, { method: 'DELETE' }),
+  codexPoolVerify: (accountId: string) =>
+    request<any>(`/api/codex-pool/accounts/${accountId}/verify`),
+  codexPoolRelogin: (accountId: string) =>
+    request<{ ok: boolean; status: string }>(`/api/codex-pool/accounts/${accountId}/relogin`, { method: 'POST' }),
+  codexPoolReloginStatus: (accountId: string) =>
+    request<{ status: string; detail?: string }>(`/api/codex-pool/accounts/${accountId}/relogin`),
+  codexPoolAddAccount: (data: { email: string; token: string; password?: string }) =>
+    request<{ ok: boolean; status: string; account_id?: string }>('/api/codex-pool/add', { method: 'POST', body: JSON.stringify(data) }),
+  codexPoolAddStatus: (email: string) =>
+    request<{ status: string; detail?: string }>(`/api/codex-pool/add/${encodeURIComponent(email)}`),
+
   // User Skills
   listUserSkills: () => request<any[]>('/api/user-skills'),
   getUserSkill: (id: number) => request<any>(`/api/user-skills/${id}`),

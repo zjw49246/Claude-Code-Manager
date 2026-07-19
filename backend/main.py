@@ -28,6 +28,7 @@ from backend.api.secrets import router as secrets_router
 from backend.api.tags import router as tags_router
 from backend.api.files import router as files_router
 from backend.api.pool import router as pool_router
+from backend.api.codex_pool import router as codex_pool_router
 from backend.api.monitor import router as monitor_router
 from backend.api.sub_agents import router as sub_agents_router
 from backend.api.sub_agent_tasks import router as sub_agent_tasks_router
@@ -75,6 +76,19 @@ dispatcher = GlobalDispatcher(
 )
 
 sub_agent_watcher = SubAgentWatcher(db_factory=async_session, broadcaster=broadcaster)
+
+# Codex account pool (optional, CODEX_POOL_ENABLED=true)
+codex_pool = None
+if settings.codex_pool_enabled:
+    try:
+        from backend.services.codex_pool import CodexPool
+        codex_pool = CodexPool(
+            config_path=settings.codex_pool_config_path,
+            cooldown_seconds=settings.codex_pool_cooldown_seconds,
+        )
+        logger.info("Codex pool enabled with %d accounts", len(codex_pool._accounts))
+    except Exception:
+        logger.debug("Codex pool init failed — codex pool disabled")
 
 update_service = UpdateService(
     broadcaster=broadcaster,
@@ -400,6 +414,7 @@ app.include_router(secrets_router)
 app.include_router(tags_router)
 app.include_router(files_router)
 app.include_router(pool_router)
+app.include_router(codex_pool_router)
 app.include_router(discussions_router)
 app.include_router(quick_phrases_router)
 app.include_router(monitor_router)
