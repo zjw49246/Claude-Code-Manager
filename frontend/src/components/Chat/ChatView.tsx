@@ -162,6 +162,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
   const [titleDraft, setTitleDraft] = useState(task.title || '');
   const titleInputRef = useRef<HTMLInputElement>(null);
   const [titleExpanded, setTitleExpanded] = useState(false);
+  const chatRootRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -245,11 +246,16 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
     const containerRect = container.getBoundingClientRect();
     const threshold = 30;
 
+    const scrollToNode = (node: HTMLElement) => {
+      const nodeTop = node.offsetTop;
+      container.scrollTo({ top: nodeTop, behavior: 'smooth' });
+    };
+
     if (direction === 'up') {
       for (let i = nodes.length - 1; i >= 0; i--) {
         const rect = nodes[i].getBoundingClientRect();
         if (rect.top < containerRect.top - threshold) {
-          nodes[i].scrollIntoView({ behavior: 'smooth', block: 'start' });
+          scrollToNode(nodes[i]);
           return;
         }
       }
@@ -257,7 +263,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
       for (const node of nodes) {
         const rect = node.getBoundingClientRect();
         if (rect.top > containerRect.top + threshold) {
-          node.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          scrollToNode(node);
           return;
         }
       }
@@ -807,32 +813,49 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
     };
   }, []);
 
-  // Prevent scroll/touch events from propagating to parent when messages
-  // container is not scrollable (content shorter than viewport)
+  // Prevent scroll/touch events on the entire ChatView from reaching parent
+  // scroll containers (task list). Allows scrolling inside the messages area
+  // but blocks propagation when touching non-scrollable zones (header, input)
+  // or when messages content is shorter than the viewport.
   useEffect(() => {
-    const el = messagesContainerRef.current;
-    if (!el) return;
-    const prevent = (e: Event) => {
-      if (el.scrollHeight <= el.clientHeight) {
+    const root = chatRootRef.current;
+    const msgEl = messagesContainerRef.current;
+    if (!root) return;
+    const handleWheel = (e: WheelEvent) => {
+      if (!msgEl) { e.preventDefault(); return; }
+      const atTop = msgEl.scrollTop <= 0 && e.deltaY < 0;
+      const atBottom = msgEl.scrollTop + msgEl.clientHeight >= msgEl.scrollHeight - 1 && e.deltaY > 0;
+      const notScrollable = msgEl.scrollHeight <= msgEl.clientHeight;
+      if (notScrollable || atTop || atBottom) {
         e.preventDefault();
       }
     };
-    el.addEventListener('wheel', prevent, { passive: false });
-    el.addEventListener('touchmove', prevent, { passive: false });
+    const handleTouch = (e: TouchEvent) => {
+      if (!msgEl) { e.preventDefault(); return; }
+      if (msgEl.scrollHeight <= msgEl.clientHeight) {
+        e.preventDefault();
+      }
+    };
+    root.addEventListener('wheel', handleWheel, { passive: false });
+    root.addEventListener('touchmove', handleTouch, { passive: false });
     return () => {
-      el.removeEventListener('wheel', prevent);
-      el.removeEventListener('touchmove', prevent);
+      root.removeEventListener('wheel', handleWheel);
+      root.removeEventListener('touchmove', handleTouch);
     };
   }, []);
 
   const loadMoreRef = useRef(loadMoreHistory);
   loadMoreRef.current = loadMoreHistory;
 
-  // Auto-scroll only on initial history load
+  // Auto-scroll only on initial history load — use scrollTop instead of
+  // scrollIntoView to avoid accidentally scrolling ancestor containers.
   useEffect(() => {
     if (messages.length > 0 && !hasScrolledRef.current) {
       hasScrolledRef.current = true;
-      bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+      const container = messagesContainerRef.current;
+      if (container) {
+        container.scrollTop = container.scrollHeight;
+      }
     }
   }, [messages]);
 
@@ -987,7 +1010,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
   };
 
   return (
-    <div className={inline ? "flex flex-col h-full bg-gray-950" : "fixed inset-0 bg-gray-950 flex flex-col z-50"}>
+    <div ref={chatRootRef} className={inline ? "flex flex-col h-full bg-gray-950 overscroll-none" : "fixed inset-0 bg-gray-950 flex flex-col z-50 overscroll-none"}>
       {/* Header — two rows */}
       <div className="px-3 sm:px-4 py-1.5 pt-[max(0.375rem,env(safe-area-inset-top))] border-b border-gray-800 bg-gray-900">
         {/* Row 1: back + task info + action buttons */}
@@ -1574,7 +1597,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
                 <ChevronDown size={16} />
               </button>
               <button
-                onClick={() => bottomRef.current?.scrollIntoView({ behavior: 'smooth' })}
+                onClick={() => { const c = messagesContainerRef.current; if (c) c.scrollTo({ top: c.scrollHeight, behavior: 'smooth' }); }}
                 className="p-1.5 text-gray-500 hover:text-gray-300 rounded transition-colors"
                 title="Scroll to bottom"
               >
