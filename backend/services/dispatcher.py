@@ -3250,10 +3250,27 @@ class GlobalDispatcher:
                     logger.exception(f"Failed to restore enabled_skills for task {task_id}")
 
             # PTY mode: the persistent session stays alive after a turn, so
-            # _consume_output's process_exit broadcast never fires. The frontend
-            # relies on this event to clear the "thinking" spinner and re-enable
-            # the input box.
+            # _consume_output's process_exit broadcast never fires. Two things
+            # the frontend needs that _consume_output normally handles:
+            #  1. task.status back to "completed" in DB (poll-based fallback)
+            #  2. process_exit WS event (clears spinner immediately)
+            # Without (1) the 5s poll keeps seeing "executing" even after the
+            # spinner is cleared, re-pinning the UI into "running" state.
             if self.instance_manager.pty_mode_enabled:
+                try:
+                    async with self.db_factory() as db:
+                        result = await db.execute(
+                            update(Task)
+                            .where(Task.id == task_id, Task.status == "executing")
+                            .values(status="completed", completed_at=datetime.utcnow(), error_message=None)
+                        )
+                        await db.commit()
+                        if result.rowcount:
+                            from backend.services.task_events import broadcast_status_change
+                            await broadcast_status_change(task_id, "completed", inst_id)
+                except Exception:
+                    logger.exception("Failed to restore task %d status after PTY turn", task_id)
+
                 process = self.instance_manager.processes.get(inst_id)
                 exit_code = getattr(process, "returncode", 0) if process else 0
                 await self.broadcaster.broadcast(f"task:{task_id}", {
