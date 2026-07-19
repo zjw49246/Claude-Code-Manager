@@ -805,11 +805,24 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
     hasScrolledRef.current = false;
   }, [task.id]);
 
-  // Lock body scroll while ChatView is open to prevent scroll bleed-through
+  // Lock body scroll while ChatView is open to prevent scroll bleed-through.
+  // iOS Safari (especially PWA) ignores overflow:hidden on body — setting
+  // position:fixed is the only reliable way to prevent background scrolling.
   useEffect(() => {
-    document.body.style.overflow = 'hidden';
+    const scrollY = window.scrollY;
+    const { body } = document;
+    body.style.position = 'fixed';
+    body.style.top = `-${scrollY}px`;
+    body.style.left = '0';
+    body.style.right = '0';
+    body.style.overflow = 'hidden';
     return () => {
-      document.body.style.overflow = '';
+      body.style.position = '';
+      body.style.top = '';
+      body.style.left = '';
+      body.style.right = '';
+      body.style.overflow = '';
+      window.scrollTo(0, scrollY);
     };
   }, []);
 
