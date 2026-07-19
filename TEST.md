@@ -778,6 +778,12 @@ uv run python -m pytest backend/tests/test_api_tasks.py -k broadcasts_status_cha
 - [ ] 切主题后手机状态栏 / PWA theme-color 跟随（meta 同步）
 - [ ] 刷新后主题保持（localStorage cc_theme）；旧值 ocean/forest/rose 直接沿用，无迁移丢失
 
+## 聊天消息复制
+
+| 测试文件 | 测试用例 | 说明 |
+|----------|----------|------|
+| `frontend/src/components/Chat/ChatView.test.tsx` | `copies a user message without its sender prefix` | 用户消息保留 `[发送者]` 的界面显示，但复制时只写入消息正文 |
+
 ## 开发规范
 
 ### Claude Code 开发时必须遵守：
