@@ -1,5 +1,7 @@
 from datetime import datetime
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
+
+from backend.config import settings
 
 
 class MonitoredRepoCreate(BaseModel):
@@ -7,7 +9,7 @@ class MonitoredRepoCreate(BaseModel):
     project_id: int | None = None
     worker_id: int | None = None  # NULL = local, else Worker ID
     auto_merge: bool = False
-    provider: str = "claude"
+    provider: str = Field(default_factory=lambda: settings.default_provider)
     review_model: str | None = None
     default_branch: str = "main"
     allowed_authors: list[str] = []

@@ -5,19 +5,21 @@ import { Plus, ArrowLeft, X, Copy, RefreshCw, ToggleLeft, ToggleRight, Trash2, G
 
 const DEFAULT_WEBHOOK_URL = `${window.location.origin}/api/github/webhook`;
 
-function useProviderModels(): { providers: string[]; modelsFor: (p: string) => string[] } {
-  const [cfg, setCfg] = useState<{ providers: string[]; claude: string[]; codex: string[] }>({
-    providers: ['claude', 'codex'], claude: [], codex: [],
+function useProviderModels(): { providers: string[]; defaultProvider: string; modelsFor: (p: string) => string[] } {
+  const [cfg, setCfg] = useState<{ providers: string[]; defaultProvider: string; claude: string[]; codex: string[] }>({
+    providers: ['claude', 'codex'], defaultProvider: 'codex', claude: [], codex: [],
   });
   useEffect(() => {
     api.config().then((c) => setCfg({
       providers: c.provider_options?.length ? c.provider_options : ['claude', 'codex'],
+      defaultProvider: c.default_provider || 'codex',
       claude: c.model_options.filter((m) => m !== 'default'),
       codex: (c.codex_model_options || []).filter((m) => m !== 'default'),
     })).catch(() => {});
   }, []);
   return {
     providers: cfg.providers,
+    defaultProvider: cfg.defaultProvider,
     modelsFor: (p: string) => (p === 'codex' ? cfg.codex : cfg.claude),
   };
 }
@@ -39,9 +41,9 @@ function copyToClipboard(text: string) {
 function AddRepoModal({ onClose, onSaved }: { onClose: () => void; onSaved: () => void }) {
   const [repoName, setRepoName] = useState('');
   const [autoMerge, setAutoMerge] = useState(false);
-  const [provider, setProvider] = useState('claude');
+  const [provider, setProvider] = useState('codex');
   const [reviewModel, setReviewModel] = useState('');
-  const { providers, modelsFor } = useProviderModels();
+  const { providers, defaultProvider, modelsFor } = useProviderModels();
   const modelOptions = modelsFor(provider);
   const [defaultBranch, setDefaultBranch] = useState('main');
   const [allowedAuthors, setAllowedAuthors] = useState('');
@@ -55,6 +57,10 @@ function AddRepoModal({ onClose, onSaved }: { onClose: () => void; onSaved: () =
   useEffect(() => {
     api.listWorkers().then(w => setWorkers(w.filter(wk => wk.status !== 'terminated'))).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    setProvider(defaultProvider);
+  }, [defaultProvider]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();

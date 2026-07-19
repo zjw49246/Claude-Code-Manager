@@ -24,16 +24,17 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   const [newProjectUrl, setNewProjectUrl] = useState('');
   const [priority, setPriority] = useState(0);
   const [mode, setMode] = useState('auto');
-  const [provider, setProvider] = useState('claude');
+  const [provider, setProvider] = useState('codex');
   // 分布式 Worker：执行位置（'' = 本机）
   const [workerId, setWorkerId] = useState('');
   // workers state removed — Run on moved to Project level
   const [model, setModel] = useState('');
   const [providerOptions, setProviderOptions] = useState<string[]>(['claude', 'codex']);
   const [effort, setEffort] = useState('');
+  const [defaultProvider, setDefaultProvider] = useState('codex');
   const [defaultModel, setDefaultModel] = useState('claude-opus-4-6');
   const [modelOptions, setModelOptions] = useState<string[]>([]);
-  const [defaultCodexModel, setDefaultCodexModel] = useState('gpt-5.1-codex-max');
+  const [defaultCodexModel, setDefaultCodexModel] = useState('gpt-5.6-sol');
   const [codexModelOptions, setCodexModelOptions] = useState<string[]>([]);
   const [effortOptions, setEffortOptions] = useState<string[]>([]);
   const [codexEffortOptions, setCodexEffortOptions] = useState<string[]>([]);
@@ -76,7 +77,9 @@ export function TaskForm({ onCreated }: TaskFormProps) {
     loadProjects();
     if (!isAdmin) api.listWorkers().then(w => setHasWorker(w.length > 0)).catch(() => {});
     api.config().then((c) => {
-      setProvider(c.default_provider || 'claude');
+      const configuredProvider = c.default_provider || 'codex';
+      setDefaultProvider(configuredProvider);
+      setProvider(configuredProvider);
       setProviderOptions(c.provider_options.length ? c.provider_options : ['claude', 'codex']);
       setDefaultModel(c.default_model);
       setModelOptions(c.model_options.filter((m) => m !== 'default'));
@@ -200,7 +203,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   const [defaultSaved, setDefaultSaved] = useState(false);
   const hasStoredDefault = !!localStorage.getItem(STORAGE_KEY);
 
-  const hasNonDefaultConfig = priority !== 0 || mode !== 'auto' || provider !== (providerOptions[0] || 'claude') || model !== '' || effort !== '' || thinkingBudget !== '' || timeoutHours !== '';
+  const hasNonDefaultConfig = priority !== 0 || mode !== 'auto' || provider !== defaultProvider || model !== '' || effort !== '' || thinkingBudget !== '' || timeoutHours !== '';
 
   const activeDefaultModel = provider === 'codex' ? defaultCodexModel : defaultModel;
   const activeModelOptions = provider === 'codex' ? codexModelOptions : modelOptions;

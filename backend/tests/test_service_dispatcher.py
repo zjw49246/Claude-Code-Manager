@@ -2736,7 +2736,8 @@ async def test_create_task_fills_default_model_and_effort(client):
     })
     assert resp.status_code == 201
     data = resp.json()
-    assert data["model"] == settings.default_model
+    assert data["provider"] == settings.default_provider == "codex"
+    assert data["model"] == settings.default_codex_model == "gpt-5.6-sol"
     assert data["effort_level"] == settings.default_effort
 
 

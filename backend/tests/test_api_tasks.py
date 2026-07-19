@@ -431,7 +431,9 @@ async def test_create_task_without_model_fills_default(client):
         "title": "No model", "description": "d", "target_repo": "/tmp",
     })
     assert resp.status_code == 201
-    assert resp.json()["model"] == settings.default_model
+    data = resp.json()
+    assert data["provider"] == settings.default_provider == "codex"
+    assert data["model"] == settings.default_codex_model == "gpt-5.6-sol"
 
 
 @pytest.mark.asyncio

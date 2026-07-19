@@ -1,6 +1,8 @@
 from datetime import datetime, timezone
 
-from pydantic import BaseModel, field_serializer, model_validator
+from pydantic import BaseModel, Field, field_serializer, model_validator
+
+from backend.config import settings
 
 
 class TaskCreate(BaseModel):
@@ -25,7 +27,8 @@ class TaskCreate(BaseModel):
     goal_condition: str | None = None  # goal only: natural-language completion condition
     goal_max_turns: int = 30  # goal only: max turns before auto-fail
     goal_evaluator_model: str | None = None  # goal only: evaluator model (default haiku)
-    provider: str = "claude"
+    # API callers that omit provider follow the deployment-wide default.
+    provider: str = Field(default_factory=lambda: settings.default_provider)
     model: str | None = None
     effort_level: str | None = None
     thinking_budget: int | None = None

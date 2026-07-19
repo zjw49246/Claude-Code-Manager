@@ -359,9 +359,9 @@ async def test_create_repo_with_codex_provider(client):
 
 
 @pytest.mark.asyncio
-async def test_create_repo_defaults_to_claude_provider(client):
+async def test_create_repo_defaults_to_configured_provider(client):
     data = await _create_repo(client, repo_full_name="owner/default-repo")
-    assert data["provider"] == "claude"
+    assert data["provider"] == "codex"
 
 
 @pytest.mark.asyncio

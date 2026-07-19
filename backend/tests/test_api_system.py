@@ -66,6 +66,16 @@ async def test_config_returns_default_model(client):
 
 
 @pytest.mark.asyncio
+async def test_config_ships_codex_sol_as_default(client):
+    resp = await client.get("/api/system/config")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["default_provider"] == "codex"
+    assert data["default_codex_model"] == "gpt-5.6-sol"
+    assert "gpt-5.6-sol" in data["codex_model_options"]
+
+
+@pytest.mark.asyncio
 async def test_config_returns_model_options_list(client):
     resp = await client.get("/api/system/config")
     assert resp.status_code == 200

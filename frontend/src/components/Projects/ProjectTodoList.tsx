@@ -41,7 +41,7 @@ export function ProjectTodoList({ projectId }: ProjectTodoListProps) {
   const [editDraft, setEditDraft] = useState<TodoDraft>(emptyDraft);
   const [taskTodo, setTaskTodo] = useState<ProjectTodo | null>(null);
   const [taskDraft, setTaskDraft] = useState<TodoDraft>(emptyDraft);
-  const [taskProvider, setTaskProvider] = useState('claude');
+  const [taskProvider, setTaskProvider] = useState('codex');
   const [providerOptions, setProviderOptions] = useState<string[]>(['claude', 'codex']);
   const [saving, setSaving] = useState(false);
   const [running, setRunning] = useState(false);
