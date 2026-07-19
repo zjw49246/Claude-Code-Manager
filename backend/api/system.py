@@ -84,6 +84,7 @@ class UpdateRequest(BaseModel):
     skip_frontend_build: bool = False
     dry_run: bool = False
     force: bool = False
+    branch: str | None = None
 
 
 def _get_update_service():
@@ -97,10 +98,11 @@ def _get_update_service():
 async def start_update(req: UpdateRequest):
     svc = _get_update_service()
     if req.dry_run:
-        return await svc.dry_run()
+        return await svc.dry_run(branch=req.branch)
     result = await svc.start_update(
         skip_frontend_build=req.skip_frontend_build,
         force=req.force,
+        branch=req.branch,
     )
     if "error" in result:
         raise HTTPException(status_code=409, detail=result["error"])

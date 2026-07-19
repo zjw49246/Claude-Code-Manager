@@ -1029,7 +1029,7 @@ export const api = {
     request<{ ok: boolean }>(`/api/user-skills/${id}`, { method: 'DELETE' }),
 
   // System Update
-  startUpdate: (data: { skip_frontend_build?: boolean; dry_run?: boolean; force?: boolean } = {}) =>
+  startUpdate: (data: { skip_frontend_build?: boolean; dry_run?: boolean; force?: boolean; branch?: string | null } = {}) =>
     request<any>('/api/system/update', { method: 'POST', body: JSON.stringify(data) }),
   getUpdateStatus: () =>
     request<any>('/api/system/update/status'),

@@ -263,14 +263,15 @@ class UpdateService:
             logger.debug("_needs_restart check failed", exc_info=True)
             return False
 
-    async def dry_run(self) -> dict[str, Any]:
+    async def dry_run(self, branch: str | None = None) -> dict[str, Any]:
         """Check for available updates without applying them."""
-        result = await self._run_cmd(["git", "fetch", "origin", "main"], timeout=60)
+        target_branch = branch or "main"
+        result = await self._run_cmd(["git", "fetch", "origin", target_branch], timeout=60)
         if result["returncode"] != 0:
             return {"has_updates": False, "error": result["stderr"]}
 
         head = (await self._run_cmd(["git", "rev-parse", "HEAD"]))["stdout"].strip()
-        origin = (await self._run_cmd(["git", "rev-parse", "origin/main"]))["stdout"].strip()
+        origin = (await self._run_cmd(["git", "rev-parse", f"origin/{target_branch}"]))["stdout"].strip()
 
         if head == origin:
             needs_restart = await self._needs_restart()
@@ -297,6 +298,7 @@ class UpdateService:
 
         return {
             "has_updates": True,
+            "branch": target_branch,
             "commits_behind": len(commits),
             "has_new_migrations": len(migration_files) > 0,
             "migration_count": len(migration_files),
@@ -311,6 +313,7 @@ class UpdateService:
         self,
         skip_frontend_build: bool = False,
         force: bool = False,
+        branch: str | None = None,
     ) -> dict[str, Any]:
         if self._lock.locked():
             if self._current:
@@ -327,7 +330,7 @@ class UpdateService:
         self._current = state
 
         asyncio.create_task(
-            self._run_pipeline(state, skip_frontend_build=skip_frontend_build, force=force)
+            self._run_pipeline(state, skip_frontend_build=skip_frontend_build, force=force, branch=branch)
         )
         return {"update_id": update_id, "status": "started"}
 
@@ -362,10 +365,11 @@ class UpdateService:
         state: UpdateState,
         skip_frontend_build: bool = False,
         force: bool = False,
+        branch: str | None = None,
     ):
         async with self._lock:
             try:
-                await self._pipeline_inner(state, skip_frontend_build, force)
+                await self._pipeline_inner(state, skip_frontend_build, force, branch=branch)
             except Exception as e:
                 state.status = "failed"
                 state.error = str(e)
@@ -378,7 +382,9 @@ class UpdateService:
         state: UpdateState,
         skip_frontend_build: bool,
         force: bool,
+        branch: str | None = None,
     ):
+        target_branch = branch or "main"
         has_new_migrations = False
         has_frontend_changes = False
         has_package_changes = False
@@ -400,7 +406,7 @@ class UpdateService:
             stashed = True
             await self._broadcast("log_line", step="git_pull", log=f"已暂存 {len(dirty_files)} 个本地改动", status="running")
 
-        result = await self._run_cmd(["git", "pull", "--rebase", "origin", "main"], timeout=60, step=step)
+        result = await self._run_cmd(["git", "pull", "--rebase", "origin", target_branch], timeout=60, step=step)
         if result["returncode"] != 0:
             if stashed:
                 await self._run_cmd(["git", "stash", "pop"])
