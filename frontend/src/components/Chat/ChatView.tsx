@@ -1874,6 +1874,10 @@ function MessageCopyButton({ text }: { text: string }) {
   );
 }
 
+function stripSenderPrefix(text: string): string {
+  return text.replace(/^\[[^\]\r\n]+\][ \t]+/, '');
+}
+
 const remarkPlugins = [remarkGfm];
 
 const markdownComponents: Components = {
@@ -2335,7 +2339,7 @@ const MessageBubble = memo(function MessageBubble({ message, taskId }: { message
         </div>
         <div className={`flex items-center gap-1 mt-0.5 ${isUser ? 'justify-end pr-1' : 'pl-1'}`}>
           {message.timestamp && <MessageTimestamp timestamp={message.timestamp} />}
-          {message.content && <MessageCopyButton text={message.content} />}
+          {message.content && <MessageCopyButton text={isUser ? stripSenderPrefix(message.content) : message.content} />}
         </div>
       </div>
     </div>
