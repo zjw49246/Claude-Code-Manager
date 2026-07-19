@@ -52,6 +52,7 @@ export function UpdateButton() {
   const [logs, setLogs] = useState<string[]>([]);
   const [dryRunResult, setDryRunResult] = useState<Record<string, unknown> | null>(null);
   const [skipFrontend, setSkipFrontend] = useState(false);
+  const [branch, setBranch] = useState('');
   const [error, setError] = useState('');
   const [oldCommit, setOldCommit] = useState('');
   const [newCommit, setNewCommit] = useState('');
@@ -186,7 +187,7 @@ export function UpdateButton() {
     setPhase('checking');
     setError('');
     try {
-      const result = await api.startUpdate({ dry_run: true });
+      const result = await api.startUpdate({ dry_run: true, branch: branch || undefined });
       setDryRunResult(result);
       setPhase('confirming');
     } catch (e: any) {
@@ -208,7 +209,7 @@ export function UpdateButton() {
     setSteps(defaultSteps);
 
     try {
-      const result = await api.startUpdate({ skip_frontend_build: skipFrontend });
+      const result = await api.startUpdate({ skip_frontend_build: skipFrontend, branch: branch || undefined });
       if (result.update_id) {
         setOldCommit(result.old_commit || '');
       }
@@ -236,6 +237,7 @@ export function UpdateButton() {
     setError('');
     setDryRunResult(null);
     setSkipFrontend(false);
+    setBranch('');
     setOldCommit('');
     setNewCommit('');
     setReconnectCount(0);
@@ -285,6 +287,26 @@ export function UpdateButton() {
               {/* Confirm phase */}
               {phase === 'confirming' && dryRunResult && (
                 <div className="space-y-3">
+                  {/* Branch selector */}
+                  <div className="flex items-center gap-2">
+                    <label className="text-xs text-gray-400 shrink-0">分支:</label>
+                    <input
+                      value={branch}
+                      onChange={e => setBranch(e.target.value)}
+                      placeholder="main"
+                      className="flex-1 bg-gray-800 text-foreground text-xs rounded px-2 py-1 border border-gray-700 focus:outline-none focus:border-indigo-500"
+                    />
+                    <button
+                      onClick={handleCheck}
+                      className="px-2 py-1 text-xs rounded bg-gray-800 text-gray-300 hover:bg-gray-700 shrink-0"
+                    >
+                      重新检查
+                    </button>
+                  </div>
+                  {branch && (
+                    <p className="text-xs text-amber-400">⚠️ 将从分支 <span className="font-mono">{branch}</span> 更新（非 main）</p>
+                  )}
+
                   {!(dryRunResult.has_updates as boolean) && !(dryRunResult.needs_restart as boolean) ? (
                     <p className="text-sm text-gray-300">已是最新版本，无需更新。</p>
                   ) : !(dryRunResult.has_updates as boolean) && (dryRunResult.needs_restart as boolean) ? (
