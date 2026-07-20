@@ -4,6 +4,64 @@
 >
 > 本文定义「Plan Agent」双 Agent 规划流水线的产品语义、模型组合配置、注入协议、数据模型、API、前后端改动与测试方案。它同时覆盖两个用户入口：任务开头的 **Plan 模式**（大改现有 `mode="plan"`）和对话中途的 **Plan Agent**（ChatView 输入栏新选项）。适用于 Claude 与 Codex provider。
 
+## 0. 速览（只看这一节即可做决策）
+
+### 0.1 需要你 check 的核心决策
+
+以下是本方案中真正需要你拍板的取舍，每条后面标注了详细章节：
+
+1. **注入后主 Agent 的动作 = ACK 协议 turn**（§4）：方案作为一条独立消息注入，触发主 Agent 一轮「只确认收到 + ≤5 句概括 + 简述疑虑」的轻量回复，**严禁实施**；`-p` 链路对这一轮追加只读硬约束，PTY 链路做写操作事后检测。落选方案：伪造 transcript 不触发回复（要绕过 CLI 写两种 provider 的私有 session 存储，PTY/app-server 不读磁盘补写，风险大）、延迟到用户下一条消息再拼入（用户得不到"已入上下文"的确认，且下一条消息可能与方案无关）。
+2. **双 Agent 是一次性只读子进程，单向文本传递**（§3）：Planner 产 `<ccm_plan>` → Reviewer 出 verdict（approve / approve_with_edits / revise），不共享 session、不用 MCP——因为默认组合跨 provider（Claude + Codex），文本协议是唯一中立通道。claude 靠 `--disallowedTools`、codex 靠 `--sandbox read-only` 硬保证只读。
+3. **revise 上限默认 2 轮，超限不失败**：取 Planner 最新方案 + 附「⚠ Reviewer 保留意见」，交给用户裁决（§3.3）。
+4. **入口 A（任务开头）保留人工审批门**：Reviewer 通过 ≠ 直接执行，仍进 plan_review 等你批准；**批准后方案显式回灌执行 prompt**（修复现在只靠 session 记忆的缺陷）；reject 可带 feedback 触发重新规划，无 feedback 维持 cancel 旧语义（§2.2、§4.4、§8.3）。
+5. **模型组合与降级**（§5）：主组合 Planner=Fable(high) + Reviewer=Sol(xhigh)，副组合双 Sol(xhigh)；run 启动时做零成本静态判定（模型清单 + CLI 配置 + 号池冷却），主组合不可用降副组合并明示，双双不可用报错；**运行中非瞬时失败 → 整条流水线降级副组合从头重跑**（不混搭槽位）。v1 只做全局配置，**不做 per-task 覆盖**。
+6. **新表 `plan_agent_runs` + `plan_agent_steps`，不复用 sub_agent_sessions**（§7）：后者耦合 claude-only 校验和 MCP 回调生命周期，Plan Run 是 provider 中立的服务端编排。
+7. **ralph_loop 里的 plan 复制逻辑直接删除**，legacy loop 不再支持 plan 模式（§9.2）。
+8. **设置扩展成独立 SettingsPage**（`#/settings`，admin 导航项）；PrefsMenu v1 不动，只加入口（§6）。
+9. **codex 主 task 也能用 Plan Agent**：流水线 provider 中立，注入走 enqueue_message，不设 provider gate（§8.2）。
+
+### 0.2 完整 To-Do List（含测试）
+
+**阶段 1 — 数据与配置**
+- [ ] Alembic migration：`plan_agent_runs` + `plan_agent_steps` 两表 + `GlobalSettings.plan_agent_config` JSON 列（与模型改动同 commit）
+- [ ] `config.py` 新增 `plan_agent_*` env 默认（4 槽 provider/model/effort + max_revise_rounds + 两个步骤超时）
+- [ ] `GET/PUT /api/settings/plan-agent`（admin，PUT 校验非法 422，GET 返回 resolved 可用性），保存后广播 `plan_agent_config_changed`
+- [ ] SettingsPage（`#/settings`）：主/副组合双卡片（provider→model→effort 联动过滤 codex_model_efforts）+ 恢复默认；App.tsx 路由 + AppShell 导航项 + iconSets 补 `settings` key + PrefsMenu 加入口
+- [ ] 测试：settings 端点校验/覆盖优先于 env/恢复默认；前端 SettingsPage 表单与联动；iconSets/icons 守卫断言全绿
+
+**阶段 2 — 流水线本体**
+- [ ] `PlanAgentService`（`backend/services/plan_agent.py`）：`resolve_combo` 静态判定 / `run_pipeline` revise 循环 / `_run_step` 子进程执行 / `inject`
+- [ ] claude/codex 命令构建（只读约束、effort clamp、号池选号写 CLAUDE_CONFIG_DIR、env 剔除 CLAUDECODE、日志落文件）
+- [ ] `<ccm_plan>` / `<ccm_plan_review>` 输出协议解析（缺失重试一次）
+- [ ] 步骤超时（planner 1800s / reviewer 900s）+ transient retry（`is_transient_for` 分流）+ 主→副组合降级重跑 + 取消（SIGTERM→10s→SIGKILL）
+- [ ] 测试（`test_plan_agent.py`）：协议解析矩阵 / 组合可用性判定矩阵 / revise 循环三分支 / 降级链 / prompt 模板与截断
+
+**阶段 3 — 入口 A（Plan 模式改造）**
+- [ ] dispatcher Step 3：plan 任务改走 PlanAgentService（不再占主 session），完成后 `status="plan_review"` + `plan_run_ready`（带内容）
+- [ ] dispatcher Step 4：批准后执行 prompt 前置回灌 `plan_content`
+- [ ] `POST /plan/reject` 支持 body `{feedback}` → 重新规划；无 feedback 维持 cancelled
+- [ ] 删除 `_run_plan_phase` 与 `ralph_loop.py` 复制版 plan 逻辑
+- [ ] 所有 plan 状态变更 commit 后补 `broadcast_status_change`
+- [ ] PlanPanel 升级 Markdown 渲染；ChatView 内渲染审批卡片（同一组件）
+- [ ] 测试：mode=plan 全链路集成（run→plan_review→approve→prompt 含方案→reject+feedback→新 run→reject 空→cancelled；状态广播断言）
+
+**阶段 4 — 入口 B（Chat 中的 Plan Agent）**
+- [ ] `POST /api/tasks/{id}/plan-agent`（并发 409、组合不可用 409、不设 provider gate）+ `GET /runs` + `POST /{run_id}/cancel`
+- [ ] `QueuedMessage.readonly_turn` 字段 + `_process_queued_message` 按 provider 注入只读 launch 参数；PTY 链路 ACK turn 写操作事后检测告警
+- [ ] 注入链路：system_event 落库（方案全文）→ `enqueue_message(source="plan:inject", readonly_turn=True)`
+- [ ] ChatView 输入栏 Plan Agent toggle（one-shot、活跃 run 禁用、走 runPlanAgent）
+- [ ] `PlanRunCard`：流水线进度 + 完成后 Markdown 方案 + 失败重试 + 刷新经 GET runs 回填
+- [ ] api client：`runPlanAgent` / `listPlanRuns` / `cancelPlanRun` / settings 两个方法（import type 纪律）
+- [ ] 测试：API 集成（创建/409/注入入队/取消 kill/重启恢复标 failed）；前端 toggle one-shot 与卡片渲染回填
+
+**阶段 5 — Worker 与收尾**
+- [ ] worker task 走 `_proxy` 转发（请求体携带已 resolve 的组合快照）+ `plan_agent_runs.remote_id` 列 + WorkerRelay 镜像 `plan_run_*` 事件
+- [ ] 服务重启恢复：运行态 run 标 failed，awaiting_approval 保留
+- [ ] 文档同步：TEST.md 手动验收项（双入口 + 降级路径实测）、README、CLAUDE.md（+AGENTS.md symlink 同步）Plan 模式条目改写
+- [ ] 全量回归：`uv run python -m pytest backend/tests/ -v` + `npx tsc --noEmit` 全绿后 push
+
+---
+
 ## 1. 背景与现状问题
 
 ### 1.1 现有 Plan 模式的实现事实
