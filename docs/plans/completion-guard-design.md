@@ -3,6 +3,69 @@
 > 状态：设计稿，尚未实施。2026-07-20 已按当日 main（d7b2402）逐项代码核查并修订：所有「现状/落地校对」段落与附录 A 均为一手证据（文件:行号）。
 >
 > 本文定义 Task 级“完成校验与自动催促”（下文简称 Completion Guard）的产品语义、状态机、消息协议、并发规则和建议改动。它适用于 Claude 与 Codex provider，并与现有 per-task 消息队列、AskUserQuestion、Goal/Loop、分布式 Worker 和任务状态广播机制衔接。
+>
+> **只需要看开头两节**（核心决策 + To-do 总表）即可完成 check；§1 起的正文和附录是实施时的参考细节。
+
+## 0. 需要你确认的核心决策
+
+一句话概括：**进程正常退出不再等于任务完成**。开启后，每个「候选完成点」要经过独立校验 Agent 判定 + 原 session 自检 + 系统生成共识，三者齐备才写 `completed`；未完成时系统判断该催 Agent 还是该问你。
+
+需要你逐条 check 的产品决策（括号内是详细章节）：
+
+1. **双确认才算完成**：校验 Agent 和原 session 单方声明都不算数，共识记录由 CCM 系统生成；任何异常（超时/解析失败/版本过期/达到上限）一律 fail closed，宁可不完成也不误标完成（§7.4、§18）。
+2. **未完成时由谁行动**：校验 Agent 必须判 `next_actor`——缺测试/没构建这类 Agent 自己能干的，自动注入催促继续干（不打扰你）；产品方案选择/不可逆操作/凭证这类必须你决定的，只通知你、绝不自动 resume 原 session。分流标准的例子在 §5.2/§5.3，请确认边界符合预期。
+3. **不进 Guard 的旁路**：你主动中断（Ctrl-C）、手动 stop-session、PR review 任务被新 push 取代、迁移回滚——按现有语义直接处理，不触发校验（附录 A 的 bypass 分类）。
+4. **聊天成本折衷（需拍板）**：Guard 开着时每条聊天消息的 turn 结束都是候选完成点。默认方案是廉价短路：只在 Agent 声明完成、或任务从未达成过共识时才跑重校验——代价是共识后被 Agent 低估的追加要求可能漏拦（§15.4 有残余风险声明）。不接受可选每 turn 全量校验（更贵）。
+5. **催促上限与兜底**：默认最多催 5 轮（可配置），超限进 `needs_attention` 等你显式处理（继续/加轮数/关 Guard/手动完成/取消），永不自动完成（§17.2）。
+6. **UI 变化**：任务列表新增 `Verifying` / `Waiting for you` / `Continuing` / `Needs attention` 展示态；聊天流用低干扰 system event 提示，详细校验记录折叠在面板里（§6、§19）。
+7. **成本**：每轮校验一次低成本模型调用（claude 用 haiku、codex 用 gpt-5.4-mini，复用 GoalEvaluator 链路）；每轮催促消耗原 session 正常 token（§8.5、§21）。
+8. **开关动态语义**：任务创建后任意时刻可开关；执行中关闭在本轮结束后生效；`waiting_user` 时关闭只停催促、不自动完成——你仍需回答/手动完成/取消（§11）。
+9. **Worker 任务的工程量**：Guard 在 worker 侧执行；Manager 改开关要同步到 worker，但该配置下发通道目前不存在需要新建，且是唯一一处 Manager→Worker 的配置同步（§16）。
+
+## 0.1 实施 To-do 总表（含测试）
+
+按依赖顺序分 5 个阶段，每项括号内为详细章节。测试项就地列在对应阶段，不后置。
+
+**阶段 1：完成入口收口**（可独立先行，Guard 关闭时行为不变）
+
+- [ ] 按附录 A 盘点表重新校验全部 completed 写入路径（代码演进后先 grep 复核）
+- [ ] 建单一 finalize 服务 `request_task_completion`，7 处自然成功路径全部改走它（§8.3、§14.2）
+- [ ] 顺带修既有不一致：completed_at 缺失 / Instance 完成计数 / PR review 回查只覆盖 auto 路径（§14.2）
+- [ ] 重启 stale 兜底 `_cleanup_stale_state` 与 finalize 的关系理顺（§14.2 冲突项）
+- [ ] 测试：Guard 关闭时各路径行为逐条锁定为回归基线（§22.2-1；「现有行为」按路径不一致，需逐条定义预期）
+
+**阶段 2：数据与动态开关**
+
+- [ ] Task 新增 Guard 字段 + alembic migration（§12.1）
+- [ ] 新增 `task_completion_checks` 审计表（§12.2）
+- [ ] create/update API：值变化时原子递增 version、失效旧 check、广播（§13.1）
+- [ ] worker 三处 payload 透传 Guard 字段，并补齐迁移 payload 既有丢字段（§16）
+- [ ] 前端：创建表单开关 + 任务详情动态开关（§19）
+- [ ] 测试：version 变化使旧结果失效（§22.1-4）；payload 字段覆盖度断言（§22.3-1）；前端表单默认值/提交（§22.4-1,2）
+
+**阶段 3：校验与原 session 协议**
+
+- [ ] evaluator schema + runner（复用 GoalEvaluator，技术失败显式落 `uncertain`）（§7.2、§8.5）
+- [ ] outcome / self-check 标签解析（§7.1、§7.3）
+- [ ] Guard 消息接入 per-task queue：新增 `PRIORITY_GUARD` 档位 + 消费侧版本校验丢弃（§14.3）
+- [ ] 双确认原子提交 + 共识广播 + 后置动作只执行一次（§7.4、§18）
+- [ ] 测试：四种 verdict 与非法组合解析（§22.1-1,2）；缺任一确认 consensus=false（§22.1-3）；催促生成 / evaluator error fail closed / 完成计数只加一次（§22.1-6,8,10）；auto 成功不直接 completed → 全链路 completed（§22.2-2,3,4）；reviewing 中关闭丢弃旧结果 / 排队催促被清（§22.2-7,8,9）；PTY turn 不绕过 Guard / transient retry 只进一次 Guard（§22.2-12,13）；Codex app-server 与 exec fallback 一致（§22.2-17）
+
+**阶段 4：next_actor 与用户等待**
+
+- [ ] `task_user_requests` 持久表 + 回答 API（重启可恢复；对齐现有 AskUser 端点风格）（§12.3、§13.3）
+- [ ] waiting_user 通知复用 AskUser 卡片/全局通知/重连回填链路（§10）
+- [ ] 回答后转正常用户消息 resume + 「不必要提问」分流催促（§8.8、§8.9）
+- [ ] 测试：waiting_user 不 enqueue 原 session（§22.1-7）；两种 waiting_user 分流（§22.2-5,6）；waiting_user 中关闭不自动完成（§22.2-10）；用户消息优先且使校验失效（§22.2-11）；前端回答卡片/全局通知/重连恢复（§22.4-5,6）
+
+**阶段 5：模式、Worker 与恢复**
+
+- [ ] Goal/Loop/Plan 介入点接入（§15；测试 §22.2-16）
+- [ ] Worker：配置下发通道（新建）+ relay 对 completed 的共识守卫 + guard 事件回传（§16）
+- [ ] 重启恢复 reviewing/waiting_user，stale 兜底不洗白 Guard 任务（§14.2；测试 §22.2-15,18,19）
+- [ ] cancel 清理 evaluator/队列/用户卡片（§17.4；测试 §22.2-14）
+- [ ] needs_attention 显式关闭选择端点（§11.6、§13.1；前端 §22.4-7）
+- [ ] 分布式测试全组（§22.3）；指标与审计面板（§21）
 
 ## 1. 背景
 
