@@ -105,6 +105,20 @@ class InstanceManager:
             logger.exception("PTY inject failed for session %s", session_id)
             return False
 
+    async def inject_codex_message(self, thread_id: str, content: str) -> bool:
+        """Steer a live Codex app-server turn without starting a new turn.
+
+        Codex ``exec`` subprocesses do not expose same-turn steering, so a
+        missing app-server/context deliberately returns False.
+        """
+        if self._codex_app_server is None or not thread_id or not content:
+            return False
+        try:
+            return await self._codex_app_server.steer_turn(thread_id, content)
+        except Exception:
+            logger.exception("Codex inject failed for thread %s", thread_id)
+            return False
+
     async def release_pty_session(self, session_id: str) -> None:
         """Return a PTY session to nothing — stop it and remove from the pool.
         Used when a workload (e.g. a loop task) is finished with its session.

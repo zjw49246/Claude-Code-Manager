@@ -278,6 +278,45 @@ class CodexAppServer:
         )
         return turn_process, thread_id
 
+    async def steer_turn(self, thread_id: str, content: str) -> bool:
+        """Append user input to the currently active regular turn.
+
+        ``expectedTurnId`` makes the request race-safe: if the turn finishes
+        between the local context lookup and the RPC, app-server rejects the
+        stale steer instead of attaching it to a later turn.
+        """
+        if not self.is_alive or not thread_id or not content:
+            return False
+        context = self._contexts_by_thread.get(thread_id)
+        if (
+            context is None
+            or context.turn_id is None
+            or context.process.returncode is not None
+        ):
+            return False
+
+        expected_turn_id = context.turn_id
+        try:
+            response = await self._request(
+                "turn/steer",
+                {
+                    "threadId": thread_id,
+                    "expectedTurnId": expected_turn_id,
+                    "input": [{"type": "text", "text": content}],
+                },
+            )
+        except Exception as exc:
+            # A normal turn-boundary race and non-steerable turns (review or
+            # manual compact) are protocol rejections, not transport crashes.
+            logger.info(
+                "Codex steer rejected thread=%s turn=%s reason=%s",
+                thread_id,
+                expected_turn_id,
+                exc,
+            )
+            return False
+        return response.get("turnId") == expected_turn_id
+
     async def _request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         if not self.is_alive or not self._process or not self._process.stdin:
             raise CodexAppServerError("app-server is not running")

@@ -52,6 +52,61 @@ async def test_start_turn_uses_native_resume_and_turn_start():
 
 
 @pytest.mark.asyncio
+async def test_steer_turn_targets_the_active_turn():
+    server = CodexAppServer("codex")
+    server._process = SimpleNamespace(pid=4321, returncode=None)
+    server.ensure_started = AsyncMock()
+    server._request = AsyncMock(side_effect=[
+        {"thread": {"id": "thread-1"}},
+        {"turn": {"id": "turn-1"}},
+        {"turnId": "turn-1"},
+    ])
+    await server.start_turn(
+        prompt="work", cwd="/tmp", model="gpt-5.5", effort="low",
+        resume_session_id=None, git_env=None, task_id=1,
+    )
+
+    assert await server.steer_turn("thread-1", "focus on the failing test") is True
+    steer_call = server._request.await_args_list[2]
+    assert steer_call.args == (
+        "turn/steer",
+        {
+            "threadId": "thread-1",
+            "expectedTurnId": "turn-1",
+            "input": [{"type": "text", "text": "focus on the failing test"}],
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_steer_turn_without_active_context_does_not_send_rpc():
+    server = CodexAppServer("codex")
+    server._process = SimpleNamespace(pid=4321, returncode=None)
+    server._request = AsyncMock()
+
+    assert await server.steer_turn("thread-gone", "too late") is False
+    server._request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_steer_turn_protocol_rejection_is_a_normal_false_result():
+    server = CodexAppServer("codex")
+    server._process = SimpleNamespace(pid=4321, returncode=None)
+    server.ensure_started = AsyncMock()
+    server._request = AsyncMock(side_effect=[
+        {"thread": {"id": "thread-1"}},
+        {"turn": {"id": "turn-1"}},
+        CodexAppServerError("active turn changed"),
+    ])
+    await server.start_turn(
+        prompt="work", cwd="/tmp", model="gpt-5.5", effort="low",
+        resume_session_id=None, git_env=None, task_id=1,
+    )
+
+    assert await server.steer_turn("thread-1", "late input") is False
+
+
+@pytest.mark.asyncio
 async def test_notifications_stream_delta_and_finish_process():
     server = CodexAppServer("codex")
     server._process = SimpleNamespace(pid=4321, returncode=None)
