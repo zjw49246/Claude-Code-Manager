@@ -8,9 +8,11 @@ from backend.models.monitor_session import MonitorSession, MonitorCheck
 
 
 async def _create_task_with_monitor(client, session_factory, status="in_progress"):
+    # monitor 是 claude-only（codex 任务显式 400），默认 provider 已是 codex，
+    # 这里必须显式钉住 claude 才测得到 skill/limit 等后续分支
     resp = await client.post("/api/tasks", json={
         "title": "T", "description": "d", "target_repo": "/tmp",
-        "enabled_skills": {"monitor": True},
+        "enabled_skills": {"monitor": True}, "provider": "claude",
     })
     task_id = resp.json()["id"]
     if status != "pending":
@@ -52,6 +54,7 @@ async def test_create_monitor_session(client, session_factory):
 async def test_create_monitor_no_skill(client, session_factory):
     resp = await client.post("/api/tasks", json={
         "title": "T", "description": "d", "target_repo": "/tmp",
+        "provider": "claude",
     })
     task_id = resp.json()["id"]
     async with session_factory() as db:
