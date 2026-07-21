@@ -974,7 +974,7 @@ export const api = {
     request<RuntimeSettings>(`/api/workers/${id}/settings/runtime`, { method: 'PUT', body: JSON.stringify(data) }),
   getWorkerPool: (id: number) =>
     request<{ enabled: boolean; total: number; available: number; accounts: { id: string; email: string | null; enabled: boolean; available: boolean; cooldown_remaining: number }[] }>(`/api/workers/${id}/pool`),
-  createWorker: (data: { accounts: { email: string; token?: string }[]; name?: string }) =>
+  createWorker: (data: { accounts: { email: string; token?: string; login_method?: string }[]; name?: string }) =>
     request<Worker>('/api/workers', { method: 'POST', body: JSON.stringify(data) }),
   getWorker: (id: number) => request<Worker>(`/api/workers/${id}`),
   getWorkerLogs: (id: number) => request<{ id: number; bootstrap_log: string | null }>(`/api/workers/${id}/logs`),
@@ -1036,7 +1036,7 @@ export const api = {
     request<{ ok: boolean; status: string }>(`/api/codex-pool/accounts/${accountId}/relogin`, { method: 'POST' }),
   codexPoolReloginStatus: (accountId: string) =>
     request<{ status: string; detail?: string }>(`/api/codex-pool/accounts/${accountId}/relogin`),
-  codexPoolAddAccount: (data: { email: string; token: string; password?: string }) =>
+  codexPoolAddAccount: (data: { email: string; token: string; password?: string; login_method?: string }) =>
     request<{ ok: boolean; status: string; account_id?: string }>('/api/codex-pool/add', { method: 'POST', body: JSON.stringify(data) }),
   codexPoolAddStatus: (email: string) =>
     request<{ status: string; detail?: string }>(`/api/codex-pool/add/${encodeURIComponent(email)}`),

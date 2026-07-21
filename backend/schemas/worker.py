@@ -5,7 +5,7 @@ from pydantic import BaseModel, ConfigDict, field_serializer
 class WorkerAccountIn(BaseModel):
     email: str
     token: str | None = None
-    login_method: str = ""  # "171mail" | "mailcom" | "" (auto-detect by suffix)
+    login_method: str = ""  # 171mail | mailcom | onet | gazeta | "" (auto-detect)
 
 
 class WorkerCreate(BaseModel):

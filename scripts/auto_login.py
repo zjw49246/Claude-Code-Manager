@@ -63,18 +63,33 @@ OAUTH_URL_RE = re.compile(r"https://claude\.com/cai/oauth/authorize\?[^\s]+")
 _COOKIE_ATTR_KEYS = {"path", "domain", "expires", "max-age", "samesite", "secure", "httponly"}
 _DROP_COOKIES = {"__cf_bm", "_cfuvid"}
 
-EMAIL_POLL_TIMEOUT = 300  # mail.com IMAP 拉取可能延迟几分钟
+EMAIL_POLL_TIMEOUT = 300  # MailCatcher 同步解析可能延迟几分钟
 
 # mail.com 家族域名——这些邮箱走 Chrome CDP（MailCatcher 接码），
 # 其余走 171mail（API 接码）。根据邮箱后缀自动判断，不需要用户手动选 provider。
 MAILCOM_DOMAINS = {
     "mail.com",
 }
+TOKEN_MAILBOX_DOMAINS = {
+    "onet.pl": "onet",
+    "gazeta.pl": "gazeta",
+}
 
 
 def is_mailcom_domain(email: str) -> bool:
     domain = email.split("@")[-1].lower()
     return domain in MAILCOM_DOMAINS
+
+
+def detect_login_method(email: str) -> str:
+    domain = email.rsplit("@", 1)[-1].strip().lower()
+    if domain in MAILCOM_DOMAINS:
+        return "mailcom"
+    return TOKEN_MAILBOX_DOMAINS.get(domain, "171mail")
+
+
+def uses_mailcatcher_api(provider: str) -> bool:
+    return provider in {"mailcom", "onet", "gazeta"}
 PLAYWRIGHT_NAV_TIMEOUT = 30_000  # ms
 CLI_OAUTH_URL_TIMEOUT = 15
 CLI_EXIT_TIMEOUT = 30
@@ -739,6 +754,38 @@ def add_to_pool(account_id: str, config_dir: str, email: str):
 # Main login flow
 # ---------------------------------------------------------------------------
 
+
+_CREDENTIAL_FILES = (".claude.json", ".credentials.json")
+
+
+def _snapshot_credentials(config_path: Path) -> dict[str, tuple[bytes, int]]:
+    """Read the complete credential snapshot before removing either file."""
+    snapshot: dict[str, tuple[bytes, int]] = {}
+    for name in _CREDENTIAL_FILES:
+        path = config_path / name
+        if path.exists():
+            snapshot[name] = (path.read_bytes(), path.stat().st_mode & 0o777)
+    try:
+        for name in _CREDENTIAL_FILES:
+            (config_path / name).unlink(missing_ok=True)
+    except Exception:
+        _restore_credentials(config_path, snapshot)
+        raise
+    return snapshot
+
+
+def _restore_credentials(
+    config_path: Path, snapshot: dict[str, tuple[bytes, int]],
+) -> None:
+    """Remove partial login output and restore the exact pre-login state."""
+    for name in _CREDENTIAL_FILES:
+        (config_path / name).unlink(missing_ok=True)
+    for name, (data, mode) in snapshot.items():
+        path = config_path / name
+        path.write_bytes(data)
+        path.chmod(mode)
+
+
 async def perform_login(
     *,
     email: str,
@@ -749,94 +796,92 @@ async def perform_login(
 ) -> bool:
     """统一登录流程（Chrome CDP，不用 Playwright/mitmproxy）。
 
-    171mail 域：API 拿 cookies → 注入 Chrome → OAuth Authorize
-    mail.com 域：Chrome 打开 claude.ai → 输入邮箱 → MailCatcher 接码 → magic link → OAuth Authorize
+    171mail：通过 171mail API 预取 magic link。
+    mail.com / Onet / Gazeta：Chrome 输入邮箱后，使用 MailCatcher
+    平台签发的查询 token 接收 magic link（不是邮箱密码）。
     两者共享 Step 2-4（CLI auth login + Chrome CDP OAuth + code#state 交给 CLI）。
-    provider: 显式指定 "171mail" 或 "mailcom"，None 则按邮箱域名自动判断。
+    provider: 显式指定接码渠道，None 则按邮箱域名自动判断。
     """
     config_path = Path(config_dir).expanduser()
     config_path.mkdir(parents=True, exist_ok=True)
 
-    if provider:
-        _use_mailcatcher = provider == "mailcom"
-    else:
-        _use_mailcatcher = is_mailcom_domain(email)
+    provider = provider or detect_login_method(email)
+    _use_mailcatcher = uses_mailcatcher_api(provider)
 
-    # Backup old credentials — only delete after successful login to avoid
-    # leaving the account in a "no credentials" state if login fails.
-    _backup_creds = {}
-    for f in [".claude.json", ".credentials.json"]:
-        fp = config_path / f
-        if fp.exists():
-            _backup_creds[f] = fp.read_bytes()
-            fp.unlink()
+    try:
+        backup_creds = _snapshot_credentials(config_path)
+    except OSError as exc:
+        logger.error("unable to prepare credential snapshot: %s", exc)
+        return False
 
-    # Step 1: 171mail 域先通过 API 拿 magic link（mail.com 域在 Chrome+MailCatcher 里拿）
-    magic_link_171: str | None = None
-    if not _use_mailcatcher:
-        logger.info("step 1: 171mail — triggering + polling magic link...")
-        try:
+    login_succeeded = False
+    try:
+        # Step 1: 171mail 域先通过 API 拿 magic link（其他渠道由 MailCatcher 取码）
+        magic_link_171: str | None = None
+        if not _use_mailcatcher:
+            logger.info("step 1: 171mail — triggering + polling magic link...")
             async with httpx.AsyncClient(timeout=30) as mc:
                 device_id, client_sha = await _trigger_send(mc, email)
                 send_ts = time.time()
                 magic_link_171 = await _poll_magic_link(mc, token_171, send_ts, EMAIL_POLL_TIMEOUT)
                 logger.info("got magic link (%d chars)", len(magic_link_171))
-        except MailServiceError as exc:
-            logger.error("171mail error: %s — restoring old credentials", exc)
-            for f, data in _backup_creds.items():
-                (config_path / f).write_bytes(data)
+        else:
+            logger.info("step 1: %s（Chrome 输入邮箱 + MailCatcher API 接码）", provider)
+
+        # Step 2: Chrome CDP 全流程（输入邮箱 → magic link → OAuth）
+        logger.info("step 2: Chrome CDP 全流程登录...")
+        script_dir = Path(__file__).resolve().parent
+        sys.path.insert(0, str(script_dir))
+        from cdp_login import cdp_login
+        result = await cdp_login(
+            email=email,
+            token=token_171,
+            config_dir=str(config_path),
+            magic_link=magic_link_171,
+            mail_provider=provider,
+        )
+        if not result or not result.get("success"):
+            logger.error("Chrome CDP 登录失败")
             return False
-    else:
-        logger.info("step 1: mail.com 域（Chrome 输入邮箱 + MailCatcher 接码）")
 
-    # Step 2: Chrome CDP 全流程（输入邮箱 → magic link → OAuth）
-    logger.info("step 2: Chrome CDP 全流程登录...")
-    script_dir = Path(__file__).resolve().parent
-    sys.path.insert(0, str(script_dir))
-    from cdp_login import cdp_login
-    result = await cdp_login(
-        email=email,
-        token=token_171,
-        config_dir=str(config_path),
-        magic_link=magic_link_171,
-    )
-    if not result or not result.get("success"):
-        logger.error("Chrome CDP 登录失败 — restoring old credentials")
-        for f, data in _backup_creds.items():
-            (config_path / f).write_bytes(data)
-        return False
-
-    # Merge default settings into settings.json (preserve existing hooks)
-    settings_path = config_path / "settings.json"
-    _default_cc_settings = {
-        "permissions": {
-            "defaultMode": "bypassPermissions",
-            "additionalDirectories": ["/home/ubuntu/Claude-Code-Manager"],
-        },
-        "model": "claude-opus-4-6",
-        "effortLevel": "medium",
-        "skipDangerousModePermissionPrompt": True,
-        "hasCompletedOnboarding": True,
-        "theme": "dark",
-        "showThinkingSummaries": True,
-    }
-    existing_settings: dict = {}
-    if settings_path.exists():
-        try:
-            existing_settings = json.loads(settings_path.read_text(encoding="utf-8")) or {}
-        except (json.JSONDecodeError, OSError):
+        # Merge default settings into settings.json (preserve existing hooks)
+        settings_path = config_path / "settings.json"
+        default_cc_settings = {
+            "permissions": {
+                "defaultMode": "bypassPermissions",
+                "additionalDirectories": ["/home/ubuntu/Claude-Code-Manager"],
+            },
+            "model": "claude-opus-4-6",
+            "effortLevel": "medium",
+            "skipDangerousModePermissionPrompt": True,
+            "hasCompletedOnboarding": True,
+            "theme": "dark",
+            "showThinkingSummaries": True,
+        }
+        existing_settings: dict = {}
+        if settings_path.exists():
+            try:
+                existing_settings = json.loads(settings_path.read_text(encoding="utf-8")) or {}
+            except (json.JSONDecodeError, OSError):
+                existing_settings = {}
+        if not isinstance(existing_settings, dict):
             existing_settings = {}
-    if not isinstance(existing_settings, dict):
-        existing_settings = {}
-    saved_hooks = existing_settings.get("hooks")
-    merged = {**existing_settings, **_default_cc_settings}
-    if saved_hooks is not None:
-        merged["hooks"] = saved_hooks
-    settings_path.write_text(json.dumps(merged, indent=2))
-    logger.info("merged default settings.json to %s", settings_path)
+        saved_hooks = existing_settings.get("hooks")
+        merged = {**existing_settings, **default_cc_settings}
+        if saved_hooks is not None:
+            merged["hooks"] = saved_hooks
+        settings_path.write_text(json.dumps(merged, indent=2))
+        logger.info("merged default settings.json to %s", settings_path)
 
-    logger.info("登录成功: %s", email)
-    return True
+        login_succeeded = True
+        logger.info("登录成功: %s", email)
+        return True
+    except Exception as exc:
+        logger.exception("login failed for %s: %s", email, exc)
+        return False
+    finally:
+        if not login_succeeded:
+            _restore_credentials(config_path, backup_creds)
 
 
 # ---------------------------------------------------------------------------
@@ -846,7 +891,10 @@ async def perform_login(
 def main():
     parser = argparse.ArgumentParser(description="Auto-login Claude account")
     parser.add_argument("--email", help="Claude account email")
-    parser.add_argument("--token", help="接码 token（171mail 用）或 mail.com 邮箱密码（mail.com 域自动识别）")
+    parser.add_argument(
+        "--token",
+        help="171mail token，或 MailCatcher 平台签发的查询 token（不是邮箱密码）",
+    )
     parser.add_argument("--config-dir", help="CLAUDE_CONFIG_DIR for this account")
     parser.add_argument("--add-to-pool", metavar="ACCOUNT_ID",
                         help="Add to ~/.claude-pool/accounts.json with this ID after login")
@@ -855,8 +903,8 @@ def main():
     # 兼容旧调用（Worker bootstrap 可能还传这些参数）
     parser.add_argument("--provider", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--mail-password", default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--login-method", default=None, choices=["171mail", "mailcom"],
-                        help="Login method: 171mail (API) or mailcom (Chrome CDP). Auto-detected by email suffix if not specified.")
+    parser.add_argument("--login-method", default=None, choices=["171mail", "mailcom", "onet", "gazeta"],
+                        help="Mailbox method. Auto-detected by email suffix if not specified.")
     args = parser.parse_args()
 
     email = args.email
@@ -864,24 +912,26 @@ def main():
         email = input("Email: ").strip()
 
     # 按 --login-method 参数 → saved provider → 邮箱后缀 判断登录方式
-    if args.login_method:
-        use_webmail = args.login_method == "mailcom"
-    else:
-        saved_provider = (load_email_tokens().get(email) or {}).get("provider")
-        if saved_provider:
-            use_webmail = saved_provider == "mailcom"
-        else:
-            use_webmail = is_mailcom_domain(email)
-
-    # token: 171mail 的接码 token，或 mail.com 的邮箱密码
+    detected_method = detect_login_method(email)
     saved = load_email_tokens().get(email)
+    saved_provider = saved.get("provider") if isinstance(saved, dict) else None
+    if args.login_method:
+        login_method = args.login_method
+    elif detected_method != "171mail":
+        login_method = detected_method
+    elif saved_provider in ("171mail", "mailcom", "onet", "gazeta"):
+        login_method = saved_provider
+    else:
+        login_method = detected_method
+
+    # --mail-password / mail_password 是历史字段名，其值仍必须是接码 API token。
     token = args.token or args.mail_password
     if not token and saved:
-        token = saved.get("token") or saved.get("mail_password")
+        token = (saved.get("token") or saved.get("mail_password")) if isinstance(saved, dict) else saved
         if token:
             logger.info("found saved token for %s", email)
     if not token:
-        token = input("mail.com 密码: " if use_webmail else "171mail Token: ").strip()
+        token = input("MailCatcher 查询 Token: " if login_method != "171mail" else "171mail Token: ").strip()
 
     config_dir = args.config_dir
     if not config_dir:
@@ -890,14 +940,13 @@ def main():
             config_dir = str(Path.home() / ".claude-account-new")
 
     if args.save_token or not get_email_token(email):
-        provider_label = "mailcom" if use_webmail else "171mail"
-        save_email_token(email, token, provider=provider_label)
+        save_email_token(email, token, provider=login_method)
 
     ok = asyncio.run(perform_login(
         email=email,
         token_171=token,
         config_dir=config_dir,
-        provider="mailcom" if use_webmail else "171mail",
+        provider=login_method,
     ))
 
     if ok and args.add_to_pool:

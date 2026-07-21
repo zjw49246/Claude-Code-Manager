@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shlex
 import socket
 import time
 
@@ -27,6 +28,51 @@ router = APIRouter(prefix="/api/workers", tags=["workers"])
 # 后台任务强引用：event loop 只持弱引用，长耗时 bootstrap 任务可能被 GC
 # 掐死在半路（asyncio 文档明确的坑）
 _background_tasks: set[asyncio.Task] = set()
+
+_LOGIN_METHODS = frozenset({"", "171mail", "mailcom", "onet", "gazeta"})
+
+
+def _normalize_login_method(value: str | None) -> str:
+    if value is not None and not isinstance(value, str):
+        raise HTTPException(400, "login_method 必须是字符串")
+    method = (value or "").strip().lower()
+    if method not in _LOGIN_METHODS:
+        raise HTTPException(400, f"不支持的登录方式: {method}")
+    return method
+
+
+def _build_add_account_command(
+    remote_dir: str,
+    *,
+    email: str,
+    token: str,
+    slot: str,
+    login_method: str,
+) -> str:
+    """Build the remote login command with every dynamic argv shell-quoted."""
+    argv = [
+        "xvfb-run",
+        "--auto-servernum",
+        "--server-args=-screen 0 1920x1080x24",
+        "uv",
+        "run",
+        "python",
+        "scripts/auto_login.py",
+        "--email",
+        email,
+        "--token",
+        token,
+        "--add-to-pool",
+        slot,
+        "--save-token",
+    ]
+    if login_method:
+        argv.extend(["--login-method", login_method])
+    return (
+        f"cd {shlex.quote(remote_dir)} && "
+        'export PATH="$HOME/.local/bin:$PATH" && '
+        f"{shlex.join(argv)}"
+    )
 
 
 def _spawn(coro) -> asyncio.Task:
@@ -63,18 +109,30 @@ async def create_worker(body: WorkerCreate, request: Request, db: AsyncSession =
     prov = _provisioner()
     if not body.name or not body.name.strip():
         raise HTTPException(400, "请填写 Worker 名称")
+    accounts = []
+    for account in body.accounts:
+        email = account.email.strip()
+        token = (account.token or "").strip()
+        if not email:
+            raise HTTPException(400, "账号 email 必填")
+        if not token.strip():
+            raise HTTPException(400, f"账号 {email} 的 token 必填")
+        accounts.append({
+            "email": email,
+            "token": token,
+            "login_method": _normalize_login_method(account.login_method),
+        })
     worker = Worker(
         name=body.name.strip(),
         status="creating",
         ssh_user=settings.worker_ssh_user,
         ssh_key_path=settings.worker_ssh_key_path,
-        accounts=[{"email": a.email, "token": a.token or "", "status": "pending"} for a in body.accounts],
+        accounts=[{**account, "status": "pending"} for account in accounts],
     )
     db.add(worker)
     await db.commit()
     await db.refresh(worker)
 
-    accounts = [a.model_dump() for a in body.accounts]
     _spawn(
         prov.create_worker(worker.id, accounts=accounts)
     )
@@ -218,12 +276,31 @@ async def retry_bootstrap(worker_id: int, request: Request, db: AsyncSession = D
         await require_worker_access(request, worker)
     prov = _provisioner()
     worker = await _require_worker(db, worker_id, ("error",))
+    # 从 DB 读已有账号信息（创建时存的 email/token），retry 时重新登录
+    saved_accounts = worker.accounts or []
+    accounts = []
+    for account in saved_accounts:
+        email = str(account.get("email", "")).strip()
+        if not email:
+            raise HTTPException(409, "Worker 保存的账号缺少 email，无法重试")
+        token = account.get("token") or ""
+        if not isinstance(token, str) or not token.strip():
+            raise HTTPException(
+                409,
+                f"账号 {email} 缺少 token，无法重试；请删除后重新创建 Worker",
+            )
+        try:
+            login_method = _normalize_login_method(account.get("login_method"))
+        except HTTPException as exc:
+            raise HTTPException(409, f"账号 {email} 的登录方式无效，无法重试") from exc
+        accounts.append({
+            "email": email,
+            "token": token,
+            "login_method": login_method,
+        })
     worker.status = "creating"
     await db.commit()
     await db.refresh(worker)
-    # 从 DB 读已有账号信息（创建时存的 email/token），retry 时重新登录
-    saved_accounts = worker.accounts or []
-    accounts = [{"email": a.get("email", ""), "token": a.get("token", "")} for a in saved_accounts if a.get("email")]
     _spawn(
         prov.create_worker(worker.id, accounts=accounts)
     )
@@ -286,7 +363,7 @@ async def get_worker_pool(worker_id: int, request: Request, db: AsyncSession = D
 
 @router.post("/{worker_id}/pool/add")
 async def add_worker_account(worker_id: int, request: Request, body: dict, db: AsyncSession = Depends(get_db)):
-    """在 worker 上添加账号（跑 auto_login.py）。body: {email, token}"""
+    """在 worker 上添加账号（跑 auto_login.py）。body: {email, token, login_method}"""
     worker = await db.get(Worker, worker_id)
     if not worker:
         raise HTTPException(404, "Worker not found")
@@ -295,9 +372,13 @@ async def add_worker_account(worker_id: int, request: Request, body: dict, db: A
     if worker.status != "ready" or not worker.private_ip:
         raise HTTPException(409, f"Worker 未就绪（{worker.status}）")
 
-    email = body.get("email", "").strip()
-    token = body.get("token", "").strip()
-    login_method = body.get("login_method", "").strip()
+    raw_email = body.get("email", "")
+    raw_token = body.get("token", "")
+    if not isinstance(raw_email, str) or not isinstance(raw_token, str):
+        raise HTTPException(400, "email 和 token 必须是字符串")
+    email = raw_email.strip()
+    token = raw_token.strip()
+    login_method = _normalize_login_method(body.get("login_method"))
     if not email or not token:
         raise HTTPException(400, "email 和 token 必填")
 
@@ -320,19 +401,19 @@ async def add_worker_account(worker_id: int, request: Request, body: dict, db: A
     remote_dir = settings.worker_remote_dir
 
     # 后台跑 auto_login（xvfb-run 包装）
-    login_method_arg = f" --login-method {login_method}" if login_method in ("171mail", "mailcom") else ""
-    cmd = (
-        f"cd {remote_dir} && export PATH=\"$HOME/.local/bin:$PATH\" && "
-        f"xvfb-run --auto-servernum --server-args='-screen 0 1920x1080x24' "
-        f"python3 scripts/auto_login.py --email {email} --token {token} "
-        f"--add-to-pool {slot} --save-token{login_method_arg}"
+    cmd = _build_add_account_command(
+        remote_dir,
+        email=email,
+        token=token,
+        slot=slot,
+        login_method=login_method,
     )
 
     # 这个任务可能跑 1-2 分钟，用 fire-and-forget
     _worker_login_state[f"{worker_id}:{email}"] = {"status": "running", "started_at": time.time()}
 
     async def _run():
-        code, out = await ssh.run(cmd, timeout=600)
+        code, out = await ssh.run(cmd, timeout=600, sensitive=True)
         _worker_login_state[f"{worker_id}:{email}"] = {
             "status": "success" if code == 0 else "failed",
             "detail": out[-1000:],

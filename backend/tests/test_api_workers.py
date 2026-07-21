@@ -1,13 +1,23 @@
 """Tests for Worker management API + provisioner state machine."""
 import asyncio
+import base64
+import logging
+import shlex
 import socket
 from unittest.mock import AsyncMock
 
 import pytest
 
 import backend.main as main_module
+from backend.api.workers import _build_add_account_command
 from backend.models.worker import Worker
-from backend.services.worker_provisioner import BootstrapError, WorkerProvisioner
+from backend.services.worker_provisioner import (
+    BootstrapError,
+    WorkerProvisioner,
+    _build_account_login_script,
+    _build_script_upload_command,
+)
+from backend.services.ssh_executor import SSHExecutor
 
 
 # === Fixtures ===
@@ -79,10 +89,19 @@ async def test_create_worker_disabled_returns_503(client, monkeypatch):
     assert resp.status_code == 503
 
 
-async def test_create_worker_auto_name_and_background_task(client, fake_provisioner):
+async def test_create_worker_auto_name_and_background_task(
+    client, fake_provisioner, session_factory,
+):
     resp = await client.post(
         "/api/workers",
-        json={"name": "test-w", "accounts": [{"email": "a@x.com", "token": "tok123"}]},
+        json={
+            "name": "test-w",
+            "accounts": [{
+                "email": "a@x.com",
+                "token": "tok123",
+                "login_method": "onet",
+            }],
+        },
     )
     assert resp.status_code == 200, resp.text
     data = resp.json()
@@ -92,8 +111,32 @@ async def test_create_worker_auto_name_and_background_task(client, fake_provisio
     await asyncio.sleep(0)  # 让 create_task 跑起来
     fake_provisioner.create_worker.assert_called_once()
     kwargs = fake_provisioner.create_worker.call_args.kwargs
-    # login_method 为可选字段（"" = 按邮箱后缀自动识别），schema 会补默认值
-    assert kwargs["accounts"] == [{"email": "a@x.com", "token": "tok123", "login_method": ""}]
+    assert kwargs["accounts"] == [{
+        "email": "a@x.com",
+        "token": "tok123",
+        "login_method": "onet",
+    }]
+    async with session_factory() as db:
+        worker = await db.get(Worker, data["id"])
+    assert worker.accounts == [{
+        "email": "a@x.com",
+        "token": "tok123",
+        "login_method": "onet",
+        "status": "pending",
+    }]
+
+
+@pytest.mark.parametrize("token", [None, "", " \n "])
+async def test_create_worker_rejects_empty_account_token(
+    client, fake_provisioner, token,
+):
+    resp = await client.post(
+        "/api/workers",
+        json={"name": "test-w", "accounts": [{"email": "a@x.com", "token": token}]},
+    )
+    assert resp.status_code == 400
+    assert "token" in resp.json()["detail"]
+    fake_provisioner.create_worker.assert_not_called()
 
 
 async def test_stop_requires_ready(client, session_factory, fake_provisioner):
@@ -138,6 +181,50 @@ async def test_retry_only_from_error(client, session_factory, fake_provisioner):
     assert (await client.post(f"/api/workers/{wid}/retry")).status_code == 200
 
 
+async def test_retry_preserves_account_token_and_login_method(
+    client, session_factory, fake_provisioner,
+):
+    wid = await _insert_worker(
+        session_factory,
+        status="error",
+        accounts=[{
+            "email": "onet@example.com",
+            "token": "mailcatcher-token",
+            "login_method": "onet",
+            "status": "failed",
+        }],
+    )
+    resp = await client.post(f"/api/workers/{wid}/retry")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["accounts"] == [{"email": "onet@example.com", "status": "failed"}]
+    await asyncio.sleep(0)
+    fake_provisioner.create_worker.assert_awaited_once_with(
+        wid,
+        accounts=[{
+            "email": "onet@example.com",
+            "token": "mailcatcher-token",
+            "login_method": "onet",
+        }],
+    )
+
+
+async def test_retry_missing_historical_token_fails_without_status_change(
+    client, session_factory, fake_provisioner,
+):
+    wid = await _insert_worker(
+        session_factory,
+        status="error",
+        accounts=[{"email": "legacy@example.com", "status": "failed"}],
+    )
+    resp = await client.post(f"/api/workers/{wid}/retry")
+    assert resp.status_code == 409
+    assert "缺少 token" in resp.json()["detail"]
+    async with session_factory() as db:
+        worker = await db.get(Worker, wid)
+    assert worker.status == "error"
+    fake_provisioner.create_worker.assert_not_called()
+
+
 async def test_get_worker_and_logs(client, session_factory, fake_provisioner):
     wid = await _insert_worker(session_factory, bootstrap_log="[00:00:00] hi\n")
     resp = await client.get(f"/api/workers/{wid}")
@@ -155,6 +242,111 @@ async def test_terminated_workers_hidden_from_list(client, session_factory):
 
 
 # === Provisioner state machine tests（cloud/bootstrap 全替身，不碰网络） ===
+
+
+def _flag_value(argv: list[str], flag: str) -> str:
+    return argv[argv.index(flag) + 1]
+
+
+def test_worker_login_commands_quote_untrusted_values():
+    email = "mail+'; touch /tmp/pwn; #@example.com"
+    token = "line-one\n$(touch /tmp/pwn) ' \" end"
+    remote_dir = "/srv/ccm dir; touch /tmp/pwn"
+    script = _build_account_login_script(
+        remote_dir,
+        email=email,
+        token=token,
+        slot="account-2",
+        login_method="gazeta",
+    )
+    assert shlex.split(script.splitlines()[3]) == ["cd", remote_dir]
+    login_argv = shlex.split(script[script.index("uv run "):])
+    assert _flag_value(login_argv, "--email") == email
+    assert _flag_value(login_argv, "--token") == token
+    assert _flag_value(login_argv, "--add-to-pool") == "account-2"
+    assert _flag_value(login_argv, "--login-method") == "gazeta"
+    assert _flag_value(login_argv, "--config-dir") == "$CONFIG_DIR"
+
+    upload = _build_script_upload_command(script, "/tmp/a script.sh")
+    upload_argv = shlex.split(upload)
+    encoded = upload_argv[upload_argv.index("%s") + 1]
+    assert base64.b64decode(encoded).decode() == script
+    assert email not in upload
+    assert token not in upload
+    assert "<<" not in upload
+
+    add_command = _build_add_account_command(
+        remote_dir,
+        email=email,
+        token=token,
+        slot="default",
+        login_method="onet",
+    )
+    pieces = add_command.split(" && ")
+    assert shlex.split(pieces[0]) == ["cd", remote_dir]
+    add_argv = shlex.split(pieces[-1])
+    assert _flag_value(add_argv, "--email") == email
+    assert _flag_value(add_argv, "--token") == token
+    assert _flag_value(add_argv, "--login-method") == "onet"
+
+
+async def test_sensitive_ssh_command_is_redacted_from_debug_log(monkeypatch, caplog):
+    ssh = SSHExecutor(host="worker.internal", user="ubuntu", key_path="/tmp/test-key")
+    monkeypatch.setattr(ssh, "_run_sync", lambda _command, _timeout: (0, "ok"))
+
+    with caplog.at_level(logging.DEBUG, logger="backend.services.ssh_executor"):
+        result = await ssh.run("login --token super-secret-token", sensitive=True)
+
+    assert result == (0, "ok")
+    assert "super-secret-token" not in caplog.text
+    assert "sensitive command redacted" in caplog.text
+
+
+async def test_provisioner_login_persists_credentials_and_onet_method(
+    db_factory, session_factory,
+):
+    wid = await _insert_worker(session_factory, status="creating")
+    prov = WorkerProvisioner(db_factory=db_factory, cloud=FakeCloud(), broadcaster=None)
+    ssh = AsyncMock()
+    ssh.run.side_effect = [(0, "uploaded"), (0, "login ok")]
+    account = {
+        "email": "user+'quote@example.com",
+        "token": "secret\n'; echo injected",
+        "login_method": "onet",
+    }
+
+    await prov._step_account_login(ssh, wid, [account])
+
+    async with session_factory() as db:
+        worker = await db.get(Worker, wid)
+    assert worker.accounts == [{**account, "status": "logged_in"}]
+    upload_command = ssh.run.await_args_list[0].args[0]
+    assert ssh.run.await_args_list[0].kwargs["sensitive"] is True
+    assert account["email"] not in upload_command
+    assert account["token"] not in upload_command
+    uploaded_argv = shlex.split(upload_command)
+    uploaded_script = base64.b64decode(
+        uploaded_argv[uploaded_argv.index("%s") + 1]
+    ).decode()
+    login_argv = shlex.split(uploaded_script[uploaded_script.index("uv run "):])
+    assert _flag_value(login_argv, "--email") == account["email"]
+    assert _flag_value(login_argv, "--token") == account["token"]
+    assert _flag_value(login_argv, "--login-method") == "onet"
+
+
+async def test_provisioner_login_rejects_empty_token_before_ssh(
+    db_factory, session_factory,
+):
+    wid = await _insert_worker(session_factory, status="creating")
+    prov = WorkerProvisioner(db_factory=db_factory, cloud=FakeCloud(), broadcaster=None)
+    ssh = AsyncMock()
+    with pytest.raises(BootstrapError, match="缺少 token"):
+        await prov._step_account_login(
+            ssh,
+            wid,
+            [{"email": "legacy@example.com", "token": "", "login_method": "onet"}],
+        )
+    ssh.run.assert_not_awaited()
 
 
 async def test_provisioner_create_happy_path(db_factory, session_factory):

@@ -71,7 +71,7 @@ function AddWorkerModal({ onClose, onSaved }: { onClose: () => void; onSaved: ()
                 />
                 <input
                   className="w-full bg-gray-700 text-foreground text-sm rounded px-3 py-2 outline-none focus:ring-1 focus:ring-indigo-500"
-                  value={acct.token} placeholder="Token 或邮箱密码"
+                  type="password" value={acct.token} placeholder="171mail / MailCatcher Token"
                   onChange={(e) => setAccounts(accounts.map((a, j) => (j === i ? { ...a, token: e.target.value } : a)))}
                 />
                 <select
@@ -82,6 +82,8 @@ function AddWorkerModal({ onClose, onSaved }: { onClose: () => void; onSaved: ()
                   <option value="">自动识别（按邮箱后缀）</option>
                   <option value="171mail">171mail（API 接码）</option>
                   <option value="mailcom">mail.com（Chrome 接码）</option>
+                  <option value="onet">Onet（Token 接码）</option>
+                  <option value="gazeta">Gazeta（Token 接码）</option>
                 </select>
               </div>
               {accounts.length > 1 && (

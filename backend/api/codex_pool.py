@@ -116,18 +116,27 @@ async def codex_relogin(request: Request, account_id: str):
         running = [k for k, v in _relogin_state.items() if v.get("status") == "running"]
         raise HTTPException(status_code=409, detail=f"另一个账号正在登录中（{', '.join(running)}）")
 
-    # Look up 171mail token
+    # Look up the saved OTP receiver API token (171mail or MailCatcher).
     tokens_path = Path.home() / ".codex-pool" / "email_tokens.json"
-    token_171 = ""
+    receiver_credential = ""
+    openai_password = ""
+    mail_provider = ""
     if tokens_path.exists():
         try:
             tokens = json.loads(tokens_path.read_text())
-            token_171 = tokens.get(acc.email, "")
+            saved = tokens.get(acc.email, "")
+            if isinstance(saved, dict):
+                receiver_credential = saved.get("token", "")
+                openai_password = saved.get("password", "")
+                mail_provider = saved.get("provider", "")
+            else:
+                receiver_credential = saved
+                mail_provider = ""
         except Exception:
             pass
 
-    if not token_171:
-        raise HTTPException(status_code=400, detail=f"No 171mail token for {acc.email}. Add via /api/codex-pool/add first.")
+    if not receiver_credential:
+        raise HTTPException(status_code=400, detail=f"No mailbox verification credential for {acc.email}. Add the account again first.")
 
     root = Path(__file__).resolve().parents[2]
     login_py = root / ".venv" / "bin" / "python3"
@@ -139,11 +148,18 @@ async def codex_relogin(request: Request, account_id: str):
 
     await _login_lock.acquire()
     script = root / "scripts" / "codex_login.py"
-    proc = await asyncio.create_subprocess_exec(
+    cmd = [
         str(login_py), str(script),
         "--email", acc.email,
-        "--token", token_171,
+        "--token", receiver_credential,
         "--codex-home", acc.codex_home,
+    ]
+    if openai_password:
+        cmd.extend(["--password", openai_password])
+    if mail_provider in ("171mail", "onet", "gazeta"):
+        cmd.extend(["--mail-provider", mail_provider])
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
         env={**os.environ, "DISPLAY": ":99", "PYTHONUNBUFFERED": "1"},
     )
@@ -163,8 +179,9 @@ async def codex_relogin_status(account_id: str):
 
 class AddCodexAccountRequest(BaseModel):
     email: str
-    token: str  # 171mail token
+    token: str  # 171mail token, or a MailCatcher-issued Onet/Gazeta query token
     password: str = ""
+    login_method: str = ""
 
 
 _xvfb_proc = None
@@ -242,6 +259,8 @@ async def codex_add_account(request: Request, body: AddCodexAccountRequest):
     ]
     if body.password:
         cmd.extend(["--password", body.password])
+    if body.login_method in ("171mail", "onet", "gazeta"):
+        cmd.extend(["--mail-provider", body.login_method])
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,

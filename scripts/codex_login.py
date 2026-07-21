@@ -6,7 +6,7 @@ Flow:
 3. Drive headful real-Chrome Playwright browser through OpenAI login pages:
    - Email field → fill email → Continue
    - Password field → fill password (if present; passwordless accounts skip)
-   - OTP field → poll 171mail for 6-digit code → fill → Continue
+   - OTP field → poll 171mail or MailCatcher with a provider-issued API token
    - Consent/Authorize button → click
 4. Codex captures the callback, exchanges token, writes CODEX_HOME/auth.json
 5. Smoke-test with `codex exec`
@@ -14,7 +14,8 @@ Flow:
 Prerequisites:
 - Xvfb running on :99 (DISPLAY set)
 - google-chrome-stable installed
-- playwright + playwright-stealth installed
+- playwright installed
+- Onet/Gazeta use the query token issued by MailCatcher (never a mailbox password)
 - codex CLI installed
 """
 
@@ -22,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import datetime
 import json
 import logging
 import os
@@ -29,6 +31,7 @@ import re
 import shutil
 import sys
 import time
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 import httpx
@@ -47,8 +50,12 @@ ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 AUTHORIZE_URL_RE = re.compile(r"(https://auth\.openai\.com/oauth/authorize\S+)")
 
 MAIL_API_BASE = "https://b.171mail.com/api/v1"
+MAIL_DECODE_API = "https://mail.claude-code-manager.com/api/v1/message"
 MAIL_POLL_TIMEOUT = 120
 MAIL_POLL_INTERVAL = 3
+
+WEBMAIL_PROVIDERS = {"onet.pl": "onet", "gazeta.pl": "gazeta"}
+MAILCATCHER_PROVIDERS = {"onet", "gazeta"}
 
 EMAIL_SELECTOR = 'input[type="email"], input[name="email"]'
 PASSWORD_SELECTOR = 'input[type="password"]'
@@ -59,58 +66,118 @@ CONTINUE_BUTTON_TEXTS = (
 )
 
 
-# --- 171mail OTP polling ---
+# --- OTP polling (171mail API) ---
 
-async def poll_verification_code(token: str, after_ts: float, timeout_s: int = MAIL_POLL_TIMEOUT) -> str:
-    """Poll 171mail for OpenAI 6-digit verification code."""
-    import datetime
 
+def detect_mail_provider(email: str) -> str:
+    domain = email.rsplit("@", 1)[-1].strip().lower()
+    return WEBMAIL_PROVIDERS.get(domain, "171mail")
+
+
+def _mail_timestamp(data: dict) -> float | None:
+    """Return the message timestamp across 171mail/MailCatcher schemas."""
+    raw = data.get("date") or data.get("Date")
+    if raw:
+        value = str(raw).strip()
+        try:
+            return datetime.datetime.fromisoformat(
+                value.replace("Z", "+00:00")
+            ).timestamp()
+        except ValueError:
+            try:
+                return parsedate_to_datetime(value).timestamp()
+            except (TypeError, ValueError):
+                pass
+
+    subject = str(data.get("subject") or "")
+    match = re.search(r"\|\s+(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", subject)
+    if match:
+        return time.mktime(time.strptime(match.group(1), "%Y-%m-%d %H:%M:%S"))
+    return None
+
+
+async def poll_verification_code(token: str, after_ts: float, timeout_s: int = MAIL_POLL_TIMEOUT,
+                                 email: str = "", provider: str | None = None) -> str:
+    """Poll the matching mailbox provider for an OpenAI 6-digit code."""
     deadline = time.time() + timeout_s
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
+    provider = provider or detect_mail_provider(email)
+    uses_mailcatcher = provider in MAILCATCHER_PROVIDERS
 
-    async with httpx.AsyncClient(timeout=15.0) as client:
+    # The synchronous MailCatcher endpoint may wait up to 90 seconds for its
+    # worker.  Cutting the request off at 45 seconds creates duplicate jobs.
+    request_timeout = 120.0 if uses_mailcatcher else 15.0
+    async with httpx.AsyncClient(timeout=request_timeout) as client:
         while time.time() < deadline:
             try:
-                resp = await client.get(
-                    f"{MAIL_API_BASE}/message",
-                    params={"token": token, "type": "gpt"},
-                )
+                url = MAIL_DECODE_API if uses_mailcatcher else f"{MAIL_API_BASE}/message"
+                resp = await client.get(url, params={"token": token, "type": "gpt"})
+                status_code = getattr(resp, "status_code", 200)
+                if status_code in {401, 403}:
+                    raise RuntimeError("Mailbox API rejected the query token")
+                if status_code >= 400:
+                    resp.raise_for_status()
                 payload = resp.json()
-            except Exception:
+            except (httpx.HTTPError, ValueError):
                 await asyncio.sleep(MAIL_POLL_INTERVAL)
                 continue
 
+            if not isinstance(payload, dict):
+                await asyncio.sleep(MAIL_POLL_INTERVAL)
+                continue
+
+            # MailCatcher has a documented top-level job/result code.  Keep the
+            # pre-existing 171mail behavior, whose response need not expose it.
+            response_code = payload.get("code")
+            if uses_mailcatcher:
+                if response_code == 202:
+                    await asyncio.sleep(MAIL_POLL_INTERVAL)
+                    continue
+                if response_code != 200:
+                    message = payload.get("message") or payload.get("error") or "unknown error"
+                    raise RuntimeError(f"Mailbox API rejected the query token: {message}")
+
             data = payload.get("data") or {}
+            if not isinstance(data, dict):
+                await asyncio.sleep(MAIL_POLL_INTERVAL)
+                continue
             subject = data.get("subject") or ""
             code = data.get("code") or ""
             body = data.get("body") or ""
-            date_str = data.get("Date") or ""
+            date_str = data.get("date") or data.get("Date") or ""
 
             if not (subject or code or body):
                 await asyncio.sleep(MAIL_POLL_INTERVAL)
                 continue
 
-            key = (subject, date_str)
+            key = (subject, str(date_str), str(code))
             if key in seen:
                 await asyncio.sleep(MAIL_POLL_INTERVAL)
                 continue
 
-            # Check freshness
-            if date_str:
-                try:
-                    mail_ts = datetime.datetime.fromisoformat(date_str).timestamp()
-                    if mail_ts < after_ts - 120:
-                        seen.add(key)
-                        await asyncio.sleep(MAIL_POLL_INTERVAL)
-                        continue
-                except ValueError:
-                    pass
+            # MailCatcher's contract returns lowercase ``date``.  It may also
+            # encode the timestamp in the subject for older deployments.  Do
+            # not accept an undated MailCatcher response: the first poll often
+            # still exposes the previous login's OTP.
+            mail_ts = _mail_timestamp(data)
+            # MailCatcher timestamps may have only whole-second precision.
+            # Its result must belong to this request; retain 171mail's legacy
+            # grace window to avoid changing that provider's established flow.
+            freshness_cutoff = int(after_ts) if uses_mailcatcher else after_ts - 120
+            if mail_ts is not None and mail_ts < freshness_cutoff:
+                seen.add(key)
+                await asyncio.sleep(MAIL_POLL_INTERVAL)
+                continue
+            if uses_mailcatcher and mail_ts is None:
+                seen.add(key)
+                await asyncio.sleep(MAIL_POLL_INTERVAL)
+                continue
 
             # Extract 6-digit OTP
             combined = f"{subject} {code} {body}"
             m = re.search(r"\b(\d{6})\b", combined)
             if m:
-                logger.info("Got verification code from 171mail")
+                logger.info("Got verification code from %s", provider)
                 return m.group(1)
 
             seen.add(key)
@@ -136,9 +203,64 @@ async def _click_continue(page, logs: list[str]) -> bool:
     return False
 
 
+async def _first_visible(page, selectors: str):
+    locator = page.locator(selectors)
+    for index in range(await locator.count()):
+        candidate = locator.nth(index)
+        if await candidate.is_visible():
+            return candidate
+    return None
+
+
+async def _switch_to_email_code(page, logs: list[str]) -> bool:
+    """Switch OpenAI password screen to passwordless email-code login."""
+    pattern = re.compile(
+        r"continue with (?:email )?code|use (?:an? )?(?:email )?code|"
+        r"email me a code|log in with (?:an? )?(?:one[- ]time )?code|"
+        r"sign in with (?:an? )?(?:one[- ]time )?code|"
+        r"try another (?:way|method)",
+        re.I,
+    )
+    candidates = page.locator("button, a, [role=button]")
+    for index in range(await candidates.count()):
+        candidate = candidates.nth(index)
+        if not await candidate.is_visible():
+            continue
+        text = " ".join(filter(None, [
+            await candidate.inner_text(), await candidate.get_attribute("aria-label"),
+        ]))
+        if pattern.search(text):
+            await candidate.click()
+            for _ in range(10):
+                await page.wait_for_timeout(500)
+                otp_field = await _first_visible(page, OTP_SELECTOR)
+                password_field = await _first_visible(page, PASSWORD_SELECTOR)
+                if otp_field or not password_field:
+                    logs.append(f"Switched to email-code login via '{text.strip()[:60]}'")
+                    return True
+            logs.append(f"Email-code action did not change the login page: '{text.strip()[:60]}'")
+            return False
+    return False
+
+
+async def _visible_action_labels(page) -> list[str]:
+    labels: list[str] = []
+    candidates = page.locator("button, a, [role=button]")
+    for index in range(min(await candidates.count(), 40)):
+        candidate = candidates.nth(index)
+        if not await candidate.is_visible():
+            continue
+        text = " ".join(filter(None, [
+            await candidate.inner_text(), await candidate.get_attribute("aria-label"),
+        ])).strip()
+        if text:
+            labels.append(text[:100])
+    return labels
+
+
 async def _run_state_machine(
     page, email: str, password: str, token_171: str,
-    timeout: int, auth_path: Path, logs: list[str],
+    timeout: int, auth_path: Path, logs: list[str], mail_provider: str | None = None,
 ) -> None:
     otp_poll_start = time.time()
     deadline = time.time() + timeout
@@ -151,26 +273,38 @@ async def _run_state_machine(
             logs.append("auth.json appeared — browser flow complete")
             return
 
-        email_field = await page.query_selector(EMAIL_SELECTOR)
+        email_field = await _first_visible(page, EMAIL_SELECTOR)
         if email_field and not await email_field.input_value():
             await email_field.fill(email)
             logs.append("Email filled")
             await _click_continue(page, logs)
             continue
 
-        password_field = await page.query_selector(PASSWORD_SELECTOR)
+        password_field = await _first_visible(page, PASSWORD_SELECTOR)
         if password_field and not await password_field.input_value():
             if not password:
-                raise RuntimeError("Login page shows password field but no password configured")
+                if await _switch_to_email_code(page, logs):
+                    await page.wait_for_timeout(1500)
+                    continue
+                labels = await _visible_action_labels(page)
+                logs.append(f"Password page actions: {labels}")
+                await page.screenshot(path="/tmp/codex_openai_password_page.png", full_page=True)
+                raise RuntimeError(
+                    "OpenAI login shows a password field and no email-code option; "
+                    "provide the OpenAI password"
+                )
             await password_field.fill(password)
             logs.append("Password filled")
             await _click_continue(page, logs)
             continue
 
-        otp_field = await page.query_selector(OTP_SELECTOR)
+        otp_field = await _first_visible(page, OTP_SELECTOR)
         if otp_field and not otp_done:
-            logs.append("OTP field present, polling 171mail...")
-            code = await poll_verification_code(token_171, after_ts=otp_poll_start)
+            provider = mail_provider or detect_mail_provider(email)
+            logs.append(f"OTP field present, polling {provider}...")
+            code = await poll_verification_code(
+                token_171, after_ts=otp_poll_start, email=email, provider=provider,
+            )
             await otp_field.fill(code)
             otp_done = True
             logs.append(f"OTP entered (len={len(code)})")
@@ -180,6 +314,9 @@ async def _run_state_machine(
         # No fillable field — try clicking Continue (consent page)
         await _click_continue(page, logs)
 
+    labels = await _visible_action_labels(page)
+    logs.append(f"Timed-out page actions: {labels}")
+    await page.screenshot(path="/tmp/codex_openai_login_timeout.png", full_page=True)
     raise RuntimeError(f"Login flow did not complete within {timeout}s (url={str(page.url)[:80]})")
 
 
@@ -191,6 +328,7 @@ async def codex_login(
     codex_home: str,
     password: str = "",
     timeout: int = DEFAULT_LOGIN_TIMEOUT,
+    mail_provider: str | None = None,
 ) -> dict:
     """Run the full automated Codex login flow. Returns result dict."""
     t0 = time.time()
@@ -274,7 +412,9 @@ async def codex_login(
                 page = await context.new_page()
                 logs.append("Navigating to authorize URL")
                 await page.goto(auth_url, timeout=45000, wait_until="domcontentloaded")
-                await _run_state_machine(page, email, password, token_171, timeout, auth_path, logs)
+                await _run_state_machine(
+                    page, email, password, token_171, timeout, auth_path, logs, mail_provider,
+                )
             finally:
                 await browser.close()
 
@@ -363,13 +503,18 @@ def add_to_codex_pool(account_id: str, email: str, codex_home: str):
 # --- CLI entry ---
 
 async def main():
-    parser = argparse.ArgumentParser(description="Automated Codex login via Playwright + 171mail")
+    parser = argparse.ArgumentParser(description="Automated Codex login via Playwright + mailbox OTP")
     parser.add_argument("--email", required=True, help="OpenAI account email")
-    parser.add_argument("--token", required=True, help="171mail token for receiving OTP")
+    parser.add_argument(
+        "--token", required=True,
+        help="171mail token, or the query token issued by MailCatcher for Onet/Gazeta",
+    )
     parser.add_argument("--codex-home", help="CODEX_HOME directory (default: ~/.codex or ~/.codex-<account-id>)")
     parser.add_argument("--password", default="", help="Account password (empty for passwordless)")
+    parser.add_argument("--mail-provider", choices=["171mail", "onet", "gazeta"], default=None,
+                        help="OTP mailbox provider (default: detect from email suffix)")
     parser.add_argument("--add-to-pool", metavar="ACCOUNT_ID", help="Add to codex pool after login")
-    parser.add_argument("--save-token", action="store_true", help="Save 171mail token for future use")
+    parser.add_argument("--save-token", action="store_true", help="Save mailbox API token for future use")
     parser.add_argument("--timeout", type=int, default=DEFAULT_LOGIN_TIMEOUT)
     args = parser.parse_args()
 
@@ -383,26 +528,13 @@ async def main():
         else:
             codex_home = str(Path.home() / ".codex")
 
-    # Save token if requested
-    if args.save_token:
-        tokens_path = Path.home() / ".codex-pool" / "email_tokens.json"
-        tokens_path.parent.mkdir(parents=True, exist_ok=True)
-        tokens = {}
-        if tokens_path.exists():
-            try:
-                tokens = json.loads(tokens_path.read_text())
-            except Exception:
-                pass
-        tokens[args.email] = args.token
-        tokens_path.write_text(json.dumps(tokens, indent=2))
-        os.chmod(tokens_path, 0o600)
-
     result = await codex_login(
         email=args.email,
         token_171=args.token,
         codex_home=codex_home,
         password=args.password,
         timeout=args.timeout,
+        mail_provider=args.mail_provider,
     )
 
     for line in result.get("logs", []):
@@ -410,6 +542,25 @@ async def main():
 
     if result["ok"]:
         print(f"\n✓ Login successful ({result.get('elapsed', 0):.1f}s)")
+        # Keep failed or rejected credentials out of the reusable pool file.
+        if args.save_token:
+            tokens_path = Path.home() / ".codex-pool" / "email_tokens.json"
+            tokens_path.parent.mkdir(parents=True, exist_ok=True)
+            tokens = {}
+            if tokens_path.exists():
+                try:
+                    tokens = json.loads(tokens_path.read_text())
+                except Exception:
+                    pass
+            if not isinstance(tokens, dict):
+                tokens = {}
+            tokens[args.email] = {
+                "token": args.token,
+                "provider": args.mail_provider or detect_mail_provider(args.email),
+                "password": args.password,
+            }
+            tokens_path.write_text(json.dumps(tokens, indent=2))
+            os.chmod(tokens_path, 0o600)
         if args.add_to_pool:
             add_to_codex_pool(args.add_to_pool, args.email, codex_home)
             print(f"  Added to pool as '{args.add_to_pool}'")

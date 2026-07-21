@@ -200,7 +200,7 @@ async def set_preferred(request: Request, body: dict):
 class AddAccountRequest(BaseModel):
     email: str
     token: str
-    login_method: str = ""  # "171mail" | "mailcom" | "" (auto-detect by suffix)
+    login_method: str = ""  # 171mail | mailcom | onet | gazeta | "" (auto-detect)
 
 
 # 全局 Xvfb：所有 auto_login 共享一个 display
@@ -289,7 +289,7 @@ async def add_account(request: Request, body: AddAccountRequest):
         "--add-to-pool", account_id,
         "--save-token",
     ]
-    if body.login_method in ("171mail", "mailcom"):
+    if body.login_method in ("171mail", "mailcom", "onet", "gazeta"):
         cmd.extend(["--login-method", body.login_method])
     proc = await asyncio.create_subprocess_exec(
         *cmd,

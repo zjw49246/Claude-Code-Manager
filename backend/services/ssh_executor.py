@@ -41,9 +41,14 @@ class SSHExecutor:
         finally:
             client.close()
 
-    async def run(self, command: str, timeout: int = 300) -> tuple[int, str]:
+    async def run(
+        self, command: str, timeout: int = 300, *, sensitive: bool = False,
+    ) -> tuple[int, str]:
         """执行远程命令，返回 (exit_code, output)。"""
-        logger.debug("ssh %s: %s", self.host, command[:200])
+        logger.debug(
+            "ssh %s: %s", self.host,
+            "[sensitive command redacted]" if sensitive else command[:200],
+        )
         return await asyncio.to_thread(self._run_sync, command, timeout)
 
     async def check_alive(self, timeout: int = 10) -> bool:
