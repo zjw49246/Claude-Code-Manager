@@ -363,6 +363,8 @@ function AddAccountModal({ onClose, onAdded }: { onClose: () => void; onAdded: (
               <option value="">自动识别（按邮箱后缀）</option>
               <option value="171mail">171mail（API 接码）</option>
               <option value="mailcom">mail.com（Chrome 接码）</option>
+              <option value="onet">Onet（Token 接码）</option>
+              <option value="gazeta">Gazeta（Token 接码）</option>
             </select>
           </div>
           {status === 'running' && <p className="text-xs text-blue-400">登录中… 请等待（可能需要 1-2 分钟）</p>}
@@ -385,10 +387,15 @@ function AddCodexAccountModal({ onClose, onAdded }: { onClose: () => void; onAdd
   const [email, setEmail] = useState('');
   const [token, setToken] = useState('');
   const [password, setPassword] = useState('');
+  const [loginMethod, setLoginMethod] = useState('');
 
   const [status, setStatus] = useState<string | null>(null);
   const [detail, setDetail] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const emailDomain = email.trim().toLowerCase().split('@').pop() || '';
+  const detectedMethod = emailDomain === 'onet.pl' ? 'onet' : emailDomain === 'gazeta.pl' ? 'gazeta' : '171mail';
+  const activeMethod = loginMethod || detectedMethod;
+  const usesWebmail = activeMethod === 'onet' || activeMethod === 'gazeta';
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -396,7 +403,10 @@ function AddCodexAccountModal({ onClose, onAdded }: { onClose: () => void; onAdd
     setSubmitting(true);
     setDetail(null);
     try {
-      await api.codexPoolAddAccount({ email: email.trim(), token: token.trim(), password: password || undefined });
+      await api.codexPoolAddAccount({
+        email: email.trim(), token: token.trim(), password: password || undefined,
+        login_method: loginMethod || undefined,
+      });
       setStatus('running');
       const poll = async () => {
         const s = await api.codexPoolAddStatus(email.trim());
@@ -427,9 +437,25 @@ function AddCodexAccountModal({ onClose, onAdded }: { onClose: () => void; onAdd
               value={email} onChange={e => setEmail(e.target.value)} placeholder="user@example.com" required />
           </div>
           <div>
-            <label className="block text-xs text-gray-400 mb-1">171mail 接码 Token</label>
+            <label className="block text-xs text-gray-400 mb-1">验证码接收方式</label>
+            <select
+              className="w-full bg-gray-700 text-foreground text-xs rounded px-2.5 py-1.5 outline-none focus:ring-1 focus:ring-emerald-500"
+              value={loginMethod} onChange={e => setLoginMethod(e.target.value)}
+            >
+              <option value="">自动识别（按邮箱后缀）</option>
+              <option value="171mail">171mail（API 接码）</option>
+              <option value="onet">Onet（Token 接码）</option>
+              <option value="gazeta">Gazeta（Token 接码）</option>
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs text-gray-400 mb-1">
+              {usesWebmail ? '邮箱接码 Token' : '接码 Token'}
+            </label>
             <input className="w-full bg-gray-700 text-foreground text-xs rounded px-2.5 py-1.5 outline-none focus:ring-1 focus:ring-emerald-500"
-              value={token} onChange={e => setToken(e.target.value)} placeholder="171mail token" required />
+              type="text" value={token} onChange={e => setToken(e.target.value)}
+              placeholder="接码 Token" required />
+            {usesWebmail && <p className="mt-1 text-[11px] text-gray-500">Token 用于接码 API 获取 OpenAI 邮箱验证码。</p>}
           </div>
           <div>
             <label className="block text-xs text-gray-400 mb-1">密码（留空=无密码登录 OTP）</label>

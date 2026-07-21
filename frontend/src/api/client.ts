@@ -1035,7 +1035,7 @@ export const api = {
     request<{ ok: boolean; status: string }>(`/api/codex-pool/accounts/${accountId}/relogin`, { method: 'POST' }),
   codexPoolReloginStatus: (accountId: string) =>
     request<{ status: string; detail?: string }>(`/api/codex-pool/accounts/${accountId}/relogin`),
-  codexPoolAddAccount: (data: { email: string; token: string; password?: string }) =>
+  codexPoolAddAccount: (data: { email: string; token: string; password?: string; login_method?: string }) =>
     request<{ ok: boolean; status: string; account_id?: string }>('/api/codex-pool/add', { method: 'POST', body: JSON.stringify(data) }),
   codexPoolAddStatus: (email: string) =>
     request<{ status: string; detail?: string }>(`/api/codex-pool/add/${encodeURIComponent(email)}`),

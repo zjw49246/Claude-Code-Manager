@@ -320,7 +320,7 @@ async def add_worker_account(worker_id: int, request: Request, body: dict, db: A
     remote_dir = settings.worker_remote_dir
 
     # 后台跑 auto_login（xvfb-run 包装）
-    login_method_arg = f" --login-method {login_method}" if login_method in ("171mail", "mailcom") else ""
+    login_method_arg = f" --login-method {login_method}" if login_method in ("171mail", "mailcom", "onet", "gazeta") else ""
     cmd = (
         f"cd {remote_dir} && export PATH=\"$HOME/.local/bin:$PATH\" && "
         f"xvfb-run --auto-servernum --server-args='-screen 0 1920x1080x24' "

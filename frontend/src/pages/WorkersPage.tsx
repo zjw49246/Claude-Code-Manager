@@ -82,6 +82,8 @@ function AddWorkerModal({ onClose, onSaved }: { onClose: () => void; onSaved: ()
                   <option value="">自动识别（按邮箱后缀）</option>
                   <option value="171mail">171mail（API 接码）</option>
                   <option value="mailcom">mail.com（Chrome 接码）</option>
+                  <option value="onet">Onet（Token 接码）</option>
+                  <option value="gazeta">Gazeta（Token 接码）</option>
                 </select>
               </div>
               {accounts.length > 1 && (

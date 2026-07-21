@@ -70,11 +70,26 @@ EMAIL_POLL_TIMEOUT = 300  # mail.com IMAP 拉取可能延迟几分钟
 MAILCOM_DOMAINS = {
     "mail.com",
 }
+TOKEN_MAILBOX_DOMAINS = {
+    "onet.pl": "onet",
+    "gazeta.pl": "gazeta",
+}
 
 
 def is_mailcom_domain(email: str) -> bool:
     domain = email.split("@")[-1].lower()
     return domain in MAILCOM_DOMAINS
+
+
+def detect_login_method(email: str) -> str:
+    domain = email.rsplit("@", 1)[-1].strip().lower()
+    if domain in MAILCOM_DOMAINS:
+        return "mailcom"
+    return TOKEN_MAILBOX_DOMAINS.get(domain, "171mail")
+
+
+def uses_mailcatcher_api(provider: str) -> bool:
+    return provider in {"mailcom", "onet", "gazeta"}
 PLAYWRIGHT_NAV_TIMEOUT = 30_000  # ms
 CLI_OAUTH_URL_TIMEOUT = 15
 CLI_EXIT_TIMEOUT = 30
@@ -757,10 +772,8 @@ async def perform_login(
     config_path = Path(config_dir).expanduser()
     config_path.mkdir(parents=True, exist_ok=True)
 
-    if provider:
-        _use_mailcatcher = provider == "mailcom"
-    else:
-        _use_mailcatcher = is_mailcom_domain(email)
+    provider = provider or detect_login_method(email)
+    _use_mailcatcher = uses_mailcatcher_api(provider)
 
     # Backup old credentials — only delete after successful login to avoid
     # leaving the account in a "no credentials" state if login fails.
@@ -787,7 +800,7 @@ async def perform_login(
                 (config_path / f).write_bytes(data)
             return False
     else:
-        logger.info("step 1: mail.com 域（Chrome 输入邮箱 + MailCatcher 接码）")
+        logger.info("step 1: %s（Chrome 输入邮箱 + MailCatcher API 接码）", provider)
 
     # Step 2: Chrome CDP 全流程（输入邮箱 → magic link → OAuth）
     logger.info("step 2: Chrome CDP 全流程登录...")
@@ -799,6 +812,7 @@ async def perform_login(
         token=token_171,
         config_dir=str(config_path),
         magic_link=magic_link_171,
+        mail_provider=provider,
     )
     if not result or not result.get("success"):
         logger.error("Chrome CDP 登录失败 — restoring old credentials")
@@ -855,8 +869,8 @@ def main():
     # 兼容旧调用（Worker bootstrap 可能还传这些参数）
     parser.add_argument("--provider", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--mail-password", default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--login-method", default=None, choices=["171mail", "mailcom"],
-                        help="Login method: 171mail (API) or mailcom (Chrome CDP). Auto-detected by email suffix if not specified.")
+    parser.add_argument("--login-method", default=None, choices=["171mail", "mailcom", "onet", "gazeta"],
+                        help="Mailbox method. Auto-detected by email suffix if not specified.")
     args = parser.parse_args()
 
     email = args.email
@@ -864,24 +878,26 @@ def main():
         email = input("Email: ").strip()
 
     # 按 --login-method 参数 → saved provider → 邮箱后缀 判断登录方式
+    detected_method = detect_login_method(email)
+    saved = load_email_tokens().get(email)
+    saved_provider = saved.get("provider") if isinstance(saved, dict) else None
     if args.login_method:
-        use_webmail = args.login_method == "mailcom"
+        login_method = args.login_method
+    elif detected_method != "171mail":
+        login_method = detected_method
+    elif saved_provider in ("171mail", "mailcom", "onet", "gazeta"):
+        login_method = saved_provider
     else:
-        saved_provider = (load_email_tokens().get(email) or {}).get("provider")
-        if saved_provider:
-            use_webmail = saved_provider == "mailcom"
-        else:
-            use_webmail = is_mailcom_domain(email)
+        login_method = detected_method
 
     # token: 171mail 的接码 token，或 mail.com 的邮箱密码
-    saved = load_email_tokens().get(email)
     token = args.token or args.mail_password
     if not token and saved:
-        token = saved.get("token") or saved.get("mail_password")
+        token = (saved.get("token") or saved.get("mail_password")) if isinstance(saved, dict) else saved
         if token:
             logger.info("found saved token for %s", email)
     if not token:
-        token = input("mail.com 密码: " if use_webmail else "171mail Token: ").strip()
+        token = input("接码 Token / 密码: " if login_method != "171mail" else "171mail Token: ").strip()
 
     config_dir = args.config_dir
     if not config_dir:
@@ -890,14 +906,13 @@ def main():
             config_dir = str(Path.home() / ".claude-account-new")
 
     if args.save_token or not get_email_token(email):
-        provider_label = "mailcom" if use_webmail else "171mail"
-        save_email_token(email, token, provider=provider_label)
+        save_email_token(email, token, provider=login_method)
 
     ok = asyncio.run(perform_login(
         email=email,
         token_171=token,
         config_dir=config_dir,
-        provider="mailcom" if use_webmail else "171mail",
+        provider=login_method,
     ))
 
     if ok and args.add_to_pool:
