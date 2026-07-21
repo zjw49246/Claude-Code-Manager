@@ -4,13 +4,18 @@ import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import select
+from sqlalchemy import select, update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
 from backend.models.task import Task
 from backend.models.instance import Instance
-from backend.schemas.task import TaskCreate, TaskUpdate, TaskResponse
+from backend.schemas.task import (
+    TaskCreate,
+    TaskMigrationImport,
+    TaskResponse,
+    TaskUpdate,
+)
 from backend.services.task_queue import TaskQueue
 from backend.api.deps import get_current_user_id, get_current_user_role, require_task_access, require_admin
 
@@ -287,6 +292,86 @@ async def create_task(request: Request, body: TaskCreate, queue: TaskQueue = Dep
         except Exception:
             pass  # best-effort
 
+    return task
+
+
+@router.post("/migration-import", response_model=TaskResponse, status_code=201)
+async def import_migrated_task(
+    request: Request,
+    body: TaskMigrationImport,
+    queue: TaskQueue = Depends(_get_queue),
+    db: AsyncSession = Depends(get_db),
+):
+    """Create or refresh an inert task copied from a Manager.
+
+    A normal task create commits ``pending`` and immediately wakes the local
+    dispatcher.  Task migration used to call that endpoint and cancel in a
+    second request, leaving a real window where the destination Worker could
+    claim and execute the imported task.  This admin-only endpoint persists
+    the task as ``cancelled`` in the same transaction and never wakes the
+    dispatcher.
+
+    Existing inactive copies are refreshed with a status CAS.  If a legacy
+    copy has already become active, fail closed instead of cancelling work
+    which may really be running.
+    """
+    require_admin(request)
+
+    data = body.model_dump()
+    for transient_field in (
+        "image_paths",
+        "file_paths",
+        "attachments",
+        "secret_ids",
+        "clone_from_task_id",
+    ):
+        data.pop(transient_field, None)
+    data.update(
+        worker_id=None,
+        status="cancelled",
+        created_by=get_current_user_id(request),
+    )
+
+    from backend.config import settings as app_settings
+    if not data.get("model"):
+        data["model"] = (
+            app_settings.default_codex_model
+            if data.get("provider") == "codex"
+            else app_settings.default_model
+        )
+    if not data.get("effort_level"):
+        data["effort_level"] = app_settings.default_effort
+
+    existing = await db.get(Task, body.id)
+    if existing is None:
+        # The first visible state is already inert.  In particular there is no
+        # pending commit and no dispatcher.wake() between create and cancel.
+        return await queue.create(**data)
+
+    old_status = existing.status
+    if old_status in ("in_progress", "executing", "migrating"):
+        raise HTTPException(
+            409,
+            f"Destination task {body.id} is active ({old_status})",
+        )
+
+    values = {key: value for key, value in data.items() if key != "id"}
+    result = await db.execute(
+        sa_update(Task)
+        .where(Task.id == body.id, Task.status == old_status)
+        .values(**values)
+    )
+    if result.rowcount != 1:
+        await db.rollback()
+        raise HTTPException(409, "Destination task changed during migration import")
+    await db.commit()
+    db.expire_all()
+    task = await db.get(Task, body.id)
+    if task is None:  # defensive: a concurrent delete must not look successful
+        raise HTTPException(409, "Destination task disappeared during migration import")
+    if old_status != "cancelled":
+        from backend.services.task_events import broadcast_status_change
+        await broadcast_status_change(task.id, "cancelled")
     return task
 
 

@@ -23,6 +23,7 @@ import tempfile
 from pathlib import PurePosixPath
 
 import httpx
+from sqlalchemy import update
 
 from backend.config import settings
 from backend.models.project import Project
@@ -65,7 +66,7 @@ class TaskMigrator:
                 raise MigrationError("task 不存在")
             if task.worker_id == target:
                 return  # 已在目标位置
-            if task.status in ("executing", "migrating"):
+            if task.status in ("in_progress", "executing", "migrating"):
                 raise MigrationError(f"task 状态 {task.status}，先停止再切换")
             prev_status = task.status
             src_worker_id = task.worker_id
@@ -80,8 +81,16 @@ class TaskMigrator:
                 "无法取回执行态。可先启动该 Worker 再切换"
             )
 
-        await self._set_status(task_id, "migrating")
+        # Worker validation contains awaits, so the snapshot above is not a
+        # claim.  Atomically transition the exact original state to migrating;
+        # a dispatcher/user update which wins the race makes this CAS fail.
+        await self._claim_migration(task_id, prev_status, src_worker_id)
+        await self._broadcast_status(task_id, prev_status, "migrating")
+
         local_codex_target_home: str | None = None
+        src_unsubscribed = False
+        dst_subscribed = False
+        claim_active = True
         try:
             # 1. 源是 worker：先把 relay 收不到的字段同步回来（session_id/last_cwd）
             if src is not None:
@@ -124,34 +133,47 @@ class TaskMigrator:
             # 5. relay 订阅切换
             if src is not None:
                 self.relay.unsubscribe_task(src.id, task_id)
+                src_unsubscribed = True
             if dst is not None:
                 await self.relay.subscribe_task(dst, task_id)
+                dst_subscribed = True
 
-            # 6. 切指针 + 状态复原
-            async with self.db_factory() as db:
-                task = await db.get(Task, task_id)
-                task.worker_id = target
-                task.status = prev_status
-                if provider == "codex" and target is None and local_codex_target_home:
-                    self._sync_local_codex_account_binding(
-                        task, local_codex_target_home
-                    )
-                # last_cwd 防护：失败启动会把 os.getcwd() 写进 last_cwd（污染），
-                # 且它优先于 target_repo——切回本机时不存在/不在项目内的一律清掉，
-                # 让 cwd 解析回落到 target_repo
-                if target is None and task.last_cwd:
-                    valid = os.path.isdir(task.last_cwd) and (
-                        not task.target_repo
-                        or task.last_cwd.startswith(task.target_repo)
-                    )
-                    if not valid:
-                        task.last_cwd = None
-                await db.commit()
+            # 6. 切指针 + 状态复原。仍以 migrating + 原 worker_id 为 CAS
+            # 条件；并发取消/认领不能被迁移完成阶段覆盖。
+            await self._finish_migration(
+                task_id=task_id,
+                expected_worker_id=src_worker_id,
+                target_worker_id=target,
+                restored_status=prev_status,
+                provider=provider,
+                local_codex_target_home=local_codex_target_home,
+            )
+            claim_active = False
             await self._broadcast_status(task_id, "migrating", prev_status)
             logger.info("task %s migrated: %s -> %s", task_id, src_worker_id, target)
         except Exception:
             # 复制式搬运：源机文件未动，失败无害，状态复原可重试
-            await self._set_status(task_id, prev_status, old="migrating")
+            if claim_active:
+                restored = await self._restore_migration_claim(
+                    task_id, prev_status, src_worker_id
+                )
+                if restored:
+                    await self._broadcast_status(task_id, "migrating", prev_status)
+                else:
+                    logger.warning(
+                        "task %s migration rollback skipped: claim no longer owned",
+                        task_id,
+                    )
+
+            # Keep relay routing aligned with the unchanged source pointer when
+            # a failure happens after subscription switching.
+            try:
+                if dst_subscribed and dst is not None:
+                    self.relay.unsubscribe_task(dst.id, task_id)
+                if src_unsubscribed and src is not None:
+                    await self.relay.subscribe_task(src, task_id)
+            except Exception:
+                logger.exception("task %s relay rollback failed", task_id)
             raise
 
     # ------------------------------------------------------------------
@@ -162,6 +184,110 @@ class TaskMigrator:
         async with self.db_factory() as db:
             return await db.get(Worker, worker_id)
 
+    @staticmethod
+    def _worker_id_condition(worker_id: int | None):
+        return (
+            Task.worker_id.is_(None)
+            if worker_id is None
+            else Task.worker_id == worker_id
+        )
+
+    async def _claim_migration(
+        self,
+        task_id: int,
+        expected_status: str,
+        expected_worker_id: int | None,
+    ) -> None:
+        async with self.db_factory() as db:
+            result = await db.execute(
+                update(Task)
+                .where(
+                    Task.id == task_id,
+                    Task.status == expected_status,
+                    self._worker_id_condition(expected_worker_id),
+                )
+                .values(status="migrating")
+            )
+            if result.rowcount != 1:
+                await db.rollback()
+                current = await db.get(Task, task_id)
+                if current is None:
+                    raise MigrationError("task 不存在")
+                raise MigrationError(
+                    "task 在迁移认领前已被并发修改"
+                    f"（status={current.status}, worker_id={current.worker_id}）"
+                )
+            await db.commit()
+
+    async def _restore_migration_claim(
+        self,
+        task_id: int,
+        restored_status: str,
+        expected_worker_id: int | None,
+    ) -> bool:
+        """Restore only a claim that this migration still owns."""
+        async with self.db_factory() as db:
+            result = await db.execute(
+                update(Task)
+                .where(
+                    Task.id == task_id,
+                    Task.status == "migrating",
+                    self._worker_id_condition(expected_worker_id),
+                )
+                .values(status=restored_status)
+            )
+            await db.commit()
+            return result.rowcount == 1
+
+    async def _finish_migration(
+        self,
+        *,
+        task_id: int,
+        expected_worker_id: int | None,
+        target_worker_id: int | None,
+        restored_status: str,
+        provider: str,
+        local_codex_target_home: str | None,
+    ) -> None:
+        async with self.db_factory() as db:
+            task = await db.get(Task, task_id)
+            if task is None:
+                raise MigrationError("task 不存在")
+
+            values: dict = {
+                "worker_id": target_worker_id,
+                "status": restored_status,
+            }
+            if provider == "codex" and target_worker_id is None and local_codex_target_home:
+                values["metadata_"] = self._local_codex_account_metadata(
+                    task.metadata_, local_codex_target_home
+                )
+
+            # last_cwd 防护：失败启动会把 os.getcwd() 写进 last_cwd（污染），
+            # 且它优先于 target_repo——切回本机时不存在/不在项目内的一律清掉，
+            # 让 cwd 解析回落到 target_repo。
+            if target_worker_id is None and task.last_cwd:
+                valid = os.path.isdir(task.last_cwd) and (
+                    not task.target_repo
+                    or task.last_cwd.startswith(task.target_repo)
+                )
+                if not valid:
+                    values["last_cwd"] = None
+
+            result = await db.execute(
+                update(Task)
+                .where(
+                    Task.id == task_id,
+                    Task.status == "migrating",
+                    self._worker_id_condition(expected_worker_id),
+                )
+                .values(**values)
+            )
+            if result.rowcount != 1:
+                await db.rollback()
+                raise MigrationError("task 迁移状态已被并发修改，拒绝覆盖")
+            await db.commit()
+
     def _ssh(self, worker: Worker) -> SSHExecutor:
         return SSHExecutor(
             host=worker.private_ip,
@@ -169,21 +295,15 @@ class TaskMigrator:
             key_path=worker.ssh_key_path or settings.worker_ssh_key_path,
         )
 
-    async def _set_status(self, task_id: int, status: str, old: str | None = None):
-        async with self.db_factory() as db:
-            task = await db.get(Task, task_id)
-            if task:
-                prev = task.status
-                task.status = status
-                await db.commit()
-        await self._broadcast_status(task_id, old or prev, status)
-
     async def _broadcast_status(self, task_id: int, old: str, new: str):
         if self.broadcaster:
-            await self.broadcaster.broadcast("tasks", {
-                "event": "status_change", "task_id": task_id,
-                "old_status": old, "new_status": new,
-            })
+            try:
+                await self.broadcaster.broadcast("tasks", {
+                    "event": "status_change", "task_id": task_id,
+                    "old_status": old, "new_status": new,
+                })
+            except Exception:
+                logger.exception("task %s status broadcast failed", task_id)
 
     async def _sync_task_fields_from_worker(self, worker: Worker, task_id: int):
         """worker 广播会 pop session_id、last_cwd 只写 worker DB——迁移前必须拉全。"""
@@ -343,8 +463,11 @@ class TaskMigrator:
         return selected
 
     @staticmethod
-    def _sync_local_codex_account_binding(task: Task, target_home: str) -> None:
-        """Align a migrated task with the local account that received rollout.
+    def _local_codex_account_metadata(
+        current_metadata: dict | None,
+        target_home: str,
+    ) -> dict:
+        """Return metadata aligned with the local account receiving rollout.
 
         Worker and manager account IDs are machine-local.  Keeping the worker's
         old ID (or an earlier local ID) after copying into ``~/.codex`` makes
@@ -367,12 +490,19 @@ class TaskMigrator:
                 target_home,
             )
 
-        metadata = dict(task.metadata_ or {})
+        metadata = dict(current_metadata or {})
         if account_id:
             metadata["codex_account_id"] = account_id
         else:
             metadata.pop("codex_account_id", None)
-        task.metadata_ = metadata
+        return metadata
+
+    @classmethod
+    def _sync_local_codex_account_binding(cls, task: Task, target_home: str) -> None:
+        """Compatibility wrapper for callers mutating an ORM task directly."""
+        task.metadata_ = cls._local_codex_account_metadata(
+            task.metadata_, target_home
+        )
 
     async def _move_codex_session(
         self,
@@ -441,41 +571,53 @@ class TaskMigrator:
     # -- 目标 worker 上重建 task ----------------------------------------
 
     async def _ensure_worker_task(self, dst: Worker, task: Task, worker_project_id: int):
-        """worker 上同 ID 建 task（带 session_id/last_cwd 以便 --resume）；
-        已存在（之前转发过）则 PUT 更新关键字段。"""
+        """Atomically import an inert same-ID task on the destination Worker."""
         headers = {"Authorization": f"Bearer {dst.auth_token}"}
         base = f"http://{dst.private_ip}:{dst.ccm_port}/api/tasks"
+        payload = {
+            "id": task.id,
+            "worker_id": None,
+            "title": task.title,
+            "description": task.description or task.title or "migrated task",
+            "project_id": worker_project_id,
+            "target_repo": task.target_repo,
+            "target_branch": task.target_branch or "main",
+            "priority": task.priority,
+            "max_retries": task.max_retries,
+            "mode": task.mode,
+            "todo_file_path": task.todo_file_path,
+            "max_iterations": task.max_iterations,
+            "must_complete": task.must_complete,
+            "goal_condition": task.goal_condition,
+            "goal_max_turns": task.goal_max_turns,
+            "goal_evaluator_model": task.goal_evaluator_model,
+            "provider": task.provider,
+            "model": task.model,
+            "effort_level": task.effort_level,
+            "thinking_budget": task.thinking_budget,
+            "system_prompt_mode": task.system_prompt_mode,
+            "timeout_hours": task.timeout_hours,
+            "sort_order": task.sort_order,
+            "enable_workflows": task.enable_workflows,
+            "enabled_skills": task.enabled_skills,
+            "selected_user_skills": task.selected_user_skills,
+            "tags": task.tags,
+            "starred": task.starred,
+            "session_id": task.session_id,
+            "last_cwd": task.last_cwd,
+        }
         async with httpx.AsyncClient(timeout=30) as c:
-            r = await c.get(f"{base}/{task.id}", headers=headers)
-            if r.status_code == 200:
-                r = await c.put(f"{base}/{task.id}", headers=headers, json={
-                    "project_id": worker_project_id,
-                })
-                r.raise_for_status()
-                return
-            payload = {
-                "id": task.id,
-                "worker_id": None,
-                "title": task.title,
-                "description": task.description or task.title or "migrated task",
-                "project_id": worker_project_id,
-                "target_branch": task.target_branch or "main",
-                "mode": task.mode,
-                "todo_file_path": task.todo_file_path,
-                "goal_condition": task.goal_condition,
-                "provider": task.provider,
-                "model": task.model,
-                "effort_level": task.effort_level,
-                "enable_workflows": task.enable_workflows,
-                "enabled_skills": task.enabled_skills,
-                "session_id": task.session_id,
-                "last_cwd": task.last_cwd,
-            }
-            r = await c.post(base, headers=headers, json=payload)
+            r = await c.post(
+                f"{base}/migration-import",
+                headers=headers,
+                json=payload,
+            )
+            if r.status_code == 409:
+                try:
+                    detail = r.json().get("detail", r.text)
+                except ValueError:
+                    detail = r.text
+                raise MigrationError(f"目标 Worker 导入 task 冲突: {detail}")
             r.raise_for_status()
-            # 关键：新建即 pending，worker Dispatcher 2 秒内就会把任务描述
-            # 当新任务执行一遍——必须立刻 cancel 压住。后续 chat 只依赖
-            # session_id，cancelled 状态不影响续聊
-            r = await c.post(f"{base}/{task.id}/cancel", headers=headers)
-            if r.status_code >= 400:
-                raise MigrationError(f"压制 worker 侧重建 task 失败: HTTP {r.status_code}")
+            if r.json().get("status") != "cancelled":
+                raise MigrationError("目标 Worker 导入 task 未保持不可调度状态")

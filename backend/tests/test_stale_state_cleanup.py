@@ -27,6 +27,9 @@ def _make_dispatcher(db_factory):
     """Create a GlobalDispatcher with mocked dependencies."""
     instance_manager = MagicMock()
     instance_manager.launch = AsyncMock(return_value=12345)
+    # Lifecycle completion now waits for the output consumer to finish its
+    # final persistence/account-routing work before deciding the task status.
+    instance_manager.wait_for_output_consumer = AsyncMock()
     instance_manager.processes = {}
     instance_manager._tasks = {}
     instance_manager.pty_mode_enabled = False

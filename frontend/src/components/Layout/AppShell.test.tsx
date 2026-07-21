@@ -15,6 +15,7 @@ vi.mock('../../api/client', () => ({
     }),
     getFeishuStatus: vi.fn().mockResolvedValue({ bound: false }),
     getPoolStatus: vi.fn().mockResolvedValue({ enabled: false }),
+    getCodexPoolStatus: vi.fn().mockRejectedValue(new Error('disabled')),
     startUpdate: vi.fn(),
     health: vi.fn(),
   },

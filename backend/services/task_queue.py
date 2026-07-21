@@ -206,27 +206,73 @@ class TaskQueue:
         await self.db.commit()
         return True
 
-    async def dequeue(self, exclude_ids: set[int] | None = None) -> Task | None:
-        """Get the highest-priority pending task."""
-        stmt = (
-            select(Task)
-            # worker task 不走本地 instance；shadow task (shared_from_id) 不执行
-            .where(Task.status == "pending", Task.worker_id.is_(None), Task.shared_from_id.is_(None))
-            .order_by(Task.priority.asc(), Task.created_at.asc())
-            .limit(1)
-        )
-        if exclude_ids:
-            stmt = stmt.where(Task.id.notin_(exclude_ids))
+    async def dequeue(
+        self,
+        exclude_ids: set[int] | None = None,
+        *,
+        instance_id: int | None = None,
+    ) -> Task | None:
+        """Atomically claim the highest-priority pending task.
 
-        result = await self.db.execute(stmt)
-        task = result.scalar_one_or_none()
-        if task:
-            task.status = "in_progress"
-            task.started_at = datetime.utcnow()
-            task.error_message = None
+        Selecting an ORM row and mutating it afterwards lets two independent
+        sessions return the same task.  Ralph loops run concurrently (and may
+        also overlap the global dispatcher), so the status transition itself
+        must be a compare-and-swap.  A loser retries and may claim the next
+        pending task instead.
+
+        ``instance_id`` lets Ralph persist ownership in the same atomic claim;
+        this leaves no cancellation window where a task is ``in_progress`` but
+        has no identifiable owner.
+        """
+
+        while True:
+            stmt = (
+                select(Task.id)
+                # worker task 不走本地 instance；shadow task (shared_from_id) 不执行
+                .where(
+                    Task.status == "pending",
+                    Task.worker_id.is_(None),
+                    Task.shared_from_id.is_(None),
+                )
+                .order_by(Task.priority.asc(), Task.created_at.asc())
+                .limit(1)
+            )
+            if exclude_ids:
+                stmt = stmt.where(Task.id.notin_(exclude_ids))
+
+            candidate_id = (await self.db.execute(stmt)).scalar_one_or_none()
+            if candidate_id is None:
+                return None
+
+            values = {
+                "status": "in_progress",
+                "started_at": datetime.utcnow(),
+                "error_message": None,
+            }
+            if instance_id is not None:
+                values["instance_id"] = instance_id
+
+            claimed = await self.db.execute(
+                update(Task)
+                .where(
+                    Task.id == candidate_id,
+                    Task.status == "pending",
+                    Task.worker_id.is_(None),
+                    Task.shared_from_id.is_(None),
+                )
+                .values(**values)
+            )
             await self.db.commit()
-            await self.db.refresh(task)
-        return task
+            if not claimed.rowcount:
+                # Another dispatcher won after our candidate SELECT.  Expire a
+                # potentially stale identity-map entry and try the next row.
+                self.db.expire_all()
+                continue
+
+            task = await self.db.get(Task, candidate_id)
+            if task is not None:
+                await self.db.refresh(task)
+            return task
 
     async def mark_status(self, task_id: int, status: str, **extra) -> None:
         """Generic status update with optional extra fields."""
@@ -254,7 +300,13 @@ class TaskQueue:
         )
         await self.db.commit()
 
-    async def defer(self, task_id: int, reason: str) -> bool:
+    async def defer(
+        self,
+        task_id: int,
+        reason: str,
+        *,
+        instance_id: int | None = None,
+    ) -> bool:
         """Return an active task to pending without consuming retry budget.
 
         Account routing can be temporarily unavailable before a process starts
@@ -265,12 +317,15 @@ class TaskQueue:
         The active-status guard is intentional: a concurrent user cancellation
         must win instead of being overwritten back to ``pending``.
         """
+        predicate = [
+            Task.id == task_id,
+            Task.status.in_(("in_progress", "executing")),
+        ]
+        if instance_id is not None:
+            predicate.append(Task.instance_id == instance_id)
         result = await self.db.execute(
             update(Task)
-            .where(
-                Task.id == task_id,
-                Task.status.in_(("in_progress", "executing")),
-            )
+            .where(*predicate)
             .values(
                 status="pending",
                 instance_id=None,

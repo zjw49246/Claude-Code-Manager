@@ -302,6 +302,25 @@ async def test_sensitive_ssh_command_is_redacted_from_debug_log(monkeypatch, cap
     assert "sensitive command redacted" in caplog.text
 
 
+async def test_provisioner_ccm_config_marks_embedded_auth_token_sensitive(
+    db_factory, session_factory,
+):
+    wid = await _insert_worker(
+        session_factory,
+        status="creating",
+        auth_token="worker-super-secret-token",
+    )
+    prov = WorkerProvisioner(db_factory=db_factory, cloud=FakeCloud(), broadcaster=None)
+    ssh = AsyncMock()
+    ssh.run.return_value = (0, "ok")
+
+    await prov._step_ccm_config(ssh, wid)
+
+    command = ssh.run.await_args.args[0]
+    assert "worker-super-secret-token" in command
+    assert ssh.run.await_args.kwargs["sensitive"] is True
+
+
 async def test_provisioner_login_persists_credentials_and_onet_method(
     db_factory, session_factory,
 ):

@@ -28,7 +28,10 @@ from backend.api.secrets import router as secrets_router
 from backend.api.tags import router as tags_router
 from backend.api.files import router as files_router
 from backend.api.pool import router as pool_router
-from backend.api.codex_pool import router as codex_pool_router
+from backend.api.codex_pool import (
+    recover_pending_codex_login_transactions,
+    router as codex_pool_router,
+)
 from backend.api.monitor import router as monitor_router
 from backend.api.sub_agents import router as sub_agents_router
 from backend.api.sub_agent_tasks import router as sub_agent_tasks_router
@@ -79,6 +82,27 @@ sub_agent_watcher = SubAgentWatcher(db_factory=async_session, broadcaster=broadc
 
 # Codex account pool (optional, CODEX_POOL_ENABLED=true)
 codex_pool = None
+try:
+    # Recovery is independent of the runtime pool toggle. A service may be
+    # restarted with CODEX_POOL_ENABLED=false while an earlier enabled process
+    # left a transaction journal; default-home Codex must not observe it first.
+    recovery = recover_pending_codex_login_transactions(
+        settings.codex_pool_config_path
+    )
+except Exception:
+    # Fail startup instead of falling back to an inherited default CODEX_HOME
+    # that may contain a half-written auth transaction.
+    logger.critical(
+        "Codex login recovery could not safely restore or isolate credentials",
+        exc_info=True,
+    )
+    raise
+if recovery["recovered"] or recovery["quarantined"]:
+    logger.warning(
+        "Recovered pending Codex login transactions before pool init: %s",
+        recovery,
+    )
+
 if settings.codex_pool_enabled:
     try:
         from backend.services.codex_pool import CodexPool
@@ -89,7 +113,7 @@ if settings.codex_pool_enabled:
         dispatcher.codex_pool = codex_pool
         logger.info("Codex pool enabled with %d accounts", len(codex_pool._accounts))
     except Exception:
-        logger.debug("Codex pool init failed — codex pool disabled")
+        logger.exception("Codex pool init failed — codex pool disabled")
 
 update_service = UpdateService(
     broadcaster=broadcaster,

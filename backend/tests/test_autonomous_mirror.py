@@ -9,6 +9,8 @@ _subagent_only_callback，报告只存在于 JSONL、聊天永久不可见。
 - _process_event 对 autonomous user-role 事件消毒（<task-notification> 压成
   一行 system_event，其余丢弃），承担历史上"重放旧 prompt"的防线。
 """
+import asyncio
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -152,6 +154,38 @@ class TestFullMirrorBackend:
         backend._restore_full_autonomous_mirror(session, 7, 27, None)
         assert session.on_autonomous_event is not _subagent_only_callback
         assert session.on_autonomous_event.__name__ == "_full_autonomous_mirror"
+
+    async def test_on_exit_waits_for_initial_running_metadata_barrier(self):
+        release_metadata = asyncio.Event()
+        wait_entered = asyncio.Event()
+        im = MagicMock()
+
+        async def wait_for_metadata(instance_id):
+            assert instance_id == 7
+            wait_entered.set()
+            await release_metadata.wait()
+
+        im.wait_for_pty_launch_metadata = AsyncMock(
+            side_effect=wait_for_metadata
+        )
+        backend = self._bare_backend(im)
+        session = MagicMock()
+
+        with patch(
+            "backend.services.pty_full_mirror.CCMBackend.on_exit",
+            new_callable=AsyncMock,
+        ) as base_on_exit:
+            exiting = asyncio.create_task(backend.on_exit(
+                7,
+                0,
+                session=session,
+                task_id=27,
+            ))
+            await wait_entered.wait()
+            base_on_exit.assert_not_awaited()
+            release_metadata.set()
+            await exiting
+            base_on_exit.assert_awaited_once()
 
     async def test_mirror_forwards_to_process_event(self):
         im = MagicMock()

@@ -240,13 +240,20 @@ def test_migrate_script_rollback_mode(tmp_path):
 # ---- update_migrate.sh always brings the service back up ----
 
 
-def _script_env(tmp_path: Path) -> tuple[dict, Path]:
+def _script_env(
+    tmp_path: Path, *, escaped: bool = True
+) -> tuple[dict, Path]:
     """Stub service-management tools into PATH; systemctl logs its calls.
 
-    The test runner itself may live under /system.slice. update_migrate.sh can
-    then choose system scope and call `sudo -n systemctl ...`, so sudo must be
-    stubbed too; otherwise this test can escape the fake PATH and touch real
-    systemd units.
+    The test runner itself may live inside ``ccm.service``.  Normal-flow tests
+    exercise the transient worker, not the short-lived trampoline, so mark it
+    escaped explicitly; otherwise the trampoline legitimately returns before
+    its asynchronous systemd-run worker has restored the DB or restarted the
+    service.  Escape-specific tests opt out below.
+
+    The runner may also live under /system.slice, in which case the script can
+    choose system scope and call `sudo -n systemctl ...`.  Stub sudo too so a
+    test can never escape the fake PATH and touch real systemd units.
     """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -264,6 +271,10 @@ def _script_env(tmp_path: Path) -> tuple[dict, Path]:
 
     env = os.environ.copy()
     env["PATH"] = f"{bin_dir}:{env['PATH']}"
+    if escaped:
+        env["CCM_ESCAPED"] = "1"
+    else:
+        env.pop("CCM_ESCAPED", None)
     return env, call_log
 
 
@@ -369,7 +380,7 @@ def _stub_systemd_run(tmp_path: Path) -> Path:
 def test_migrate_script_escapes_own_service_cgroup(tmp_path):
     """Launched inside the service's own cgroup, the script must re-exec via
     systemd-run and NOT run `systemctl stop` from its doomed position."""
-    env, call_log = _script_env(tmp_path)
+    env, call_log = _script_env(tmp_path, escaped=False)
     leaf = _self_cgroup_leaf()
     if not leaf:
         pytest.skip("cgroup v2 unavailable")

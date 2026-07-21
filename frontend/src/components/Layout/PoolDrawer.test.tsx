@@ -454,6 +454,46 @@ describe('PoolDrawer', () => {
       );
       expect(api.codexPoolAddStatus).toHaveBeenCalledTimes(2);
     });
+
+    it('keeps an add attempt active while the backend safely finalizes it', async () => {
+      enableCodexPool();
+      vi.mocked(api.codexPoolAddAccount).mockResolvedValue({
+        ok: true,
+        status: 'running',
+        attempt_id: 'add-attempt-finalizing',
+      });
+      vi.mocked(api.codexPoolAddStatus)
+        .mockResolvedValueOnce({
+          status: 'finalizing',
+          attempt_id: 'add-attempt-finalizing',
+        })
+        .mockResolvedValue({
+          status: 'success',
+          attempt_id: 'add-attempt-finalizing',
+        });
+      const user = userEvent.setup();
+
+      await renderAndWaitForPro();
+      await openDrawer(user);
+      await user.click(screen.getByRole('button', { name: 'Codex' }));
+      await waitFor(() => expect(screen.getByText('Codex Pool')).toBeInTheDocument());
+      await user.click(screen.getByTitle('添加账号'));
+      await user.type(screen.getByLabelText('OpenAI 邮箱'), 'finalizing@example.com');
+      await user.type(screen.getByLabelText('OpenAI 密码（可选）'), 'openai-password');
+      await user.click(screen.getByRole('button', { name: '添加' }));
+
+      expect(await screen.findByText(
+        '登录已完成，正在安全提交登录结果…',
+        {},
+        { timeout: 3000 },
+      )).toBeInTheDocument();
+      expect(screen.getByTitle('请等待登录完成')).toBeDisabled();
+
+      await waitFor(() => {
+        expect(api.codexPoolAddStatus).toHaveBeenCalledTimes(2);
+        expect(screen.queryByText('登录已完成，正在安全提交登录结果…')).not.toBeInTheDocument();
+      }, { timeout: 5000 });
+    });
   });
 
   describe('Codex account controls', () => {
@@ -572,6 +612,46 @@ describe('PoolDrawer', () => {
           '123456',
         );
       });
+    });
+
+    it('continues polling relogin through finalizing until committed success', async () => {
+      enableCodexPool({
+        enabled: true,
+        total: 1,
+        available: 1,
+        cooldown: 0,
+        disabled: 0,
+        preferred: null,
+        accounts: [codexAccount],
+      });
+      vi.mocked(api.codexPoolRelogin).mockResolvedValue({
+        ok: true,
+        status: 'running',
+        attempt_id: 'relogin-finalizing',
+      });
+      vi.mocked(api.codexPoolReloginStatus)
+        .mockResolvedValueOnce({
+          status: 'finalizing',
+          attempt_id: 'relogin-finalizing',
+        })
+        .mockResolvedValue({
+          status: 'success',
+          attempt_id: 'relogin-finalizing',
+        });
+      const user = userEvent.setup();
+
+      await openCodexTab(user);
+      await user.click(screen.getByRole('button', { name: '重新登录' }));
+
+      expect(await screen.findByText(
+        '登录已完成，正在安全提交登录结果…',
+        {},
+        { timeout: 3000 },
+      )).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: '登录中…' })).toBeDisabled();
+
+      expect(await screen.findByText('登录成功', {}, { timeout: 5000 })).toBeInTheDocument();
+      expect(api.codexPoolReloginStatus).toHaveBeenCalledTimes(2);
     });
   });
 });

@@ -475,6 +475,7 @@ export type CodexLoginStatusName =
   | 'running'
   | 'awaiting_otp'
   | 'verifying_otp'
+  | 'finalizing'
   | 'success'
   | 'failed'
   | 'expired';

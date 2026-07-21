@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import signal
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -22,6 +23,20 @@ from backend.services.ws_broadcaster import WebSocketBroadcaster
 logger = logging.getLogger(__name__)
 
 
+class InstanceAlreadyRunningError(RuntimeError):
+    """A second turn attempted to claim an occupied instance slot."""
+
+
+@dataclass(frozen=True)
+class _OutputConsumerRecord:
+    """Identity of one output-bookkeeping generation for a reusable slot."""
+
+    process: asyncio.subprocess.Process
+    task: asyncio.Task
+    chat_initiated: bool
+    provider: str
+
+
 class InstanceManager:
     """Manages multiple Claude Code subprocess instances."""
 
@@ -31,7 +46,26 @@ class InstanceManager:
         self.parser = StreamParser()
         self.processes: dict[int, asyncio.subprocess.Process] = {}
         self._tasks: dict[int, asyncio.Task] = {}  # instance_id -> consumer task
+        # Keep process identity alongside the consumer: the instance id is a
+        # reusable slot, so a late waiter for generation A must never consume
+        # (or be poisoned by) generation B's bookkeeping failure.
+        self._consumer_records: dict[int, _OutputConsumerRecord] = {}
+        # Holding the process object in the key also prevents Python object-id
+        # reuse from ever mapping a very late failure onto a future process.
+        self._consumer_errors: dict[
+            tuple[int, asyncio.subprocess.Process], BaseException
+        ] = {}
         self._stopping: set[int] = set()  # instance_ids being intentionally stopped
+        # Serialize process admission and stop cleanup for each reusable worker
+        # slot.  API-level ``is_running`` checks are advisory; this lock is the
+        # authoritative guard against two concurrent launches or stop→run map
+        # replacement races on the same instance id.
+        self._instance_lifecycle_locks: dict[int, asyncio.Lock] = {}
+        # Monotonic admission generation per reusable slot. Two callers that
+        # both observed the same settling consumer may race for the next turn;
+        # exactly one may advance this token and the loser must return busy,
+        # never wait through the winner and execute the prompt afterwards.
+        self._instance_launch_generations: dict[int, int] = {}
         # instance_id -> provider credential home used for the current/recent
         # launch (CLAUDE_CONFIG_DIR for Claude, CODEX_HOME for Codex).  Retry
         # paths read this map to stay on the same account.
@@ -77,6 +111,16 @@ class InstanceManager:
         # launches only; running sessions finish on their current path).
         self._pty_backend = None
         self._pty_enabled = False
+        # ``claude_binary_override`` is currently injected by temporarily
+        # wrapping the shared backend's build_config method. Every PTY launch
+        # participates in this lock so an ordinary launch cannot observe
+        # another instance's container-specific binary.
+        self._pty_build_config_lock = asyncio.Lock()
+        # FullMirrorCCMBackend.on_exit waits on this barrier before writing a
+        # terminal state. PTY starts its consumer before InstanceManager can
+        # commit `running`; without ordering, a very short turn can write idle
+        # first and then be overwritten by the late running commit.
+        self._pty_launch_barriers: dict[int, asyncio.Event] = {}
         if settings.use_pty_mode:
             self.set_pty_mode(True)
 
@@ -189,7 +233,114 @@ class InstanceManager:
             self._pty_enabled = False
         return self._pty_enabled
 
-    async def launch(self, instance_id: int, prompt: str, task_id: int | None = None, cwd: str | None = None, model: str | None = None, resume_session_id: str | None = None, loop_iteration: int | None = None, git_env: dict | None = None, thinking_budget: int | None = None, effort_level: str | None = None, chat_initiated: bool = False, config_dir: str | None = None, provider: str = "claude", enable_workflows: bool = False, enabled_skills: dict | None = None, system_prompt_mode: str | None = None) -> int:
+    def _instance_lifecycle_lock(self, instance_id: int) -> asyncio.Lock:
+        lock = self._instance_lifecycle_locks.get(instance_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._instance_lifecycle_locks[instance_id] = lock
+        return lock
+
+    async def launch(
+        self,
+        instance_id: int,
+        prompt: str,
+        task_id: int | None = None,
+        cwd: str | None = None,
+        model: str | None = None,
+        resume_session_id: str | None = None,
+        loop_iteration: int | None = None,
+        git_env: dict | None = None,
+        thinking_budget: int | None = None,
+        effort_level: str | None = None,
+        chat_initiated: bool = False,
+        config_dir: str | None = None,
+        provider: str = "claude",
+        enable_workflows: bool = False,
+        enabled_skills: dict | None = None,
+        system_prompt_mode: str | None = None,
+    ) -> int:
+        """Atomically admit one turn into a reusable instance slot."""
+
+        provider = (provider or "claude").lower()
+        lifecycle_lock = self._instance_lifecycle_lock(instance_id)
+        current = asyncio.current_task()
+        observed_generation: int | None = None
+        while True:
+            async with lifecycle_lock:
+                generation = self._instance_launch_generations.get(instance_id, 0)
+                if observed_generation is None:
+                    observed_generation = generation
+                elif generation != observed_generation:
+                    raise InstanceAlreadyRunningError(
+                        f"Instance {instance_id} was claimed by another launch"
+                    )
+                process = self.processes.get(instance_id)
+                record = self._consumer_records.get(instance_id)
+                consumer = record.task if record is not None else self._tasks.get(instance_id)
+                if (
+                    process is not None
+                    and process.returncode is None
+                    and consumer is not current
+                ):
+                    raise InstanceAlreadyRunningError(
+                        f"Instance {instance_id} is already running"
+                    )
+                if consumer is None or consumer is current:
+                    self._instance_launch_generations[instance_id] = generation + 1
+                    return await self._launch_locked(
+                        instance_id=instance_id,
+                        prompt=prompt,
+                        task_id=task_id,
+                        cwd=cwd,
+                        model=model,
+                        resume_session_id=resume_session_id,
+                        loop_iteration=loop_iteration,
+                        git_env=git_env,
+                        thinking_budget=thinking_budget,
+                        effort_level=effort_level,
+                        chat_initiated=chat_initiated,
+                        config_dir=config_dir,
+                        provider=provider,
+                        enable_workflows=enable_workflows,
+                        enabled_skills=enabled_skills,
+                        system_prompt_mode=system_prompt_mode,
+                    )
+
+            # Never hold admission while waiting: a terminal consumer may
+            # legitimately self-launch a transient/account retry, which needs
+            # this same lock.  Re-enter and re-check all maps afterwards so an
+            # external contender cannot slip a second process into the slot.
+            if consumer is not None:
+                await self.wait_for_output_consumer(
+                    instance_id,
+                    provider=provider,
+                    timeout=None,
+                    # A bare legacy/test task has no process-generation
+                    # identity.  Passing the process here makes the waiter
+                    # deliberately ignore that task and spin forever.
+                    expected_process=(record.process if record is not None else None),
+                    preserve_error=True,
+                )
+
+    async def _launch_locked(
+        self,
+        instance_id: int,
+        prompt: str,
+        task_id: int | None = None,
+        cwd: str | None = None,
+        model: str | None = None,
+        resume_session_id: str | None = None,
+        loop_iteration: int | None = None,
+        git_env: dict | None = None,
+        thinking_budget: int | None = None,
+        effort_level: str | None = None,
+        chat_initiated: bool = False,
+        config_dir: str | None = None,
+        provider: str = "claude",
+        enable_workflows: bool = False,
+        enabled_skills: dict | None = None,
+        system_prompt_mode: str | None = None,
+    ) -> int:
         """Launch a Claude Code subprocess for the given instance.
 
         If resume_session_id is provided, uses --resume to continue the conversation.
@@ -478,36 +629,15 @@ class InstanceManager:
                 "config_dir": config_dir,
             }
 
-        # Update instance record
-        async with self.db_factory() as db:
-            await db.execute(
-                update(Instance)
-                .where(Instance.id == instance_id)
-                .values(
-                    pid=process.pid,
-                    status="running",
-                    current_task_id=task_id,
-                    started_at=datetime.utcnow(),
-                    last_heartbeat=datetime.utcnow(),
-                )
-            )
-            # Save cwd to task for session resumption
-            if task_id:
-                actual_cwd = cwd or os.getcwd()
-                await db.execute(
-                    update(Task)
-                    .where(Task.id == task_id)
-                    .values(last_cwd=actual_cwd)
-                )
-            await db.commit()
-
-        # Start consuming stdout
-        consumer = asyncio.create_task(
-            self._consume_output(instance_id, task_id, process, loop_iteration, chat_initiated, provider)
+        return await self._persist_and_track_launch(
+            instance_id=instance_id,
+            task_id=task_id,
+            process=process,
+            actual_cwd=cwd or os.getcwd(),
+            loop_iteration=loop_iteration,
+            chat_initiated=chat_initiated,
+            provider=provider,
         )
-        self._tasks[instance_id] = consumer
-
-        return process.pid
 
     def _ensure_codex_app_server_registry(self):
         """Return the lazy per-CODEX_HOME app-server registry."""
@@ -584,38 +714,173 @@ class InstanceManager:
                 "config_dir": config_dir,
             }
 
-        async with self.db_factory() as db:
-            await db.execute(
-                update(Instance)
-                .where(Instance.id == instance_id)
-                .values(
-                    pid=process.pid,
-                    status="running",
-                    current_task_id=task_id,
-                    started_at=datetime.utcnow(),
-                    last_heartbeat=datetime.utcnow(),
-                )
-            )
-            if task_id:
-                await db.execute(
-                    update(Task)
-                    .where(Task.id == task_id)
-                    .values(last_cwd=actual_cwd)
-                )
-            await db.commit()
+        return await self._persist_and_track_launch(
+            instance_id=instance_id,
+            task_id=task_id,
+            process=process,
+            actual_cwd=actual_cwd,
+            loop_iteration=loop_iteration,
+            chat_initiated=chat_initiated,
+            provider="codex",
+        )
 
-        consumer = asyncio.create_task(
-            self._consume_output(
-                instance_id,
-                task_id,
-                process,
-                loop_iteration,
-                chat_initiated,
-                "codex",
+    async def _persist_and_track_launch(
+        self,
+        *,
+        instance_id: int,
+        task_id: int | None,
+        process: asyncio.subprocess.Process,
+        actual_cwd: str,
+        loop_iteration: int | None,
+        chat_initiated: bool,
+        provider: str,
+    ) -> int:
+        """Commit launch metadata and install the consumer as one guarded step."""
+
+        consumer: asyncio.Task | None = None
+        try:
+            async with self.db_factory() as db:
+                await db.execute(
+                    update(Instance)
+                    .where(Instance.id == instance_id)
+                    .values(
+                        pid=process.pid,
+                        status="running",
+                        current_task_id=task_id,
+                        started_at=datetime.utcnow(),
+                        last_heartbeat=datetime.utcnow(),
+                    )
+                )
+                if task_id:
+                    await db.execute(
+                        update(Task)
+                        .where(Task.id == task_id)
+                        .values(last_cwd=actual_cwd)
+                    )
+                await db.commit()
+
+            # No await is allowed between task creation and map registration.
+            # Once this point succeeds every live process has a stdout owner.
+            consumer = asyncio.create_task(
+                self._consume_output(
+                    instance_id,
+                    task_id,
+                    process,
+                    loop_iteration,
+                    chat_initiated,
+                    provider,
+                )
             )
+            self._track_output_consumer(
+                instance_id,
+                process,
+                consumer,
+                chat_initiated=chat_initiated,
+                provider=provider,
+            )
+            return process.pid
+        except BaseException:
+            async def _cleanup_failed_launch() -> None:
+                if consumer is not None and not consumer.done():
+                    consumer.cancel()
+                    await asyncio.gather(consumer, return_exceptions=True)
+                if process.returncode is None:
+                    from backend.services.codex_app_server import CodexTurnProcess
+                    if (
+                        isinstance(process, CodexTurnProcess)
+                        and self._codex_app_server is not None
+                    ):
+                        await self._codex_app_server.abort_unclaimed_turn(
+                            self._config_dirs.get(instance_id),
+                            process,
+                            reason="CCM launch metadata commit failed",
+                        )
+                    else:
+                        try:
+                            process.kill()
+                        except (ProcessLookupError, RuntimeError):
+                            pass
+                        await process.wait()
+                if self.processes.get(instance_id) is process:
+                    self.processes.pop(instance_id, None)
+                    self._codex_exec_homes.pop(instance_id, None)
+                    self._launch_params.pop(instance_id, None)
+                try:
+                    async with self.db_factory() as db:
+                        await db.execute(
+                            update(Instance)
+                            .where(
+                                Instance.id == instance_id,
+                                Instance.pid == getattr(process, "pid", None),
+                            )
+                            .values(status="idle", pid=None, current_task_id=None)
+                        )
+                        await db.commit()
+                except Exception:
+                    logger.exception(
+                        "Failed to rollback metadata for aborted launch %s",
+                        instance_id,
+                    )
+
+            cleanup = asyncio.create_task(_cleanup_failed_launch())
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    continue
+            cleanup.result()
+            raise
+
+    def _track_output_consumer(
+        self,
+        instance_id: int,
+        process: asyncio.subprocess.Process,
+        consumer: asyncio.Task,
+        *,
+        chat_initiated: bool = False,
+        provider: str = "claude",
+    ) -> None:
+        """Register a consumer with identity-safe terminal cleanup.
+
+        Most cleanup happens inside ``_consume_output`` because it also owns
+        database and broadcast work.  This callback is the last-resort guard:
+        an unexpected exception in that bookkeeping must not leave a finished
+        task in ``_tasks`` that every future Codex launch re-awaits forever.
+        """
+
+        record = _OutputConsumerRecord(
+            process,
+            consumer,
+            chat_initiated,
+            (provider or "claude").lower(),
         )
         self._tasks[instance_id] = consumer
-        return process.pid
+        self._consumer_records[instance_id] = record
+
+        def _consumer_done(done: asyncio.Task) -> None:
+            try:
+                error = done.exception()
+            except asyncio.CancelledError:
+                error = None
+            if error is not None:
+                logger.error(
+                    "Output consumer crashed for instance %s",
+                    instance_id,
+                    exc_info=(type(error), error, error.__traceback__),
+                )
+
+            if self._consumer_records.get(instance_id) is record:
+                if error is not None and not record.chat_initiated:
+                    self._consumer_errors[(instance_id, process)] = error
+                self._consumer_records.pop(instance_id, None)
+                if self._tasks.get(instance_id) is done:
+                    self._tasks.pop(instance_id, None)
+                if self.processes.get(instance_id) is process and process.returncode is not None:
+                    self.processes.pop(instance_id, None)
+                    self._codex_exec_homes.pop(instance_id, None)
+                    self._launch_params.pop(instance_id, None)
+
+        consumer.add_done_callback(_consumer_done)
 
     async def shutdown_codex_app_server(self) -> None:
         """Stop every persistent Codex account transport at app shutdown."""
@@ -801,71 +1066,185 @@ class InstanceManager:
                 "pty_cold_start": True,
             })
 
-        # If container wrapper exists, monkey-patch build_config to use it
-        _original_build_config = None
-        if claude_binary_override:
-            _original_build_config = self._pty_backend.build_config
-            _wrapper = claude_binary_override
-            def _patched_build_config(**kw):
-                cfg = _original_build_config(**kw)
-                cfg.claude_binary = _wrapper
-                return cfg
-            self._pty_backend.build_config = _patched_build_config
-
+        metadata_barrier = asyncio.Event()
+        self._pty_launch_barriers[instance_id] = metadata_barrier
+        previous_process = self.processes.get(instance_id)
+        previous_consumer = self._tasks.get(instance_id)
+        process = None
+        consumer = None
+        session_id = None
         try:
-            session_id = await self._pty_backend.launch_for_ccm(
-                instance_id=instance_id,
-                prompt=prompt,
-                task_id=task_id,
-                cwd=cwd,
-                model=model if model and model != "default" else None,
-                resume_session_id=resume_session_id,
-                loop_iteration=loop_iteration,
-                git_env=git_env,
-                thinking_budget=thinking_budget,
-                effort_level=effort_level,
-                chat_initiated=chat_initiated,
-                config_dir=config_dir,
-                enable_workflows=enable_workflows,
-                enabled_skills=enabled_skills,
-                mcp_config_path=mcp_config_path,
-            )
-        finally:
-            if _original_build_config:
-                self._pty_backend.build_config = _original_build_config
+            # build_config is shared by every PTY instance. Hold one global
+            # admission lock across patch -> config construction -> restore so
+            # a container wrapper can never leak into another launch.
+            async with self._pty_build_config_lock:
+                original_build_config = None
+                if claude_binary_override:
+                    original_build_config = self._pty_backend.build_config
+                    wrapper = claude_binary_override
 
-        if task_id and session_id:
+                    def _patched_build_config(**kw):
+                        cfg = original_build_config(**kw)
+                        cfg.claude_binary = wrapper
+                        return cfg
+
+                    self._pty_backend.build_config = _patched_build_config
+                try:
+                    session_id = await self._pty_backend.launch_for_ccm(
+                        instance_id=instance_id,
+                        prompt=prompt,
+                        task_id=task_id,
+                        cwd=cwd,
+                        model=model if model and model != "default" else None,
+                        resume_session_id=resume_session_id,
+                        loop_iteration=loop_iteration,
+                        git_env=git_env,
+                        thinking_budget=thinking_budget,
+                        effort_level=effort_level,
+                        chat_initiated=chat_initiated,
+                        config_dir=config_dir,
+                        enable_workflows=enable_workflows,
+                        enabled_skills=enabled_skills,
+                        mcp_config_path=mcp_config_path,
+                    )
+                finally:
+                    if original_build_config is not None:
+                        self._pty_backend.build_config = original_build_config
+
+            process = self.processes.get(instance_id)
+            consumer = self._tasks.get(instance_id)
+            if consumer is not None and process is not None:
+                self._track_output_consumer(
+                    instance_id,
+                    process,
+                    consumer,
+                    chat_initiated=chat_initiated,
+                    provider="claude",
+                )
+            pid = getattr(process, "pid", 0) or 0
+
+            # Session affinity and instance ownership become visible in one
+            # commit. A failure/cancellation below tears down the exact PTY
+            # generation before the per-instance lifecycle lock is released.
             async with self.db_factory() as db:
+                if task_id and session_id:
+                    await db.execute(
+                        update(Task)
+                        .where(Task.id == task_id)
+                        .values(session_id=session_id)
+                    )
                 await db.execute(
-                    update(Task).where(Task.id == task_id).values(session_id=session_id)
+                    update(Instance)
+                    .where(Instance.id == instance_id)
+                    .values(
+                        pid=pid,
+                        status="running",
+                        current_task_id=task_id,
+                        started_at=datetime.utcnow(),
+                        last_heartbeat=datetime.utcnow(),
+                    )
                 )
+                if task_id:
+                    actual_cwd = cwd or os.getcwd()
+                    await db.execute(
+                        update(Task)
+                        .where(Task.id == task_id)
+                        .values(last_cwd=actual_cwd)
+                    )
                 await db.commit()
-
-        process = self.processes.get(instance_id)
-        pid = getattr(process, "pid", 0) or 0
-
-        async with self.db_factory() as db:
-            await db.execute(
-                update(Instance)
-                .where(Instance.id == instance_id)
-                .values(
-                    pid=pid,
-                    status="running",
-                    current_task_id=task_id,
-                    started_at=datetime.utcnow(),
-                    last_heartbeat=datetime.utcnow(),
-                )
+            metadata_barrier.set()
+            if self._pty_launch_barriers.get(instance_id) is metadata_barrier:
+                self._pty_launch_barriers.pop(instance_id, None)
+            return pid
+        except BaseException:
+            # Unblock an on_exit that may already be waiting. It will commit
+            # its terminal state before/alongside the explicit rollback below,
+            # so `running` can never become the final write.
+            metadata_barrier.set()
+            if self._pty_launch_barriers.get(instance_id) is metadata_barrier:
+                self._pty_launch_barriers.pop(instance_id, None)
+            process = self.processes.get(instance_id)
+            consumer = self._tasks.get(instance_id)
+            owns_new_process = (
+                process is not None and process is not previous_process
             )
-            if task_id:
-                actual_cwd = cwd or os.getcwd()
-                await db.execute(
-                    update(Task)
-                    .where(Task.id == task_id)
-                    .values(last_cwd=actual_cwd)
-                )
-            await db.commit()
+            owns_new_consumer = (
+                consumer is not None and consumer is not previous_consumer
+            )
 
-        return pid
+            async def _cleanup_failed_pty_launch() -> None:
+                if owns_new_process or owns_new_consumer:
+                    stop_pty = getattr(self._pty_backend, "stop", None)
+                    if stop_pty is not None:
+                        try:
+                            await stop_pty(instance_id)
+                        except Exception:
+                            logger.exception(
+                                "Failed to stop aborted PTY launch for instance %s",
+                                instance_id,
+                            )
+                    if consumer is not None and not consumer.done():
+                        consumer.cancel()
+                        await asyncio.gather(consumer, return_exceptions=True)
+                    if process is not None and process.returncode is None:
+                        try:
+                            process.kill()
+                        except (ProcessLookupError, RuntimeError):
+                            pass
+                        try:
+                            await asyncio.wait_for(process.wait(), timeout=10)
+                        except asyncio.TimeoutError:
+                            logger.error(
+                                "Aborted PTY process did not terminate for instance %s",
+                                instance_id,
+                            )
+
+                    if self.processes.get(instance_id) is process:
+                        self.processes.pop(instance_id, None)
+                    if self._tasks.get(instance_id) is consumer:
+                        self._tasks.pop(instance_id, None)
+                    record = self._consumer_records.get(instance_id)
+                    if record is not None and record.task is consumer:
+                        self._consumer_records.pop(instance_id, None)
+                    self._launch_params.pop(instance_id, None)
+
+                # Commit outcome is indeterminate under cancellation, and an
+                # ultra-short consumer may already have removed its maps. The
+                # slot is still lifecycle-locked, so always reconcile DB idle
+                # rather than conditioning rollback on in-memory ownership.
+                try:
+                    async with self.db_factory() as db:
+                        await db.execute(
+                            update(Instance)
+                            .where(Instance.id == instance_id)
+                            .values(
+                                status="idle",
+                                pid=None,
+                                current_task_id=None,
+                            )
+                        )
+                        await db.commit()
+                except Exception:
+                    logger.exception(
+                        "Failed to rollback aborted PTY launch metadata for instance %s",
+                        instance_id,
+                    )
+
+            cleanup = asyncio.create_task(_cleanup_failed_pty_launch())
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    continue
+            cleanup.result()
+            raise
+
+    async def wait_for_pty_launch_metadata(self, instance_id: int) -> None:
+        """Order PTY terminal cleanup after the initial running commit."""
+
+        barrier = self._pty_launch_barriers.get(instance_id)
+        if barrier is not None:
+            await barrier.wait()
 
     def _build_command(
         self,
@@ -967,7 +1346,91 @@ class InstanceManager:
 
         return configured or "codex"
 
-    async def _consume_output(self, instance_id: int, task_id: int | None, process: asyncio.subprocess.Process, loop_iteration: int | None = None, chat_initiated: bool = False, provider: str = "claude"):
+    async def _consume_output(
+        self,
+        instance_id: int,
+        task_id: int | None,
+        process: asyncio.subprocess.Process,
+        loop_iteration: int | None = None,
+        chat_initiated: bool = False,
+        provider: str = "claude",
+    ) -> None:
+        """Run the consumer with a terminal, identity-safe recovery boundary."""
+
+        try:
+            await self._consume_output_impl(
+                instance_id,
+                task_id,
+                process,
+                loop_iteration,
+                chat_initiated,
+                provider,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception(
+                "Output consumer bookkeeping failed for instance %s task %s",
+                instance_id,
+                task_id,
+            )
+            consumer = asyncio.current_task()
+            owns_turn = (
+                self.processes.get(instance_id) is process
+                and self._tasks.get(instance_id) is consumer
+            )
+            if not owns_turn:
+                return
+            if process.returncode is None:
+                try:
+                    process.kill()
+                    await process.wait()
+                except Exception:
+                    logger.exception(
+                        "Could not terminate crashed consumer process for instance %s",
+                        instance_id,
+                    )
+            # A failed post-process hook must not leave the DB advertising a
+            # running worker after the process is terminal.  Conditions on the
+            # task status preserve a result already committed before a later
+            # broadcast/cleanup failure.
+            try:
+                async with self.db_factory() as db:
+                    recovery_status = (
+                        "idle" if process.returncode in (0, -2, 130) else "error"
+                    )
+                    await db.execute(
+                        update(Instance)
+                        .where(Instance.id == instance_id)
+                        .values(
+                            status=recovery_status,
+                            pid=None,
+                            current_task_id=None,
+                        )
+                    )
+                    if task_id and chat_initiated:
+                        await db.execute(
+                            update(Task)
+                            .where(
+                                Task.id == task_id,
+                                Task.status.in_(["executing", "in_progress"]),
+                            )
+                            .values(
+                                status="failed",
+                                error_message=(
+                                    f"Output bookkeeping failed: {exc}"
+                                )[:500],
+                            )
+                        )
+                    await db.commit()
+            except Exception:
+                logger.exception(
+                    "Failed to persist consumer recovery for instance %s",
+                    instance_id,
+                )
+            raise
+
+    async def _consume_output_impl(self, instance_id: int, task_id: int | None, process: asyncio.subprocess.Process, loop_iteration: int | None = None, chat_initiated: bool = False, provider: str = "claude"):
         """Read NDJSON lines from stdout, parse, store, and broadcast.
 
         This method MUST keep running until the process closes stdout (EOF).
@@ -2667,18 +3130,99 @@ class InstanceManager:
         return bool(ok)
 
     async def stop(self, instance_id: int) -> bool:
+        """Cancellation-safe stop of one reusable worker slot."""
+
+        operation = asyncio.create_task(self._stop_serialized(instance_id))
+        cancellation: asyncio.CancelledError | None = None
+        while not operation.done():
+            try:
+                await asyncio.shield(operation)
+            except asyncio.CancelledError as exc:
+                # A disconnected API caller or shutdown cancellation must not
+                # abandon a signalled process while it is still mapped. Delay
+                # propagation until exact process/consumer cleanup completes.
+                cancellation = exc
+        result = operation.result()
+        if cancellation is not None:
+            raise cancellation
+        return result
+
+    async def _stop_serialized(self, instance_id: int) -> bool:
+        """Serialize stop against launch without cancelling terminal bookkeeping."""
+
+        lifecycle_lock = self._instance_lifecycle_lock(instance_id)
+        settled_terminal_consumer = False
+        force_cancel_consumer = False
+        try:
+            while True:
+                async with lifecycle_lock:
+                    process = self.processes.get(instance_id)
+                    record = self._consumer_records.get(instance_id)
+                    task = (
+                        record.task
+                        if record is not None
+                        else self._tasks.get(instance_id)
+                    )
+                    record_process = record.process if record is not None else process
+                    process_live = process is not None and process.returncode is None
+                    consumer_live = task is not None and not task.done()
+                    terminal_consumer = (
+                        consumer_live
+                        and not process_live
+                        and (
+                            record_process is None
+                            or record_process.returncode is not None
+                        )
+                    )
+                    if terminal_consumer and not force_cancel_consumer:
+                        expected_process = record_process
+                        provider = record.provider if record is not None else "claude"
+                    else:
+                        stopped = await self._stop_locked(instance_id)
+                        return stopped or settled_terminal_consumer
+
+                # The model process has already ended. In particular, a Codex
+                # consumer may now be migrating its rollout, rebinding the
+                # app-server owner, and persisting task affinity. Await it
+                # outside the lifecycle lock so a consumer-driven retry can
+                # acquire the lock; the next loop then stops that replacement.
+                try:
+                    await self.wait_for_output_consumer(
+                        instance_id,
+                        provider=provider,
+                        timeout=None if provider == "codex" else 30,
+                        expected_process=expected_process,
+                        preserve_error=True,
+                    )
+                except asyncio.TimeoutError:
+                    force_cancel_consumer = True
+                except Exception:
+                    logger.exception(
+                        "Terminal output consumer failed while stopping instance %s",
+                        instance_id,
+                    )
+                settled_terminal_consumer = True
+        finally:
+            self._stopping.discard(instance_id)
+
+    async def _stop_locked(self, instance_id: int) -> bool:
         """Stop a running Claude Code instance via SIGINT (interrupt).
 
         Sends SIGINT first so Claude can gracefully save session state,
         then falls back to SIGTERM and SIGKILL if needed.
         """
         process = self.processes.get(instance_id)
-        if not process or process.returncode is not None:
+        record = self._consumer_records.get(instance_id)
+        task = record.task if record is not None else self._tasks.get(instance_id)
+        process_live = process is not None and process.returncode is None
+        consumer_live = task is not None and not task.done()
+        if not process_live and not consumer_live:
             return False
 
         self._stopping.add(instance_id)
         pty_managed = (
-            self._pty_backend is not None
+            process_live
+            and self._pty_backend is not None
             and instance_id in getattr(self._pty_backend, "_sessions", {})
         )
         if pty_managed:
@@ -2690,7 +3234,7 @@ class InstanceManager:
             except asyncio.TimeoutError:
                 process.kill()
                 await process.wait()
-        else:
+        elif process_live:
             import signal
             process.send_signal(signal.SIGINT)
             try:
@@ -2704,9 +3248,13 @@ class InstanceManager:
                     await process.wait()
 
         # Cancel consumer task
-        task = self._tasks.get(instance_id)
         if task and not task.done():
             task.cancel()
+        if task:
+            # The consumer's stopping branch still drains process/stderr state.
+            # Reap that exact task before the lifecycle lock can admit a new
+            # process under the same instance id.
+            await asyncio.gather(task, return_exceptions=True)
 
         async with self.db_factory() as db:
             inst = await db.get(Instance, instance_id)
@@ -2727,16 +3275,21 @@ class InstanceManager:
         if task_id:
             await self.broadcaster.broadcast(f"task:{task_id}", {
                 "event_type": "process_exit",
-                "exit_code": process.returncode,
+                "exit_code": process.returncode if process is not None else None,
                 "stderr": None,
             })
 
-        self.processes.pop(instance_id, None)
-        self._codex_exec_homes.pop(instance_id, None)
+        if process is not None and self.processes.get(instance_id) is process:
+            self.processes.pop(instance_id, None)
+            self._codex_exec_homes.pop(instance_id, None)
+        if task is not None and self._tasks.get(instance_id) is task:
+            self._tasks.pop(instance_id, None)
+        record = self._consumer_records.get(instance_id)
+        if record is not None and record.task is task:
+            self._consumer_records.pop(instance_id, None)
         self._transient_attempts.pop(instance_id, None)
         self._pty_rate_limit_seen.discard(instance_id)
         self._pty_rate_limit_info.pop(instance_id, None)
-        self._stopping.discard(instance_id)
         return True
 
     async def wait_for_output_consumer(
@@ -2745,6 +3298,8 @@ class InstanceManager:
         *,
         provider: str = "claude",
         timeout: float | None = 30,
+        expected_process: asyncio.subprocess.Process | None = None,
+        preserve_error: bool = False,
     ) -> None:
         """Wait until an instance's output bookkeeping is fully settled.
 
@@ -2763,34 +3318,125 @@ class InstanceManager:
             deadline = asyncio.get_running_loop().time() + timeout
 
         while True:
-            consumer = self._tasks.get(instance_id)
+            expected_key = (
+                (instance_id, expected_process)
+                if expected_process is not None
+                else None
+            )
+            if expected_key is not None:
+                stored_error = (
+                    self._consumer_errors.get(expected_key)
+                    if preserve_error
+                    else self._consumer_errors.pop(expected_key, None)
+                )
+                if stored_error is not None:
+                    raise RuntimeError(
+                        f"Output consumer failed for instance {instance_id}"
+                    ) from stored_error
+
+            record = self._consumer_records.get(instance_id)
+            if record is not None:
+                if (
+                    expected_process is not None
+                    and record.process is not expected_process
+                ):
+                    # The expected generation has already settled and a newer
+                    # turn owns this reusable instance slot.  Never await or
+                    # consume errors from that newer generation.
+                    return
+                consumer = record.task
+                process = record.process
+            else:
+                # Compatibility for tests/legacy integrations that install a
+                # bare task directly. Exact-generation waiting deliberately
+                # does not attach such a task to an unrelated process.
+                if expected_process is not None:
+                    return
+                consumer = self._tasks.get(instance_id)
+                process = self.processes.get(instance_id)
             if consumer is None or consumer is current:
                 return
-            if consumer.done():
-                # Retrieve any exception instead of leaving a finished task
-                # unobserved, while preserving its normal propagation.
-                await asyncio.shield(consumer)
-            elif provider == "codex":
-                await asyncio.shield(consumer)
-            else:
-                remaining = None
-                if deadline is not None:
-                    remaining = deadline - asyncio.get_running_loop().time()
-                    if remaining <= 0:
-                        raise asyncio.TimeoutError
-                await asyncio.wait_for(
-                    asyncio.shield(consumer), timeout=remaining
+            try:
+                if consumer.done():
+                    # Retrieve any exception instead of leaving a finished task
+                    # unobserved, while preserving its normal propagation.
+                    await asyncio.shield(consumer)
+                elif provider == "codex":
+                    await asyncio.shield(consumer)
+                else:
+                    remaining = None
+                    if deadline is not None:
+                        remaining = deadline - asyncio.get_running_loop().time()
+                        if remaining <= 0:
+                            raise asyncio.TimeoutError
+                    await asyncio.wait_for(
+                        asyncio.shield(consumer), timeout=remaining
+                    )
+            except Exception as exc:
+                if isinstance(exc, asyncio.TimeoutError) and not consumer.done():
+                    # wait_for timed out; the shielded consumer still owns its
+                    # generation and must continue draining output.
+                    raise
+
+                # If the waiter beats the done callback, clear the exact stale
+                # generation here. A generic admission waiter must preserve a
+                # managed-turn failure for its lifecycle owner; chat turns have
+                # no separate owner and already persist their own failed state.
+                failure_key = (
+                    (instance_id, process) if process is not None else None
                 )
+                if (
+                    failure_key is not None
+                    and record is not None
+                    and not record.chat_initiated
+                    and (expected_process is None or preserve_error)
+                ):
+                    self._consumer_errors.setdefault(failure_key, exc)
+                elif failure_key is not None:
+                    self._consumer_errors.pop(failure_key, None)
+                if self._tasks.get(instance_id) is consumer:
+                    self._tasks.pop(instance_id, None)
+                if record is not None and self._consumer_records.get(instance_id) is record:
+                    self._consumer_records.pop(instance_id, None)
+                if (
+                    process is not None
+                    and self.processes.get(instance_id) is process
+                    and process.returncode is not None
+                ):
+                    self.processes.pop(instance_id, None)
+                    self._codex_exec_homes.pop(instance_id, None)
+                    self._launch_params.pop(instance_id, None)
+                raise
 
             # A chat consumer may launch its own replacement on a transient or
             # account-limit retry.  Codex callers must wait for that replacement
             # too before considering the instance reusable.
-            if provider != "codex" or self._tasks.get(instance_id) is consumer:
+            if record is not None and self._consumer_records.get(instance_id) is record:
+                self._consumer_records.pop(instance_id, None)
+                if self._tasks.get(instance_id) is consumer:
+                    self._tasks.pop(instance_id, None)
+                if (
+                    process is not None
+                    and self.processes.get(instance_id) is process
+                    and process.returncode is not None
+                ):
+                    self.processes.pop(instance_id, None)
+                    self._codex_exec_homes.pop(instance_id, None)
+                    self._launch_params.pop(instance_id, None)
+
+            replacement = self._consumer_records.get(instance_id)
+            if (
+                expected_process is not None
+                or provider != "codex"
+                or replacement is None
+                or replacement.task is consumer
+            ):
                 return
 
     def is_running(self, instance_id: int) -> bool:
         process = self.processes.get(instance_id)
-        consumer = self._tasks.get(instance_id)
+        record = self._consumer_records.get(instance_id)
+        consumer = record.task if record is not None else self._tasks.get(instance_id)
         return (
             (process is not None and process.returncode is None)
             or (consumer is not None and not consumer.done())

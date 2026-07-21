@@ -40,6 +40,60 @@ async def test_create_task_wakes_dispatcher_after_commit(client):
 
 
 @pytest.mark.asyncio
+async def test_migration_import_is_created_cancelled_without_waking_dispatcher(
+    client, session_factory,
+):
+    """Worker imports have no observable pending state to dispatch."""
+    from backend.main import dispatcher
+    from backend.models.task import Task
+
+    with patch.object(dispatcher, "wake") as wake:
+        resp = await client.post("/api/tasks/migration-import", json={
+            "id": 7001,
+            "title": "Migrated",
+            "description": "Resume an existing session",
+            "session_id": "session-1",
+            "last_cwd": "/workspace/repo",
+        })
+
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["status"] == "cancelled"
+    wake.assert_not_called()
+    async with session_factory() as db:
+        task = await db.get(Task, 7001)
+    assert task.status == "cancelled"
+    assert task.session_id == "session-1"
+
+
+@pytest.mark.asyncio
+async def test_migration_import_refuses_active_existing_task(client, session_factory):
+    """An import must never cancel a same-ID task which is already running."""
+    from backend.models.task import Task
+
+    async with session_factory() as db:
+        task = Task(
+            id=7002,
+            title="Already running",
+            description="d",
+            status="in_progress",
+        )
+        db.add(task)
+        await db.commit()
+
+    resp = await client.post("/api/tasks/migration-import", json={
+        "id": 7002,
+        "title": "Migrated",
+        "description": "d",
+    })
+
+    assert resp.status_code == 409
+    async with session_factory() as db:
+        task = await db.get(Task, 7002)
+    assert task.status == "in_progress"
+    assert task.title == "Already running"
+
+
+@pytest.mark.asyncio
 async def test_create_task_with_project_id(client):
     resp = await client.post("/api/tasks", json={
         "title": "Test",

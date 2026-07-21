@@ -40,9 +40,15 @@ class RalphLoop:
         logger.info(f"Ralph loop started for instance {instance_id}")
 
     async def stop(self, instance_id: int):
-        task = self._loops.pop(instance_id, None)
+        task = self._loops.get(instance_id)
         if task and not task.done():
             task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        if self._loops.get(instance_id) is task:
+            self._loops.pop(instance_id, None)
         logger.info(f"Ralph loop stopped for instance {instance_id}")
 
     def is_running(self, instance_id: int) -> bool:
@@ -117,6 +123,7 @@ class RalphLoop:
                 instance_id,
                 provider=task.provider,
                 timeout=30,
+                expected_process=process,
             )
         except asyncio.TimeoutError:
             logger.warning(
@@ -175,6 +182,86 @@ class RalphLoop:
         })
         return delay
 
+    async def _release_cancelled_claim(
+        self,
+        instance_id: int,
+        task: Task | None,
+    ) -> None:
+        """Stop a Ralph-owned turn and return its claim to the pending queue.
+
+        Cancelling only the loop used to strand the task in ``in_progress``;
+        cancelling while a subprocess was active also left that process running
+        without a lifecycle owner.  Ownership is checked both before stopping
+        the process and in the final compare-and-swap defer, so a concurrent
+        user cancellation or terminal transition always wins.
+        """
+
+        if task is None:
+            return
+
+        task_id = task.id
+        provider = (task.provider or "claude").lower()
+        process_owned = False
+        try:
+            async with self.db_factory() as db:
+                current = await db.get(Task, task_id)
+                instance = await db.get(Instance, instance_id)
+                if (
+                    current is None
+                    or current.instance_id != instance_id
+                    or current.status not in ("in_progress", "executing")
+                ):
+                    return
+                provider = (current.provider or "claude").lower()
+                process_owned = bool(
+                    instance and instance.current_task_id == task_id
+                )
+
+            owned_process = self.instance_manager.processes.get(instance_id)
+            if process_owned and self.instance_manager.is_running(instance_id):
+                await self.instance_manager.stop(instance_id)
+            if process_owned:
+                await self.instance_manager.wait_for_output_consumer(
+                    instance_id,
+                    provider=provider,
+                    timeout=30,
+                    expected_process=owned_process,
+                )
+        except Exception:
+            # The status CAS below is still required even when process cleanup
+            # reports an error; leaving an unowned in_progress row wedges it
+            # forever. InstanceManager retains its own process/consumer guards.
+            logger.exception(
+                "Failed to stop Ralph-owned process for task %s on instance %s",
+                task_id,
+                instance_id,
+            )
+
+        try:
+            async with self.db_factory() as db:
+                queue = TaskQueue(db)
+                released = await queue.defer(
+                    task_id,
+                    "Ralph loop stopped; task returned to the queue",
+                    instance_id=instance_id,
+                )
+        except Exception:
+            logger.exception(
+                "Failed to release cancelled Ralph claim for task %s",
+                task_id,
+            )
+            return
+
+        if released:
+            await self.broadcaster.broadcast("tasks", {
+                "event": "status_change",
+                "task_id": task_id,
+                "old_status": "in_progress",
+                "new_status": "pending",
+                "instance_id": instance_id,
+                "reason": "ralph_stopped",
+            })
+
     async def _loop(self, instance_id: int):
         logger.info(f"Ralph loop running for instance {instance_id}")
         while True:
@@ -183,7 +270,7 @@ class RalphLoop:
                 # Dequeue next task
                 async with self.db_factory() as db:
                     queue = TaskQueue(db)
-                    task = await queue.dequeue()
+                    task = await queue.dequeue(instance_id=instance_id)
 
                 if not task:
                     await asyncio.sleep(5)
@@ -201,14 +288,6 @@ class RalphLoop:
                 })
 
                 cwd = task.target_repo or "."
-
-                async with self.db_factory() as db:
-                    await db.execute(
-                        update(Task)
-                        .where(Task.id == task.id)
-                        .values(instance_id=instance_id)
-                    )
-                    await db.commit()
 
                 # Plan mode handling
                 if task.mode == "plan" and not task.plan_approved:
@@ -297,7 +376,20 @@ class RalphLoop:
 
             except asyncio.CancelledError:
                 logger.info(f"Ralph loop cancelled for instance {instance_id}")
-                break
+                # Once dequeue succeeds, cancellation must either reconcile the
+                # active turn or atomically return the claim.  Await cleanup
+                # before allowing stop() to report success. Repeated caller
+                # cancellation must not interrupt this ownership handoff.
+                cleanup = asyncio.create_task(
+                    self._release_cancelled_claim(instance_id, task)
+                )
+                while not cleanup.done():
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError:
+                        continue
+                cleanup.result()
+                raise
             except Exception as e:
                 from backend.services.codex_app_server import (
                     CodexAppServerBusyError,

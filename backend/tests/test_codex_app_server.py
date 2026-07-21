@@ -115,6 +115,31 @@ async def test_steer_turn_without_active_context_does_not_send_rpc():
 
 
 @pytest.mark.asyncio
+async def test_request_cancelled_during_write_drops_pending_future():
+    server = CodexAppServer("codex")
+    server._process = SimpleNamespace(
+        pid=4321,
+        returncode=None,
+        stdin=object(),
+    )
+    write_entered = asyncio.Event()
+
+    async def blocked_write(_message):
+        write_entered.set()
+        await asyncio.Event().wait()
+
+    server._write = AsyncMock(side_effect=blocked_write)
+    request = asyncio.create_task(server._request("turn/start", {}))
+    await write_entered.wait()
+    assert len(server._pending) == 1
+
+    request.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await request
+    assert server._pending == {}
+
+
+@pytest.mark.asyncio
 async def test_steer_turn_protocol_rejection_is_a_normal_false_result():
     server = CodexAppServer("codex")
     server._process = SimpleNamespace(pid=4321, returncode=None)
@@ -399,6 +424,218 @@ def reset_registry_fake_servers():
     _RegistryFakeServer.instances = []
     yield
     _RegistryFakeServer.instances = []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shutdown_fails", [False, True])
+async def test_cancelled_turn_with_unconfirmed_interrupt_escalates_transport(
+    tmp_path,
+    shutdown_fails,
+):
+    """A failed interrupt cannot reopen a home onto untracked model work."""
+
+    turn_start_entered = asyncio.Event()
+    release_turn_start = asyncio.Event()
+    home = normalize_codex_home(tmp_path / "interrupt-failure")
+    thread_id = "thread-interrupt-failure"
+    server = CodexAppServer("codex", codex_home=home)
+    server._process = SimpleNamespace(pid=4321, returncode=None)
+    server.ensure_started = AsyncMock()
+
+    async def request(method, _params):
+        if method == "thread/resume":
+            return {"thread": {"id": thread_id}}
+        if method == "turn/start":
+            turn_start_entered.set()
+            await release_turn_start.wait()
+            return {"turn": {"id": "turn-interrupt-failure"}}
+        if method == "turn/interrupt":
+            raise CodexAppServerError("interrupt RPC failed")
+        raise AssertionError(f"unexpected request: {method}")
+
+    server._request = AsyncMock(side_effect=request)
+    if shutdown_fails:
+        server.shutdown = AsyncMock(side_effect=RuntimeError("shutdown failed"))
+    else:
+        server.shutdown = AsyncMock()
+
+    registry = CodexAppServerRegistry("codex")
+    registry._servers[home] = server
+    start = asyncio.create_task(registry.start_turn(
+        codex_home=home,
+        prompt="continue",
+        cwd="/tmp",
+        model=None,
+        effort=None,
+        resume_session_id=thread_id,
+        git_env=None,
+        task_id=1,
+    ))
+    await turn_start_entered.wait()
+    start.cancel()
+    await asyncio.sleep(0)
+    release_turn_start.set()
+
+    if shutdown_fails:
+        with pytest.raises(RuntimeError, match="shutdown failed"):
+            await start
+        assert home in registry._draining
+        assert registry._servers[home] is server
+    else:
+        with pytest.raises(asyncio.CancelledError):
+            await start
+        assert home not in registry._draining
+        assert home not in registry._servers
+
+    server.shutdown.assert_awaited_once()
+    assert home not in registry._starting
+    assert thread_id not in registry._thread_owners
+    assert server._contexts_by_thread == {}
+    assert server._contexts_by_turn == {}
+
+
+@pytest.mark.asyncio
+async def test_turn_start_timeout_shuts_transport_to_avoid_untracked_work(
+    tmp_path,
+):
+    home = normalize_codex_home(tmp_path / "turn-timeout")
+    thread_id = "thread-timeout"
+    server = CodexAppServer("codex", codex_home=home)
+    server._process = SimpleNamespace(pid=4321, returncode=None)
+    server.ensure_started = AsyncMock()
+    server._request = AsyncMock(side_effect=[
+        {"thread": {"id": thread_id}},
+        asyncio.TimeoutError(),
+    ])
+    server.shutdown = AsyncMock()
+
+    registry = CodexAppServerRegistry("codex")
+    registry._servers[home] = server
+
+    with pytest.raises(
+        CodexAppServerError,
+        match="turn/start timed out with unknown server state",
+    ):
+        await registry.start_turn(
+            codex_home=home,
+            prompt="continue",
+            cwd="/tmp",
+            model=None,
+            effort=None,
+            resume_session_id=thread_id,
+            git_env=None,
+            task_id=1,
+        )
+
+    server.shutdown.assert_awaited_once()
+    assert home not in registry._servers
+    assert home not in registry._draining
+    assert home not in registry._starting
+    assert thread_id not in registry._thread_owners
+    assert server._contexts_by_thread == {}
+
+
+@pytest.mark.asyncio
+async def test_registry_cancel_while_final_admission_lock_contended_cleans_once(
+    tmp_path,
+):
+    start_entered = asyncio.Event()
+    release_start = asyncio.Event()
+
+    class LockContentionServer(_RegistryFakeServer):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.process = None
+            self.abandoned = 0
+
+        async def start_turn(self, **kwargs):
+            start_entered.set()
+            await release_start.wait()
+
+            async def interrupt():
+                return None
+
+            self.process = CodexTurnProcess(99, interrupt)
+            thread = kwargs["resume_session_id"]
+            self.active_threads.add(thread)
+            return self.process, thread
+
+        async def abandon_turn(self, process, reason):
+            self.abandoned += 1
+            self.active_threads.clear()
+            process.finish(130, reason)
+            return True
+
+    registry = CodexAppServerRegistry("codex")
+    home = normalize_codex_home(tmp_path / "lock-contention")
+    thread_id = "thread-lock-contention"
+    server = LockContentionServer("codex", codex_home=home)
+    registry._servers[home] = server
+
+    start = asyncio.create_task(registry.start_turn(
+        codex_home=home,
+        resume_session_id=thread_id,
+        task_id=2,
+    ))
+    await start_entered.wait()
+    await registry._lock.acquire()
+    try:
+        release_start.set()
+        await asyncio.sleep(0)
+        assert not start.done()
+        start.cancel()
+        await asyncio.sleep(0)
+        assert home in registry._starting
+    finally:
+        registry._lock.release()
+
+    with pytest.raises(asyncio.CancelledError):
+        await start
+
+    assert server.abandoned == 1
+    assert server.process.returncode == 130
+    assert home not in registry._starting
+    assert thread_id not in registry._thread_owners
+    assert home not in registry._draining
+    assert registry._servers[home] is server
+
+
+@pytest.mark.asyncio
+async def test_registry_rejects_concurrent_resume_of_same_thread(tmp_path):
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingResumeServer(_RegistryFakeServer):
+        async def start_turn(self, **kwargs):
+            entered.set()
+            await release.wait()
+            return await super().start_turn(**kwargs)
+
+    registry = CodexAppServerRegistry("codex")
+    home = normalize_codex_home(tmp_path / "same-thread")
+    thread_id = "thread-one-resume"
+    server = BlockingResumeServer("codex", codex_home=home)
+    registry._servers[home] = server
+
+    first = asyncio.create_task(registry.start_turn(
+        codex_home=home,
+        resume_session_id=thread_id,
+        task_id=1,
+    ))
+    await entered.wait()
+    try:
+        with pytest.raises(CodexAppServerBusyError, match="resume request in flight"):
+            await registry.start_turn(
+                codex_home=home,
+                resume_session_id=thread_id,
+                task_id=2,
+            )
+    finally:
+        release.set()
+        await first
+
+    assert registry._thread_owners[thread_id] == home
+    assert thread_id not in registry._starting_threads
 
 
 @pytest.mark.asyncio
@@ -694,6 +931,76 @@ async def test_registry_maintenance_rejects_active_and_blocks_new_turns(
 
     assert thread_id == "thread-2"
     assert len(_RegistryFakeServer.instances) == 2
+
+
+@pytest.mark.asyncio
+async def test_registry_maintenance_cancellation_detaches_closed_server_before_reopen(
+    tmp_path,
+):
+    """Cancellation after shutdown must not permanently poison the home."""
+
+    shutdown_entered = asyncio.Event()
+    release_shutdown = asyncio.Event()
+
+    class BlockingShutdownServer(_RegistryFakeServer):
+        async def shutdown(self):
+            shutdown_entered.set()
+            await release_shutdown.wait()
+            await super().shutdown()
+
+    registry = CodexAppServerRegistry("codex")
+    home = normalize_codex_home(tmp_path / "cancelled-maintenance")
+    server = BlockingShutdownServer("codex", codex_home=home)
+    registry._servers[home] = server
+    registry._thread_owners["thread-cancelled-maintenance"] = home
+
+    maintenance = asyncio.create_task(registry.begin_home_maintenance(home))
+    await shutdown_entered.wait()
+
+    # Hold the registry lock so cancellation lands in the post-shutdown
+    # bookkeeping await—the window that previously leaked ``_draining``.
+    await registry._lock.acquire()
+    release_shutdown.set()
+    await asyncio.sleep(0)
+    maintenance.cancel()
+    await asyncio.sleep(0)
+    assert home in registry._draining
+
+    registry._lock.release()
+    with pytest.raises(asyncio.CancelledError):
+        await maintenance
+
+    assert home not in registry._draining
+    assert home not in registry._servers
+    assert "thread-cancelled-maintenance" not in registry._thread_owners
+
+
+@pytest.mark.asyncio
+async def test_registry_maintenance_cancel_during_shutdown_stays_fail_closed(
+    tmp_path,
+):
+    shutdown_entered = asyncio.Event()
+
+    class IndeterminateShutdownServer(_RegistryFakeServer):
+        async def shutdown(self):
+            shutdown_entered.set()
+            await asyncio.Event().wait()
+
+    registry = CodexAppServerRegistry("codex")
+    home = normalize_codex_home(tmp_path / "indeterminate-shutdown")
+    server = IndeterminateShutdownServer("codex", codex_home=home)
+    registry._servers[home] = server
+
+    maintenance = asyncio.create_task(registry.begin_home_maintenance(home))
+    await shutdown_entered.wait()
+    maintenance.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await maintenance
+
+    assert home in registry._draining
+    assert registry._servers[home] is server
+    with pytest.raises(CodexAppServerBusyError, match="draining"):
+        await registry.start_turn(codex_home=home, task_id=2)
 
 
 @pytest.mark.asyncio
