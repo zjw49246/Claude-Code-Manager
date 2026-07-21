@@ -651,6 +651,12 @@ class InstanceManager:
             )
         return self._codex_app_server
 
+    async def read_codex_rate_limits(self, codex_home: str) -> dict:
+        """Read live quota from the app-server bound to ``codex_home``."""
+
+        registry = self._ensure_codex_app_server_registry()
+        return await registry.read_rate_limits(codex_home)
+
     def _codex_home_lock(self, codex_home: str) -> asyncio.Lock:
         """Return the admission/maintenance lock for a canonical home."""
 

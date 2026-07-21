@@ -4,9 +4,9 @@ Parallel to claude_pool.py but for OpenAI Codex CLI accounts.
 Config: ~/.codex-pool/accounts.json
 Each account has its own CODEX_HOME directory with auth.json.
 
-Quota is read from Codex session rollout files:
-  CODEX_HOME/sessions/YYYY/MM/DD/rollout-*.jsonl
-which contain rate_limits payloads after each turn.
+Manual quota refresh uses Codex app-server's account/rateLimits/read RPC for
+the account's own CODEX_HOME. Session rollout rate_limits payloads remain the
+cached/background source and the fallback when live account reads fail.
 """
 
 import asyncio
@@ -16,6 +16,7 @@ import os
 import re
 import time
 from pathlib import Path
+from typing import Awaitable, Callable
 
 from backend.services.claude_pool import (
     is_codex_auth_failure,
@@ -166,7 +167,13 @@ class CodexPoolAccount:
 class CodexPool:
     """In-process Codex account pool with cooldown and quota tracking."""
 
-    def __init__(self, config_path: str | Path | None = None, cooldown_seconds: int = DEFAULT_COOLDOWN_SECONDS):
+    def __init__(
+        self,
+        config_path: str | Path | None = None,
+        cooldown_seconds: int = DEFAULT_COOLDOWN_SECONDS,
+        *,
+        quota_reader: Callable[[str], Awaitable[dict]] | None = None,
+    ):
         if config_path:
             self._config_path = Path(os.path.expandvars(os.path.expanduser(str(config_path))))
         else:
@@ -179,6 +186,8 @@ class CodexPool:
         self._last_selected_at: float = 0.0
         self._quota_cache: dict[str, dict] | None = None
         self._quota_cache_at: float = 0.0
+        self._quota_cache_live_until: float = 0.0
+        self._quota_reader = quota_reader
         self._load()
 
     @property
@@ -252,6 +261,7 @@ class CodexPool:
         # when the same account id remains in the reloaded file.
         self._quota_cache = None
         self._quota_cache_at = 0.0
+        self._quota_cache_live_until = 0.0
 
     def account(self, account_id: str) -> CodexPoolAccount | None:
         return next((a for a in self._accounts if a.id == account_id), None)
@@ -513,32 +523,78 @@ class CodexPool:
             raise AmbiguousCodexSessionHomeError(session_id, homes)
         return homes[0] if homes else None
 
-    # --- Quota tracking (from rollout files) ---
+    # --- Quota tracking (live account RPC with rollout fallback) ---
 
-    async def fetch_quota(self, force: bool = False) -> list[dict]:
-        """Read quota from each account's latest rollout file."""
+    async def fetch_quota(
+        self, force: bool = False, *, live: bool = False,
+    ) -> list[dict]:
+        """Read per-account quota, optionally querying app-server live.
+
+        ``force`` bypasses the short cache. ``live`` is reserved for an
+        explicit user refresh: background quota checks continue using rollout
+        files so they do not start every account's app-server after each turn.
+        """
+        if live:
+            force = True
         now = time.time()
         if not force and self._quota_cache is not None and (now - self._quota_cache_at) < QUOTA_CACHE_TTL:
             return list(self._quota_cache.values())
 
         results = {}
         enabled_accounts = [acc for acc in self._accounts if acc.enabled]
-        quotas = await asyncio.gather(*(
-            asyncio.to_thread(_read_quota_from_rollout, acc.codex_home)
-            for acc in enabled_accounts
+
+        async def _read_account_quota(
+            acc: CodexPoolAccount,
+        ) -> tuple[dict | None, str | None]:
+            live_failed = False
+            if live and self._quota_reader is not None:
+                try:
+                    response = await self._quota_reader(acc.codex_home)
+                    quota = _quota_from_app_server_response(response)
+                    if quota is not None:
+                        return quota, None
+                    live_failed = True
+                    logger.warning(
+                        "Codex live quota response had no rate-limit snapshot: %s",
+                        acc.id,
+                    )
+                except Exception as exc:
+                    live_failed = True
+                    logger.warning(
+                        "Codex live quota read failed for %s; falling back to rollout: %s",
+                        acc.id,
+                        exc,
+                    )
+            quota = await asyncio.to_thread(
+                _read_quota_from_rollout, acc.codex_home
+            )
+            error = "live_unavailable" if live_failed and quota is None else None
+            return quota, error
+
+        quota_results = await asyncio.gather(*(
+            _read_account_quota(acc) for acc in enabled_accounts
         ))
-        for acc, quota in zip(enabled_accounts, quotas):
+        for acc, (quota, quota_error) in zip(enabled_accounts, quota_results):
             results[acc.id] = {
                 "id": acc.id,
                 "email": acc.email,
                 "codex_home": acc.codex_home,
                 "plan_type": quota.get("plan_type") if quota else None,
                 "quota": quota,
-                "error": None if quota else "no_rollout_data",
+                "error": None if quota else (quota_error or "no_rollout_data"),
             }
 
-        self._quota_cache = results
-        self._quota_cache_at = now
+        completed_at = time.time()
+        if live:
+            self._quota_cache = results
+            self._quota_cache_at = completed_at
+            self._quota_cache_live_until = completed_at + QUOTA_CACHE_TTL
+        elif completed_at >= self._quota_cache_live_until:
+            # A background rollout scan may overlap a manual live refresh.
+            # Return its fresh data to quota-aware switching, but do not let it
+            # replace a newer authoritative UI snapshot during the short TTL.
+            self._quota_cache = results
+            self._quota_cache_at = completed_at
         return list(results.values())
 
     async def select_quota_alternative(
@@ -609,53 +665,102 @@ class CodexPool:
 # ---------------------------------------------------------------------------
 
 def _read_quota_from_rollout(codex_home: str) -> dict | None:
-    """Parse the newest rollout file for rate_limits data."""
+    """Parse the newest available rate_limits snapshot across rollouts."""
     sessions_dir = Path(codex_home) / "sessions"
     if not sessions_dir.is_dir():
         return None
 
-    candidates = list(sessions_dir.glob("*/*/*/rollout-*.jsonl"))
+    candidates: list[tuple[float, Path]] = []
+    for path in sessions_dir.glob("*/*/*/rollout-*.jsonl"):
+        try:
+            candidates.append((path.stat().st_mtime, path))
+        except OSError:
+            continue
     if not candidates:
         return None
 
-    newest = max(candidates, key=lambda p: p.stat().st_mtime)
+    for _mtime, path in sorted(
+        candidates, key=lambda candidate: candidate[0], reverse=True,
+    ):
+        found = None
+        try:
+            with path.open() as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or '"rate_limits"' not in line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    payload = event.get("payload") or {}
+                    if payload.get("type") != "token_count":
+                        continue
+                    rate_limits = payload.get("rate_limits")
+                    if isinstance(rate_limits, dict):
+                        found = rate_limits
+        except OSError:
+            continue
 
-    found = None
-    try:
-        with newest.open() as f:
-            for line in f:
-                line = line.strip()
-                if not line or '"rate_limits"' not in line:
-                    continue
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                payload = event.get("payload") or {}
-                if payload.get("type") != "token_count":
-                    continue
-                rate_limits = payload.get("rate_limits")
-                if isinstance(rate_limits, dict):
-                    found = rate_limits
-    except OSError:
+        quota = _normalize_rate_limits(found)
+        if quota is not None:
+            return quota
+    return None
+
+
+def _value(data: dict, camel: str, snake: str):
+    """Read a v2 app-server camelCase field or rollout snake_case field."""
+
+    return data.get(camel) if camel in data else data.get(snake)
+
+
+def _normalize_rate_limits(snapshot: dict | None) -> dict | None:
+    """Map app-server or rollout rate-limit fields to CCM's quota shape."""
+
+    if not isinstance(snapshot, dict) or not snapshot:
         return None
-
-    if not found:
+    primary = snapshot.get("primary")
+    secondary = snapshot.get("secondary")
+    primary = primary if isinstance(primary, dict) else {}
+    secondary = secondary if isinstance(secondary, dict) else {}
+    credits = snapshot.get("credits")
+    credits = credits if isinstance(credits, dict) else {}
+    plan_type = _value(snapshot, "planType", "plan_type")
+    reached_type = _value(
+        snapshot, "rateLimitReachedType", "rate_limit_reached_type"
+    )
+    if not (primary or secondary or plan_type is not None or reached_type is not None):
         return None
-
-    primary = found.get("primary") or {}
-    secondary = found.get("secondary") or {}
     return {
-        "primary_used_percent": primary.get("used_percent"),
-        "primary_window_minutes": primary.get("window_minutes"),
-        "primary_resets_at": primary.get("resets_at"),
-        "secondary_used_percent": secondary.get("used_percent") if secondary else None,
-        "secondary_window_minutes": secondary.get("window_minutes") if secondary else None,
-        "secondary_resets_at": secondary.get("resets_at") if secondary else None,
-        "plan_type": found.get("plan_type"),
-        "is_rate_limited": found.get("rate_limit_reached_type") is not None,
-        "has_credits": (found.get("credits") or {}).get("has_credits", False),
+        "primary_used_percent": _value(primary, "usedPercent", "used_percent"),
+        "primary_window_minutes": _value(
+            primary, "windowDurationMins", "window_minutes"
+        ),
+        "primary_resets_at": _value(primary, "resetsAt", "resets_at"),
+        "secondary_used_percent": _value(
+            secondary, "usedPercent", "used_percent"
+        ),
+        "secondary_window_minutes": _value(
+            secondary, "windowDurationMins", "window_minutes"
+        ),
+        "secondary_resets_at": _value(secondary, "resetsAt", "resets_at"),
+        "plan_type": plan_type,
+        "is_rate_limited": reached_type is not None,
+        "has_credits": bool(_value(credits, "hasCredits", "has_credits")),
     }
+
+
+def _quota_from_app_server_response(response: dict | None) -> dict | None:
+    """Extract the Codex bucket from account/rateLimits/read."""
+
+    if not isinstance(response, dict):
+        return None
+    snapshot = response.get("rateLimits")
+    if not isinstance(snapshot, dict) or not snapshot:
+        buckets = response.get("rateLimitsByLimitId")
+        if isinstance(buckets, dict):
+            snapshot = buckets.get("codex")
+    return _normalize_rate_limits(snapshot)
 
 
 def _extract_email_from_jwt(id_token: str) -> str:

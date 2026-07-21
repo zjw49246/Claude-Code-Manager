@@ -309,6 +309,29 @@ describe('PoolDrawer', () => {
         expect(screen.getByText('加载中…')).toBeInTheDocument();
       });
     });
+
+    it('explains when live Codex quota and rollout history are both unavailable', async () => {
+      enableCodexPool({
+        total: 1,
+        available: 1,
+        preferred: null,
+        accounts: [{
+          id: 'codex-1',
+          email: 'codex@example.com',
+          codex_home: '/tmp/codex-1',
+          available: true,
+          enabled: true,
+          quota: null,
+          quota_error: 'live_unavailable',
+        }],
+      });
+      const user = userEvent.setup();
+      await renderAndWaitForPro();
+      await openDrawer(user);
+      await user.click(screen.getByRole('button', { name: 'Codex' }));
+
+      expect(await screen.findByText('实时额度查询失败，暂无历史数据')).toBeInTheDocument();
+    });
   });
 
   describe('Codex account login source', () => {

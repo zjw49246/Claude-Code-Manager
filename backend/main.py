@@ -109,6 +109,7 @@ if settings.codex_pool_enabled:
         codex_pool = CodexPool(
             config_path=settings.codex_pool_config_path,
             cooldown_seconds=settings.codex_pool_cooldown_seconds,
+            quota_reader=instance_manager.read_codex_rate_limits,
         )
         dispatcher.codex_pool = codex_pool
         logger.info("Codex pool enabled with %d accounts", len(codex_pool._accounts))

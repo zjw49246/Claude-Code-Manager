@@ -287,7 +287,7 @@ export function AppShell({ currentPage, onNavigate, wide, children }: AppShellPr
             </div>
           </div>
         </header>
-        <main className={`flex-1 mx-auto w-full ${wide ? 'max-w-[1400px]' : 'max-w-6xl'} p-4`}>
+        <main className={`flex-1 w-full ${wide ? 'max-w-none' : 'mx-auto max-w-6xl'} p-4`}>
           {children}
         </main>
       </div>

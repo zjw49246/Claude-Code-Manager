@@ -193,6 +193,15 @@ class CodexAppServer:
                 await self._reader_task
             await self._start()
 
+    async def read_rate_limits(self) -> dict[str, Any]:
+        """Read the authenticated account's current rate-limit snapshot."""
+
+        await self.ensure_started()
+        # The v2 protocol declares this method with Option<()> params and the
+        # official client omits the field. Sending ``params: {}`` is rejected
+        # by Codex 0.144.6's serde decoder.
+        return await self._request("account/rateLimits/read", None)
+
     async def _start(self) -> None:
         self._stderr_lines.clear()
         codex_home = Path(self.codex_home)
@@ -472,7 +481,9 @@ class CodexAppServer:
             return False
         return response.get("turnId") == expected_turn_id
 
-    async def _request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+    async def _request(
+        self, method: str, params: dict[str, Any] | None,
+    ) -> dict[str, Any]:
         if not self.is_alive or not self._process or not self._process.stdin:
             raise CodexAppServerError("app-server is not running")
         self._request_id += 1
@@ -480,7 +491,10 @@ class CodexAppServer:
         future = asyncio.get_running_loop().create_future()
         self._pending[request_id] = future
         try:
-            await self._write({"id": request_id, "method": method, "params": params})
+            message: dict[str, Any] = {"id": request_id, "method": method}
+            if params is not None:
+                message["params"] = params
+            await self._write(message)
             response = await asyncio.wait_for(future, timeout=self.request_timeout)
         finally:
             # Cancellation can happen while waiting for the shared write lock
@@ -799,9 +813,10 @@ class CodexAppServerRegistry:
         # route reserved across that await so a manual resume or account
         # maintenance operation cannot reopen the source/target midway.
         self._rebindings: dict[str, tuple[str, str]] = {}
-        # Number of start/resume RPC sequences admitted for each home but not
-        # yet returned to the caller.  Maintenance checks this under the same
-        # lock so relogin cannot race between server lookup and context setup.
+        # Number of home-bound RPC sequences (turn start/resume or account
+        # reads) admitted but not yet returned to the caller. Maintenance
+        # checks this under the same lock so relogin cannot race between
+        # server lookup and an RPC using the old auth.json.
         self._starting: dict[str, int] = {}
         # A home-level count protects maintenance; this per-thread token also
         # prevents two concurrent resumes of the same native thread. Without
@@ -1011,6 +1026,44 @@ class CodexAppServerRegistry:
         if server is None:
             return False
         return await server.steer_turn(thread_id, content)
+
+    async def read_rate_limits(
+        self, codex_home: str | os.PathLike[str] | None,
+    ) -> dict[str, Any]:
+        """Read one account's quota without crossing CODEX_HOME boundaries."""
+
+        home = normalize_codex_home(codex_home)
+        async with self._lock:
+            if home in self._draining:
+                raise CodexAppServerBusyError(
+                    f"Codex account app-server is draining: {home}"
+                )
+            server = self._servers.get(home)
+            if server is None:
+                server = CodexAppServer(
+                    self.binary,
+                    request_timeout=self.request_timeout,
+                    codex_home=home,
+                )
+                self._servers[home] = server
+            self._starting[home] = self._starting.get(home, 0) + 1
+
+        try:
+            return await server.read_rate_limits()
+        finally:
+            # Cancellation must not leak the home reservation and make future
+            # relogin/delete operations report a permanent busy state.
+            async def _release_read_reservation() -> None:
+                async with self._lock:
+                    self._decrement_starting_locked(home)
+
+            cleanup = asyncio.create_task(_release_read_reservation())
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    continue
+            cleanup.result()
 
     async def rebind_thread(
         self,

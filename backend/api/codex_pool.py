@@ -1048,10 +1048,14 @@ async def codex_pool_status():
 
 @router.get("/usage")
 async def codex_pool_usage(force: bool = False):
-    """Pool status merged with per-account quota from rollout files."""
+    """Pool status merged with per-account quota.
+
+    A forced user refresh queries each account through its own Codex
+    app-server; rollout snapshots remain the background/failure fallback.
+    """
     pool = _get_pool()
     status = pool.status()
-    quota_list = await pool.fetch_quota(force=force)
+    quota_list = await pool.fetch_quota(force=force, live=force)
     quota_by_id = {q["id"]: q for q in quota_list}
     for account in status["accounts"]:
         q = quota_by_id.get(account["id"], {})

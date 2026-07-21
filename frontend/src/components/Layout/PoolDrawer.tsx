@@ -369,7 +369,11 @@ function CodexAccountCard({ account, preferred, onClearCooldown, onSetPreferred,
       ) : (
         <div className="text-xs space-y-1">
           <div className="flex items-center gap-2 text-gray-500">
-            <span>{account.quota_error === 'no_rollout_data' ? '暂无额度数据（使用后自动更新）' : (account.quota_error || '未知')}</span>
+            <span>{account.quota_error === 'no_rollout_data'
+              ? '暂无额度数据（使用后自动更新）'
+              : account.quota_error === 'live_unavailable'
+                ? '实时额度查询失败，暂无历史数据'
+                : (account.quota_error || '未知')}</span>
             <button
               onClick={onRetryUsage}
               className="shrink-0 text-[10px] px-1.5 py-0.5 rounded border border-gray-600 text-gray-400 hover:text-foreground"
@@ -775,11 +779,11 @@ export function PoolDrawer() {
 
   // Claude handlers
   const handleClaudeClearCooldown = useCallback(async (accountId: string) => {
-    try { await api.clearPoolCooldown(accountId); await loadClaudeUsage(); } catch {}
+    try { await api.clearPoolCooldown(accountId); await loadClaudeUsage(); } catch { /* Keep current drawer state on request failure. */ }
   }, [loadClaudeUsage]);
 
   const handleClaudeSetPreferred = useCallback(async (accountId: string | null) => {
-    try { await api.setPoolPreferred(accountId); await loadClaudeUsage(); } catch {}
+    try { await api.setPoolPreferred(accountId); await loadClaudeUsage(); } catch { /* Keep current drawer state on request failure. */ }
   }, [loadClaudeUsage]);
 
   const [relogin, setRelogin] = useState<Record<string, { status: string; message?: string }>>({});
@@ -816,11 +820,11 @@ export function PoolDrawer() {
 
   // Codex handlers
   const handleCodexClearCooldown = useCallback(async (accountId: string) => {
-    try { await api.clearCodexPoolCooldown(accountId); await loadCodexUsage(); } catch {}
+    try { await api.clearCodexPoolCooldown(accountId); await loadCodexUsage(); } catch { /* Keep current drawer state on request failure. */ }
   }, [loadCodexUsage]);
 
   const handleCodexSetPreferred = useCallback(async (accountId: string | null) => {
-    try { await api.setCodexPoolPreferred(accountId); await loadCodexUsage(); } catch {}
+    try { await api.setCodexPoolPreferred(accountId); await loadCodexUsage(); } catch { /* Keep current drawer state on request failure. */ }
   }, [loadCodexUsage]);
 
   const [codexRelogin, setCodexRelogin] = useState<Record<string, CodexLoginStatus>>({});
@@ -831,10 +835,11 @@ export function PoolDrawer() {
     // React StrictMode runs an extra setup/cleanup cycle in development, so
     // restore the live flag on every setup rather than only initializing it.
     codexReloginAlive.current = true;
+    const timers = codexReloginTimers.current;
     return () => {
       codexReloginAlive.current = false;
-      for (const timer of codexReloginTimers.current.values()) clearTimeout(timer);
-      codexReloginTimers.current.clear();
+      for (const timer of timers.values()) clearTimeout(timer);
+      timers.clear();
     };
   }, []);
 

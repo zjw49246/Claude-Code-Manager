@@ -1,4 +1,5 @@
 import json
+import os
 import time
 from pathlib import Path
 
@@ -64,6 +65,37 @@ def _rollout(home: Path, session_id: str, timestamp: str = "2026-07-21T00-00-00"
     path = home / "sessions" / "2026" / "07" / "21" / f"rollout-{timestamp}-{session_id}.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("{}\n", encoding="utf-8")
+    return path
+
+
+def _quota_rollout(
+    home: Path,
+    session_id: str,
+    used_percent: int,
+    *,
+    mtime: float | None = None,
+) -> Path:
+    path = _rollout(home, session_id)
+    path.write_text(json.dumps({
+        "payload": {
+            "type": "token_count",
+            "rate_limits": {
+                "primary": {
+                    "used_percent": used_percent,
+                    "window_minutes": 10080,
+                    "resets_at": 1_800_000_000,
+                },
+                "secondary": None,
+                "plan_type": "pro",
+                "rate_limit_reached_type": (
+                    "rate_limit_reached" if used_percent >= 100 else None
+                ),
+                "credits": {"has_credits": False},
+            },
+        }
+    }) + "\n")
+    if mtime is not None:
+        os.utime(path, (mtime, mtime))
     return path
 
 
@@ -233,6 +265,7 @@ class TestReload:
         pool._cooldowns["removed"] = time.time() + 60
         pool._quota_cache = {"codex-2": {"quota": "stale"}}
         pool._quota_cache_at = time.time()
+        pool._quota_cache_live_until = time.time() + 60
 
         existing = json.loads(pool_config.read_text(encoding="utf-8"))["accounts"]
         pool_config.write_text(
@@ -246,6 +279,7 @@ class TestReload:
         assert "removed" not in pool._cooldowns
         assert pool._quota_cache is None
         assert pool._quota_cache_at == 0.0
+        assert pool._quota_cache_live_until == 0.0
 
     def test_keeps_valid_preferred_but_still_invalidates_quota_cache(
         self, pool: CodexPool
@@ -308,6 +342,191 @@ async def test_fetch_quota_tracks_each_account_from_its_own_latest_rollout(
     assert result["codex-2"]["quota"]["secondary_window_minutes"] == 10080
     assert result["codex-1"]["plan_type"] == "pro"
     assert result["codex-1"]["error"] is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_quota_falls_back_to_older_rollout_with_rate_limits(
+    pool: CodexPool, tmp_path: Path,
+):
+    _quota_rollout(
+        tmp_path / "codex-1", "older-with-quota", 100, mtime=100,
+    )
+    newest = _rollout(tmp_path / "codex-1", "newest-without-quota")
+    newest.write_text('{"payload":{"type":"task_started"}}\nnot-json\n')
+    os.utime(newest, (200, 200))
+
+    result = {item["id"]: item for item in await pool.fetch_quota(force=True)}
+
+    assert result["codex-1"]["quota"]["primary_used_percent"] == 100
+    assert result["codex-1"]["quota"]["is_rate_limited"] is True
+    assert result["codex-1"]["error"] is None
+
+
+@pytest.mark.asyncio
+async def test_live_quota_refresh_prefers_account_rpc_and_maps_camel_case(
+    pool_config: Path, tmp_path: Path,
+):
+    _quota_rollout(tmp_path / "codex-1", "stale", 10)
+    calls: list[str] = []
+
+    async def live_reader(codex_home: str) -> dict:
+        calls.append(codex_home)
+        used = 100 if codex_home.endswith("codex-1") else 25
+        snapshot = {
+            "limitId": "codex",
+            "primary": {
+                "usedPercent": used,
+                "windowDurationMins": 300,
+                "resetsAt": 1_800_000_100,
+            },
+            "secondary": {
+                "usedPercent": 91,
+                "windowDurationMins": 10080,
+                "resetsAt": 1_800_100_000,
+            },
+            "planType": "pro",
+            "rateLimitReachedType": (
+                "rate_limit_reached" if used >= 100 else None
+            ),
+            "credits": {"hasCredits": True, "unlimited": False},
+        }
+        if used == 25:
+            return {
+                "rateLimits": {},
+                "rateLimitsByLimitId": {"codex": snapshot},
+            }
+        return {"rateLimits": snapshot}
+
+    live_pool = CodexPool(
+        config_path=pool_config,
+        cooldown_seconds=60,
+        quota_reader=live_reader,
+    )
+    result = {
+        item["id"]: item
+        for item in await live_pool.fetch_quota(force=True, live=True)
+    }
+
+    first = result["codex-1"]["quota"]
+    assert first == {
+        "primary_used_percent": 100,
+        "primary_window_minutes": 300,
+        "primary_resets_at": 1_800_000_100,
+        "secondary_used_percent": 91,
+        "secondary_window_minutes": 10080,
+        "secondary_resets_at": 1_800_100_000,
+        "plan_type": "pro",
+        "is_rate_limited": True,
+        "has_credits": True,
+    }
+    assert result["codex-1"]["error"] is None
+    assert result["codex-2"]["quota"]["primary_used_percent"] == 25
+    assert set(calls) == {
+        str((tmp_path / "codex-1").resolve()),
+        str((tmp_path / "codex-2").resolve()),
+    }
+
+
+@pytest.mark.asyncio
+async def test_live_quota_failure_falls_back_per_account_to_rollout(
+    pool_config: Path, tmp_path: Path,
+):
+    _quota_rollout(tmp_path / "codex-1", "fallback", 77)
+
+    async def live_reader(codex_home: str) -> dict:
+        if codex_home.endswith("codex-1"):
+            raise RuntimeError("live RPC unavailable")
+        return {"rateLimits": {"primary": {"usedPercent": 12}}}
+
+    live_pool = CodexPool(
+        config_path=pool_config,
+        quota_reader=live_reader,
+    )
+    result = {
+        item["id"]: item
+        for item in await live_pool.fetch_quota(live=True)
+    }
+
+    assert result["codex-1"]["quota"]["primary_used_percent"] == 77
+    assert result["codex-1"]["error"] is None
+    assert result["codex-2"]["quota"]["primary_used_percent"] == 12
+
+
+@pytest.mark.asyncio
+async def test_live_quota_failure_without_history_reports_clear_error(
+    pool_config: Path,
+):
+    async def unavailable(_codex_home: str) -> dict:
+        raise RuntimeError("account RPC unavailable")
+
+    live_pool = CodexPool(config_path=pool_config, quota_reader=unavailable)
+    result = await live_pool.fetch_quota(live=True)
+
+    assert {item["error"] for item in result} == {"live_unavailable"}
+    assert all(item["quota"] is None for item in result)
+
+
+@pytest.mark.asyncio
+async def test_background_scan_cannot_overwrite_recent_live_quota_cache(
+    pool_config: Path, tmp_path: Path,
+):
+    async def live_reader(_codex_home: str) -> dict:
+        return {"rateLimits": {"primary": {"usedPercent": 100}}}
+
+    live_pool = CodexPool(config_path=pool_config, quota_reader=live_reader)
+    live = {
+        item["id"]: item for item in await live_pool.fetch_quota(live=True)
+    }
+    _quota_rollout(tmp_path / "codex-1", "later-background", 20)
+
+    background = {
+        item["id"]: item
+        for item in await live_pool.fetch_quota(force=True)
+    }
+    cached = {item["id"]: item for item in await live_pool.fetch_quota()}
+
+    assert live["codex-1"]["quota"]["primary_used_percent"] == 100
+    assert background["codex-1"]["quota"]["primary_used_percent"] == 20
+    assert cached["codex-1"]["quota"]["primary_used_percent"] == 100
+
+
+@pytest.mark.asyncio
+async def test_background_force_refresh_does_not_start_live_account_readers(
+    pool_config: Path, tmp_path: Path,
+):
+    _quota_rollout(tmp_path / "codex-1", "background", 64)
+
+    async def unexpected_live_reader(_codex_home: str) -> dict:
+        raise AssertionError("background refresh must stay rollout-only")
+
+    background_pool = CodexPool(
+        config_path=pool_config,
+        quota_reader=unexpected_live_reader,
+    )
+    result = {
+        item["id"]: item
+        for item in await background_pool.fetch_quota(force=True)
+    }
+
+    assert result["codex-1"]["quota"]["primary_used_percent"] == 64
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("force", [False, True])
+async def test_usage_api_only_requests_live_quota_for_explicit_force(
+    monkeypatch: pytest.MonkeyPatch, force: bool,
+):
+    from unittest.mock import AsyncMock
+
+    from backend.api import codex_pool as codex_pool_api
+
+    fake_pool = type("FakePool", (), {})()
+    fake_pool.status = lambda: {"accounts": []}
+    fake_pool.fetch_quota = AsyncMock(return_value=[])
+    monkeypatch.setattr(codex_pool_api, "_get_pool", lambda: fake_pool)
+
+    assert await codex_pool_api.codex_pool_usage(force=force) == {"accounts": []}
+    fake_pool.fetch_quota.assert_awaited_once_with(force=force, live=force)
 
 
 class TestQuotaAwareSelection:

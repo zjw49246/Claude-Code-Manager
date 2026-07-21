@@ -31,9 +31,9 @@ vi.mock('../../config/server', () => ({
   isCapacitor: vi.fn().mockReturnValue(false),
 }));
 
-function renderShell(page = 'tasks') {
+function renderShell(page = 'tasks', wide = false) {
   return render(
-    <AppShell currentPage={page} onNavigate={() => {}}>
+    <AppShell currentPage={page} onNavigate={() => {}} wide={wide}>
       <div data-testid="page-content">Page content</div>
     </AppShell>,
   );
@@ -193,6 +193,21 @@ describe('AppShell layout and z-index architecture', () => {
   });
 
   describe('page content area', () => {
+    it('fills the available column in wide split mode so the task sidebar stays flush with navigation', () => {
+      renderShell('tasks', true);
+      const main = document.querySelector('main');
+      expect(main!.className).toContain('max-w-none');
+      expect(main!.className).not.toContain('mx-auto');
+      expect(main!.className).not.toContain('max-w-[1400px]');
+    });
+
+    it('keeps regular pages centered and width-limited', () => {
+      renderShell();
+      const main = document.querySelector('main');
+      expect(main!.className).toContain('mx-auto');
+      expect(main!.className).toContain('max-w-6xl');
+    });
+
     it('main content is rendered OUTSIDE the header', () => {
       renderShell();
       const header = document.querySelector('header');

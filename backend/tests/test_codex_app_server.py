@@ -115,6 +115,45 @@ async def test_steer_turn_without_active_context_does_not_send_rpc():
 
 
 @pytest.mark.asyncio
+async def test_read_rate_limits_uses_parameterless_account_rpc():
+    server = CodexAppServer("codex")
+    server.ensure_started = AsyncMock()
+    server._request = AsyncMock(return_value={
+        "rateLimits": {"primary": {"usedPercent": 100}},
+    })
+
+    result = await server.read_rate_limits()
+
+    assert result["rateLimits"]["primary"]["usedPercent"] == 100
+    server.ensure_started.assert_awaited_once()
+    server._request.assert_awaited_once_with("account/rateLimits/read", None)
+
+
+@pytest.mark.asyncio
+async def test_parameterless_request_omits_params_field():
+    server = CodexAppServer("codex")
+    server._process = SimpleNamespace(
+        pid=4321,
+        returncode=None,
+        stdin=object(),
+    )
+    sent = []
+
+    async def respond(message):
+        sent.append(message)
+        server._pending[message["id"]].set_result({
+            "id": message["id"],
+            "result": {"rateLimits": {}},
+        })
+
+    server._write = AsyncMock(side_effect=respond)
+
+    await server._request("account/rateLimits/read", None)
+
+    assert sent == [{"id": 1, "method": "account/rateLimits/read"}]
+
+
+@pytest.mark.asyncio
 async def test_request_cancelled_during_write_drops_pending_future():
     server = CodexAppServer("codex")
     server._process = SimpleNamespace(
@@ -414,6 +453,14 @@ class _RegistryFakeServer:
         self.steered.append((thread_id, content))
         return thread_id in self.active_threads
 
+    async def read_rate_limits(self):
+        return {
+            "rateLimits": {
+                "limitId": "codex",
+                "primary": {"usedPercent": 42},
+            }
+        }
+
     async def shutdown(self):
         self.shutdown_count += 1
         self.active_threads.clear()
@@ -675,6 +722,84 @@ async def test_registry_routes_each_canonical_home_to_one_server(
     )
     assert server_a.steered == [(thread_a, "a-only")]
     assert server_b.steered == []
+
+
+@pytest.mark.asyncio
+async def test_registry_routes_rate_limit_reads_by_canonical_home(
+    tmp_path, reset_registry_fake_servers,
+):
+    registry = CodexAppServerRegistry("codex", request_timeout=7)
+    home = tmp_path / "quota" / ".." / "quota"
+
+    with patch(
+        "backend.services.codex_app_server.CodexAppServer",
+        _RegistryFakeServer,
+    ):
+        result = await registry.read_rate_limits(home)
+        second = await registry.read_rate_limits(home)
+
+    assert result["rateLimits"]["primary"]["usedPercent"] == 42
+    assert second == result
+    assert len(_RegistryFakeServer.instances) == 1
+    assert _RegistryFakeServer.instances[0].codex_home == normalize_codex_home(home)
+    assert normalize_codex_home(home) not in registry._starting
+
+
+@pytest.mark.asyncio
+async def test_registry_rate_limit_read_blocks_home_maintenance_and_cleans_up(
+    tmp_path,
+):
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingRateLimitServer(_RegistryFakeServer):
+        async def read_rate_limits(self):
+            entered.set()
+            await release.wait()
+            return await super().read_rate_limits()
+
+    registry = CodexAppServerRegistry("codex")
+    home = normalize_codex_home(tmp_path / "quota-maintenance")
+    server = BlockingRateLimitServer("codex", codex_home=home)
+    registry._servers[home] = server
+
+    read = asyncio.create_task(registry.read_rate_limits(home))
+    await entered.wait()
+    with pytest.raises(CodexAppServerBusyError, match="active or starting"):
+        await registry.begin_home_maintenance(home)
+    release.set()
+
+    assert (await read)["rateLimits"]["primary"]["usedPercent"] == 42
+    assert home not in registry._starting
+    assert home not in registry._draining
+
+
+@pytest.mark.asyncio
+async def test_cancelled_registry_rate_limit_read_releases_home_reservation(
+    tmp_path,
+):
+    entered = asyncio.Event()
+
+    class CancelledRateLimitServer(_RegistryFakeServer):
+        async def read_rate_limits(self):
+            entered.set()
+            await asyncio.Event().wait()
+
+    registry = CodexAppServerRegistry("codex")
+    home = normalize_codex_home(tmp_path / "cancelled-quota")
+    server = CancelledRateLimitServer("codex", codex_home=home)
+    registry._servers[home] = server
+
+    read = asyncio.create_task(registry.read_rate_limits(home))
+    await entered.wait()
+    read.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await read
+
+    assert home not in registry._starting
+    assert await registry.begin_home_maintenance(home) is True
+    await registry.end_home_maintenance(home)
+    assert home not in registry._draining
 
 
 @pytest.mark.asyncio
