@@ -9,6 +9,7 @@ async def test_get_runtime_settings(client):
     data = resp.json()
     assert "use_pty_mode" in data
     assert "pty_available" in data
+    assert "codex_app_server_enabled" in data
 
 
 @pytest.mark.asyncio

@@ -14,7 +14,11 @@ vi.mock('../../api/client', () => ({
     uploadImages: vi.fn().mockResolvedValue([]),
     listMonitorSessions: vi.fn().mockResolvedValue([]),
     getAskUserPending: vi.fn().mockResolvedValue({ pending: [] }),
-    getRuntimeSettings: vi.fn().mockResolvedValue({ use_pty_mode: false, pty_available: false }),
+    getRuntimeSettings: vi.fn().mockResolvedValue({
+      use_pty_mode: false,
+      pty_available: false,
+      codex_app_server_enabled: true,
+    }),
     config: vi.fn().mockResolvedValue({ model_options: ['claude-opus-4-6'], codex_model_options: [] }),
     injectTaskMessage: vi.fn().mockResolvedValue({ ok: true, injected: true }),
     listQuickPhrases: vi.fn().mockResolvedValue([]),
@@ -94,6 +98,46 @@ describe('ChatView', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     (api.getTaskChatHistory as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+    (api.getRuntimeSettings as ReturnType<typeof vi.fn>).mockResolvedValue({
+      use_pty_mode: false,
+      pty_available: false,
+      codex_app_server_enabled: true,
+    });
+  });
+
+  describe('Live turn injection', () => {
+    it('steers an executing Codex turn even when Claude PTY is off', async () => {
+      const task = makeTask({
+        provider: 'codex',
+        status: 'executing',
+        worker_id: null,
+        shared_from_id: null,
+      });
+      render(<ChatView task={task} projects={projects} onBack={onBack} onTaskUpdated={onTaskUpdated} />);
+
+      const toggle = await screen.findByTitle(/Codex turn\/steer.*插入运行中的 turn/);
+      await userEvent.click(toggle);
+      await userEvent.type(screen.getByRole('textbox'), 'change direction');
+      await userEvent.click(screen.getByTitle('注入到运行中的 turn (Ctrl+Enter)'));
+
+      await waitFor(() => {
+        expect(api.injectTaskMessage).toHaveBeenCalledWith(task.id, 'change direction');
+      });
+      expect(api.sendTaskChat).not.toHaveBeenCalled();
+    });
+
+    it('does not offer local injection for worker tasks', async () => {
+      const task = makeTask({
+        provider: 'codex',
+        status: 'executing',
+        worker_id: 7,
+        shared_from_id: null,
+      });
+      render(<ChatView task={task} projects={projects} onBack={onBack} onTaskUpdated={onTaskUpdated} />);
+
+      await waitFor(() => expect(api.getRuntimeSettings).toHaveBeenCalled());
+      expect(screen.queryByTitle(/Codex turn\/steer/)).not.toBeInTheDocument();
+    });
   });
 
   describe('Initial prompt bubble', () => {

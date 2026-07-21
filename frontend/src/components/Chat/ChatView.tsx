@@ -173,13 +173,25 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
   const [showModelMenu, setShowModelMenu] = useState(false);
   const [modelOptions, setModelOptions] = useState<string[]>([]);
   const [ptyMode, setPtyMode] = useState(false);
+  const [codexAppServerEnabled, setCodexAppServerEnabled] = useState(false);
   const [injecting, setInjecting] = useState(false);
-  // 注入模式开关：开启后「发送」走 PTY 注入逻辑而不是排队新 turn
+  // 注入模式开关：开启后「发送」直达当前 turn，而不是排队新 turn。
   const [injectMode, setInjectMode] = useState(false);
+  const canInject = task.worker_id == null && task.shared_from_id == null && (
+    task.provider === 'codex' ? codexAppServerEnabled : ptyMode
+  );
+  const injectTransport = task.provider === 'codex' ? 'Codex turn/steer' : 'Claude PTY';
 
   useEffect(() => {
-    api.getRuntimeSettings().then((s) => setPtyMode(s.use_pty_mode)).catch(() => {});
+    api.getRuntimeSettings().then((s) => {
+      setPtyMode(s.use_pty_mode);
+      setCodexAppServerEnabled(s.codex_app_server_enabled);
+    }).catch(() => {});
   }, []);
+
+  useEffect(() => {
+    if (!canInject) setInjectMode(false);
+  }, [canInject]);
 
   useEffect(() => {
     if (!showModelMenu) return;
@@ -913,8 +925,8 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
     const text = (overrideText ?? input).trim();
     if (!text && fileUpload.uploads.length === 0 && !preUploadedResults?.length) return;
 
-    // 注入模式：发送动作改走 PTY 注入（仅文本；不开新 turn、不排队）
-    if (injectMode && ptyMode && !fromQueue) {
+    // 注入模式：发送动作直达当前 turn（仅文本；不开新 turn、不排队）
+    if (injectMode && canInject && !fromQueue) {
       if (text) await handleInject();
       return;
     }
@@ -1546,18 +1558,18 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
                 </div>
               )}
             </div>
-            {/* PTY-only: inject mode toggle — when on, Send delivers via injection */}
-            {ptyMode && (
+            {/* Live-turn injection: Claude PTY or Codex app-server steering. */}
+            {canInject && (
               <button
                 type="button"
                 onClick={() => setInjectMode((v) => !v)}
-                disabled={!task.session_id && !task.shared_from_id}
+                disabled={!task.session_id}
                 className={`p-2 rounded-lg transition-colors disabled:opacity-40 ${
                   injectMode ? 'text-teal-300 bg-teal-600/20' : 'text-gray-500 hover:text-teal-300'
                 }`}
                 title={injectMode
-                  ? '注入模式已开启：发送的消息将注入运行中的 turn（点击关闭）'
-                  : '开启注入模式：发送改走 PTY turn 内注入（不开新 turn）'}
+                  ? `注入模式已开启：消息将通过 ${injectTransport} 插入运行中的 turn（点击关闭）`
+                  : `开启注入模式：通过 ${injectTransport} 插入运行中的 turn（不开新 turn）`}
               >
                 <Syringe size={18} />
               </button>
@@ -1597,7 +1609,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
               placeholder={
                 !task.session_id && !task.shared_from_id
                   ? 'Run the task first to start a session...'
-                  : injectMode && ptyMode
+                  : injectMode && canInject
                     ? '注入模式：消息将直接注入运行中的 turn...'
                     : isProcessing
                       ? 'Type next message to queue...'
@@ -1610,16 +1622,16 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
             />
             <button
               onClick={() => handleSend()}
-              disabled={(!input.trim() && fileUpload.uploads.length === 0) || (!task.session_id && !task.shared_from_id) || (injectMode && ptyMode && !isProcessing) || fileUpload.isUploading}
-              title={injectMode && ptyMode
+              disabled={(!input.trim() && fileUpload.uploads.length === 0) || (!task.session_id && !task.shared_from_id) || (injectMode && canInject && !isProcessing) || injecting || fileUpload.isUploading}
+              title={injectMode && canInject
                 ? (isProcessing ? '注入到运行中的 turn (Ctrl+Enter)' : '注入模式：仅在 turn 运行中可用，空闲时请关闭注入模式')
                 : isProcessing ? 'Add to queue (Ctrl+Enter)' : 'Send (Ctrl+Enter)'}
               className={`p-2.5 text-white rounded-xl transition-colors disabled:opacity-40 disabled:cursor-not-allowed shadow-md ${
-                injectMode && ptyMode ? 'bg-teal-600 hover:bg-teal-700 shadow-teal-600/20'
+                injectMode && canInject ? 'bg-teal-600 hover:bg-teal-700 shadow-teal-600/20'
                 : isProcessing ? 'bg-amber-600 hover:bg-amber-700 shadow-amber-600/20' : 'bg-indigo-600 hover:bg-indigo-500 shadow-indigo-600/25'
               }`}
             >
-              {injectMode && ptyMode ? <Syringe size={18} /> : isProcessing ? <ListPlus size={18} /> : <Send size={18} />}
+              {injectMode && canInject ? <Syringe size={18} /> : isProcessing ? <ListPlus size={18} /> : <Send size={18} />}
             </button>
           </div>
           </div>
@@ -2300,7 +2312,7 @@ const MessageBubble = memo(function MessageBubble({ message, taskId }: { message
         )}
         {isInjected && (
           <div className="flex items-center gap-1 mb-0.5 pr-1 justify-end">
-            <span className="text-xs bg-teal-600/30 text-teal-300 px-1.5 py-0.5 rounded" title="通过 PTY 注入到运行中的 turn">💉 注入</span>
+            <span className="text-xs bg-teal-600/30 text-teal-300 px-1.5 py-0.5 rounded" title="注入到运行中的 turn">💉 注入</span>
           </div>
         )}
         <div

@@ -511,7 +511,7 @@ async def inject_message(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    """Inject a message into the RUNNING turn of a PTY session (PTY-only)."""
+    """Inject a message into the task's currently running turn."""
     task = await db.get(Task, task_id)
     if task:
         await require_task_access(request, task, db)
@@ -519,18 +519,44 @@ async def inject_message(
         raise HTTPException(404, "Task not found")
 
     from backend.main import instance_manager, broadcaster
-    if not instance_manager.pty_mode_enabled:
-        raise HTTPException(400, "PTY 模式未开启，注入功能仅在 PTY 模式下可用")
     if not task.session_id:
         raise HTTPException(400, "Task has no session yet")
+    if task.worker_id is not None or task.shared_from_id is not None:
+        raise HTTPException(400, "远程 Worker / shared task 暂不支持执行中注入")
 
-    ok = await instance_manager.inject_pty_message(task.session_id, body.message)
-    if not ok:
-        raise HTTPException(
-            409,
-            "注入失败：没有正在运行的 turn。注入仅在任务执行中可用"
-            "（用于中途补充指令）；空闲时请关闭注入模式直接发普通消息",
+    provider = (task.provider or "claude").lower()
+    if provider == "codex":
+        from backend.config import settings
+        if not settings.codex_app_server_enabled:
+            raise HTTPException(
+                400,
+                "Codex app-server 未开启，当前 exec 链路不支持执行中注入",
+            )
+        ok = await instance_manager.inject_codex_message(
+            task.session_id, body.message
         )
+        unavailable_detail = (
+            "注入失败：当前 Codex turn 已结束、暂不可 steer，或正在使用 "
+            "exec fallback；空闲时请关闭注入模式直接发普通消息"
+        )
+    elif provider == "claude":
+        if not instance_manager.pty_mode_enabled:
+            raise HTTPException(
+                400,
+                "PTY 模式未开启，Claude 注入仅在 PTY 模式下可用",
+            )
+        ok = await instance_manager.inject_pty_message(
+            task.session_id, body.message
+        )
+        unavailable_detail = (
+            "注入失败：没有正在运行的 turn。注入仅在任务执行中可用"
+            "（用于中途补充指令）；空闲时请关闭注入模式直接发普通消息"
+        )
+    else:
+        raise HTTPException(400, f"Provider {provider} 不支持执行中注入")
+
+    if not ok:
+        raise HTTPException(409, unavailable_detail)
 
     # Record + broadcast so the injected text shows up in the chat thread
     db.add(LogEntry(

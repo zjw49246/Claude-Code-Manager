@@ -546,7 +546,9 @@ async def test_update_task_model_persists(client, session_factory):
 @pytest.mark.asyncio
 async def test_inject_requires_pty_mode(client, session_factory):
     """PTY 模式关闭时注入返回 400。"""
-    task_id = await _create_task_with_session(client, session_factory)
+    task_id = await _create_task_with_session(
+        client, session_factory, provider="claude"
+    )
 
     mock_im = MagicMock()
     mock_im.pty_mode_enabled = False
@@ -563,7 +565,9 @@ async def test_inject_delivers_to_pty_session(client, session_factory):
     """PTY 注入成功：调用 inject_pty_message 并广播 source=inject 的 user_message。"""
     from backend.models.task import Task
 
-    task_id = await _create_task_with_session(client, session_factory)
+    task_id = await _create_task_with_session(
+        client, session_factory, provider="claude"
+    )
 
     mock_im = MagicMock()
     mock_im.pty_mode_enabled = True
@@ -592,7 +596,9 @@ async def test_inject_no_live_session_409(client, session_factory):
     """会话不存活时注入返回 409。"""
     from backend.models.task import Task
 
-    task_id = await _create_task_with_session(client, session_factory)
+    task_id = await _create_task_with_session(
+        client, session_factory, provider="claude"
+    )
 
     mock_im = MagicMock()
     mock_im.pty_mode_enabled = True
@@ -603,3 +609,101 @@ async def test_inject_no_live_session_409(client, session_factory):
             f"/api/tasks/{task_id}/inject", json={"message": "x"}
         )
     assert resp.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_codex_inject_steers_without_pty_mode(
+    client, session_factory, monkeypatch
+):
+    """Codex injection uses app-server steering and is independent of PTY."""
+    from backend.config import settings
+
+    monkeypatch.setattr(settings, "codex_app_server_enabled", True)
+    task_id = await _create_task_with_session(
+        client, session_factory, provider="codex"
+    )
+    mock_im = MagicMock()
+    mock_im.pty_mode_enabled = False
+    mock_im.inject_codex_message = AsyncMock(return_value=True)
+    mock_broadcaster = MagicMock(broadcast=AsyncMock())
+
+    with patch("backend.main.instance_manager", mock_im), \
+         patch("backend.main.broadcaster", mock_broadcaster):
+        resp = await client.post(
+            f"/api/tasks/{task_id}/inject", json={"message": "steer now"}
+        )
+
+    assert resp.status_code == 200
+    mock_im.inject_codex_message.assert_awaited_once_with(
+        "test-session-123", "steer now"
+    )
+    injected = [
+        call for call in mock_broadcaster.broadcast.call_args_list
+        if call.args[1].get("source") == "inject"
+    ]
+    assert len(injected) == 1
+
+
+@pytest.mark.asyncio
+async def test_codex_inject_without_live_app_server_turn_returns_409(
+    client, session_factory, monkeypatch
+):
+    from backend.config import settings
+
+    monkeypatch.setattr(settings, "codex_app_server_enabled", True)
+    task_id = await _create_task_with_session(
+        client, session_factory, provider="codex"
+    )
+    mock_im = MagicMock()
+    mock_im.inject_codex_message = AsyncMock(return_value=False)
+
+    with patch("backend.main.instance_manager", mock_im), \
+         patch("backend.main.broadcaster", MagicMock(broadcast=AsyncMock())):
+        resp = await client.post(
+            f"/api/tasks/{task_id}/inject", json={"message": "too late"}
+        )
+
+    assert resp.status_code == 409
+    assert "exec fallback" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_codex_inject_requires_app_server_enabled(
+    client, session_factory, monkeypatch
+):
+    from backend.config import settings
+
+    monkeypatch.setattr(settings, "codex_app_server_enabled", False)
+    task_id = await _create_task_with_session(
+        client, session_factory, provider="codex"
+    )
+    mock_im = MagicMock()
+    mock_im.inject_codex_message = AsyncMock()
+
+    with patch("backend.main.instance_manager", mock_im), \
+         patch("backend.main.broadcaster", MagicMock(broadcast=AsyncMock())):
+        resp = await client.post(
+            f"/api/tasks/{task_id}/inject", json={"message": "x"}
+        )
+
+    assert resp.status_code == 400
+    mock_im.inject_codex_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_inject_rejects_remote_worker_task(client, session_factory):
+    task_id = await _create_task_with_session(
+        client, session_factory, provider="codex", worker_id=7
+    )
+    mock_im = MagicMock()
+    mock_im.inject_codex_message = AsyncMock()
+
+    with patch("backend.main.instance_manager", mock_im), \
+         patch("backend.main.broadcaster", MagicMock(broadcast=AsyncMock())):
+        resp = await client.post(
+            f"/api/tasks/{task_id}/inject", json={"message": "x"}
+        )
+
+    assert resp.status_code == 400
+    assert "Worker" in resp.json()["detail"]
+    mock_im.inject_codex_message.assert_not_awaited()
