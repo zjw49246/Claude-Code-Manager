@@ -490,7 +490,7 @@ describe('ChatView', () => {
       });
     });
 
-    it('clicking "Previous user message" calls scrollIntoView on a user message element', async () => {
+    it('clicking "Previous user message" scrolls the container to the user message', async () => {
       const msgs = makeChatMessages(3);
       (api.getTaskChatHistory as ReturnType<typeof vi.fn>).mockResolvedValue(msgs);
       const task = makeTask({ description: 'Prompt' });
@@ -506,18 +506,19 @@ describe('ChatView', () => {
       // Navigation is getBoundingClientRect-based: container top = 100;
       // nodes below except nodes[2], which sits above the viewport (top = 0)
       (scrollContainer as HTMLElement).getBoundingClientRect = () => ({ top: 100 } as DOMRect);
-      const scrollIntoViewMock = vi.fn();
+      const scrollToMock = vi.fn();
+      (scrollContainer as HTMLElement).scrollTo = scrollToMock;
       userMsgNodes.forEach((node, i) => {
-        (node as HTMLElement).scrollIntoView = scrollIntoViewMock;
+        Object.defineProperty(node, 'offsetTop', { value: i * 140, configurable: true });
         (node as HTMLElement).getBoundingClientRect = () => ({ top: i === 2 ? 0 : 200 } as DOMRect);
       });
 
       await userEvent.click(screen.getByTitle('Previous user message'));
 
-      expect(scrollIntoViewMock).toHaveBeenCalledWith({ behavior: 'smooth', block: 'start' });
+      expect(scrollToMock).toHaveBeenCalledWith({ top: 280, behavior: 'smooth' });
     });
 
-    it('clicking "Next user message" calls scrollIntoView on the next user message', async () => {
+    it('clicking "Next user message" scrolls the container to the next user message', async () => {
       const msgs = makeChatMessages(3);
       (api.getTaskChatHistory as ReturnType<typeof vi.fn>).mockResolvedValue(msgs);
       const task = makeTask({ description: 'Prompt' });
@@ -533,15 +534,16 @@ describe('ChatView', () => {
       // Container top = 100; all nodes below the viewport top (top = 200)
       // → "down" navigates to the first node past container top + threshold
       (scrollContainer as HTMLElement).getBoundingClientRect = () => ({ top: 100 } as DOMRect);
-      const scrollIntoViewMock = vi.fn();
-      userMsgNodes.forEach((node) => {
-        (node as HTMLElement).scrollIntoView = scrollIntoViewMock;
+      const scrollToMock = vi.fn();
+      (scrollContainer as HTMLElement).scrollTo = scrollToMock;
+      userMsgNodes.forEach((node, i) => {
+        Object.defineProperty(node, 'offsetTop', { value: i * 140 + 40, configurable: true });
         (node as HTMLElement).getBoundingClientRect = () => ({ top: 200 } as DOMRect);
       });
 
       await userEvent.click(screen.getByTitle('Next user message'));
 
-      expect(scrollIntoViewMock).toHaveBeenCalledWith({ behavior: 'smooth', block: 'start' });
+      expect(scrollToMock).toHaveBeenCalledWith({ top: 40, behavior: 'smooth' });
     });
 
     it('does nothing when already at the top and clicking up', async () => {
@@ -557,9 +559,9 @@ describe('ChatView', () => {
       const scrollContainer = container.querySelector('.overflow-y-auto')!;
       const userMsgNodes = scrollContainer.querySelectorAll('[data-user-msg]');
 
-      const scrollIntoViewMock = vi.fn();
+      const scrollToMock = vi.fn();
+      (scrollContainer as HTMLElement).scrollTo = scrollToMock;
       userMsgNodes.forEach((node, i) => {
-        (node as HTMLElement).scrollIntoView = scrollIntoViewMock;
         Object.defineProperty(node, 'offsetTop', { value: i * 300 + 100, configurable: true });
       });
 
@@ -567,7 +569,7 @@ describe('ChatView', () => {
 
       await userEvent.click(screen.getByTitle('Previous user message'));
 
-      expect(scrollIntoViewMock).not.toHaveBeenCalled();
+      expect(scrollToMock).not.toHaveBeenCalled();
     });
 
     it('does nothing when already at the last user message and clicking down', async () => {
@@ -583,9 +585,9 @@ describe('ChatView', () => {
       const scrollContainer = container.querySelector('.overflow-y-auto')!;
       const userMsgNodes = scrollContainer.querySelectorAll('[data-user-msg]');
 
-      const scrollIntoViewMock = vi.fn();
+      const scrollToMock = vi.fn();
+      (scrollContainer as HTMLElement).scrollTo = scrollToMock;
       userMsgNodes.forEach((node, i) => {
-        (node as HTMLElement).scrollIntoView = scrollIntoViewMock;
         Object.defineProperty(node, 'offsetTop', { value: i * 100, configurable: true });
       });
 
@@ -593,7 +595,7 @@ describe('ChatView', () => {
 
       await userEvent.click(screen.getByTitle('Next user message'));
 
-      expect(scrollIntoViewMock).not.toHaveBeenCalled();
+      expect(scrollToMock).not.toHaveBeenCalled();
     });
   });
 
