@@ -91,6 +91,15 @@ PRIORITY_MONITOR_IMPORTANT = 2
 QUEUE_CONSUMER_IDLE_TIMEOUT = 300
 QUEUE_HEARTBEAT_INTERVAL = 30
 QUEUE_STUCK_THRESHOLD = 120
+CODEX_ROUTING_RETRY_DELAY = 5
+
+
+class CodexAccountRoutingError(RuntimeError):
+    """A Codex turn cannot be safely assigned to an account right now."""
+
+    def __init__(self, message: str, *, retry_after: float | None = None):
+        super().__init__(message)
+        self.retry_after = retry_after
 
 
 @dataclass(order=True)
@@ -106,6 +115,9 @@ class QueuedMessage:
     # Source monitor/sub-agent session ID for dedup (frontend uses this to
     # render [Monitor] / [Sub-Agent] badges on injected user_message bubbles)
     monitor_session_id: int | None = field(compare=False, default=None)
+    # A routing retry reuses this same object. Monitor/sub-agent source bubbles
+    # are persisted/broadcast once, not once per account-maintenance retry.
+    source_logged: bool = field(compare=False, default=False)
 
 
 def _binary_available(binary: str) -> bool:
@@ -295,9 +307,17 @@ class GlobalDispatcher:
         self._task_queues: dict[int, asyncio.PriorityQueue] = {}
         self._task_queue_workers: dict[int, asyncio.Task] = {}
         self._task_queue_activity: dict[int, float] = {}
+        # Fresh lifecycle tasks waiting for a Codex account cooldown or
+        # maintenance window. TaskQueue excludes them without consuming retry
+        # budget, while unrelated pending tasks can still use idle instances.
+        self._codex_routing_not_before: dict[int, float] = {}
 
         # Pool: initialized lazily on start() if pool_enabled
         self.pool: "ClaudePool | None" = None
+        # CodexPool is created by backend.main and injected after construction.
+        # Task ownership lives on Task.metadata_["codex_account_id"] because
+        # instances are generic workers that rotate between unrelated tasks.
+        self.codex_pool: "CodexPool | None" = None
 
     @property
     def is_running(self) -> bool:
@@ -491,6 +511,29 @@ class GlobalDispatcher:
         else:
             await process.wait()
 
+    async def _wait_output_consumer(
+        self, instance_id: int, task: Task, label: str
+    ) -> None:
+        """Wait for post-process output/account bookkeeping.
+
+        ``InstanceManager`` deliberately gives Codex an unbounded wait because
+        its consumer may still be migrating and rebinding the native rollout.
+        Claude retains the historical 30-second bound.
+        """
+
+        try:
+            await self.instance_manager.wait_for_output_consumer(
+                instance_id,
+                provider=task.provider,
+                timeout=30,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Output consumer did not finish after %s for task %s",
+                label,
+                task.id,
+            )
+
     async def _curator_loop(self):
         """Background curator: periodic skill lifecycle management.
 
@@ -584,7 +627,15 @@ class GlobalDispatcher:
 
                     async with self.db_factory() as db:
                         queue = TaskQueue(db)
-                        task = await queue.dequeue()
+                        now = time.monotonic()
+                        self._codex_routing_not_before = {
+                            task_id: deadline
+                            for task_id, deadline in self._codex_routing_not_before.items()
+                            if deadline > now
+                        }
+                        task = await queue.dequeue(
+                            exclude_ids=set(self._codex_routing_not_before)
+                        )
 
                     if not task:
                         continue  # No matching task for this instance, try next
@@ -724,12 +775,17 @@ class GlobalDispatcher:
         return await self.pool.select_async(exclude=exclude, validate=True)
 
     async def _resolve_resume_config_dir(
-        self, session_id: str | None, provider: str | None = "claude"
+        self,
+        session_id: str | None,
+        provider: str | None = "claude",
+        *,
+        task_id: int | None = None,
     ) -> str | None:
-        """Resolve the CLAUDE_CONFIG_DIR for a (possibly resuming) launch.
+        """Resolve the provider account home for a (possibly resuming) launch.
 
-        Codex 任务直接返回 None：号池/CLAUDE_CONFIG_DIR 是 claude 专属，
-        为 codex 选号只会白白 select+migrate（污染轮转指针），launch 也不会用。
+        Claude returns ``CLAUDE_CONFIG_DIR``. Codex returns ``CODEX_HOME`` and
+        persists the selected account on the Task so copied rollout files do
+        not make future resumes ambiguous.
 
         Prefers a fresh, validated pool account and migrates the session JSONL
         into it. The critical case is when the pool can hand out **no** healthy
@@ -745,8 +801,8 @@ class GlobalDispatcher:
         Returns a config_dir, or None when there is no pool (default account)
         or no session to anchor a fallback to.
         """
-        if (provider or "claude").lower() != "claude":
-            return None
+        if (provider or "claude").lower() == "codex":
+            return await self._resolve_codex_home(session_id, task_id=task_id)
         if not (self.pool and self.pool.enabled):
             return None
 
@@ -802,6 +858,160 @@ class GlobalDispatcher:
         # Fresh launch (no session to anchor): just pick a healthy account.
         return self.pool.select(validate=False)
 
+    async def _codex_task_binding(self, task_id: int | None) -> str | None:
+        if task_id is None:
+            return None
+        async with self.db_factory() as db:
+            task = await db.get(Task, task_id)
+            if not task:
+                return None
+            value = (task.metadata_ or {}).get("codex_account_id")
+            return value if isinstance(value, str) and value else None
+
+    async def _set_codex_task_binding(
+        self, task_id: int | None, account_id: str | None
+    ) -> None:
+        if task_id is None or not account_id:
+            return
+        async with self.db_factory() as db:
+            task = await db.get(Task, task_id)
+            if not task:
+                return
+            metadata = dict(task.metadata_ or {})
+            if metadata.get("codex_account_id") == account_id:
+                return
+            metadata["codex_account_id"] = account_id
+            # SQLAlchemy JSON columns do not reliably detect in-place changes.
+            task.metadata_ = metadata
+            await db.commit()
+
+    def _codex_pool_retry_after(self) -> float | None:
+        pool = self.codex_pool
+        if not pool:
+            return None
+        remaining = [
+            float(account.get("cooldown_remaining") or 0)
+            for account in pool.list_accounts()
+            if account.get("enabled") and account.get("cooldown_remaining")
+        ]
+        return max(1.0, min(remaining)) if remaining else None
+
+    async def _resolve_codex_home(
+        self, session_id: str | None, *, task_id: int | None
+    ) -> str | None:
+        """Select/reuse a Codex account without losing the native thread.
+
+        A migrated rollout deliberately remains in the source account as a
+        recovery copy, so filesystem discovery alone cannot pick an owner after
+        the first switch. ``Task.metadata_.codex_account_id`` is authoritative;
+        a single discovered home is only used to bootstrap older tasks.
+        """
+        pool = self.codex_pool
+        if not (pool and pool.enabled):
+            return None
+
+        bound_id = await self._codex_task_binding(task_id)
+        bound_home = pool.home_for_account(bound_id) if bound_id else None
+        matches: list[str] = []
+        if session_id:
+            matches = pool.locate_session_homes(session_id)
+
+        resident: str | None = None
+        if bound_home:
+            canonical_bound = pool.canonical_home(bound_home)
+            if not session_id or not matches or canonical_bound in matches:
+                # No rollout yet is valid for a just-started app-server thread.
+                resident = canonical_bound
+            elif len(matches) == 1:
+                # Repair stale metadata created by legacy/manual launch paths:
+                # the only physical rollout is more authoritative than a
+                # binding that points at a home where resume cannot work.
+                resident = matches[0]
+                logger.warning(
+                    "Repairing stale Codex account binding for task %s session %s: "
+                    "%s -> %s",
+                    task_id, session_id, canonical_bound, resident,
+                )
+            else:
+                raise CodexAccountRoutingError(
+                    f"Codex session {session_id} has multiple rollout copies, "
+                    f"none in its bound account home {canonical_bound}"
+                )
+        elif len(matches) == 1:
+            resident = matches[0]
+        elif len(matches) > 1:
+            raise CodexAccountRoutingError(
+                f"Codex session {session_id} exists in multiple account homes "
+                "but the task has no codex_account_id binding"
+            )
+
+        if resident and pool.is_home_available(resident):
+            account_id = pool.account_id_for_home(resident)
+            await self._set_codex_task_binding(task_id, account_id)
+            return resident
+
+        excluded: set[str] = set()
+        resident_id = pool.account_id_for_home(resident) if resident else None
+        if resident_id:
+            excluded.add(resident_id)
+        target = pool.select(exclude=excluded)
+
+        if not target:
+            if resident and pool.is_known_account(resident) and pool.is_home_enabled(resident):
+                retry_after = self._codex_pool_retry_after()
+                raise CodexAccountRoutingError(
+                    f"Codex pool is cooling down; task {task_id} session "
+                    f"{session_id} remains safely stored in {resident}",
+                    retry_after=retry_after,
+                )
+            if resident:
+                raise CodexAccountRoutingError(
+                    f"Codex task {task_id} is bound to disabled/removed account "
+                    f"home {resident} and no enabled account is available for migration"
+                )
+            retry_after = self._codex_pool_retry_after()
+            raise CodexAccountRoutingError(
+                "Codex pool has no available account; refusing to fall back to "
+                "the service's default CODEX_HOME",
+                retry_after=retry_after,
+            )
+
+        target = pool.canonical_home(target)
+        if session_id and resident and resident != target:
+            from backend.services.codex_session_migration import (
+                CodexSessionMigrationError,
+                migrate_codex_rollout_session,
+            )
+
+            try:
+                await asyncio.to_thread(
+                    migrate_codex_rollout_session,
+                    session_id,
+                    resident,
+                    target,
+                )
+                await self.instance_manager.rebind_codex_thread(
+                    session_id,
+                    source_codex_home=resident,
+                    target_codex_home=target,
+                )
+            except CodexSessionMigrationError:
+                logger.exception(
+                    "Refusing to switch Codex task %s session %s from %s to %s "
+                    "because its rollout could not be migrated safely",
+                    task_id, session_id, resident, target,
+                )
+                if pool.is_home_available(resident):
+                    return resident
+                raise CodexAccountRoutingError(
+                    f"Codex session {session_id} could not be migrated from "
+                    f"unavailable account home {resident}"
+                )
+
+        account_id = pool.account_id_for_home(target)
+        await self._set_codex_task_binding(task_id, account_id)
+        return target
+
     async def _collect_failure_output(self, instance_id: int, task_id: int) -> str:
         """Gather stderr + recent log text once for failure classification.
 
@@ -828,16 +1038,21 @@ class GlobalDispatcher:
         may be pre-collected by the caller (see _collect_failure_output) to
         avoid double-popping stderr.
         """
-        if not self.pool or exit_code == 0 or exit_code in (-2, 130):
+        if exit_code == 0 or exit_code in (-2, 130):
             return None
 
-        # 号池是 claude 专属；codex 的限额文案（"hit your usage limit"）会误命中
-        # claude 的 _RATE_LIMIT_RE——不拦会冷却无辜的 claude 账号并把 codex
-        # session 迁进 claude config_dir，必须按 provider 显式挡掉。
         async with self.db_factory() as db:
             t = await db.get(Task, task_id)
-            if t and (t.provider or "claude").lower() != "claude":
-                return None
+            provider = (t.provider or "claude").lower() if t else "claude"
+
+        # Codex has an independent account pool and native rollout format. It
+        # must never enter the Claude pool/migrate_session path below.
+        if provider == "codex":
+            return await self._check_codex_rate_limit_and_rotate(
+                instance_id, task_id, combined=combined
+            )
+        if not self.pool:
+            return None
 
         from backend.services.claude_pool import is_pool_rotatable, is_auth_failure, is_rate_limited
         from backend.services.claude_pool import migrate_session, collect_process_output_for_detection
@@ -904,6 +1119,171 @@ class GlobalDispatcher:
 
         return {
             "config_dir": new_config_dir,
+            "session_id": session_id,
+            "excluded": excluded,
+        }
+
+    async def _check_codex_rate_limit_and_rotate(
+        self,
+        instance_id: int,
+        task_id: int,
+        *,
+        combined: str | None,
+    ) -> dict | None:
+        pool = self.codex_pool
+        if not (pool and pool.enabled):
+            return None
+
+        from backend.services.codex_pool import (
+            is_auth_failure,
+            is_pool_rotatable,
+            is_rate_limited,
+        )
+
+        if combined is None:
+            combined = await self._collect_failure_output(instance_id, task_id)
+        if not is_pool_rotatable(combined):
+            return None
+
+        async with self.db_factory() as db:
+            task = await db.get(Task, task_id)
+            session_id = task.session_id if task else None
+            bound_id = (
+                (task.metadata_ or {}).get("codex_account_id") if task else None
+            )
+
+        old_home = self.instance_manager.get_config_dir(instance_id)
+        if not old_home and isinstance(bound_id, str):
+            old_home = pool.home_for_account(bound_id)
+        old_home = pool.canonical_home(
+            old_home or os.environ.get("CODEX_HOME") or str(Path.home() / ".codex")
+        )
+
+        auth_failed = is_auth_failure(combined)
+        if auth_failed:
+            pool.mark_auth_failure(old_home)
+            logger.warning(
+                "Codex pool account %s auth failed; cooling it indefinitely",
+                old_home,
+            )
+        elif is_rate_limited(combined):
+            pool.mark_rate_limited(old_home)
+            logger.info("Codex pool account %s hit its usage limit", old_home)
+
+        old_account_id = pool.account_id_for_home(old_home)
+        excluded = {old_account_id} if old_account_id else set()
+        new_home = pool.select(exclude=excluded)
+        if not new_home:
+            logger.warning(
+                "Codex pool exhausted — no alternative account for task %d",
+                task_id,
+            )
+            raise CodexAccountRoutingError(
+                f"Codex pool has no alternative account for task {task_id}; "
+                "the current native thread remains in its original CODEX_HOME",
+                retry_after=self._codex_pool_retry_after(),
+            )
+        new_home = pool.canonical_home(new_home)
+
+        if session_id and old_home != new_home:
+            from backend.services.codex_app_server import (
+                CodexAppServerBusyError,
+                CodexThreadHomeMismatchError,
+            )
+            from backend.services.codex_session_migration import (
+                CodexSessionMigrationError,
+                CodexSessionNotFoundError,
+                migrate_codex_rollout_session,
+            )
+
+            source_home = old_home
+            try:
+                await asyncio.to_thread(
+                    migrate_codex_rollout_session,
+                    session_id,
+                    source_home,
+                    new_home,
+                )
+            except CodexSessionNotFoundError:
+                # Older tasks may not have an account binding. Accept one
+                # unambiguous pool copy, but never guess among migrated copies.
+                matches = pool.locate_session_homes(session_id)
+                if len(matches) != 1:
+                    logger.exception(
+                        "Cannot identify a unique Codex rollout for task %s session %s",
+                        task_id, session_id,
+                    )
+                    raise CodexAccountRoutingError(
+                        f"Cannot identify a unique Codex rollout for task {task_id} "
+                        f"session {session_id}",
+                        retry_after=CODEX_ROUTING_RETRY_DELAY,
+                    )
+                source_home = matches[0]
+                try:
+                    await asyncio.to_thread(
+                        migrate_codex_rollout_session,
+                        session_id,
+                        source_home,
+                        new_home,
+                    )
+                except CodexSessionMigrationError:
+                    logger.exception(
+                        "Codex rollout migration failed for task %s session %s",
+                        task_id, session_id,
+                    )
+                    raise CodexAccountRoutingError(
+                        f"Codex rollout migration failed for task {task_id} "
+                        f"session {session_id}",
+                        retry_after=CODEX_ROUTING_RETRY_DELAY,
+                    )
+            except CodexSessionMigrationError:
+                logger.exception(
+                    "Codex rollout migration failed for task %s session %s",
+                    task_id, session_id,
+                )
+                raise CodexAccountRoutingError(
+                    f"Codex rollout migration failed for task {task_id} "
+                    f"session {session_id}",
+                    retry_after=CODEX_ROUTING_RETRY_DELAY,
+                )
+
+            try:
+                await self.instance_manager.rebind_codex_thread(
+                    session_id,
+                    source_codex_home=source_home,
+                    target_codex_home=new_home,
+                )
+            except (CodexAppServerBusyError, CodexThreadHomeMismatchError):
+                logger.exception(
+                    "Codex app-server refused account rebind for task %s session %s",
+                    task_id, session_id,
+                )
+                raise CodexAccountRoutingError(
+                    f"Codex app-server could not rebind task {task_id} session "
+                    f"{session_id}",
+                    retry_after=CODEX_ROUTING_RETRY_DELAY,
+                )
+
+        new_account_id = pool.account_id_for_home(new_home)
+        await self._set_codex_task_binding(task_id, new_account_id)
+        reason = "auth_failure" if auth_failed else "rate_limit"
+        await self.broadcaster.broadcast(f"task:{task_id}", {
+            "event_type": "pool_rotation",
+            "provider": "codex",
+            "old_account": old_account_id,
+            "new_account": new_account_id,
+            "reason": reason,
+        })
+        await self.broadcaster.broadcast("system", {
+            "event": "pool_rotation",
+            "provider": "codex",
+            "task_id": task_id,
+            "instance_id": instance_id,
+            "old_account": old_account_id,
+            "new_account": new_account_id,
+        })
+        return {
+            "config_dir": new_home,
             "session_id": session_id,
             "excluded": excluded,
         }
@@ -986,13 +1366,153 @@ class GlobalDispatcher:
         process = self.instance_manager.processes.get(instance_id)
         if process:
             await self._wait_process(process, task, label)
-        consumer = self.instance_manager._tasks.get(instance_id)
-        if consumer:
-            try:
-                await asyncio.wait_for(consumer, timeout=30)
-            except asyncio.TimeoutError:
-                pass
+        await self._wait_output_consumer(instance_id, task, label)
         return process.returncode if process else -1
+
+    async def _launch_mode_turn_with_rotation(
+        self,
+        instance_id: int,
+        task: Task,
+        cwd: str,
+        git_env: dict | None,
+        *,
+        prompt: str,
+        config_dir: str | None,
+        resume_session_id: str | None,
+        loop_iteration: int | None,
+        effort_level: str | None,
+        label: str,
+        max_rotations: int = 5,
+    ) -> tuple[int, str | None]:
+        """Run one plan/loop/goal turn and rotate provider accounts on limit.
+
+        These lifecycle modes return before the normal Step 5 classifier, so
+        without a local classifier Codex usage/auth failures would never reach
+        its pool.  Replaying the same mode prompt on the migrated native thread
+        preserves that mode's contract while avoiding the generic pool retry,
+        which would incorrectly mark the entire task completed after one turn.
+        """
+        current_home = config_dir
+        current_session = resume_session_id
+
+        for rotation_attempt in range(max_rotations + 1):
+            await self.instance_manager.launch(
+                instance_id=instance_id,
+                prompt=prompt,
+                task_id=task.id,
+                cwd=cwd,
+                model=task.model,
+                resume_session_id=current_session,
+                loop_iteration=loop_iteration,
+                git_env=git_env or {},
+                thinking_budget=task.thinking_budget,
+                effort_level=task.effort_level or effort_level,
+                provider=task.provider,
+                config_dir=current_home,
+                enable_workflows=task.enable_workflows,
+                enabled_skills=task.enabled_skills,
+            )
+
+            process = self.instance_manager.processes.get(instance_id)
+            if process:
+                await self._wait_process(process, task, label)
+            await self._wait_output_consumer(instance_id, task, label)
+            exit_code = process.returncode if process else -1
+            if exit_code in (0, -2, 130):
+                # _consume_output may have completed a proactive quota switch
+                # after this successful turn.  Keep lifecycle/evaluator
+                # routing aligned with the newly persisted task binding rather
+                # than returning the home used at launch.
+                if exit_code == 0:
+                    active_home = self.instance_manager.get_config_dir(instance_id)
+                    if isinstance(active_home, str) and active_home:
+                        current_home = active_home
+                return exit_code, current_home
+            if rotation_attempt >= max_rotations:
+                return exit_code, current_home
+
+            combined = await self._collect_failure_output(instance_id, task.id)
+            rotation = await self._check_rate_limit_and_rotate(
+                instance_id,
+                task.id,
+                exit_code,
+                combined=combined,
+            )
+            if not rotation:
+                return exit_code, current_home
+            current_home = rotation["config_dir"]
+            current_session = rotation.get("session_id") or current_session
+            logger.info(
+                "%s for task %s rotating account and retrying native session %s",
+                label, task.id, current_session,
+            )
+
+        return -1, current_home
+
+    async def _retry_or_fail_mode_task(
+        self, task_id: int, instance_id: int, reason: str
+    ) -> str:
+        async with self.db_factory() as db:
+            queue = TaskQueue(db)
+            task = await queue.get(task_id)
+            if task and task.retry_count < task.max_retries:
+                await queue.retry(task_id)
+                status = "pending"
+            else:
+                await queue.mark_failed(task_id, reason)
+                status = "failed"
+        await self.broadcaster.broadcast("tasks", {
+            "event": "status_change",
+            "task_id": task_id,
+            "new_status": status,
+            "instance_id": instance_id,
+        })
+        return status
+
+    async def _defer_codex_routing_task(
+        self,
+        task_id: int,
+        instance_id: int,
+        reason: str,
+        *,
+        retry_after: float | None = None,
+    ) -> None:
+        delay = max(1.0, min(float(retry_after or CODEX_ROUTING_RETRY_DELAY), 300.0))
+        # Install the exclusion before committing ``pending``.  Otherwise the
+        # dispatch loop can observe the pending row during the context-manager
+        # exit yield and immediately claim it again before this coroutine stores
+        # the deadline.
+        self._codex_routing_not_before[task_id] = time.monotonic() + delay
+        try:
+            async with self.db_factory() as db:
+                queue = TaskQueue(db)
+                deferred = await queue.defer(task_id, reason[:500])
+        except BaseException:
+            self._codex_routing_not_before.pop(task_id, None)
+            raise
+        if not deferred:
+            # Cancellation/deletion may race the launch failure.  Never revive a
+            # terminal task merely because account routing also failed.
+            self._codex_routing_not_before.pop(task_id, None)
+            logger.info(
+                "Skipped Codex routing deferral for inactive task %s", task_id,
+            )
+            return
+
+        await self.broadcaster.broadcast("tasks", {
+            "event": "status_change",
+            "task_id": task_id,
+            "new_status": "pending",
+            "instance_id": instance_id,
+            "reason": "codex_account_wait",
+            "retry_after": round(delay, 1),
+        })
+        logger.warning(
+            "Deferred Codex task %s for %.1fs while account routing recovers: %s",
+            task_id, delay, reason,
+        )
+
+        asyncio.get_running_loop().call_later(delay, self.wake)
 
     async def _run_transient_retry(
         self,
@@ -1191,7 +1711,9 @@ class GlobalDispatcher:
             # task that already has a session) this also anchors to the session's
             # resident dir when the pool is exhausted, so --resume doesn't miss
             # the JSONL and hard-fail with "No conversation found" (prod #734/#740).
-            pool_config_dir = await self._resolve_resume_config_dir(task.session_id, task.provider)
+            pool_config_dir = await self._resolve_resume_config_dir(
+                task.session_id, task.provider, task_id=task.id
+            )
 
             await self.instance_manager.launch(
                 instance_id=instance_id,
@@ -1219,12 +1741,7 @@ class GlobalDispatcher:
             # buffered output before judging the result. Without this the
             # task can be marked completed while the last chunk of Claude's
             # reply is still being parsed/broadcast.
-            consumer = self.instance_manager._tasks.get(instance_id)
-            if consumer:
-                try:
-                    await asyncio.wait_for(consumer, timeout=30)
-                except asyncio.TimeoutError:
-                    logger.warning(f"Output consumer for instance {instance_id} did not finish in 30s, proceeding")
+            await self._wait_output_consumer(instance_id, task, "Task run")
 
             exit_code = process.returncode if process else -1
 
@@ -1262,9 +1779,18 @@ class GlobalDispatcher:
             # PTY proactive pool switch: turn finished OK but an actionable
             # rate_limit_event was observed → migrate session to a healthy
             # account before judging success (next retry/turn uses fresh quota).
-            if self.instance_manager.pty_rate_limit_seen(instance_id):
-                await self.instance_manager._try_proactive_pool_switch(instance_id, task.id)
-                self.instance_manager._pty_rate_limit_seen.discard(instance_id)
+            if (
+                self.instance_manager.pty_mode_enabled
+                and self.instance_manager.pty_rate_limit_seen(instance_id)
+            ):
+                await self.instance_manager._try_proactive_pool_switch(
+                    instance_id,
+                    task.id,
+                    rate_limit_info=self.instance_manager.pty_rate_limit_info(
+                        instance_id
+                    ),
+                )
+                self.instance_manager.clear_pty_rate_limit(instance_id)
 
             if exit_code != 0:
                 from backend.services.claude_pool import is_transient_for
@@ -1365,7 +1891,41 @@ class GlobalDispatcher:
         except asyncio.CancelledError:
             logger.info(f"Lifecycle cancelled for task {task.id} on instance {instance_id}")
             raise
+        except CodexAccountRoutingError as e:
+            if e.retry_after is None:
+                logger.error(
+                    "Permanent Codex account routing error for task %s: %s",
+                    task.id, e,
+                )
+                async with self.db_factory() as db:
+                    queue = TaskQueue(db)
+                    await queue.mark_failed(task.id, str(e)[:500])
+                await self.broadcaster.broadcast("tasks", {
+                    "event": "status_change",
+                    "task_id": task.id,
+                    "new_status": "failed",
+                    "instance_id": instance_id,
+                })
+            else:
+                await self._defer_codex_routing_task(
+                    task.id,
+                    instance_id,
+                    str(e),
+                    retry_after=e.retry_after,
+                )
         except Exception as e:
+            from backend.services.codex_app_server import (
+                CodexAppServerBusyError,
+                CodexThreadHomeMismatchError,
+            )
+
+            if isinstance(e, (CodexAppServerBusyError, CodexThreadHomeMismatchError)):
+                await self._defer_codex_routing_task(
+                    task.id,
+                    instance_id,
+                    str(e),
+                )
+                return
             logger.error(f"Lifecycle error for task {task.id}: {e}", exc_info=True)
             async with self.db_factory() as db:
                 queue = TaskQueue(db)
@@ -1637,7 +2197,10 @@ class GlobalDispatcher:
             # (one iteration == one turn) — no cold start, continuous context.
             # -p mode keeps its stateless-per-iteration semantics (no resume).
             resume_sid = None
-            if iteration > 0 and getattr(self.instance_manager, "pty_mode_enabled", False):
+            if iteration > 0 and (
+                (task.provider or "claude").lower() == "codex"
+                or getattr(self.instance_manager, "pty_mode_enabled", False)
+            ):
                 async with self.db_factory() as db:
                     t = await db.get(Task, task.id)
                     resume_sid = t.session_id if t else None
@@ -1650,28 +2213,22 @@ class GlobalDispatcher:
             # account and die with "No conversation found". For a resume it
             # anchors to the session's resident account (no config_dir drift →
             # PTY hot session preserved); fresh iterations get a healthy pick.
-            config_dir = await self._resolve_resume_config_dir(resume_sid, task.provider)
-
-            await self.instance_manager.launch(
-                instance_id=instance_id,
-                prompt=prompt,
-                task_id=task.id,
-                cwd=cwd,
-                model=task.model,
-                resume_session_id=resume_sid,
-                loop_iteration=iteration,
-                git_env=git_env or {},
-                thinking_budget=task.thinking_budget,
-                effort_level=task.effort_level or effort_level,
-                provider=task.provider,
-                config_dir=config_dir,
-                enable_workflows=task.enable_workflows,
-                enabled_skills=task.enabled_skills,
+            config_dir = await self._resolve_resume_config_dir(
+                resume_sid, task.provider, task_id=task.id
             )
 
-            process = self.instance_manager.processes.get(instance_id)
-            if process:
-                await self._wait_process(process, task, "Loop iteration")
+            iteration_exit_code, config_dir = await self._launch_mode_turn_with_rotation(
+                instance_id,
+                task,
+                cwd,
+                git_env,
+                prompt=prompt,
+                config_dir=config_dir,
+                resume_session_id=resume_sid,
+                loop_iteration=iteration,
+                effort_level=effort_level,
+                label="Loop iteration",
+            )
 
             # P1: Check if task was cancelled/deleted while the iteration was running
             async with self.db_factory() as db:
@@ -1683,10 +2240,19 @@ class GlobalDispatcher:
                     logger.info(f"Loop task {task.id} cancelled during iteration {iteration}, stopping")
                     return
 
-            signal = self._read_loop_signal(signal_path)
+            if iteration_exit_code not in (0, -2, 130):
+                signal = {
+                    "action": "abort",
+                    "reason": f"Loop iteration process failed (exit code {iteration_exit_code})",
+                }
+            else:
+                signal = self._read_loop_signal(signal_path)
 
             # P0: If signal is missing, attempt one resume to ask Claude to write it
-            if signal.get("reason") == "Signal file missing or invalid JSON":
+            if (
+                iteration_exit_code == 0
+                and signal.get("reason") == "Signal file missing or invalid JSON"
+            ):
                 signal = await self._resume_fix_signal(
                     instance_id, task, cwd, signal_path, iteration, git_env or {},
                     effort_level=effort_level,
@@ -1796,6 +2362,64 @@ class GlobalDispatcher:
     #                       Goal mode lifecycle                           #
     # ------------------------------------------------------------------ #
 
+    async def _evaluate_goal_with_rotation(
+        self,
+        evaluator,
+        task: Task,
+        instance_id: int,
+        conversation_summary: str,
+        codex_home: str | None,
+    ):
+        """Evaluate once, retrying a Codex usage/auth failure on a new account.
+
+        Evaluation is part of the current goal turn, not a new agent turn.  A
+        pool rotation therefore retries only the ephemeral evaluator and does
+        not advance ``goal_turns_used`` or rerun the goal prompt.
+        """
+        from backend.services.goal_evaluator import GoalEvaluationError
+
+        current_home = codex_home
+        for rotation_attempt in range(2):
+            try:
+                result = await evaluator.evaluate(
+                    condition=task.goal_condition,
+                    conversation_summary=conversation_summary,
+                    model=task.goal_evaluator_model,
+                    provider=task.provider or "claude",
+                    codex_home=current_home,
+                )
+                return result, current_home
+            except GoalEvaluationError as exc:
+                if (
+                    (task.provider or "claude").lower() != "codex"
+                    or rotation_attempt > 0
+                ):
+                    raise
+
+                classifier_exit_code = (
+                    exc.returncode
+                    if isinstance(exc.returncode, int) and exc.returncode not in (0, -2, 130)
+                    else 1
+                )
+                rotation = await self._check_rate_limit_and_rotate(
+                    instance_id,
+                    task.id,
+                    classifier_exit_code,
+                    combined=exc.combined_output,
+                )
+                if not rotation:
+                    raise
+
+                current_home = rotation.get("config_dir")
+                if not current_home:
+                    raise
+                logger.info(
+                    "Goal evaluator for task %s rotating Codex account and retrying",
+                    task.id,
+                )
+
+        raise RuntimeError("unreachable goal evaluator retry state")
+
     async def _run_goal_lifecycle(
         self,
         instance_id: int,
@@ -1811,14 +2435,15 @@ class GlobalDispatcher:
         context. After each turn, a lightweight evaluator model judges the
         conversation transcript against the goal condition.
         """
-        from backend.services.goal_evaluator import GoalEvaluator
+        from backend.services.goal_evaluator import GoalEvaluationError, GoalEvaluator
 
         evaluator = GoalEvaluator()
-        turn = 0
+        turn = max(0, int(task.goal_turns_used or 0))
         max_turns = task.goal_max_turns or 30
-        session_id: str | None = None
+        session_id: str | None = task.session_id
+        last_reason = task.goal_last_reason or ""
 
-        while turn < max_turns:
+        while True:
             # Check if task was cancelled or deleted externally between turns
             async with self.db_factory() as db:
                 t = await db.get(Task, task.id)
@@ -1830,56 +2455,47 @@ class GlobalDispatcher:
                     return
                 # 每轮刷新可变设置（model/effort/thinking/timeout 下一轮生效）
                 task = t
+                turn = max(turn, int(t.goal_turns_used or 0))
+                session_id = t.session_id or session_id
+                last_reason = t.goal_last_reason or last_reason
+                max_turns = t.goal_max_turns or 30
 
-            if turn == 0:
-                prompt = self._build_goal_initial_prompt(task)
+            if turn >= max_turns:
+                break
+
+            if turn == 0 and not session_id:
+                turn_prompt = self._build_goal_initial_prompt(task)
+                turn_resume_session = None
                 # Pool: pick a healthy account for the fresh session (mirrors the
                 # non-goal Step 4 path). Without this, goal launches passed
                 # config_dir=None and silently inherited the hardcoded systemd
                 # CLAUDE_CONFIG_DIR — the pool was never consulted. See loop fix
                 # (#770); goal had the identical gap.
-                config_dir = await self._resolve_resume_config_dir(None, task.provider)
-                await self.instance_manager.launch(
-                    instance_id=instance_id,
-                    prompt=prompt,
-                    task_id=task.id,
-                    cwd=cwd,
-                    model=task.model,
-                    loop_iteration=turn,
-                    git_env=git_env or {},
-                    thinking_budget=task.thinking_budget,
-                    effort_level=task.effort_level or effort_level,
-                    provider=task.provider,
-                    config_dir=config_dir,
-                    enable_workflows=task.enable_workflows,
-                    enabled_skills=task.enabled_skills,
+                config_dir = await self._resolve_resume_config_dir(
+                    None, task.provider, task_id=task.id
                 )
             else:
-                follow_up = self._build_goal_followup_prompt(last_reason, turn, max_turns)
+                resume_reason = last_reason or "上一轮未能完成评估，请检查当前进度并继续完成目标。"
+                turn_prompt = self._build_goal_followup_prompt(resume_reason, turn, max_turns)
+                turn_resume_session = session_id
                 # Resume on the session's resident account (no config_dir drift →
                 # PTY hot session preserved); migrate / fall back if cooled down.
-                config_dir = await self._resolve_resume_config_dir(session_id, task.provider)
-                await self.instance_manager.launch(
-                    instance_id=instance_id,
-                    prompt=follow_up,
-                    task_id=task.id,
-                    cwd=cwd,
-                    model=task.model,
-                    resume_session_id=session_id,
-                    loop_iteration=turn,
-                    git_env=git_env or {},
-                    thinking_budget=task.thinking_budget,
-                    effort_level=task.effort_level or effort_level,
-                    provider=task.provider,
-                    config_dir=config_dir,
-                    enable_workflows=task.enable_workflows,
-                    enabled_skills=task.enabled_skills,
+                config_dir = await self._resolve_resume_config_dir(
+                    session_id, task.provider, task_id=task.id
                 )
 
-            # Wait for process to finish
-            process = self.instance_manager.processes.get(instance_id)
-            if process:
-                await self._wait_process(process, task, "Goal turn")
+            turn_exit_code, config_dir = await self._launch_mode_turn_with_rotation(
+                instance_id,
+                task,
+                cwd,
+                git_env,
+                prompt=turn_prompt,
+                config_dir=config_dir,
+                resume_session_id=turn_resume_session,
+                loop_iteration=turn,
+                effort_level=effort_level,
+                label="Goal turn",
+            )
 
             # Check if cancelled/deleted during execution
             async with self.db_factory() as db:
@@ -1891,6 +2507,16 @@ class GlobalDispatcher:
                     logger.info(f"Goal task {task.id} cancelled during turn {turn}, stopping")
                     return
 
+            if turn_exit_code not in (0, -2, 130):
+                await self._retry_or_fail_mode_task(
+                    task.id,
+                    instance_id,
+                    f"Goal turn failed (exit code {turn_exit_code})",
+                )
+                return
+            if turn_exit_code in (-2, 130):
+                return
+
             # Get session_id from DB (set by _consume_output)
             async with self.db_factory() as db:
                 t = await db.get(Task, task.id)
@@ -1900,13 +2526,25 @@ class GlobalDispatcher:
             # Collect conversation summary for evaluator
             conversation_summary = await self._collect_goal_conversation(task.id, turn)
 
-            # Evaluate goal condition
-            eval_result = await evaluator.evaluate(
-                condition=task.goal_condition,
-                conversation_summary=conversation_summary,
-                model=task.goal_evaluator_model,
-                provider=task.provider or "claude",
-            )
+            # Evaluate goal condition. Operational failures are distinct from
+            # an actual "not achieved" verdict, so they never consume a goal
+            # turn. Codex usage/auth failures rotate and retry the evaluator on
+            # another account without rerunning the agent turn.
+            try:
+                eval_result, config_dir = await self._evaluate_goal_with_rotation(
+                    evaluator,
+                    task,
+                    instance_id,
+                    conversation_summary,
+                    config_dir,
+                )
+            except GoalEvaluationError as exc:
+                await self._retry_or_fail_mode_task(
+                    task.id,
+                    instance_id,
+                    f"Goal evaluation failed: {exc}",
+                )
+                return
 
             turn += 1
             last_reason = eval_result.reason
@@ -2221,34 +2859,28 @@ class GlobalDispatcher:
         # Same pool anchoring as the main loop launch: resume on the session's
         # resident account, not the inherited systemd default (else --resume
         # misses the JSONL on the wrong account).
-        config_dir = await self._resolve_resume_config_dir(resume_sid, task.provider)
-
-        logger.info(f"Loop task {task.id} iter {iteration}: resuming session {resume_sid} to fix missing signal")
-        await self.instance_manager.launch(
-            instance_id=instance_id,
-            prompt=fix_prompt,
-            task_id=task.id,
-            cwd=cwd,
-            model=task.model,
-            resume_session_id=resume_sid,
-            loop_iteration=iteration,
-            git_env=git_env,
-            thinking_budget=task.thinking_budget,
-            effort_level=effort_level,
-            provider=task.provider,
-            config_dir=config_dir,
-            enable_workflows=task.enable_workflows,
-            enabled_skills=task.enabled_skills,
+        config_dir = await self._resolve_resume_config_dir(
+            resume_sid, task.provider, task_id=task.id
         )
 
-        fix_proc = self.instance_manager.processes.get(instance_id)
-        if fix_proc:
-            try:
-                await asyncio.wait_for(fix_proc.wait(), timeout=60)
-            except asyncio.TimeoutError:
-                logger.warning(f"Loop task {task.id} iter {iteration}: resume fix timed out, killing")
-                fix_proc.kill()
-                await fix_proc.wait()
+        logger.info(f"Loop task {task.id} iter {iteration}: resuming session {resume_sid} to fix missing signal")
+        exit_code, _ = await self._launch_mode_turn_with_rotation(
+            instance_id,
+            task,
+            cwd,
+            git_env,
+            prompt=fix_prompt,
+            config_dir=config_dir,
+            resume_session_id=resume_sid,
+            loop_iteration=iteration,
+            effort_level=effort_level,
+            label="Loop signal repair",
+        )
+        if exit_code not in (0, -2, 130):
+            return {
+                "action": "abort",
+                "reason": f"Signal repair failed (exit code {exit_code})",
+            }
 
         return self._read_loop_signal(signal_path)
 
@@ -2258,22 +2890,30 @@ class GlobalDispatcher:
             f"Please analyze the following task and create a detailed plan. "
             f"Do NOT execute any changes, only describe what you would do:\n\n{task.description}"
         )
-        await self.instance_manager.launch(
-            instance_id=instance_id,
-            prompt=plan_prompt,
-            task_id=task.id,
-            cwd=cwd,
-            model=task.model,
-            git_env=git_env or {},
-            thinking_budget=task.thinking_budget,
-            effort_level=effort_level,
-            provider=task.provider,
-            enable_workflows=task.enable_workflows,
-            enabled_skills=task.enabled_skills,
+        config_dir = await self._resolve_resume_config_dir(
+            task.session_id, task.provider, task_id=task.id
         )
-        process = self.instance_manager.processes.get(instance_id)
-        if process:
-            await self._wait_process(process, task, "Plan phase")
+        exit_code, config_dir = await self._launch_mode_turn_with_rotation(
+            instance_id,
+            task,
+            cwd,
+            git_env,
+            prompt=plan_prompt,
+            config_dir=config_dir,
+            resume_session_id=task.session_id,
+            loop_iteration=None,
+            effort_level=effort_level,
+            label="Plan phase",
+        )
+        if exit_code not in (0, -2, 130):
+            await self._retry_or_fail_mode_task(
+                task.id,
+                instance_id,
+                f"Plan phase failed (exit code {exit_code})",
+            )
+            return
+        if exit_code in (-2, 130):
+            return
 
         # Collect plan content from logs
         async with self.db_factory() as db:
@@ -2888,8 +3528,34 @@ class GlobalDispatcher:
 
                 try:
                     await self._process_queued_message(task_id, msg)
-                except Exception:
-                    logger.exception(f"Error processing queued message for task {task_id}")
+                except Exception as exc:
+                    from backend.services.codex_app_server import (
+                        CodexAppServerBusyError,
+                        CodexThreadHomeMismatchError,
+                    )
+
+                    if isinstance(
+                        exc,
+                        (
+                            CodexAccountRoutingError,
+                            CodexAppServerBusyError,
+                            CodexThreadHomeMismatchError,
+                        ),
+                    ):
+                        # Account cooldown/maintenance/rebind conflicts are
+                        # temporary. Preserve the exact user message instead
+                        # of acknowledging q.task_done() and dropping it.
+                        logger.warning(
+                            "Deferring queued message for task %s until Codex "
+                            "account routing is available: %s",
+                            task_id, exc,
+                        )
+                        await q.put(msg)
+                        await asyncio.sleep(CODEX_ROUTING_RETRY_DELAY)
+                    else:
+                        logger.exception(
+                            f"Error processing queued message for task {task_id}"
+                        )
                 finally:
                     q.task_done()
         finally:
@@ -3036,7 +3702,9 @@ class GlobalDispatcher:
             # — crucially — when the pool is exhausted still anchors --resume to
             # the session's resident dir instead of letting it fall through to an
             # inherited CLAUDE_CONFIG_DIR that lacks the JSONL (prod #734/#740).
-            config_dir = await self._resolve_resume_config_dir(task.session_id, task.provider)
+            config_dir = await self._resolve_resume_config_dir(
+                task.session_id, task.provider, task_id=task.id
+            )
 
             logger.info(
                 f"Processing queued message for task {task_id}: source={msg.source} "
@@ -3134,9 +3802,17 @@ class GlobalDispatcher:
                 system_prompt_mode=task.system_prompt_mode,
             )
             inst_id = inst.id
+            task_provider = (task.provider or "claude").lower()
 
             # Write a log entry for monitor/sub-agent sourced messages so frontend can track source
-            if msg.source and (msg.source.startswith("monitor:") or msg.source.startswith("sub-agent:")):
+            if (
+                not msg.source_logged
+                and msg.source
+                and (
+                    msg.source.startswith("monitor:")
+                    or msg.source.startswith("sub-agent:")
+                )
+            ):
                 import json as _json
                 src_label = "monitor" if msg.source.startswith("monitor:") else "sub-agent"
                 log_raw: dict = {"source": src_label}
@@ -3164,9 +3840,16 @@ class GlobalDispatcher:
                     broadcast_data["monitor_session_id"] = msg.monitor_session_id
                 await self.broadcaster.broadcast(f"task:{task_id}", broadcast_data)
 
+            status_before_launch = task.status
+            completed_at_before_launch = task.completed_at
             task.status = "executing"
             task.completed_at = None
             await db.commit()
+            if msg.source and (
+                msg.source.startswith("monitor:")
+                or msg.source.startswith("sub-agent:")
+            ):
+                msg.source_logged = True
 
             # Claim the instance across the launch window: launch() only flips
             # its DB status to "running" once the PTY session is fully spawned,
@@ -3177,6 +3860,18 @@ class GlobalDispatcher:
             self._launching_instances.add(inst_id)
             try:
                 await self.instance_manager.launch(**launch_kwargs)
+            except Exception:
+                # launch can reject a Codex turn before a process exists when
+                # the account is under maintenance or its thread owner changed.
+                # Restore all pre-launch temporary DB state before the consumer
+                # requeues that same message.
+                if has_temp_skills:
+                    task.enabled_skills = dict(original_skills)
+                    has_temp_skills = False
+                task.status = status_before_launch
+                task.completed_at = completed_at_before_launch
+                await db.commit()
+                raise
             finally:
                 self._launching_instances.discard(inst_id)
 
@@ -3191,8 +3886,33 @@ class GlobalDispatcher:
         # Phase 2: wait for process to finish (no DB held)
         try:
             process = self.instance_manager.processes.get(inst_id)
-            if process:
-                # Chat 路径同样遵守任务级超时（此前 chat 无超时，可无限占住 instance）
+            consumer = self.instance_manager._tasks.get(inst_id)
+            if task_provider != "claude" or not self.instance_manager.pty_mode_enabled:
+                # A subprocess/app-server output consumer may react to a
+                # transient or account limit by launching a replacement turn
+                # before it exits. Follow that chain to completion so this
+                # per-task queue cannot start the next message concurrently on
+                # the same native session.
+                while process is not None:
+                    await self._wait_process(process, task, "Chat run")
+                    if consumer is not None and consumer is not asyncio.current_task():
+                        try:
+                            await asyncio.shield(consumer)
+                        except Exception:
+                            logger.exception(
+                                "Output consumer failed while serializing task %d",
+                                task_id,
+                            )
+                    next_process = self.instance_manager.processes.get(inst_id)
+                    next_consumer = self.instance_manager._tasks.get(inst_id)
+                    if next_process is None or (
+                        next_process is process and next_consumer is consumer
+                    ):
+                        break
+                    process, consumer = next_process, next_consumer
+            elif process:
+                # Claude PTY represents one turn through a persistent session;
+                # its retry/switch handling remains in the PTY branch below.
                 await self._wait_process(process, task, "Chat run")
             # Status management is handled by _consume_output (chat_initiated=True)
             #
@@ -3208,6 +3928,7 @@ class GlobalDispatcher:
             if (
                 settings.transient_retry_enabled
                 and inst_id is not None
+                and task_provider == "claude"
                 and self.instance_manager.pty_mode_enabled
             ):
                 while self.instance_manager.transient_error_seen(inst_id):
@@ -3228,11 +3949,18 @@ class GlobalDispatcher:
             # mode needs it here because the process stays alive (exit_code 0).
             if (
                 inst_id is not None
+                and task_provider == "claude"
                 and self.instance_manager.pty_mode_enabled
                 and self.instance_manager.pty_rate_limit_seen(inst_id)
             ):
-                await self.instance_manager._try_proactive_pool_switch(inst_id, task_id)
-                self.instance_manager._pty_rate_limit_seen.discard(inst_id)
+                await self.instance_manager._try_proactive_pool_switch(
+                    inst_id,
+                    task_id,
+                    rate_limit_info=self.instance_manager.pty_rate_limit_info(
+                        inst_id
+                    ),
+                )
+                self.instance_manager.clear_pty_rate_limit(inst_id)
         finally:
             # Phase 3: remove temporarily added skills (must run even on crash)
             if has_temp_skills:
@@ -3256,7 +3984,10 @@ class GlobalDispatcher:
             #  2. process_exit WS event (clears spinner immediately)
             # Without (1) the 5s poll keeps seeing "executing" even after the
             # spinner is cleared, re-pinning the UI into "running" state.
-            if self.instance_manager.pty_mode_enabled:
+            if (
+                task_provider == "claude"
+                and self.instance_manager.pty_mode_enabled
+            ):
                 try:
                     async with self.db_factory() as db:
                         result = await db.execute(

@@ -1,17 +1,19 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Plus, RefreshCw, X, Users, Settings } from '../icons';
 import { api } from '../../api/client';
-import type { PoolAccountUsage, PoolUsageStatus, PoolUsageWindow } from '../../api/client';
+import type { CodexLoginMethod, CodexLoginStatus, CodexPoolAccountUsage, CodexPoolUsageStatus, PoolAccountUsage, PoolUsageStatus, PoolUsageWindow } from '../../api/client';
+
+const ACTIVE_CODEX_LOGIN_STATUSES = new Set(['running', 'awaiting_otp', 'verifying_otp']);
 
 function barColor(utilization: number): string {
-  if (utilization >= 85) return 'bg-red-500';
+  if (utilization >= 90) return 'bg-red-500';
   if (utilization >= 60) return 'bg-yellow-500';
   return 'bg-green-500';
 }
 
 function textColor(utilization: number): string {
-  if (utilization >= 85) return 'text-red-400';
+  if (utilization >= 90) return 'text-red-400';
   if (utilization >= 60) return 'text-yellow-400';
   return 'text-green-400';
 }
@@ -181,13 +183,70 @@ function AccountCard({ account, preferred, lastSelected, onClearCooldown, onSetP
 }
 
 // --- Codex Account Card ---
-function CodexAccountCard({ account, onClearCooldown, onRelogin, onDelete, onRetryUsage, reloginState }: {
-  account: any;
+function CodexOtpPrompt({ state, onSubmit }: {
+  state: CodexLoginStatus;
+  onSubmit: (code: string) => Promise<void>;
+}) {
+  const [code, setCode] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const submit = async () => {
+    if (!/^\d{6}$/.test(code)) {
+      setError('请输入 6 位数字验证码');
+      return;
+    }
+    setSubmitting(true);
+    setError(null);
+    try {
+      await onSubmit(code);
+      setCode('');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : '验证码提交失败');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="rounded border border-amber-500/40 bg-amber-500/10 p-2 space-y-2">
+      <div className="text-xs text-amber-300">OpenAI 要求邮箱验证码，请从邮箱中取得最新的 6 位码。</div>
+      {state.expires_at && <div className="text-[10px] text-gray-400">{formatResetCountdown(state.expires_at)}</div>}
+      <div className="flex gap-2">
+        <input
+          aria-label="OpenAI 邮箱验证码"
+          inputMode="numeric"
+          autoComplete="one-time-code"
+          maxLength={6}
+          value={code}
+          onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+          className="min-w-0 flex-1 bg-gray-700 text-foreground text-xs rounded px-2.5 py-1.5 outline-none focus:ring-1 focus:ring-amber-500"
+          placeholder="6 位验证码"
+        />
+        <button
+          type="button"
+          onClick={submit}
+          disabled={submitting || code.length !== 6}
+          className="px-2.5 py-1.5 text-xs rounded bg-amber-600 text-white hover:bg-amber-500 disabled:opacity-50"
+        >
+          {submitting ? '提交中…' : '继续登录'}
+        </button>
+      </div>
+      {error && <div className="text-[10px] text-red-400">{error}</div>}
+    </div>
+  );
+}
+
+function CodexAccountCard({ account, preferred, onClearCooldown, onSetPreferred, onRelogin, onSubmitOtp, onDelete, onRetryUsage, reloginState }: {
+  account: CodexPoolAccountUsage;
+  preferred: string | null;
   onClearCooldown: (id: string) => void;
+  onSetPreferred: (id: string | null) => void;
   onRelogin: (id: string) => void;
+  onSubmitOtp: (state: CodexLoginStatus, code: string) => Promise<void>;
   onDelete: (id: string) => void;
   onRetryUsage: () => void;
-  reloginState?: { status: string; message?: string };
+  reloginState?: CodexLoginStatus;
 }) {
   const statusDot = !account.enabled
     ? { cls: 'bg-gray-500', label: '已禁用' }
@@ -196,9 +255,10 @@ function CodexAccountCard({ account, onClearCooldown, onRelogin, onDelete, onRet
       : { cls: 'bg-yellow-500', label: '冷却中' };
 
   const q = account.quota;
+  const isPreferred = preferred === account.id;
 
   return (
-    <div className="rounded-lg border bg-gray-800 p-3 space-y-2 border-gray-700">
+    <div className={`rounded-lg border bg-gray-800 p-3 space-y-2 ${isPreferred ? 'border-emerald-500' : 'border-gray-700'}`}>
       <div className="flex items-center gap-2">
         <span className={`h-2 w-2 shrink-0 rounded-full ${statusDot.cls}`} title={statusDot.label} />
         <span className="text-sm font-medium text-foreground truncate">{account.id}</span>
@@ -212,18 +272,42 @@ function CodexAccountCard({ account, onClearCooldown, onRelogin, onDelete, onRet
             Credits
           </span>
         )}
+        {isPreferred && (
+          <span className="px-1.5 py-0.5 rounded bg-green-600/30 text-green-300 text-[10px] font-semibold">
+            当前指定
+          </span>
+        )}
         <div className="ml-auto flex items-center gap-2">
           {!account.available && account.enabled && (
             <button onClick={() => onClearCooldown(account.id)} className="text-[10px] text-gray-400 hover:text-foreground underline">
               解除冷却
             </button>
           )}
+          {account.enabled && (
+            isPreferred ? (
+              <button
+                onClick={() => onSetPreferred(null)}
+                className="text-[10px] px-1.5 py-0.5 rounded border border-gray-600 text-gray-400 hover:text-foreground hover:border-gray-400"
+                title="取消指定，恢复 Codex 自动轮换"
+              >
+                恢复自动
+              </button>
+            ) : (
+              <button
+                onClick={() => onSetPreferred(account.id)}
+                className="text-[10px] px-1.5 py-0.5 rounded border border-emerald-500/50 text-emerald-300 hover:bg-emerald-600/20"
+                title="切换到此 Codex 账号"
+              >
+                切换到此账号
+              </button>
+            )
+          )}
           <button
             onClick={() => onRelogin(account.id)}
-            disabled={reloginState?.status === 'running'}
+            disabled={Boolean(reloginState && ACTIVE_CODEX_LOGIN_STATUSES.has(reloginState.status))}
             className="text-[10px] px-1.5 py-0.5 rounded border border-emerald-500/50 text-emerald-300 hover:bg-emerald-600/20 disabled:opacity-50"
           >
-            {reloginState?.status === 'running' ? '登录中…' : '重新登录'}
+            {reloginState && ACTIVE_CODEX_LOGIN_STATUSES.has(reloginState.status) ? '登录中…' : '重新登录'}
           </button>
           <button
             onClick={() => onDelete(account.id)}
@@ -234,6 +318,9 @@ function CodexAccountCard({ account, onClearCooldown, onRelogin, onDelete, onRet
         </div>
       </div>
       {account.email && <div className="text-xs text-gray-500 truncate">{account.email}</div>}
+      <div className="text-[10px] text-gray-500 font-mono truncate" title={account.codex_home}>
+        CODEX_HOME: {account.codex_home}
+      </div>
       {q ? (
         <div className="space-y-2">
           {/* Primary window */}
@@ -293,8 +380,17 @@ function CodexAccountCard({ account, onClearCooldown, onRelogin, onDelete, onRet
       {reloginState?.status === 'running' && (
         <div className="text-xs text-blue-400">自动登录中…</div>
       )}
-      {reloginState?.status === 'failed' && (
-        <div className="text-xs text-red-400 break-all">{reloginState.message}</div>
+      {reloginState?.status === 'awaiting_otp' && (
+        <CodexOtpPrompt state={reloginState} onSubmit={(code) => onSubmitOtp(reloginState, code)} />
+      )}
+      {reloginState?.status === 'verifying_otp' && (
+        <div className="text-xs text-blue-400">验证码已提交，正在继续登录…</div>
+      )}
+      {reloginState && ACTIVE_CODEX_LOGIN_STATUSES.has(reloginState.status) && reloginState.detail && (
+        <div className="text-[10px] text-amber-400 break-all">{reloginState.detail}</div>
+      )}
+      {(reloginState?.status === 'failed' || reloginState?.status === 'expired') && (
+        <div className="text-xs text-red-400 break-all">{reloginState.detail || '登录失败'}</div>
       )}
       {reloginState?.status === 'success' && (
         <div className="text-xs text-green-400">登录成功</div>
@@ -388,40 +484,96 @@ function AddCodexAccountModal({ onClose, onAdded }: { onClose: () => void; onAdd
   const [email, setEmail] = useState('');
   const [token, setToken] = useState('');
   const [password, setPassword] = useState('');
-  const [loginMethod, setLoginMethod] = useState('');
+  const [loginMethod, setLoginMethod] = useState<CodexLoginMethod | ''>('');
 
-  const [status, setStatus] = useState<string | null>(null);
-  const [detail, setDetail] = useState<string | null>(null);
+  const [loginState, setLoginState] = useState<CodexLoginStatus | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const emailDomain = email.trim().toLowerCase().split('@').pop() || '';
-  const detectedMethod = emailDomain === 'onet.pl' ? 'onet' : emailDomain === 'gazeta.pl' ? 'gazeta' : '171mail';
+  const detectedMethod: CodexLoginMethod = emailDomain === '163.com'
+    ? 'mailcatcher'
+    : emailDomain === 'mail.com'
+      ? 'mailcom'
+    : emailDomain === 'onet.pl'
+      ? 'onet'
+      : emailDomain === 'gazeta.pl'
+        ? 'gazeta'
+        : '171mail';
   const activeMethod = loginMethod || detectedMethod;
-  const usesMailCatcher = activeMethod === 'onet' || activeMethod === 'gazeta';
+  const usesMailCatcher = activeMethod !== '171mail';
+  const hasCredential = Boolean(token.trim() || password);
+  const loginActive = Boolean(loginState && ACTIVE_CODEX_LOGIN_STATUSES.has(loginState.status));
+
+  useEffect(() => {
+    if (!loginActive || !email.trim()) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const poll = async () => {
+      try {
+        const state = await api.codexPoolAddStatus(email.trim());
+        if (cancelled) return;
+        setLoginState(state);
+        if (state.status === 'success') {
+          onAdded();
+          onClose();
+          return;
+        }
+        if (ACTIVE_CODEX_LOGIN_STATUSES.has(state.status)) {
+          timer = setTimeout(poll, 2000);
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setLoginState((current) => ({
+            ...(current || { status: 'running' }),
+            detail: e instanceof Error
+              ? `状态查询暂时失败，正在重试：${e.message}`
+              : '状态查询暂时失败，正在重试',
+          }));
+          timer = setTimeout(poll, 2000);
+        }
+      }
+    };
+
+    timer = setTimeout(poll, 1000);
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [loginActive, email, onAdded, onClose]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!email.trim() || !token.trim()) return;
+    if (!email.trim() || !hasCredential) return;
     setSubmitting(true);
-    setDetail(null);
     try {
-      await api.codexPoolAddAccount({
-        email: email.trim(), token: token.trim(), password: password || undefined,
+      const state = await api.codexPoolAddAccount({
+        email: email.trim(),
+        token: token.trim() || undefined,
+        password: password || undefined,
         login_method: loginMethod || undefined,
       });
-      setStatus('running');
-      const poll = async () => {
-        const s = await api.codexPoolAddStatus(email.trim());
-        if (s.status === 'running') { setTimeout(poll, 5000); return; }
-        setStatus(s.status);
-        if (s.status === 'failed') setDetail(s.detail?.slice(-500) || '登录失败');
-        if (s.status === 'success') { onAdded(); onClose(); }
-      };
-      setTimeout(poll, 5000);
+      // The child login process has received the credentials at this point;
+      // do not retain reusable secrets in React state for the rest of the
+      // potentially long-running browser/OTP flow.
+      setToken('');
+      setPassword('');
+      setLoginState({ status: state.status, attempt_id: state.attempt_id });
     } catch (e) {
-      setStatus('failed');
-      setDetail(e instanceof Error ? e.message : '请求失败');
+      setLoginState({
+        status: 'failed',
+        detail: e instanceof Error ? e.message : '请求失败',
+      });
+    } finally {
       setSubmitting(false);
     }
+  };
+
+  const submitOtp = async (code: string) => {
+    if (!loginState?.attempt_id || !loginState.challenge_id) {
+      throw new Error('验证码挑战信息缺失，请重新登录');
+    }
+    await api.codexPoolSubmitOtp(loginState.attempt_id, loginState.challenge_id, code);
+    setLoginState({ ...loginState, status: 'verifying_otp' });
   };
 
   return (
@@ -429,47 +581,55 @@ function AddCodexAccountModal({ onClose, onAdded }: { onClose: () => void; onAdd
       <div className="bg-gray-800 rounded-lg shadow-xl w-full max-w-xs">
         <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700">
           <h3 className="text-sm font-semibold text-foreground">添加 Codex 账号</h3>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-200"><X size={14} /></button>
+          <button disabled={loginActive} onClick={onClose} className="text-gray-400 hover:text-gray-200 disabled:opacity-40" title={loginActive ? '请等待登录完成' : undefined}><X size={14} /></button>
         </div>
         <form onSubmit={handleSubmit} className="p-4 space-y-3">
           <div>
-            <label className="block text-xs text-gray-400 mb-1">OpenAI 邮箱</label>
-            <input className="w-full bg-gray-700 text-foreground text-xs rounded px-2.5 py-1.5 outline-none focus:ring-1 focus:ring-emerald-500"
-              value={email} onChange={e => setEmail(e.target.value)} placeholder="user@example.com" required />
+            <label htmlFor="codex-account-email" className="block text-xs text-gray-400 mb-1">OpenAI 邮箱</label>
+            <input id="codex-account-email" className="w-full bg-gray-700 text-foreground text-xs rounded px-2.5 py-1.5 outline-none focus:ring-1 focus:ring-emerald-500"
+              value={email} onChange={e => setEmail(e.target.value)} placeholder="user@example.com" required disabled={loginActive} />
           </div>
           <div>
-            <label className="block text-xs text-gray-400 mb-1">验证码接收方式</label>
+            <label htmlFor="codex-login-method" className="block text-xs text-gray-400 mb-1">验证码邮箱来源</label>
             <select
+              id="codex-login-method"
               className="w-full bg-gray-700 text-foreground text-xs rounded px-2.5 py-1.5 outline-none focus:ring-1 focus:ring-emerald-500"
-              value={loginMethod} onChange={e => setLoginMethod(e.target.value)}
+              value={loginMethod}
+              onChange={e => setLoginMethod(e.target.value as CodexLoginMethod | '')}
+              disabled={loginActive}
             >
-              <option value="">自动识别（按邮箱后缀）</option>
+              <option value="">自动识别（163/mail.com/Onet/Gazeta → MailCatcher）</option>
               <option value="171mail">171mail（API 接码）</option>
-              <option value="onet">Onet（Token 接码）</option>
-              <option value="gazeta">Gazeta（Token 接码）</option>
+              <option value="mailcatcher">MailCatcher（163 / mail.com / Onet / Gazeta 等）</option>
+              <option value="mailcom">mail.com（MailCatcher 接码）</option>
+              <option value="onet">Onet（MailCatcher 接码）</option>
+              <option value="gazeta">Gazeta（MailCatcher 接码）</option>
             </select>
           </div>
           <div>
-            <label className="block text-xs text-gray-400 mb-1">
-              {usesMailCatcher ? 'MailCatcher 查询 Token' : '接码 Token'}
+            <label htmlFor="codex-mail-credential" className="block text-xs text-gray-400 mb-1">
+              {activeMethod === '171mail' ? '171mail API Token（可选）' : 'MailCatcher 查询 Token（可选）'}
             </label>
-            <input className="w-full bg-gray-700 text-foreground text-xs rounded px-2.5 py-1.5 outline-none focus:ring-1 focus:ring-emerald-500"
-              type="password" value={token} onChange={e => setToken(e.target.value)}
-              placeholder="接码 Token" required />
-            {usesMailCatcher && <p className="mt-1 text-[11px] text-gray-500">使用 MailCatcher 平台签发的 Token，不是邮箱密码。</p>}
+            <input id="codex-mail-credential" type="password" className="w-full bg-gray-700 text-foreground text-xs rounded px-2.5 py-1.5 outline-none focus:ring-1 focus:ring-emerald-500"
+              value={token} onChange={e => setToken(e.target.value)} placeholder="仅在使用邮箱验证码时需要" disabled={loginActive} />
+            {usesMailCatcher && <p className="mt-1 text-[11px] text-gray-500">填写 MailCatcher 平台签发的查询 Token，不是邮箱密码。</p>}
           </div>
           <div>
-            <label className="block text-xs text-gray-400 mb-1">密码（留空=无密码登录 OTP）</label>
-            <input type="password" className="w-full bg-gray-700 text-foreground text-xs rounded px-2.5 py-1.5 outline-none focus:ring-1 focus:ring-emerald-500"
-              value={password} onChange={e => setPassword(e.target.value)} placeholder="可选" />
+            <label htmlFor="codex-openai-password" className="block text-xs text-gray-400 mb-1">OpenAI 密码（可选）</label>
+            <input id="codex-openai-password" type="password" className="w-full bg-gray-700 text-foreground text-xs rounded px-2.5 py-1.5 outline-none focus:ring-1 focus:ring-emerald-500"
+              value={password} onChange={e => setPassword(e.target.value)} placeholder="有密码时优先使用密码登录" disabled={loginActive} />
+            <p className="mt-1 text-[11px] text-gray-500">Token 和 OpenAI 密码至少填写一项；仅填密码时，如 OpenAI 要求验证码，可在这里人工输入后继续。登录成功后凭据会以 0600 权限保存在 CCM 服务器，用于自动重新登录；删除账号时一并清除。</p>
           </div>
-          {status === 'running' && <p className="text-xs text-blue-400">登录中… 请等待（可能需要 1-3 分钟）</p>}
-          {status === 'failed' && <p className="text-xs text-red-400 break-all">{detail || '登录失败'}</p>}
+          {loginState?.status === 'running' && <p className="text-xs text-blue-400">登录中… 请等待（可能需要 1-3 分钟）</p>}
+          {loginState?.status === 'awaiting_otp' && <CodexOtpPrompt state={loginState} onSubmit={submitOtp} />}
+          {loginState?.status === 'verifying_otp' && <p className="text-xs text-blue-400">验证码已提交，正在继续登录…</p>}
+          {loginActive && loginState?.detail && <p className="text-xs text-amber-400 break-all">{loginState.detail}</p>}
+          {(loginState?.status === 'failed' || loginState?.status === 'expired') && <p className="text-xs text-red-400 break-all">{loginState.detail || '登录失败'}</p>}
           <div className="flex justify-end gap-2 pt-1">
-            <button type="button" onClick={onClose} className="px-3 py-1.5 text-xs text-gray-300 hover:text-white">取消</button>
-            <button type="submit" disabled={submitting || status === 'running' || !email.trim() || !token.trim()}
+            <button type="button" disabled={loginActive} onClick={onClose} className="px-3 py-1.5 text-xs text-gray-300 hover:text-white disabled:opacity-40">取消</button>
+            <button type="submit" disabled={submitting || loginActive || !email.trim() || !hasCredential}
               className="px-3 py-1.5 text-xs bg-emerald-600 text-white rounded hover:bg-emerald-500 disabled:opacity-50">
-              {status === 'running' ? '登录中…' : '添加'}
+              {loginActive ? '登录中…' : '添加'}
             </button>
           </div>
         </form>
@@ -563,7 +723,7 @@ export function PoolDrawer() {
   const [claudeError, setClaudeError] = useState<string | null>(null);
 
   // Codex pool state
-  const [codexStatus, setCodexStatus] = useState<any>(null);
+  const [codexStatus, setCodexStatus] = useState<CodexPoolUsageStatus | null>(null);
   const [codexLoading, setCodexLoading] = useState(false);
   const [codexError, setCodexError] = useState<string | null>(null);
 
@@ -653,29 +813,89 @@ export function PoolDrawer() {
     try { await api.clearCodexPoolCooldown(accountId); await loadCodexUsage(); } catch {}
   }, [loadCodexUsage]);
 
-  const [codexRelogin, setCodexRelogin] = useState<Record<string, { status: string; message?: string }>>({});
+  const handleCodexSetPreferred = useCallback(async (accountId: string | null) => {
+    try { await api.setCodexPoolPreferred(accountId); await loadCodexUsage(); } catch {}
+  }, [loadCodexUsage]);
+
+  const [codexRelogin, setCodexRelogin] = useState<Record<string, CodexLoginStatus>>({});
+  const codexReloginAlive = useRef(true);
+  const codexReloginTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+
+  useEffect(() => {
+    // React StrictMode runs an extra setup/cleanup cycle in development, so
+    // restore the live flag on every setup rather than only initializing it.
+    codexReloginAlive.current = true;
+    return () => {
+      codexReloginAlive.current = false;
+      for (const timer of codexReloginTimers.current.values()) clearTimeout(timer);
+      codexReloginTimers.current.clear();
+    };
+  }, []);
 
   const handleCodexRelogin = useCallback(async (accountId: string) => {
     setCodexRelogin((m) => ({ ...m, [accountId]: { status: 'running' } }));
     try {
-      await api.codexPoolRelogin(accountId);
-      const poll = async () => {
-        const s = await api.codexPoolReloginStatus(accountId);
-        if (s.status === 'running') { setTimeout(poll, 5000); return; }
-        setCodexRelogin((m) => ({ ...m, [accountId]: {
-          status: s.status,
-          message: s.status === 'failed' ? `登录失败：${(s.detail || '').slice(-300)}` : undefined,
-        } }));
-        if (s.status === 'success') await loadCodexUsage();
+      const started = await api.codexPoolRelogin(accountId);
+      setCodexRelogin((m) => ({ ...m, [accountId]: {
+        status: started.status,
+        attempt_id: started.attempt_id,
+      } }));
+
+      const schedulePoll = (delay: number) => {
+        const previous = codexReloginTimers.current.get(accountId);
+        if (previous) clearTimeout(previous);
+        const timer = setTimeout(poll, delay);
+        codexReloginTimers.current.set(accountId, timer);
       };
-      setTimeout(poll, 5000);
+      const poll = async () => {
+        if (!codexReloginAlive.current) return;
+        try {
+          const s = await api.codexPoolReloginStatus(accountId);
+          if (!codexReloginAlive.current) return;
+          setCodexRelogin((m) => ({ ...m, [accountId]: s }));
+          if (ACTIVE_CODEX_LOGIN_STATUSES.has(s.status)) {
+            schedulePoll(2000);
+            return;
+          }
+          codexReloginTimers.current.delete(accountId);
+          if (s.status === 'success') await loadCodexUsage();
+        } catch (e) {
+          if (!codexReloginAlive.current) return;
+          setCodexRelogin((current) => ({
+            ...current,
+            [accountId]: {
+              ...(current[accountId] || { status: 'running' }),
+              detail: e instanceof Error
+                ? `状态查询暂时失败，正在重试：${e.message}`
+                : '状态查询暂时失败，正在重试',
+            },
+          }));
+          schedulePoll(2000);
+        }
+      };
+      schedulePoll(1000);
     } catch (e) {
       setCodexRelogin((m) => ({ ...m, [accountId]: {
         status: 'failed',
-        message: e instanceof Error ? e.message : '重新登录失败',
+        detail: e instanceof Error ? e.message : '重新登录失败',
       } }));
     }
   }, [loadCodexUsage]);
+
+  const handleCodexSubmitOtp = useCallback(async (
+    accountId: string,
+    state: CodexLoginStatus,
+    code: string,
+  ) => {
+    if (!state.attempt_id || !state.challenge_id) {
+      throw new Error('验证码挑战信息缺失，请重新登录');
+    }
+    await api.codexPoolSubmitOtp(state.attempt_id, state.challenge_id, code);
+    setCodexRelogin((current) => ({
+      ...current,
+      [accountId]: { ...state, status: 'verifying_otp' },
+    }));
+  }, []);
 
   if (!claudeEnabled && !codexEnabled) return null;
 
@@ -694,7 +914,7 @@ export function PoolDrawer() {
       </button>
       {open && createPortal(
         <div className="fixed inset-0 z-[70]">
-          <div className="absolute inset-0 bg-black/50" onClick={() => setOpen(false)} />
+          <div className="absolute inset-0 bg-black/50" onClick={() => { if (!showCodexAdd) setOpen(false); }} />
           <div className="absolute right-0 top-0 h-full w-full max-w-sm bg-gray-900 border-l border-gray-700 shadow-xl flex flex-col pt-[env(safe-area-inset-top)]">
             <div className="flex items-center gap-2 px-4 py-3 border-b border-gray-700">
               <Users size={16} className="text-indigo-400" />
@@ -737,8 +957,10 @@ export function PoolDrawer() {
                   <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
                 </button>
                 <button
-                  onClick={() => setOpen(false)}
-                  className="p-1.5 rounded text-gray-400 hover:text-foreground hover:bg-gray-800"
+                  onClick={() => { if (!showCodexAdd) setOpen(false); }}
+                  disabled={showCodexAdd}
+                  className="p-1.5 rounded text-gray-400 hover:text-foreground hover:bg-gray-800 disabled:opacity-40"
+                  title={showCodexAdd ? '请先关闭账号登录窗口' : undefined}
                 >
                   <X size={14} />
                 </button>
@@ -806,14 +1028,17 @@ export function PoolDrawer() {
                 <>
                   {codexError && <div className="text-xs text-red-400">{codexError}</div>}
                   {codexLoading && !codexStatus && <div className="text-xs text-gray-500">加载中…</div>}
-                  {codexStatus?.accounts?.map((a: any) => (
+                  {codexStatus?.accounts.map((a) => (
                     <CodexAccountCard
                       key={a.id}
                       account={a}
+                      preferred={codexStatus.preferred ?? null}
                       onClearCooldown={handleCodexClearCooldown}
+                      onSetPreferred={handleCodexSetPreferred}
                       onRelogin={handleCodexRelogin}
+                      onSubmitOtp={(state, code) => handleCodexSubmitOtp(a.id, state, code)}
                       onDelete={async (id) => {
-                        if (!window.confirm(`从 Codex 号池中删除 ${id}？`)) return;
+                        if (!window.confirm(`从 Codex 号池中删除 ${id}？将清除 OAuth、邮箱 Token、OpenAI 密码以及该账号的日志、历史和配置；仅保留原生会话文件用于任务上下文迁移。`)) return;
                         try { await api.codexPoolDeleteAccount(id); await loadCodexUsage(); } catch (e) { window.alert(String(e)); }
                       }}
                       onRetryUsage={() => loadCodexUsage(true)}

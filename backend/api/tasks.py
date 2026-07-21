@@ -33,16 +33,57 @@ def _find_session_jsonl(session_id: str, provider: str = "claude") -> Path | Non
     all project subdirs so cwd-encoding differences don't hide the file either.
     """
     if (provider or "claude").lower() == "codex":
-        codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+        homes_to_check: list[Path] = []
+
+        # Pool account homes are the primary source of truth in multi-account
+        # deployments.  Include disabled/cooling accounts too: their rollout
+        # history remains valid even when the credentials cannot run a turn.
         try:
-            return next(
-                codex_home.glob(
-                    f"sessions/*/*/*/rollout-*-{session_id}.jsonl"
-                ),
-                None,
+            from backend.main import codex_pool
+            if codex_pool:
+                for account in codex_pool.list_accounts():
+                    codex_home = account.get("codex_home")
+                    if codex_home:
+                        homes_to_check.append(Path(codex_home).expanduser())
+        except Exception:
+            pass
+
+        env_home = os.environ.get("CODEX_HOME")
+        if env_home:
+            homes_to_check.append(Path(env_home).expanduser())
+        homes_to_check.append(Path.home() / ".codex")
+
+        # Disk fallback covers removed pool entries and legacy account naming
+        # such as ~/.codex-account-2.  A missing sessions/ child is harmless.
+        try:
+            homes_to_check.extend(
+                path for path in sorted(Path.home().glob(".codex*")) if path.is_dir()
             )
         except OSError:
-            return None
+            pass
+
+        seen: set[str] = set()
+        for codex_home in homes_to_check:
+            key = os.path.abspath(str(codex_home))
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                match = next(
+                    (
+                        path
+                        for path in codex_home.glob(
+                            f"sessions/*/*/*/rollout-*-{session_id}.jsonl"
+                        )
+                        if path.is_file()
+                    ),
+                    None,
+                )
+                if match:
+                    return match
+            except OSError:
+                continue
+        return None
 
     config_dir: str | None = None
     try:

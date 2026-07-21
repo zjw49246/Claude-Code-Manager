@@ -3,11 +3,18 @@ import asyncio
 import json
 import os
 import signal
+import time
 import pytest
 from sqlalchemy import select
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 from backend.services.instance_manager import InstanceManager
+from backend.services.claude_pool import ClaudePool
+from backend.services.codex_pool import CodexPool
+from backend.services.codex_app_server import (
+    CodexAppServerBusyError,
+    CodexThreadHomeMismatchError,
+)
 from backend.config import settings
 from backend.models.instance import Instance
 from backend.models.log_entry import LogEntry
@@ -35,6 +42,41 @@ def test_parse_codex_agent_message():
     assert event["role"] == "assistant"
     assert event["content"] == "Done"
     assert event["is_error"] is False
+
+
+@pytest.mark.asyncio
+async def test_pty_quota_event_retains_reset_metadata_for_post_turn_switch(
+    db_factory,
+):
+    async with db_factory() as db:
+        inst = Instance(name="pty-quota-event")
+        task = Task(title="pty quota", status="executing", provider="claude")
+        db.add_all([inst, task])
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+
+    info = {
+        "status": "allowed_warning",
+        "rateLimitType": "seven_day",
+        "utilization": 0.91,
+        "resetsAt": 1_800_000_000,
+    }
+    im = InstanceManager(db_factory, MagicMock(broadcast=AsyncMock()))
+    await im._process_event(inst.id, task.id, {
+        "event_type": "rate_limit_event",
+        "role": None,
+        "content": None,
+        "raw_json": None,
+        "is_error": False,
+        "rate_limit_info": info,
+    })
+
+    assert im.pty_rate_limit_seen(inst.id)
+    assert im.pty_rate_limit_info(inst.id) == info
+    im.clear_pty_rate_limit(inst.id)
+    assert not im.pty_rate_limit_seen(inst.id)
+    assert im.pty_rate_limit_info(inst.id) is None
 
 
 @pytest.mark.asyncio
@@ -479,6 +521,37 @@ async def test_launch_unsets_claude_env(db_factory):
 
 
 @pytest.mark.asyncio
+async def test_default_claude_launch_clears_stale_instance_account_home(db_factory):
+    async with db_factory() as db:
+        inst = Instance(name="default-home-inst")
+        db.add(inst)
+        await db.commit()
+        await db.refresh(inst)
+        inst_id = inst.id
+
+    mock_proc = _make_mock_process()
+    broadcaster = MagicMock(broadcast=AsyncMock())
+    im = InstanceManager(db_factory, broadcaster)
+    im._config_dirs[inst_id] = "/tmp/previous-claude-account"
+
+    with patch(
+        "backend.services.instance_manager.asyncio.create_subprocess_exec",
+        new_callable=AsyncMock,
+        return_value=mock_proc,
+    ):
+        await im.launch(
+            instance_id=inst_id,
+            prompt="use default account",
+            cwd="/tmp",
+            provider="claude",
+            config_dir=None,
+        )
+
+    assert im.get_config_dir(inst_id) is None
+    await asyncio.sleep(0.1)
+
+
+@pytest.mark.asyncio
 async def test_launch_with_thinking_budget_sets_env(db_factory):
     """launch(thinking_budget=N) injects MAX_THINKING_TOKENS=N into subprocess env."""
     async with db_factory() as db:
@@ -578,7 +651,7 @@ async def test_launch_with_effort_level(db_factory):
 
 
 @pytest.mark.asyncio
-async def test_launch_codex_provider_command(db_factory, monkeypatch):
+async def test_launch_codex_provider_command(db_factory, monkeypatch, tmp_path):
     """launch(provider='codex') constructs codex exec command."""
     monkeypatch.setattr(settings, "codex_app_server_enabled", False)
     async with db_factory() as db:
@@ -593,8 +666,12 @@ async def test_launch_codex_provider_command(db_factory, monkeypatch):
     broadcaster.broadcast = AsyncMock()
     im = InstanceManager(db_factory, broadcaster)
 
+    codex_home = tmp_path / "codex-account"
     with patch("backend.services.instance_manager.asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=mock_proc) as mock_exec:
-        await im.launch(instance_id=inst_id, prompt="do stuff", cwd="/tmp", provider="codex")
+        await im.launch(
+            instance_id=inst_id, prompt="do stuff", cwd="/tmp",
+            provider="codex", config_dir=str(codex_home),
+        )
 
     cmd_args = mock_exec.call_args[0]
     assert cmd_args[1] == "exec"
@@ -604,11 +681,17 @@ async def test_launch_codex_provider_command(db_factory, monkeypatch):
     # Should NOT have Claude-specific flags
     assert "--output-format" not in cmd_args
     assert "--verbose" not in cmd_args
+    expected_home = str(codex_home.resolve())
+    assert mock_exec.call_args.kwargs["env"]["CODEX_HOME"] == expected_home
+    assert im.get_config_dir(inst_id) == expected_home
+    assert codex_home.stat().st_mode & 0o777 == 0o700
     await asyncio.sleep(0.1)
 
 
 @pytest.mark.asyncio
-async def test_launch_codex_prefers_persistent_app_server(db_factory, monkeypatch):
+async def test_launch_codex_prefers_persistent_app_server(
+    db_factory, monkeypatch, tmp_path,
+):
     monkeypatch.setattr(settings, "codex_app_server_enabled", True)
     async with db_factory() as db:
         inst = Instance(name="codex-app-inst")
@@ -618,23 +701,29 @@ async def test_launch_codex_prefers_persistent_app_server(db_factory, monkeypatc
 
     im = InstanceManager(db_factory, MagicMock())
     im._launch_codex_app_server = AsyncMock(return_value=4321)
+    codex_home = tmp_path / "codex-account"
     with patch(
         "backend.services.instance_manager.asyncio.create_subprocess_exec",
         new_callable=AsyncMock,
     ) as exec_mock:
         pid = await im.launch(
             instance_id=inst.id, prompt="hi", cwd="/tmp", provider="codex",
-            resume_session_id="thread-1",
+            resume_session_id="thread-1", config_dir=str(codex_home),
         )
 
     assert pid == 4321
     im._launch_codex_app_server.assert_awaited_once()
     assert im._launch_codex_app_server.await_args.kwargs["resume_session_id"] == "thread-1"
+    assert im._launch_codex_app_server.await_args.kwargs["config_dir"] == str(
+        codex_home.resolve()
+    )
     exec_mock.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_launch_codex_falls_back_to_exec_when_app_server_fails(db_factory, monkeypatch):
+async def test_launch_codex_falls_back_to_exec_when_app_server_fails(
+    db_factory, monkeypatch, tmp_path,
+):
     monkeypatch.setattr(settings, "codex_app_server_enabled", True)
     async with db_factory() as db:
         inst = Instance(name="codex-fallback-inst")
@@ -647,6 +736,7 @@ async def test_launch_codex_falls_back_to_exec_when_app_server_fails(db_factory,
     broadcaster.broadcast = AsyncMock()
     im = InstanceManager(db_factory, broadcaster)
     im._launch_codex_app_server = AsyncMock(side_effect=RuntimeError("bad protocol"))
+    codex_home = tmp_path / "codex-fallback-home"
     with patch(
         "backend.services.instance_manager.asyncio.create_subprocess_exec",
         new_callable=AsyncMock,
@@ -654,11 +744,838 @@ async def test_launch_codex_falls_back_to_exec_when_app_server_fails(db_factory,
     ) as exec_mock:
         await im.launch(
             instance_id=inst.id, prompt="fallback", cwd="/tmp", provider="codex",
+            config_dir=str(codex_home),
         )
 
     assert exec_mock.await_args.args[1] == "exec"
     assert "fallback" in exec_mock.await_args.args
+    assert exec_mock.await_args.kwargs["env"]["CODEX_HOME"] == str(
+        codex_home.resolve()
+    )
     await asyncio.sleep(0.1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "launch_error",
+    [
+        asyncio.TimeoutError(),
+        CodexAppServerBusyError("account busy"),
+        CodexThreadHomeMismatchError("wrong owner"),
+    ],
+    ids=["timeout", "busy", "owner-mismatch"],
+)
+async def test_launch_codex_does_not_fallback_when_replay_is_unsafe(
+    db_factory, monkeypatch, tmp_path, launch_error,
+):
+    monkeypatch.setattr(settings, "codex_app_server_enabled", True)
+    async with db_factory() as db:
+        inst = Instance(name="codex-no-fallback-inst")
+        db.add(inst)
+        await db.commit()
+        await db.refresh(inst)
+
+    im = InstanceManager(db_factory, MagicMock())
+    im._launch_codex_app_server = AsyncMock(side_effect=launch_error)
+    with patch(
+        "backend.services.instance_manager.asyncio.create_subprocess_exec",
+        new_callable=AsyncMock,
+    ) as exec_mock:
+        with pytest.raises(type(launch_error)):
+            await im.launch(
+                instance_id=inst.id,
+                prompt="must not replay",
+                cwd="/tmp",
+                provider="codex",
+                config_dir=str(tmp_path / "codex-home"),
+            )
+
+    exec_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_launch_codex_app_server_routes_turn_to_canonical_home(
+    db_factory, tmp_path,
+):
+    async with db_factory() as db:
+        inst = Instance(name="codex-registry-inst")
+        task = Task(title="registry-task", status="executing", provider="codex")
+        db.add_all([inst, task])
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+
+    process = _make_mock_process(pid=7654)
+    registry = MagicMock()
+    registry.start_turn = AsyncMock(return_value=(process, "thread-home"))
+    codex_home = tmp_path / "account-home"
+    im = InstanceManager(db_factory, MagicMock(broadcast=AsyncMock()))
+
+    with patch(
+        "backend.services.codex_app_server.CodexAppServerRegistry",
+        return_value=registry,
+    ) as registry_cls:
+        pid = await im._launch_codex_app_server(
+            instance_id=inst.id,
+            prompt="work",
+            task_id=task.id,
+            cwd="/tmp",
+            model="gpt-5.5",
+            resume_session_id="thread-home",
+            loop_iteration=None,
+            git_env=None,
+            effort_level="high",
+            chat_initiated=True,
+            config_dir=str(codex_home.resolve()),
+            enable_workflows=False,
+            enabled_skills=None,
+        )
+
+    assert pid == 7654
+    registry_cls.assert_called_once()
+    assert registry.start_turn.await_args.kwargs["codex_home"] == str(
+        codex_home.resolve()
+    )
+    assert im.get_config_dir(inst.id) == str(codex_home.resolve())
+    assert im._launch_params[inst.id]["config_dir"] == str(codex_home.resolve())
+    await asyncio.sleep(0.1)
+
+
+@pytest.mark.asyncio
+async def test_codex_registry_lifecycle_facades_delegate():
+    registry = MagicMock()
+    registry.begin_home_maintenance = AsyncMock(return_value=True)
+    registry.end_home_maintenance = AsyncMock()
+    registry.rebind_thread = AsyncMock()
+    im = InstanceManager(MagicMock(), MagicMock())
+    im._codex_app_server = registry
+
+    assert await im.shutdown_codex_app_server_home(
+        "/tmp/codex-a", require_idle=True,
+    ) is True
+    await im.rebind_codex_thread(
+        "thread-1",
+        source_codex_home="/tmp/codex-a",
+        target_codex_home="/tmp/codex-b",
+    )
+    await im.begin_codex_app_server_home_maintenance("/tmp/codex-b")
+    await im.end_codex_app_server_home_maintenance("/tmp/codex-b")
+
+    assert registry.begin_home_maintenance.await_args_list[0].kwargs == {
+        "require_idle": True,
+    }
+    assert registry.begin_home_maintenance.await_args_list[0].args == (
+        "/tmp/codex-a",
+    )
+    registry.end_home_maintenance.assert_any_await("/tmp/codex-a")
+    registry.begin_home_maintenance.assert_any_await(
+        "/tmp/codex-b", require_idle=True,
+    )
+    registry.end_home_maintenance.assert_any_await("/tmp/codex-b")
+    registry.rebind_thread.assert_awaited_once_with(
+        "thread-1",
+        source_codex_home="/tmp/codex-a",
+        target_codex_home="/tmp/codex-b",
+    )
+
+
+@pytest.mark.asyncio
+async def test_codex_maintenance_rejects_active_exec_turn(tmp_path):
+    home = str((tmp_path / "codex-a").resolve())
+    im = InstanceManager(MagicMock(), MagicMock())
+    im.processes[7] = MagicMock(returncode=None)
+    im._codex_exec_homes[7] = home
+
+    with pytest.raises(CodexAppServerBusyError, match="active exec turn"):
+        await im.begin_codex_home_maintenance(home, require_idle=True)
+
+    assert home not in im._codex_home_maintenance
+    assert im._codex_app_server is None
+
+
+@pytest.mark.asyncio
+async def test_codex_maintenance_blocks_exec_launch_even_without_app_server(
+    db_factory, monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(settings, "codex_app_server_enabled", False)
+    async with db_factory() as db:
+        inst = Instance(name="codex-maintenance-inst")
+        db.add(inst)
+        await db.commit()
+        await db.refresh(inst)
+
+    home = str((tmp_path / "codex-a").resolve())
+    im = InstanceManager(db_factory, MagicMock())
+    assert await im.begin_codex_home_maintenance(home) is False
+    try:
+        with patch(
+            "backend.services.instance_manager.asyncio.create_subprocess_exec",
+            new_callable=AsyncMock,
+        ) as exec_mock:
+            with pytest.raises(CodexAppServerBusyError, match="under maintenance"):
+                await im.launch(
+                    instance_id=inst.id,
+                    prompt="must wait",
+                    cwd="/tmp",
+                    provider="codex",
+                    config_dir=home,
+                )
+        exec_mock.assert_not_awaited()
+    finally:
+        await im.end_codex_home_maintenance(home)
+
+    assert home not in im._codex_home_maintenance
+
+
+@pytest.mark.asyncio
+async def test_codex_maintenance_reservation_creates_registry_before_first_turn(
+    tmp_path,
+):
+    registry = MagicMock()
+    registry.begin_home_maintenance = AsyncMock(return_value=False)
+    registry.end_home_maintenance = AsyncMock()
+    im = InstanceManager(MagicMock(), MagicMock())
+
+    def ensure_registry():
+        im._codex_app_server = registry
+        return registry
+
+    im._ensure_codex_app_server_registry = MagicMock(side_effect=ensure_registry)
+    home = str((tmp_path / "codex-first").resolve())
+
+    assert await im.begin_codex_home_maintenance(home) is False
+    assert home in im._codex_home_maintenance
+    await im.end_codex_home_maintenance(home)
+
+    im._ensure_codex_app_server_registry.assert_called_once_with()
+    registry.begin_home_maintenance.assert_awaited_once_with(
+        home, require_idle=True,
+    )
+    registry.end_home_maintenance.assert_awaited_once_with(home)
+
+
+@pytest.mark.asyncio
+async def test_codex_registry_legacy_rebind_facade_still_delegates():
+    registry = MagicMock()
+    registry.rebind_thread = AsyncMock()
+    im = InstanceManager(MagicMock(), MagicMock())
+    im._codex_app_server = registry
+
+    await im.rebind_codex_app_server_thread(
+        "thread-legacy",
+        source_codex_home="/tmp/codex-a",
+        target_codex_home="/tmp/codex-b",
+    )
+
+    registry.rebind_thread.assert_awaited_once_with(
+        "thread-legacy",
+        source_codex_home="/tmp/codex-a",
+        target_codex_home="/tmp/codex-b",
+    )
+
+
+@pytest.mark.asyncio
+async def test_codex_shutdown_home_uses_idle_maintenance_gate():
+    registry = MagicMock()
+    registry.begin_home_maintenance = AsyncMock(return_value=True)
+    registry.end_home_maintenance = AsyncMock()
+    im = InstanceManager(MagicMock(), MagicMock())
+    im._codex_app_server = registry
+
+    assert await im.shutdown_codex_app_server_home(
+        "/tmp/codex-a", require_idle=True,
+    ) is True
+    registry.begin_home_maintenance.assert_awaited_once_with(
+        "/tmp/codex-a", require_idle=True,
+    )
+    registry.end_home_maintenance.assert_awaited_once_with("/tmp/codex-a")
+
+
+@pytest.mark.asyncio
+async def test_codex_chat_pool_rotation_delegates_to_dispatcher_and_relaunches(
+    db_factory, tmp_path,
+):
+    async with db_factory() as db:
+        task = Task(
+            title="rotate-codex",
+            status="executing",
+            provider="codex",
+            session_id="thread-rotate",
+            last_cwd="/tmp",
+        )
+        db.add(task)
+        await db.commit()
+        await db.refresh(task)
+
+    new_home = str((tmp_path / "codex-b").resolve())
+    dispatcher = MagicMock()
+    dispatcher._check_rate_limit_and_rotate = AsyncMock(return_value={
+        "config_dir": new_home,
+        "session_id": "thread-rotate",
+        "excluded": {"codex-a"},
+    })
+    im = InstanceManager(db_factory, MagicMock(broadcast=AsyncMock()))
+    im._launch_params[7] = {
+        "provider": "codex",
+        "prompt": "continue the task",
+        "model": "gpt-5.5",
+        "git_env": {},
+        "effort_level": "high",
+    }
+    im.get_recent_log_contents = AsyncMock(return_value=[])
+    im.launch = AsyncMock(return_value=999)
+
+    with patch("backend.main.dispatcher", dispatcher):
+        rotated = await im._try_chat_pool_rotation(
+            7, task.id, 1, "You've hit your usage limit",
+        )
+
+    assert rotated is True
+    assert dispatcher._check_rate_limit_and_rotate.await_args.args == (
+        7, task.id, 1,
+    )
+    combined = dispatcher._check_rate_limit_and_rotate.await_args.kwargs["combined"]
+    assert "usage limit" in combined
+    launch_kwargs = im.launch.await_args.kwargs
+    assert launch_kwargs["provider"] == "codex"
+    assert launch_kwargs["config_dir"] == new_home
+    assert launch_kwargs["resume_session_id"] == "thread-rotate"
+    assert launch_kwargs["prompt"] == "continue the task"
+
+
+@pytest.mark.asyncio
+async def test_codex_chat_pool_rotation_replays_fresh_prompt_without_session(
+    db_factory, tmp_path,
+):
+    """Fresh/compact-retry turns rotate by starting a new thread in the new home."""
+
+    async with db_factory() as db:
+        task = Task(
+            title="rotate-fresh-codex",
+            status="executing",
+            provider="codex",
+            session_id=None,
+            last_cwd="/tmp",
+        )
+        db.add(task)
+        await db.commit()
+        await db.refresh(task)
+
+    new_home = str((tmp_path / "codex-b").resolve())
+    dispatcher = MagicMock()
+    dispatcher._check_rate_limit_and_rotate = AsyncMock(return_value={
+        "config_dir": new_home,
+        "session_id": None,
+        "excluded": {"codex-a"},
+    })
+    compact_prompt = "[Context compacted]\nsummary\n\n[Message]\ncontinue"
+    im = InstanceManager(db_factory, MagicMock(broadcast=AsyncMock()))
+    im._launch_params[7] = {
+        "provider": "codex",
+        "prompt": compact_prompt,
+        "model": "gpt-5.5",
+        "git_env": {},
+        "effort_level": "high",
+    }
+    im.get_recent_log_contents = AsyncMock(return_value=[])
+    im.launch = AsyncMock(return_value=999)
+
+    with patch("backend.main.dispatcher", dispatcher):
+        rotated = await im._try_chat_pool_rotation(
+            7, task.id, 1, "You've hit your usage limit",
+        )
+
+    assert rotated is True
+    launch_kwargs = im.launch.await_args.kwargs
+    assert launch_kwargs["provider"] == "codex"
+    assert launch_kwargs["config_dir"] == new_home
+    assert launch_kwargs["resume_session_id"] is None
+    assert launch_kwargs["prompt"] == compact_prompt
+
+
+@pytest.mark.asyncio
+async def test_claude_soft_quota_switch_migrates_before_reset_cooldown(
+    db_factory, tmp_path,
+):
+    source = tmp_path / "claude-a"
+    target = tmp_path / "claude-b"
+    session_id = "quota-session"
+    rollout = source / "projects" / "encoded-cwd" / f"{session_id}.jsonl"
+    rollout.parent.mkdir(parents=True)
+    rollout.write_text('{"type":"user"}\n')
+    config = tmp_path / "claude-pool.json"
+    config.write_text(json.dumps({"accounts": [
+        {"id": "claude-a", "config_dir": str(source), "enabled": True},
+        {"id": "claude-b", "config_dir": str(target), "enabled": True},
+    ]}))
+    pool = ClaudePool(config_path=config, cooldown_seconds=60)
+    pool.fetch_usage = AsyncMock(return_value=[
+        {"id": "claude-a", "usage": {"five_hour": {"utilization": 95}}},
+        {"id": "claude-b", "usage": {"seven_day": {"utilization": 20}}},
+    ])
+
+    async with db_factory() as db:
+        task = Task(
+            title="claude quota", provider="claude", status="executing",
+            session_id=session_id,
+        )
+        db.add(task)
+        await db.commit()
+        await db.refresh(task)
+
+    broadcaster = MagicMock(broadcast=AsyncMock())
+    im = InstanceManager(db_factory, broadcaster)
+    im._config_dirs[7] = str(source)
+    dispatcher = MagicMock(pool=pool, codex_pool=None)
+    reset_at = time.time() + 3600
+
+    with patch("backend.main.dispatcher", dispatcher):
+        switched = await im._try_proactive_pool_switch(
+            7,
+            task.id,
+            rate_limit_info={
+                "status": "allowed_warning",
+                "rateLimitType": "five_hour",
+                "utilization": 0.95,
+                "resetsAt": reset_at,
+            },
+        )
+
+    assert switched is True
+    migrated = target / "projects" / "encoded-cwd" / f"{session_id}.jsonl"
+    assert migrated.exists()
+    assert migrated.stat().st_ino == rollout.stat().st_ino
+    assert pool.is_in_cooldown(str(source))
+    assert pool._cooldowns["claude-a"] >= reset_at - 2
+    assert im.get_config_dir(7) == str(target)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("migration_exists", [True, False])
+async def test_claude_soft_quota_no_usable_target_or_migration_failure_does_not_cool(
+    db_factory, tmp_path, migration_exists,
+):
+    source = tmp_path / "claude-a"
+    target = tmp_path / "claude-b"
+    session_id = "quota-stays"
+    if migration_exists:
+        rollout = source / "projects" / "encoded-cwd" / f"{session_id}.jsonl"
+        rollout.parent.mkdir(parents=True)
+        rollout.write_text("{}\n")
+    config = tmp_path / "claude-pool.json"
+    config.write_text(json.dumps({"accounts": [
+        {"id": "claude-a", "config_dir": str(source), "enabled": True},
+        {"id": "claude-b", "config_dir": str(target), "enabled": True},
+    ]}))
+    pool = ClaudePool(config_path=config, cooldown_seconds=60)
+    if migration_exists:
+        # Both accounts are known-high, so selection must stop before migration.
+        pool.fetch_usage = AsyncMock(return_value=[
+            {"id": "claude-a", "usage": {"five_hour": {"utilization": 95}}},
+            {"id": "claude-b", "usage": {"seven_day": {"utilization": 90}}},
+        ])
+    else:
+        # A usable target exists, but the session copy itself fails.
+        pool.fetch_usage = AsyncMock(return_value=[
+            {"id": "claude-a", "usage": {"five_hour": {"utilization": 95}}},
+            {"id": "claude-b", "usage": {"seven_day": {"utilization": 10}}},
+        ])
+
+    async with db_factory() as db:
+        task = Task(
+            title="claude quota stays", provider="claude", status="executing",
+            session_id=session_id,
+        )
+        db.add(task)
+        await db.commit()
+        await db.refresh(task)
+
+    im = InstanceManager(db_factory, MagicMock(broadcast=AsyncMock()))
+    im._config_dirs[7] = str(source)
+    dispatcher = MagicMock(pool=pool, codex_pool=None)
+    with patch("backend.main.dispatcher", dispatcher):
+        switched = await im._try_proactive_pool_switch(
+            7,
+            task.id,
+            rate_limit_info={
+                "status": "allowed_warning",
+                "rateLimitType": "seven_day",
+                "utilization": 0.95,
+                "resetsAt": time.time() + 86400,
+            },
+        )
+
+    assert switched is False
+    assert not pool.is_in_cooldown(str(source))
+    assert im.get_config_dir(7) == str(source)
+
+
+@pytest.mark.asyncio
+async def test_codex_soft_quota_switch_migrates_rebinds_and_updates_binding(
+    db_factory, tmp_path,
+):
+    source = tmp_path / "codex-a"
+    target = tmp_path / "codex-b"
+    session_id = "thread-quota"
+    rollout = (
+        source / "sessions" / "2026" / "07" / "21"
+        / f"rollout-2026-07-21T00-00-00-{session_id}.jsonl"
+    )
+    rollout.parent.mkdir(parents=True)
+    rollout.write_text("{}\n")
+    config = tmp_path / "codex-pool.json"
+    config.write_text(json.dumps({"accounts": [
+        {"id": "codex-a", "codex_home": str(source), "enabled": True},
+        {"id": "codex-b", "codex_home": str(target), "enabled": True},
+    ]}))
+    pool = CodexPool(config_path=config)
+    pool.select_quota_alternative = AsyncMock(return_value=str(target.resolve()))
+    reset_at = time.time() + 7200
+    pool._quota_cache = {
+        "codex-a": {
+            "id": "codex-a",
+            "quota": {
+                "primary_used_percent": 95,
+                "primary_resets_at": time.time() + 300,
+                "secondary_used_percent": 90,
+                "secondary_resets_at": reset_at,
+            },
+        }
+    }
+
+    async with db_factory() as db:
+        task = Task(
+            title="codex quota", provider="codex", status="executing",
+            session_id=session_id, metadata_={"codex_account_id": "codex-a"},
+        )
+        db.add(task)
+        await db.commit()
+        await db.refresh(task)
+
+    im = InstanceManager(db_factory, MagicMock(broadcast=AsyncMock()))
+    im._config_dirs[7] = str(source.resolve())
+    im.rebind_codex_thread = AsyncMock()
+    dispatcher = MagicMock(pool=None, codex_pool=pool)
+    dispatcher._set_codex_task_binding = AsyncMock()
+
+    with patch("backend.main.dispatcher", dispatcher):
+        switched = await im._try_proactive_pool_switch(7, task.id)
+
+    assert switched is True
+    migrated = (
+        target / "sessions" / "2026" / "07" / "21"
+        / f"rollout-2026-07-21T00-00-00-{session_id}.jsonl"
+    )
+    assert migrated.exists()
+    im.rebind_codex_thread.assert_awaited_once_with(
+        session_id,
+        source_codex_home=str(source.resolve()),
+        target_codex_home=str(target.resolve()),
+    )
+    dispatcher._set_codex_task_binding.assert_awaited_once_with(
+        task.id, "codex-b"
+    )
+    assert pool.is_in_cooldown(str(source))
+    assert pool._cooldowns["codex-a"] >= reset_at - 2
+    assert im.get_config_dir(7) == str(target.resolve())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rollback_fails", [False, True])
+async def test_codex_soft_quota_binding_failure_rolls_back_owner_without_cooldown(
+    db_factory, tmp_path, rollback_fails,
+):
+    source = tmp_path / "codex-binding-old"
+    target = tmp_path / "codex-binding-new"
+    session_id = "thread-binding-rollback"
+    rollout = (
+        source / "sessions" / "2026" / "07" / "21"
+        / f"rollout-2026-07-21T00-00-00-{session_id}.jsonl"
+    )
+    rollout.parent.mkdir(parents=True)
+    rollout.write_text("{}\n")
+    config = tmp_path / "codex-binding-pool.json"
+    config.write_text(json.dumps({"accounts": [
+        {"id": "codex-old", "codex_home": str(source), "enabled": True},
+        {"id": "codex-new", "codex_home": str(target), "enabled": True},
+    ]}))
+    pool = CodexPool(config_path=config)
+    pool.select_quota_alternative = AsyncMock(return_value=str(target.resolve()))
+    pool._quota_cache = {
+        "codex-old": {
+            "id": "codex-old",
+            "quota": {
+                "primary_used_percent": 95,
+                "primary_resets_at": time.time() + 3600,
+            },
+        }
+    }
+
+    async with db_factory() as db:
+        task = Task(
+            title="codex binding rollback", provider="codex", status="executing",
+            session_id=session_id, metadata_={"codex_account_id": "codex-old"},
+        )
+        db.add(task)
+        await db.commit()
+        await db.refresh(task)
+
+    im = InstanceManager(db_factory, MagicMock(broadcast=AsyncMock()))
+    im._config_dirs[7] = str(source.resolve())
+    im.rebind_codex_thread = AsyncMock(
+        side_effect=[None, RuntimeError("rollback busy")]
+        if rollback_fails else None
+    )
+    im.clear_codex_thread_owner_for_recovery = AsyncMock(return_value=True)
+    dispatcher = MagicMock(pool=None, codex_pool=pool)
+    dispatcher._set_codex_task_binding = AsyncMock(
+        side_effect=RuntimeError("database unavailable")
+    )
+
+    with patch("backend.main.dispatcher", dispatcher):
+        switched = await im._try_proactive_pool_switch(7, task.id)
+
+    assert switched is False
+    assert im.rebind_codex_thread.await_args_list == [
+        call(
+            session_id,
+            source_codex_home=str(source.resolve()),
+            target_codex_home=str(target.resolve()),
+        ),
+        call(
+            session_id,
+            source_codex_home=str(target.resolve()),
+            target_codex_home=str(source.resolve()),
+        ),
+    ]
+    assert not pool.is_in_cooldown(str(source))
+    assert im.get_config_dir(7) == str(source.resolve())
+    if rollback_fails:
+        im.clear_codex_thread_owner_for_recovery.assert_awaited_once_with(
+            session_id,
+            expected_codex_home=str(target.resolve()),
+        )
+    else:
+        im.clear_codex_thread_owner_for_recovery.assert_not_awaited()
+    async with db_factory() as db:
+        persisted = await db.get(Task, task.id)
+        assert persisted.metadata_["codex_account_id"] == "codex-old"
+
+
+@pytest.mark.asyncio
+async def test_codex_soft_quota_rebind_failure_keeps_old_home_available(
+    db_factory, tmp_path,
+):
+    source = tmp_path / "codex-rebind-old"
+    target = tmp_path / "codex-rebind-new"
+    session_id = "thread-rebind-fails"
+    rollout = (
+        source / "sessions" / "2026" / "07" / "21"
+        / f"rollout-2026-07-21T00-00-00-{session_id}.jsonl"
+    )
+    rollout.parent.mkdir(parents=True)
+    rollout.write_text("{}\n")
+    config = tmp_path / "codex-rebind-pool.json"
+    config.write_text(json.dumps({"accounts": [
+        {"id": "codex-old", "codex_home": str(source), "enabled": True},
+        {"id": "codex-new", "codex_home": str(target), "enabled": True},
+    ]}))
+    pool = CodexPool(config_path=config)
+    pool.select_quota_alternative = AsyncMock(return_value=str(target.resolve()))
+    pool._quota_cache = {
+        "codex-old": {
+            "id": "codex-old",
+            "quota": {
+                "primary_used_percent": 95,
+                "primary_resets_at": time.time() + 3600,
+            },
+        }
+    }
+
+    async with db_factory() as db:
+        task = Task(
+            title="codex rebind failure", provider="codex", status="executing",
+            session_id=session_id, metadata_={"codex_account_id": "codex-old"},
+        )
+        db.add(task)
+        await db.commit()
+        await db.refresh(task)
+
+    im = InstanceManager(db_factory, MagicMock(broadcast=AsyncMock()))
+    im._config_dirs[7] = str(source.resolve())
+    im.rebind_codex_thread = AsyncMock(side_effect=RuntimeError("target busy"))
+    dispatcher = MagicMock(pool=None, codex_pool=pool)
+    dispatcher._set_codex_task_binding = AsyncMock()
+
+    with patch("backend.main.dispatcher", dispatcher):
+        switched = await im._try_proactive_pool_switch(7, task.id)
+
+    assert switched is False
+    dispatcher._set_codex_task_binding.assert_not_awaited()
+    assert not pool.is_in_cooldown(str(source))
+    assert im.get_config_dir(7) == str(source.resolve())
+
+
+@pytest.mark.asyncio
+async def test_codex_chat_routing_error_requeues_prompt_and_cleans_failed_turn(
+    db_factory,
+):
+    from backend.services.dispatcher import (
+        CodexAccountRoutingError,
+        PRIORITY_USER,
+    )
+
+    async with db_factory() as db:
+        task = Task(
+            title="route-retry-codex",
+            status="executing",
+            provider="codex",
+            session_id="thread-route",
+            last_cwd="/tmp",
+        )
+        inst = Instance(name="route-retry-inst", status="running")
+        db.add_all([task, inst])
+        await db.flush()
+        inst.current_task_id = task.id
+        await db.commit()
+        await db.refresh(task)
+        await db.refresh(inst)
+
+    dispatcher = MagicMock()
+    dispatcher._check_rate_limit_and_rotate = AsyncMock(side_effect=
+        CodexAccountRoutingError(
+            "rollout migration is temporarily unavailable", retry_after=5,
+        )
+    )
+    dispatcher.enqueue_message = AsyncMock()
+    broadcaster = MagicMock(broadcast=AsyncMock())
+    im = InstanceManager(db_factory, broadcaster)
+    process = _make_mock_process(returncode=1)
+    im.processes[inst.id] = process
+    im._launch_params[inst.id] = {
+        "provider": "codex",
+        "prompt": "preserve this exact user prompt",
+        "model": "gpt-5.5",
+    }
+    im.get_recent_log_contents = AsyncMock(return_value=[])
+
+    with patch("backend.main.dispatcher", dispatcher):
+        await im._consume_output(
+            inst.id,
+            task.id,
+            process,
+            chat_initiated=True,
+            provider="codex",
+        )
+
+    dispatcher.enqueue_message.assert_awaited_once_with(
+        task_id=task.id,
+        prompt="preserve this exact user prompt",
+        priority=PRIORITY_USER,
+        source="routing_retry",
+    )
+    async with db_factory() as db:
+        refreshed_task = await db.get(Task, task.id)
+        refreshed_inst = await db.get(Instance, inst.id)
+    assert refreshed_task.status == "failed"
+    assert refreshed_inst.status == "error"
+    assert inst.id not in im.processes
+
+
+@pytest.mark.asyncio
+async def test_codex_transient_replacement_busy_requeues_exact_prompt(
+    db_factory, monkeypatch,
+):
+    import backend.services.claude_pool as claude_pool_module
+
+    async with db_factory() as db:
+        task = Task(
+            title="transient replacement busy",
+            status="executing",
+            provider="codex",
+            session_id="thread-transient-busy",
+            last_cwd="/tmp",
+        )
+        db.add(task)
+        await db.commit()
+        await db.refresh(task)
+
+    dispatcher = MagicMock()
+    dispatcher.enqueue_message = AsyncMock()
+    broadcaster = MagicMock(broadcast=AsyncMock())
+    im = InstanceManager(db_factory, broadcaster)
+    im._config_dirs[7] = "/tmp/codex-a"
+    im._launch_params[7] = {
+        "provider": "codex",
+        "prompt": "preserve transient prompt",
+        "model": "gpt-5.5",
+    }
+    im.get_recent_log_contents = AsyncMock(return_value=[])
+    im.launch = AsyncMock(
+        side_effect=CodexAppServerBusyError("account under maintenance")
+    )
+    monkeypatch.setattr(
+        claude_pool_module, "transient_retry_delay", lambda *_args: 0,
+    )
+
+    with patch("backend.main.dispatcher", dispatcher):
+        launched = await im._try_chat_transient_retry(
+            7, task.id, 1, "request timed out",
+        )
+
+    assert launched is False
+    dispatcher.enqueue_message.assert_awaited_once_with(
+        task_id=task.id,
+        prompt="preserve transient prompt",
+        priority=0,
+        source="routing_retry",
+    )
+
+
+@pytest.mark.asyncio
+async def test_codex_pool_replacement_busy_requeues_exact_prompt(db_factory):
+    async with db_factory() as db:
+        task = Task(
+            title="pool replacement busy",
+            status="executing",
+            provider="codex",
+            session_id="thread-pool-busy",
+            last_cwd="/tmp",
+        )
+        db.add(task)
+        await db.commit()
+        await db.refresh(task)
+
+    dispatcher = MagicMock()
+    dispatcher._check_rate_limit_and_rotate = AsyncMock(return_value={
+        "config_dir": "/tmp/codex-b",
+        "session_id": task.session_id,
+    })
+    dispatcher.enqueue_message = AsyncMock()
+    broadcaster = MagicMock(broadcast=AsyncMock())
+    im = InstanceManager(db_factory, broadcaster)
+    im._launch_params[7] = {
+        "provider": "codex",
+        "prompt": "preserve rotation prompt",
+        "model": "gpt-5.5",
+    }
+    im.get_recent_log_contents = AsyncMock(return_value=[])
+    im.launch = AsyncMock(
+        side_effect=CodexThreadHomeMismatchError("thread is being rebound")
+    )
+
+    with patch("backend.main.dispatcher", dispatcher):
+        launched = await im._try_chat_pool_rotation(
+            7, task.id, 1, "You've hit your usage limit",
+        )
+
+    assert launched is False
+    dispatcher.enqueue_message.assert_awaited_once_with(
+        task_id=task.id,
+        prompt="preserve rotation prompt",
+        priority=0,
+        source="routing_retry",
+    )
 
 
 @pytest.mark.asyncio
@@ -1204,6 +2121,41 @@ async def test_process_event_broadcasts_loop_iteration_zero(db_factory):
 
 
 # === chat_initiated flag tests ===
+
+
+@pytest.mark.asyncio
+async def test_successful_codex_consumer_checks_quota_for_every_turn(db_factory):
+    async with db_factory() as db:
+        inst = Instance(name="codex-quota-consumer")
+        task = Task(
+            title="codex quota consumer",
+            status="executing",
+            provider="codex",
+            session_id="thread-consumer",
+        )
+        db.add_all([inst, task])
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+
+    process = _make_mock_process(returncode=0)
+    im = InstanceManager(db_factory, MagicMock(broadcast=AsyncMock()))
+    im.processes[inst.id] = process
+    im._try_proactive_pool_switch = AsyncMock(return_value=False)
+
+    await im._consume_output(
+        inst.id,
+        task.id,
+        process,
+        chat_initiated=False,
+        provider="codex",
+    )
+
+    im._try_proactive_pool_switch.assert_awaited_once_with(
+        inst.id,
+        task.id,
+        rate_limit_info=None,
+    )
 
 
 @pytest.mark.asyncio
@@ -1777,6 +2729,37 @@ async def test_process_event_usage_limit_does_not_set_transient_flag(db_factory)
         "raw_json": "{}",
     })
     assert im.transient_error_seen(inst_id) is False
+
+
+@pytest.mark.asyncio
+async def test_process_event_codex_usage_text_never_sets_claude_pty_limit_flag(
+    db_factory,
+):
+    """Codex usage wording overlaps Claude regex but Codex is never PTY-managed."""
+    async with db_factory() as db:
+        inst = Instance(name="codex-usage-inst")
+        task = Task(title="t", description="d", provider="codex")
+        db.add_all([inst, task])
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id, task_id = inst.id, task.id
+
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    im = InstanceManager(db_factory, broadcaster)
+    im._launch_params[inst_id] = {"provider": "codex"}
+
+    await im._process_event(inst_id, task_id, {
+        "event_type": "result",
+        "role": "assistant",
+        "content": "You've hit your usage limit for Codex",
+        "is_error": True,
+        "raw_json": "{}",
+    })
+
+    assert im.transient_error_seen(inst_id) is False
+    assert im.pty_rate_limit_seen(inst_id) is False
 
 
 @pytest.mark.asyncio

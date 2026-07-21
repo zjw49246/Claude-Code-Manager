@@ -1,4 +1,5 @@
 """Phase 3 测试：TaskMigrator 状态机 / PUT 触发迁移 / 销毁批量迁回。"""
+from pathlib import PurePosixPath
 from unittest.mock import AsyncMock
 
 import pytest
@@ -250,3 +251,182 @@ async def test_local_codex_session_glob_finds_rollout_file(tmp_path, monkeypatch
     assert matches == [str(f)]
     # 不同 session id 不应命中
     assert TaskMigrator._local_codex_session_glob("other-id") == []
+
+
+async def test_local_codex_session_glob_finds_account_specific_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    sid = "019f0000-aaaa-bbbb-cccc-000000000003"
+    day_dir = tmp_path / ".codex-account-2" / "sessions" / "2026" / "07" / "20"
+    day_dir.mkdir(parents=True)
+    rollout = day_dir / f"rollout-2026-07-20T01-02-03-{sid}.jsonl"
+    rollout.write_text("{}")
+
+    assert TaskMigrator._local_codex_session_glob(sid) == [str(rollout)]
+    root, relative = TaskMigrator._codex_sessions_root_and_relative(str(rollout))
+    assert root == str(tmp_path / ".codex-account-2" / "sessions")
+    assert relative == f"2026/07/20/{rollout.name}"
+    assert ".." not in PurePosixPath(relative).parts
+
+
+async def test_local_account_rollout_moves_to_safe_remote_relative_path(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    sid = "019f0000-aaaa-bbbb-cccc-000000000005"
+    day_dir = tmp_path / ".codex-account-2" / "sessions" / "2026" / "07" / "20"
+    day_dir.mkdir(parents=True)
+    rollout = day_dir / f"rollout-2026-07-20T02-03-04-{sid}.jsonl"
+    rollout.write_text("{}")
+
+    fake_ssh = AsyncMock()
+    destination = Worker(
+        id=8,
+        name="destination",
+        status="ready",
+        private_ip="10.0.0.8",
+        auth_token="t",
+        ssh_user="ubuntu",
+    )
+    migrator = TaskMigrator(db_factory=None, relay=FakeRelay())
+    monkeypatch.setattr(migrator, "_ssh", lambda worker: fake_ssh)
+
+    await migrator._move_codex_session(None, destination, sid)
+
+    expected = (
+        "/home/ubuntu/.codex/sessions/2026/07/20/"
+        f"rollout-2026-07-20T02-03-04-{sid}.jsonl"
+    )
+    fake_ssh.copy_file.assert_awaited_once_with(str(rollout), expected)
+    assert ".." not in PurePosixPath(expected).parts
+
+
+async def test_local_codex_migration_selects_copy_with_complete_history(
+    tmp_path, monkeypatch,
+):
+    """Rotation copies remain in old homes; the longest proven prefix wins."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    sid = "019f0000-aaaa-bbbb-cccc-000000000006"
+    old_dir = tmp_path / ".codex" / "sessions" / "2026" / "07" / "20"
+    new_dir = tmp_path / ".codex-codex-3" / "sessions" / "2026" / "07" / "21"
+    old_dir.mkdir(parents=True)
+    new_dir.mkdir(parents=True)
+    old = old_dir / f"rollout-old-{sid}.jsonl"
+    newest = new_dir / f"rollout-new-{sid}.jsonl"
+    old.write_bytes(b"turn-1\n")
+    newest.write_bytes(b"turn-1\nturn-2\n")
+
+    destination = Worker(
+        id=9,
+        name="destination",
+        status="ready",
+        private_ip="10.0.0.9",
+        auth_token="t",
+        ssh_user="ubuntu",
+    )
+    fake_ssh = AsyncMock()
+    migrator = TaskMigrator(db_factory=None, relay=FakeRelay())
+    monkeypatch.setattr(migrator, "_ssh", lambda worker: fake_ssh)
+
+    await migrator._move_codex_session(None, destination, sid)
+
+    assert fake_ssh.copy_file.await_args.args[0] == str(newest)
+
+
+def test_codex_migration_refuses_divergent_account_copies(tmp_path):
+    first = tmp_path / "first.jsonl"
+    second = tmp_path / "second.jsonl"
+    first.write_bytes(b"same-prefix\nA\n")
+    second.write_bytes(b"same-prefix\nB\n")
+
+    with pytest.raises(MigrationError, match="分叉 rollout"):
+        TaskMigrator._select_authoritative_codex_rollout(
+            [str(first), str(second)]
+        )
+
+
+async def test_remote_codex_session_uses_matched_account_sessions_root(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    sid = "019f0000-aaaa-bbbb-cccc-000000000004"
+    remote_file = (
+        f"/home/ubuntu/.codex-account-3/sessions/2026/07/20/"
+        f"rollout-2026-07-20T01-02-03-{sid}.jsonl"
+    )
+
+    class FakeSSH:
+        def __init__(self):
+            self.commands = []
+
+        async def run(self, command):
+            self.commands.append(command)
+            return 0, remote_file + "\n"
+
+        async def rsync_from(self, remote_path, local_path, delete=False):
+            assert remote_path == remote_file
+            assert delete is False
+            with open(local_path, "w", encoding="utf-8") as stream:
+                stream.write("{}")
+
+    source = Worker(
+        id=7,
+        name="source",
+        status="ready",
+        private_ip="10.0.0.7",
+        auth_token="t",
+        ssh_user="ubuntu",
+    )
+    fake_ssh = FakeSSH()
+    migrator = TaskMigrator(db_factory=None, relay=FakeRelay())
+    monkeypatch.setattr(migrator, "_ssh", lambda worker: fake_ssh)
+
+    await migrator._move_codex_session(source, None, sid)
+
+    target = (
+        tmp_path / ".codex" / "sessions" / "2026" / "07" / "20"
+        / f"rollout-2026-07-20T01-02-03-{sid}.jsonl"
+    )
+    assert target.read_text() == "{}"
+    assert "find ~/.codex*/sessions" in fake_ssh.commands[0]
+
+
+async def test_remote_codex_session_downloads_all_copies_and_uses_complete_one(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    sid = "019f0000-aaaa-bbbb-cccc-000000000007"
+    old_remote = (
+        f"/home/ubuntu/.codex/sessions/2026/07/20/rollout-old-{sid}.jsonl"
+    )
+    new_remote = (
+        f"/home/ubuntu/.codex-codex-3/sessions/2026/07/21/"
+        f"rollout-new-{sid}.jsonl"
+    )
+
+    class MultiCopySSH:
+        async def run(self, _command):
+            return 0, f"{old_remote}\n{new_remote}\n"
+
+        async def rsync_from(self, remote_path, local_path, delete=False):
+            assert delete is False
+            content = b"turn-1\n" if remote_path == old_remote else b"turn-1\nturn-2\n"
+            with open(local_path, "wb") as stream:
+                stream.write(content)
+
+    source = Worker(
+        id=7,
+        name="source",
+        status="ready",
+        private_ip="10.0.0.7",
+        auth_token="t",
+        ssh_user="ubuntu",
+    )
+    fake_ssh = MultiCopySSH()
+    migrator = TaskMigrator(db_factory=None, relay=FakeRelay())
+    monkeypatch.setattr(migrator, "_ssh", lambda worker: fake_ssh)
+
+    await migrator._move_codex_session(source, None, sid)
+
+    target = (
+        tmp_path / ".codex" / "sessions" / "2026" / "07" / "21"
+        / f"rollout-new-{sid}.jsonl"
+    )
+    assert target.read_bytes() == b"turn-1\nturn-2\n"

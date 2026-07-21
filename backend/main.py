@@ -86,6 +86,7 @@ if settings.codex_pool_enabled:
             config_path=settings.codex_pool_config_path,
             cooldown_seconds=settings.codex_pool_cooldown_seconds,
         )
+        dispatcher.codex_pool = codex_pool
         logger.info("Codex pool enabled with %d accounts", len(codex_pool._accounts))
     except Exception:
         logger.debug("Codex pool init failed — codex pool disabled")

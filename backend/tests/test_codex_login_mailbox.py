@@ -1,9 +1,21 @@
 from __future__ import annotations
 
+import asyncio
+import json
+import os
+import subprocess
+import sys
 from collections.abc import Iterable
+from types import ModuleType, SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
+from fastapi import HTTPException
+from starlette.requests import Request
 
+import backend.api.codex_pool as codex_pool_api
+from backend.services.codex_app_server import CodexAppServerBusyError
+from backend.services.codex_pool import CodexPool
 import scripts.codex_login as codex_login
 
 
@@ -56,6 +68,8 @@ def _success(*, code: str = "654321", **timestamp_fields) -> dict:
 
 
 def test_detect_mail_provider():
+    assert codex_login.detect_mail_provider("test-user@163.com") == "mailcatcher"
+    assert codex_login.detect_mail_provider("user@MAIL.COM") == "mailcom"
     assert codex_login.detect_mail_provider("user@onet.pl") == "onet"
     assert codex_login.detect_mail_provider("user@GAZETA.PL") == "gazeta"
     assert codex_login.detect_mail_provider("user@israelmail.com") == "171mail"
@@ -86,6 +100,26 @@ async def test_mailcatcher_accepts_only_fresh_timestamped_code(monkeypatch, time
     assert state["calls"] == [{
         "url": codex_login.MAIL_DECODE_API,
         "params": {"token": "platform-query-token", "type": "gpt"},
+    }]
+
+
+async def test_generic_mailcatcher_source_supports_163_query_token(monkeypatch):
+    state = _install_mail_client(monkeypatch, [
+        _success(date="2023-11-14T22:13:30+00:00"),
+    ])
+
+    code = await codex_login.poll_verification_code(
+        "mailcatcher-query-token",
+        after_ts=1_699_999_990,
+        timeout_s=1,
+        email="test-user@163.com",
+        provider="mailcatcher",
+    )
+
+    assert code == "654321"
+    assert state["calls"] == [{
+        "url": codex_login.MAIL_DECODE_API,
+        "params": {"token": "mailcatcher-query-token", "type": "gpt"},
     }]
 
 
@@ -152,3 +186,1315 @@ async def test_mailcatcher_undated_code_times_out_instead_of_being_reused(monkey
             timeout_s=1,
             provider="gazeta",
         )
+
+
+class _OtpField:
+    def __init__(self, auth_path: Path):
+        self.auth_path = auth_path
+        self.value = ""
+
+    async def fill(self, value: str):
+        self.value = value
+        if value:
+            self.auth_path.write_text("authenticated")
+
+
+class _OtpPage:
+    url = "https://auth.openai.com/verify"
+
+    async def wait_for_timeout(self, _milliseconds: int):
+        return None
+
+    async def screenshot(self, **_kwargs):
+        return None
+
+
+class _PersistentOtpField:
+    def __init__(self):
+        self.values: list[str] = []
+
+    async def fill(self, value: str):
+        self.values.append(value)
+
+
+class _DelayedAuthOtpPage(_OtpPage):
+    def __init__(self, auth_path: Path):
+        self.auth_path = auth_path
+        self.waits = 0
+
+    async def wait_for_timeout(self, _milliseconds: int):
+        self.waits += 1
+        if self.waits >= 6:
+            self.auth_path.write_text("authenticated")
+
+
+class _SecondOtpSucceedsField(_PersistentOtpField):
+    def __init__(self, auth_path: Path):
+        super().__init__()
+        self.auth_path = auth_path
+        self.submissions = 0
+
+    async def fill(self, value: str):
+        await super().fill(value)
+        if value:
+            self.submissions += 1
+            if self.submissions == 2:
+                self.auth_path.write_text("authenticated")
+
+
+async def test_password_only_login_waits_for_user_otp_and_continues(monkeypatch, tmp_path):
+    auth_path = tmp_path / "auth.json"
+    otp_field = _OtpField(auth_path)
+    manual_reader = SimpleNamespace(read_code=AsyncMock(return_value="123456"))
+
+    async def first_visible(_page, selector: str):
+        return otp_field if selector == codex_login.OTP_SELECTOR else None
+
+    poll = AsyncMock()
+    monkeypatch.setattr(codex_login, "_first_visible", first_visible)
+    monkeypatch.setattr(codex_login, "poll_verification_code", poll)
+    monkeypatch.setattr(codex_login, "_click_continue", AsyncMock(return_value=True))
+
+    await codex_login._run_state_machine(
+        _OtpPage(),
+        "user@mail.com",
+        "openai-password",
+        "",
+        1,
+        auth_path,
+        [],
+        "mailcom",
+        "attempt-1",
+        manual_reader,
+    )
+
+    manual_reader.read_code.assert_awaited_once()
+    assert otp_field.value == "123456"
+    poll.assert_not_awaited()
+
+
+async def test_visible_otp_form_waits_for_delayed_auth_without_new_challenge(
+    monkeypatch, tmp_path,
+):
+    auth_path = tmp_path / "auth.json"
+    otp_field = _PersistentOtpField()
+    page = _DelayedAuthOtpPage(auth_path)
+    manual_reader = SimpleNamespace(read_code=AsyncMock(return_value="123456"))
+
+    async def first_visible(_page, selector: str):
+        return otp_field if selector == codex_login.OTP_SELECTOR else None
+
+    monkeypatch.setattr(codex_login, "_first_visible", first_visible)
+    monkeypatch.setattr(codex_login, "_visible_otp_error", AsyncMock(return_value=None))
+    monkeypatch.setattr(codex_login, "_click_continue", AsyncMock(return_value=True))
+
+    await codex_login._run_state_machine(
+        page,
+        "user@mail.com",
+        "openai-password",
+        "",
+        1,
+        auth_path,
+        [],
+        "mailcom",
+        "attempt-delayed-auth",
+        manual_reader,
+    )
+
+    manual_reader.read_code.assert_awaited_once()
+    assert otp_field.values == ["123456"]
+    assert page.waits >= 6
+
+
+async def test_explicit_otp_error_opens_one_new_challenge(monkeypatch, tmp_path):
+    auth_path = tmp_path / "auth.json"
+    otp_field = _SecondOtpSucceedsField(auth_path)
+    manual_reader = SimpleNamespace(
+        read_code=AsyncMock(side_effect=["111111", "222222"]),
+    )
+
+    async def first_visible(_page, selector: str):
+        return otp_field if selector == codex_login.OTP_SELECTOR else None
+
+    monkeypatch.setattr(codex_login, "_first_visible", first_visible)
+    monkeypatch.setattr(
+        codex_login,
+        "_visible_otp_error",
+        AsyncMock(return_value="The code you entered is incorrect"),
+    )
+    monkeypatch.setattr(codex_login, "_click_continue", AsyncMock(return_value=True))
+
+    await codex_login._run_state_machine(
+        _OtpPage(),
+        "user@mail.com",
+        "openai-password",
+        "",
+        1,
+        auth_path,
+        [],
+        "mailcom",
+        "attempt-retry",
+        manual_reader,
+    )
+
+    assert manual_reader.read_code.await_count == 2
+    assert otp_field.values == ["111111", "", "222222"]
+
+
+async def test_login_input_reader_consumes_credentials_then_otp_on_same_stream(
+    monkeypatch,
+):
+    attempt_id = "attempt-shared-stdin"
+    stream = asyncio.StreamReader()
+    stream.feed_data((json.dumps({
+        "type": "credentials",
+        "attempt_id": attempt_id,
+        "token": "mailbox-query-token",
+        "password": "openai-password",
+    }) + "\n").encode())
+    reader = codex_login._ManualOtpReader()
+    reader._reader = stream
+
+    token, password = await reader.read_credentials(attempt_id=attempt_id)
+
+    assert token == "mailbox-query-token"
+    assert password == "openai-password"
+
+    monkeypatch.setattr(
+        codex_login.uuid,
+        "uuid4",
+        lambda: SimpleNamespace(hex="challenge-shared-stdin"),
+    )
+    stream.feed_data(b'{"challenge_id":"challenge-shared-stdin","code":"123456"}\n')
+
+    code = await reader.read_code(attempt_id=attempt_id, timeout_s=60, logs=[])
+
+    assert code == "123456"
+    assert reader._reader is stream
+
+
+class _OtpStdin:
+    def __init__(self):
+        self.writes: list[bytes] = []
+
+    def write(self, value: bytes):
+        self.writes.append(value)
+
+    async def drain(self):
+        return None
+
+
+async def test_backend_exposes_otp_challenge_and_forwards_code_only_over_stdin():
+    attempt_id = "attempt-otp"
+    challenge_id = "challenge-otp"
+    email = "user@example.com"
+    stdin = _OtpStdin()
+    proc = SimpleNamespace(returncode=None, stdin=stdin)
+    codex_pool_api._add_state.clear()
+    codex_pool_api._login_attempts.clear()
+    codex_pool_api._add_state[email] = {"status": "running", "attempt_id": attempt_id}
+    codex_pool_api._login_attempts[attempt_id] = {
+        "kind": "add",
+        "state_key": email,
+        "proc": proc,
+        "challenge_id": None,
+        "expires_at": None,
+    }
+
+    handled = codex_pool_api._handle_login_event(
+        attempt_id,
+        codex_pool_api.LOGIN_EVENT_PREFIX + json.dumps({
+            "type": "otp_required",
+            "attempt_id": attempt_id,
+            "challenge_id": challenge_id,
+            "expires_at": codex_pool_api.time.time() + 60,
+        }),
+    )
+
+    assert handled is True
+    state = codex_pool_api._add_state[email]
+    assert state["status"] == "awaiting_otp"
+    assert state["challenge_id"] == challenge_id
+
+    response = await codex_pool_api.codex_submit_login_otp(
+        _admin_request(),
+        attempt_id,
+        codex_pool_api.SubmitCodexOtpRequest(
+            challenge_id=challenge_id,
+            code="123456",
+        ),
+    )
+
+    assert response == {"ok": True, "status": "verifying_otp"}
+    assert json.loads(stdin.writes[0]) == {
+        "challenge_id": challenge_id,
+        "code": "123456",
+    }
+    assert "123456" not in repr(codex_pool_api._add_state[email])
+    assert "123456" not in repr(codex_pool_api._login_attempts[attempt_id])
+
+
+async def test_backend_rejects_invalid_or_stale_otp_without_writing_stdin():
+    attempt_id = "attempt-invalid"
+    challenge_id = "challenge-current"
+    email = "user@example.com"
+    stdin = _OtpStdin()
+    proc = SimpleNamespace(returncode=None, stdin=stdin)
+    codex_pool_api._add_state.clear()
+    codex_pool_api._login_attempts.clear()
+    codex_pool_api._add_state[email] = {
+        "status": "awaiting_otp",
+        "attempt_id": attempt_id,
+    }
+    codex_pool_api._login_attempts[attempt_id] = {
+        "kind": "add",
+        "state_key": email,
+        "proc": proc,
+        "challenge_id": challenge_id,
+        "expires_at": codex_pool_api.time.time() + 60,
+    }
+
+    with pytest.raises(HTTPException) as stale:
+        await codex_pool_api.codex_submit_login_otp(
+            _admin_request(),
+            attempt_id,
+            codex_pool_api.SubmitCodexOtpRequest(
+                challenge_id="old-challenge",
+                code="123456",
+            ),
+        )
+    assert stale.value.status_code == 409
+
+    with pytest.raises(HTTPException) as invalid:
+        await codex_pool_api.codex_submit_login_otp(
+            _admin_request(),
+            attempt_id,
+            codex_pool_api.SubmitCodexOtpRequest(
+                challenge_id=challenge_id,
+                code="12ab",
+            ),
+        )
+    assert invalid.value.status_code == 422
+    assert stdin.writes == []
+
+
+def test_login_detail_redacts_oauth_authorize_url():
+    detail = codex_pool_api._sanitize_login_detail(
+        "open https://auth.openai.com/oauth/authorize?client_id=secret&state=private now"
+    )
+    assert "client_id" not in detail
+    assert "state=" not in detail
+    assert "[redacted OpenAI OAuth URL]" in detail
+
+
+def _admin_request() -> Request:
+    request = Request({"type": "http", "method": "POST", "path": "/"})
+    request.state.user_role = "admin"
+    return request
+
+
+class _FinishedProcess:
+    def __init__(self):
+        self.returncode = 0
+        self.stdin = _OtpStdin()
+
+    async def communicate(self):
+        return b"", b""
+
+
+class _BlockingProcess:
+    def __init__(self):
+        self.returncode = None
+        self.finished = asyncio.Event()
+        self.stdin = _OtpStdin()
+
+    async def communicate(self):
+        await self.finished.wait()
+        self.returncode = 0
+        return b"", b""
+
+
+def _maintenance_manager(*, begin_side_effect=None):
+    begin = AsyncMock(return_value=False)
+    if begin_side_effect is not None:
+        begin.side_effect = begin_side_effect
+    return SimpleNamespace(
+        begin_codex_app_server_home_maintenance=begin,
+        end_codex_app_server_home_maintenance=AsyncMock(),
+    )
+
+
+def _prepare_relogin_account(monkeypatch, tmp_path, manager):
+    token_dir = tmp_path / ".codex-pool"
+    token_dir.mkdir(exist_ok=True)
+    (token_dir / "email_tokens.json").write_text(json.dumps({
+        "password-only@mail.com": {
+            "token": "",
+            "provider": "mailcom",
+            "password": "openai-password",
+        },
+    }))
+    monkeypatch.setattr(codex_pool_api.Path, "home", lambda: tmp_path)
+
+    account = SimpleNamespace(
+        id="codex-2",
+        email="password-only@mail.com",
+        codex_home=str(tmp_path / ".codex-codex-2"),
+    )
+    pool = SimpleNamespace(
+        account=lambda account_id: account if account_id == account.id else None,
+        reload=lambda: None,
+        _quota_cache=None,
+    )
+    monkeypatch.setattr(codex_pool_api, "_get_pool", lambda: pool)
+    monkeypatch.setattr(codex_pool_api, "_get_instance_manager", lambda: manager)
+    monkeypatch.setattr(codex_pool_api, "_ensure_xvfb", AsyncMock())
+    monkeypatch.setattr(codex_pool_api, "_login_lock", asyncio.Lock())
+    codex_pool_api._relogin_state.clear()
+    return account, pool
+
+
+async def test_add_account_keeps_credentials_out_of_argv_and_reuses_stdin_for_otp(
+    monkeypatch,
+):
+    captured: dict[str, object] = {}
+    pool = SimpleNamespace(_accounts=[], reload=lambda: None, _quota_cache=None)
+    manager = _maintenance_manager()
+    proc = _BlockingProcess()
+
+    async def create_process(*cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        return proc
+
+    monkeypatch.setattr(codex_pool_api, "_get_pool", lambda: pool)
+    monkeypatch.setattr(codex_pool_api, "_get_instance_manager", lambda: manager)
+    monkeypatch.setattr(codex_pool_api, "_ensure_xvfb", AsyncMock())
+    monkeypatch.setattr(codex_pool_api.asyncio, "create_subprocess_exec", create_process)
+    monkeypatch.setattr(codex_pool_api, "_login_lock", asyncio.Lock())
+    codex_pool_api._add_state.clear()
+
+    result = await codex_pool_api.codex_add_account(
+        _admin_request(),
+        codex_pool_api.AddCodexAccountRequest(
+            email="password-only@mail.com",
+            token="mailbox-query-token",
+            password="openai-password",
+            login_method="mailcom",
+        ),
+    )
+
+    cmd = captured["cmd"]
+    assert result["status"] == "running"
+    assert "--token" not in cmd
+    assert "--password" not in cmd
+    assert "mailbox-query-token" not in cmd
+    assert "openai-password" not in cmd
+    assert "--credentials-stdin" in cmd
+    assert cmd[cmd.index("--mail-provider") + 1] == "mailcom"
+    assert captured["kwargs"]["stdin"] is asyncio.subprocess.PIPE
+    assert captured["kwargs"]["start_new_session"] is True
+    assert json.loads(proc.stdin.writes[0]) == {
+        "type": "credentials",
+        "attempt_id": result["attempt_id"],
+        "token": "mailbox-query-token",
+        "password": "openai-password",
+    }
+    assert "mailbox-query-token" not in repr(codex_pool_api._add_state)
+    assert "openai-password" not in repr(codex_pool_api._login_attempts)
+
+    challenge_id = "challenge-after-credentials"
+    codex_pool_api._handle_login_event(
+        result["attempt_id"],
+        codex_pool_api.LOGIN_EVENT_PREFIX + json.dumps({
+            "type": "otp_required",
+            "attempt_id": result["attempt_id"],
+            "challenge_id": challenge_id,
+            "expires_at": codex_pool_api.time.time() + 60,
+        }),
+    )
+    await codex_pool_api.codex_submit_login_otp(
+        _admin_request(),
+        result["attempt_id"],
+        codex_pool_api.SubmitCodexOtpRequest(
+            challenge_id=challenge_id,
+            code="123456",
+        ),
+    )
+    assert json.loads(proc.stdin.writes[1]) == {
+        "challenge_id": challenge_id,
+        "code": "123456",
+    }
+
+    proc.finished.set()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    manager.begin_codex_app_server_home_maintenance.assert_awaited_once()
+    manager.end_codex_app_server_home_maintenance.assert_awaited_once()
+    assert not codex_pool_api._login_lock.locked()
+
+
+async def test_add_account_holds_home_maintenance_until_login_finishes(
+    monkeypatch, tmp_path,
+):
+    pool = SimpleNamespace(_accounts=[], reload=lambda: None, _quota_cache=None)
+    manager = _maintenance_manager()
+    proc = _BlockingProcess()
+    monkeypatch.setattr(codex_pool_api.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(codex_pool_api, "_get_pool", lambda: pool)
+    monkeypatch.setattr(codex_pool_api, "_get_instance_manager", lambda: manager)
+    monkeypatch.setattr(codex_pool_api, "_ensure_xvfb", AsyncMock())
+    monkeypatch.setattr(
+        codex_pool_api.asyncio,
+        "create_subprocess_exec",
+        AsyncMock(return_value=proc),
+    )
+    monkeypatch.setattr(codex_pool_api, "_login_lock", asyncio.Lock())
+    codex_pool_api._add_state.clear()
+
+    result = await codex_pool_api.codex_add_account(
+        _admin_request(),
+        codex_pool_api.AddCodexAccountRequest(
+            email="new@mail.com",
+            password="openai-password",
+            login_method="mailcom",
+        ),
+    )
+    await asyncio.sleep(0)
+
+    codex_home = str(tmp_path / ".codex")
+    assert result["status"] == "running"
+    manager.begin_codex_app_server_home_maintenance.assert_awaited_once_with(
+        codex_home, require_idle=True,
+    )
+    manager.end_codex_app_server_home_maintenance.assert_not_awaited()
+    assert codex_pool_api._login_lock.locked()
+
+    proc.finished.set()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    manager.end_codex_app_server_home_maintenance.assert_awaited_once_with(codex_home)
+    assert not codex_pool_api._login_lock.locked()
+
+
+async def test_add_account_busy_home_returns_409_and_releases_login_lock(
+    monkeypatch, tmp_path,
+):
+    pool = SimpleNamespace(_accounts=[], reload=lambda: None, _quota_cache=None)
+    manager = _maintenance_manager(
+        begin_side_effect=CodexAppServerBusyError("active Codex turn"),
+    )
+    spawn = AsyncMock()
+    monkeypatch.setattr(codex_pool_api.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(codex_pool_api, "_get_pool", lambda: pool)
+    monkeypatch.setattr(codex_pool_api, "_get_instance_manager", lambda: manager)
+    monkeypatch.setattr(codex_pool_api, "_ensure_xvfb", AsyncMock())
+    monkeypatch.setattr(codex_pool_api.asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(codex_pool_api, "_login_lock", asyncio.Lock())
+    codex_pool_api._add_state.clear()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await codex_pool_api.codex_add_account(
+            _admin_request(),
+            codex_pool_api.AddCodexAccountRequest(
+                email="busy@mail.com",
+                password="openai-password",
+                login_method="mailcom",
+            ),
+        )
+
+    assert exc_info.value.status_code == 409
+    spawn.assert_not_awaited()
+    manager.end_codex_app_server_home_maintenance.assert_not_awaited()
+    assert not codex_pool_api._login_lock.locked()
+
+
+def test_add_account_home_allocator_never_reuses_retained_rollout_directory(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(codex_pool_api.Path, "home", lambda: tmp_path)
+    (tmp_path / ".codex").mkdir()
+    retained = (
+        tmp_path / ".codex-codex-2" / "sessions" / "2026" / "07" / "21"
+    )
+    retained.mkdir(parents=True)
+    (retained / "rollout-old-thread.jsonl").write_text("{}\n")
+    pool = SimpleNamespace(_accounts=[SimpleNamespace(id="codex-1")])
+
+    account_id, codex_home = codex_pool_api._allocate_codex_account_home(pool)
+
+    assert account_id == "codex-3"
+    assert codex_home == str(tmp_path / ".codex-codex-3")
+
+
+def test_add_account_home_allocator_reuses_failed_empty_slot(monkeypatch, tmp_path):
+    monkeypatch.setattr(codex_pool_api.Path, "home", lambda: tmp_path)
+    (tmp_path / ".codex").mkdir()
+    failed_home = tmp_path / ".codex-codex-2"
+    failed_home.mkdir()
+    (failed_home / "models_cache.json").write_text("{}\n")
+    pool = SimpleNamespace(_accounts=[SimpleNamespace(id="codex-1")])
+
+    account_id, codex_home = codex_pool_api._allocate_codex_account_home(pool)
+
+    assert account_id == "codex-2"
+    assert codex_home == str(failed_home)
+
+
+def test_add_account_home_allocator_rejects_unknown_failed_home_data(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(codex_pool_api.Path, "home", lambda: tmp_path)
+    (tmp_path / ".codex").mkdir()
+    stale_home = tmp_path / ".codex-codex-2"
+    stale_home.mkdir()
+    (stale_home / "history.jsonl").write_text("old identity\n")
+    pool = SimpleNamespace(_accounts=[SimpleNamespace(id="codex-1")])
+
+    account_id, codex_home = codex_pool_api._allocate_codex_account_home(pool)
+
+    assert account_id == "codex-3"
+    assert codex_home == str(tmp_path / ".codex-codex-3")
+
+
+@pytest.mark.parametrize("watcher_kind", ["add", "relogin"])
+async def test_login_watcher_kills_live_process_before_releasing_home(
+    monkeypatch, tmp_path, watcher_kind,
+):
+    proc = SimpleNamespace(returncode=None, kill=Mock(), wait=AsyncMock())
+    manager = _maintenance_manager()
+    login_lock = asyncio.Lock()
+    await login_lock.acquire()
+    home = tmp_path / ".codex-codex-watch"
+    home.mkdir()
+    auth_path = home / "auth.json"
+    auth_path.write_text("old-auth")
+    auth_snapshot = codex_pool_api._login_auth_snapshot(str(home))
+    backup = home / ".auth.json.login-backup-current"
+    os.replace(auth_path, backup)
+    auth_path.write_text("partial-new-auth")
+    monkeypatch.setattr(
+        codex_pool_api,
+        "_collect_login_output",
+        AsyncMock(side_effect=RuntimeError("collector failed")),
+    )
+
+    if watcher_kind == "add":
+        codex_pool_api._add_state.clear()
+        await codex_pool_api._watch_add(
+            "watch@example.com", "attempt-watch", proc, manager,
+            str(home), login_lock, auth_snapshot,
+        )
+    else:
+        codex_pool_api._relogin_state.clear()
+        await codex_pool_api._watch_relogin(
+            "codex-watch", "attempt-watch", proc, manager,
+            str(home), login_lock, auth_snapshot,
+        )
+
+    proc.kill.assert_called_once_with()
+    proc.wait.assert_awaited_once_with()
+    manager.end_codex_app_server_home_maintenance.assert_awaited_once_with(
+        str(home)
+    )
+    assert auth_path.read_text() == "old-auth"
+    assert not backup.exists()
+    assert not login_lock.locked()
+
+
+def test_private_json_writer_never_exposes_group_read_permissions(tmp_path):
+    destination = tmp_path / "private" / "email_tokens.json"
+
+    codex_login._write_private_json(destination, {"user@example.com": {"password": "p"}})
+
+    assert destination.stat().st_mode & 0o777 == 0o600
+    assert destination.parent.stat().st_mode & 0o777 == 0o700
+    assert not list(destination.parent.glob(".email_tokens.json.*.tmp"))
+
+
+def test_pool_login_registration_rolls_back_credentials_when_pool_write_fails(
+    monkeypatch, tmp_path,
+):
+    pool_path = tmp_path / "accounts.json"
+    tokens_path = tmp_path / "email_tokens.json"
+    original_pool = {"accounts": [{
+        "id": "codex-1",
+        "codex_home": "/tmp/.codex",
+        "email": "existing@example.com",
+        "enabled": True,
+    }]}
+    original_tokens = {
+        "existing@example.com": {"password": "existing-password"},
+    }
+    pool_path.write_text(json.dumps(original_pool))
+    tokens_path.write_text(json.dumps(original_tokens))
+    real_write = codex_login._write_private_json
+
+    def fail_pool_write(path, data):
+        if path == pool_path:
+            raise OSError("pool disk full")
+        real_write(path, data)
+
+    monkeypatch.setattr(codex_login, "_write_private_json", fail_pool_write)
+
+    with pytest.raises(OSError, match="pool disk full"):
+        codex_login._persist_new_pool_login(
+            account_id="codex-2",
+            email="new@example.com",
+            codex_home="/tmp/.codex-codex-2",
+            token="mail-token",
+            password="openai-password",
+            provider="mailcatcher",
+            pool_path=pool_path,
+            tokens_path=tokens_path,
+        )
+
+    assert json.loads(tokens_path.read_text()) == original_tokens
+    assert json.loads(pool_path.read_text()) == original_pool
+
+
+async def test_delete_account_scrubs_credentials_but_keeps_routable_sessions(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(codex_pool_api.Path, "home", lambda: tmp_path)
+    pool_dir = tmp_path / ".codex-pool"
+    pool_dir.mkdir()
+    account_home = tmp_path / ".codex-codex-2"
+    rollout = (
+        account_home / "sessions" / "2026" / "07" / "21"
+        / "rollout-now-thread-delete.jsonl"
+    )
+    rollout.parent.mkdir(parents=True)
+    rollout.write_text("history\n")
+    (account_home / "auth.json").write_text("oauth-secret")
+    (account_home / ".auth.json.login-backup-old").write_text("old-oauth-secret")
+    (account_home / "history.jsonl").write_text("account history\n")
+    (account_home / "config.toml").write_text("profile = 'old'\n")
+    (account_home / "state_5.sqlite").write_bytes(b"sqlite-state")
+    (account_home / "log").mkdir()
+    (account_home / "log" / "codex.log").write_text("sensitive log\n")
+    (account_home / "shell_snapshots").mkdir()
+    (account_home / "archived_sessions").mkdir()
+    config_path = pool_dir / "accounts.json"
+    config_path.write_text(json.dumps({"accounts": [{
+        "id": "codex-2",
+        "codex_home": str(account_home),
+        "email": "delete@example.com",
+        "enabled": True,
+    }]}))
+    tokens_path = pool_dir / "email_tokens.json"
+    tokens_path.write_text(json.dumps({
+        "delete@example.com": {
+            "token": "mailbox-token",
+            "provider": "mailcatcher",
+            "password": "openai-password",
+        },
+    }))
+    pool = CodexPool(config_path=config_path)
+    manager = _maintenance_manager()
+    monkeypatch.setattr(codex_pool_api, "_get_pool", lambda: pool)
+    monkeypatch.setattr(codex_pool_api, "_get_instance_manager", lambda: manager)
+    monkeypatch.setattr(codex_pool_api, "_login_lock", asyncio.Lock())
+
+    result = await codex_pool_api.codex_delete_account(
+        _admin_request(), "codex-2",
+    )
+
+    assert result == {
+        "ok": True,
+        "deleted": "codex-2",
+        "retained_sessions": True,
+    }
+    assert rollout.read_text() == "history\n"
+    assert {path.name for path in account_home.iterdir()} == {
+        "sessions",
+        ".ccm-retired-account",
+    }
+    assert not tokens_path.exists()
+    assert (account_home / ".ccm-retired-account").stat().st_mode & 0o777 == 0o600
+    record = json.loads(config_path.read_text())["accounts"][0]
+    assert record == {
+        "id": "codex-2",
+        "codex_home": str(account_home.resolve()),
+        "email": "",
+        "enabled": False,
+        "retired": True,
+    }
+    assert pool.list_accounts() == []
+    assert pool.home_for_account("codex-2") == str(account_home.resolve())
+    manager.begin_codex_app_server_home_maintenance.assert_awaited_once_with(
+        str(account_home.resolve()), require_idle=True,
+    )
+    manager.end_codex_app_server_home_maintenance.assert_awaited_once_with(
+        str(account_home.resolve())
+    )
+    assert not codex_pool_api._login_lock.locked()
+
+
+async def test_delete_config_commit_failure_leaves_live_credentials_untouched(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(codex_pool_api.Path, "home", lambda: tmp_path)
+    pool_dir = tmp_path / ".codex-pool"
+    pool_dir.mkdir()
+    account_home = tmp_path / ".codex-codex-2"
+    account_home.mkdir()
+    auth_path = account_home / "auth.json"
+    auth_path.write_text("oauth-secret")
+    config_path = pool_dir / "accounts.json"
+    original_config = {"accounts": [{
+        "id": "codex-2",
+        "codex_home": str(account_home),
+        "email": "keep@example.com",
+        "enabled": True,
+    }]}
+    config_path.write_text(json.dumps(original_config))
+    tokens_path = pool_dir / "email_tokens.json"
+    original_tokens = {"keep@example.com": {"password": "keep-me"}}
+    tokens_path.write_text(json.dumps(original_tokens))
+    pool = CodexPool(config_path=config_path)
+    manager = _maintenance_manager()
+    monkeypatch.setattr(codex_pool_api, "_get_pool", lambda: pool)
+    monkeypatch.setattr(codex_pool_api, "_get_instance_manager", lambda: manager)
+    monkeypatch.setattr(codex_pool_api, "_login_lock", asyncio.Lock())
+    monkeypatch.setattr(
+        codex_pool_api,
+        "_write_private_json",
+        Mock(side_effect=OSError("disk full")),
+    )
+
+    with pytest.raises(OSError, match="disk full"):
+        await codex_pool_api.codex_delete_account(
+            _admin_request(), "codex-2",
+        )
+
+    assert json.loads(config_path.read_text()) == original_config
+    assert json.loads(tokens_path.read_text()) == original_tokens
+    assert auth_path.read_text() == "oauth-secret"
+    assert not (account_home / ".ccm-retired-account").exists()
+    manager.end_codex_app_server_home_maintenance.assert_awaited_once_with(
+        str(account_home.resolve())
+    )
+
+
+async def test_delete_cleanup_failure_can_be_retried_from_pending_tombstone(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(codex_pool_api.Path, "home", lambda: tmp_path)
+    pool_dir = tmp_path / ".codex-pool"
+    pool_dir.mkdir()
+    account_home = tmp_path / ".codex-codex-2"
+    account_home.mkdir()
+    (account_home / "auth.json").write_text("oauth-secret")
+    config_path = pool_dir / "accounts.json"
+    config_path.write_text(json.dumps({"accounts": [{
+        "id": "codex-2",
+        "codex_home": str(account_home),
+        "email": "retry@example.com",
+        "enabled": True,
+    }]}))
+    (pool_dir / "email_tokens.json").write_text(json.dumps({
+        "retry@example.com": {"password": "openai-password"},
+    }))
+    pool = CodexPool(config_path=config_path)
+    manager = _maintenance_manager()
+    monkeypatch.setattr(codex_pool_api, "_get_pool", lambda: pool)
+    monkeypatch.setattr(codex_pool_api, "_get_instance_manager", lambda: manager)
+    monkeypatch.setattr(codex_pool_api, "_login_lock", asyncio.Lock())
+    real_purge = codex_pool_api._purge_retired_codex_home
+    purge_calls = 0
+
+    def fail_once(home, account_id):
+        nonlocal purge_calls
+        purge_calls += 1
+        if purge_calls == 1:
+            raise OSError("temporary cleanup failure")
+        real_purge(home, account_id)
+
+    monkeypatch.setattr(codex_pool_api, "_purge_retired_codex_home", fail_once)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await codex_pool_api.codex_delete_account(_admin_request(), "codex-2")
+
+    assert exc_info.value.status_code == 500
+    pending = pool.account("codex-2")
+    assert pending.retired is True
+    assert pending.cleanup_pending is True
+    assert pending.email == "retry@example.com"
+
+    result = await codex_pool_api.codex_delete_account(
+        _admin_request(), "codex-2",
+    )
+
+    assert result["ok"] is True
+    finalized = pool.account("codex-2")
+    assert finalized.retired is True
+    assert finalized.cleanup_pending is False
+    assert finalized.email == ""
+    assert {path.name for path in account_home.iterdir()} == {
+        ".ccm-retired-account",
+    }
+
+
+def test_retired_home_purge_refuses_matching_directory_outside_user_home(
+    monkeypatch, tmp_path,
+):
+    user_home = tmp_path / "user"
+    user_home.mkdir()
+    unmanaged = tmp_path / "service-data" / ".codex-prod"
+    unmanaged.mkdir(parents=True)
+    secret = unmanaged / "important.db"
+    secret.write_text("must survive")
+    monkeypatch.setattr(codex_pool_api.Path, "home", lambda: user_home)
+
+    with pytest.raises(RuntimeError, match="outside the service user's home"):
+        codex_pool_api._purge_retired_codex_home(unmanaged, "codex-prod")
+
+    assert secret.read_text() == "must survive"
+
+
+async def test_delete_rejects_unmanaged_home_before_mutating_account(
+    monkeypatch, tmp_path,
+):
+    user_home = tmp_path / "user"
+    user_home.mkdir()
+    unmanaged = tmp_path / "service-data" / ".codex-prod"
+    unmanaged.mkdir(parents=True)
+    auth_path = unmanaged / "auth.json"
+    auth_path.write_text("oauth-secret")
+    pool_dir = tmp_path / ".codex-pool"
+    pool_dir.mkdir()
+    config_path = pool_dir / "accounts.json"
+    original = {"accounts": [{
+        "id": "codex-prod",
+        "codex_home": str(unmanaged),
+        "email": "prod@example.com",
+        "enabled": True,
+    }]}
+    config_path.write_text(json.dumps(original))
+    pool = CodexPool(config_path=config_path)
+    manager = _maintenance_manager()
+    monkeypatch.setattr(codex_pool_api.Path, "home", lambda: user_home)
+    monkeypatch.setattr(codex_pool_api, "_get_pool", lambda: pool)
+    monkeypatch.setattr(codex_pool_api, "_get_instance_manager", lambda: manager)
+    monkeypatch.setattr(codex_pool_api, "_login_lock", asyncio.Lock())
+
+    with pytest.raises(HTTPException) as exc_info:
+        await codex_pool_api.codex_delete_account(
+            _admin_request(), "codex-prod",
+        )
+
+    assert exc_info.value.status_code == 409
+    assert json.loads(config_path.read_text()) == original
+    assert auth_path.read_text() == "oauth-secret"
+
+
+async def test_xvfb_uses_private_xauthority_cookie(monkeypatch, tmp_path):
+    monkeypatch.setattr(codex_pool_api.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(codex_pool_api.asyncio, "sleep", AsyncMock())
+    monkeypatch.setenv("DISPLAY", ":previous")
+    monkeypatch.setenv("XAUTHORITY", "/tmp/previous-xauthority")
+    run = Mock()
+    xvfb_proc = SimpleNamespace(returncode=None)
+    popen = Mock(return_value=xvfb_proc)
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    monkeypatch.setattr(codex_pool_api, "_xvfb_proc", None)
+    monkeypatch.setattr(codex_pool_api, "_xvfb_auth_path", None)
+
+    await codex_pool_api._ensure_xvfb()
+
+    command = popen.call_args.args[0]
+    assert "-ac" not in command
+    assert command[command.index("-auth") + 1] == str(
+        tmp_path / ".codex-pool" / "xvfb.auth"
+    )
+    assert os.environ["XAUTHORITY"] == command[command.index("-auth") + 1]
+    assert (tmp_path / ".codex-pool" / "xvfb.auth").stat().st_mode & 0o777 == 0o600
+    xauth_call = next(
+        call for call in run.call_args_list if call.args[0][0] == "xauth"
+    )
+    assert xauth_call.args[0] == [
+        "xauth", "-f", str(tmp_path / ".codex-pool" / "xvfb.auth"),
+    ]
+    assert "MIT-MAGIC-COOKIE-1" in xauth_call.kwargs["input"]
+    assert xauth_call.kwargs["check"] is True
+
+
+async def test_add_account_rejects_when_password_and_token_are_both_empty():
+    with pytest.raises(HTTPException) as exc_info:
+        await codex_pool_api.codex_add_account(
+            _admin_request(),
+            codex_pool_api.AddCodexAccountRequest(email="missing@example.com"),
+        )
+
+    assert exc_info.value.status_code == 400
+    assert "至少填写一项" in str(exc_info.value.detail)
+
+
+async def test_relogin_accepts_saved_password_without_mailbox_token(monkeypatch, tmp_path):
+    manager = _maintenance_manager()
+    account, _pool = _prepare_relogin_account(monkeypatch, tmp_path, manager)
+    captured: dict[str, object] = {}
+    proc = _FinishedProcess()
+
+    async def create_process(*cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        return proc
+
+    monkeypatch.setattr(codex_pool_api.asyncio, "create_subprocess_exec", create_process)
+
+    result = await codex_pool_api.codex_relogin(_admin_request(), account.id)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    cmd = captured["cmd"]
+    assert result["ok"] is True
+    assert result["status"] == "running"
+    assert result["attempt_id"]
+    assert "--token" not in cmd
+    assert "--password" not in cmd
+    assert "openai-password" not in cmd
+    assert "--credentials-stdin" in cmd
+    assert captured["kwargs"]["stdin"] is asyncio.subprocess.PIPE
+    assert captured["kwargs"]["start_new_session"] is True
+    assert json.loads(proc.stdin.writes[0]) == {
+        "type": "credentials",
+        "attempt_id": result["attempt_id"],
+        "token": "",
+        "password": "openai-password",
+    }
+    manager.begin_codex_app_server_home_maintenance.assert_awaited_once_with(
+        account.codex_home, require_idle=True,
+    )
+    manager.end_codex_app_server_home_maintenance.assert_awaited_once_with(account.codex_home)
+    assert not codex_pool_api._login_lock.locked()
+
+
+async def test_relogin_holds_maintenance_until_subprocess_finishes(monkeypatch, tmp_path):
+    manager = _maintenance_manager()
+    account, _pool = _prepare_relogin_account(monkeypatch, tmp_path, manager)
+    proc = _BlockingProcess()
+    monkeypatch.setattr(
+        codex_pool_api.asyncio,
+        "create_subprocess_exec",
+        AsyncMock(return_value=proc),
+    )
+
+    result = await codex_pool_api.codex_relogin(_admin_request(), account.id)
+    await asyncio.sleep(0)
+
+    assert result["status"] == "running"
+    manager.end_codex_app_server_home_maintenance.assert_not_awaited()
+    assert codex_pool_api._login_lock.locked()
+
+    proc.finished.set()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    manager.end_codex_app_server_home_maintenance.assert_awaited_once_with(account.codex_home)
+    assert not codex_pool_api._login_lock.locked()
+
+
+async def test_relogin_busy_account_returns_409_and_releases_login_lock(monkeypatch, tmp_path):
+    manager = _maintenance_manager(
+        begin_side_effect=CodexAppServerBusyError("active Codex turn"),
+    )
+    account, _pool = _prepare_relogin_account(monkeypatch, tmp_path, manager)
+    create_process = AsyncMock()
+    monkeypatch.setattr(codex_pool_api.asyncio, "create_subprocess_exec", create_process)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await codex_pool_api.codex_relogin(_admin_request(), account.id)
+
+    assert exc_info.value.status_code == 409
+    assert "active Codex turn" in str(exc_info.value.detail)
+    create_process.assert_not_awaited()
+    manager.end_codex_app_server_home_maintenance.assert_not_awaited()
+    assert not codex_pool_api._login_lock.locked()
+
+
+async def test_relogin_spawn_failure_releases_maintenance_and_login_lock(monkeypatch, tmp_path):
+    manager = _maintenance_manager()
+    account, _pool = _prepare_relogin_account(monkeypatch, tmp_path, manager)
+    monkeypatch.setattr(
+        codex_pool_api.asyncio,
+        "create_subprocess_exec",
+        AsyncMock(side_effect=OSError("could not spawn login")),
+    )
+
+    with pytest.raises(OSError, match="could not spawn login"):
+        await codex_pool_api.codex_relogin(_admin_request(), account.id)
+
+    manager.end_codex_app_server_home_maintenance.assert_awaited_once_with(account.codex_home)
+    assert not codex_pool_api._login_lock.locked()
+
+
+async def test_delete_account_is_wrapped_in_idle_maintenance(monkeypatch, tmp_path):
+    account = SimpleNamespace(
+        id="codex-2",
+        codex_home=str(tmp_path / ".codex-codex-2"),
+        email="",
+    )
+    reload_calls: list[bool] = []
+    reload_count = 0
+
+    def reload_pool():
+        nonlocal reload_count
+        reload_calls.append(True)
+        reload_count += 1
+
+    def get_account(account_id: str):
+        if account_id != account.id:
+            return None
+        if reload_count == 1:
+            return SimpleNamespace(
+                **vars(account), retired=True, cleanup_pending=True,
+            )
+        if reload_count >= 2:
+            return SimpleNamespace(
+                **vars(account), retired=True, cleanup_pending=False,
+            )
+        return account
+
+    pool = SimpleNamespace(
+        account=get_account,
+        reload=reload_pool,
+    )
+    manager = _maintenance_manager()
+    pool_dir = tmp_path / ".codex-pool"
+    pool_dir.mkdir()
+    accounts_path = pool_dir / "accounts.json"
+    accounts_path.write_text(json.dumps({"accounts": [
+        {"id": "codex-1"},
+        {"id": account.id},
+    ]}))
+    monkeypatch.setattr(codex_pool_api.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(codex_pool_api, "_get_pool", lambda: pool)
+    monkeypatch.setattr(codex_pool_api, "_get_instance_manager", lambda: manager)
+    monkeypatch.setattr(codex_pool_api, "_login_lock", asyncio.Lock())
+
+    result = await codex_pool_api.codex_delete_account(_admin_request(), account.id)
+
+    assert result == {
+        "ok": True,
+        "deleted": account.id,
+        "retained_sessions": True,
+    }
+    assert json.loads(accounts_path.read_text())["accounts"] == [
+        {"id": "codex-1"},
+        {
+            "id": account.id,
+            "codex_home": account.codex_home,
+            "email": "",
+            "enabled": False,
+            "retired": True,
+        },
+    ]
+    assert reload_calls == [True, True]
+    manager.begin_codex_app_server_home_maintenance.assert_awaited_once_with(
+        account.codex_home, require_idle=True,
+    )
+    manager.end_codex_app_server_home_maintenance.assert_awaited_once_with(account.codex_home)
+
+
+async def test_delete_busy_account_returns_409_without_mutating_pool(monkeypatch, tmp_path):
+    account = SimpleNamespace(id="codex-2", codex_home=str(tmp_path / ".codex-codex-2"))
+    pool = SimpleNamespace(account=lambda _account_id: account, reload=lambda: None)
+    manager = _maintenance_manager(
+        begin_side_effect=CodexAppServerBusyError("active Codex turn"),
+    )
+    pool_dir = tmp_path / ".codex-pool"
+    pool_dir.mkdir()
+    accounts_path = pool_dir / "accounts.json"
+    original = json.dumps({"accounts": [{"id": account.id}]})
+    accounts_path.write_text(original)
+    monkeypatch.setattr(codex_pool_api.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(codex_pool_api, "_get_pool", lambda: pool)
+    monkeypatch.setattr(codex_pool_api, "_get_instance_manager", lambda: manager)
+    monkeypatch.setattr(codex_pool_api, "_login_lock", asyncio.Lock())
+
+    with pytest.raises(HTTPException) as exc_info:
+        await codex_pool_api.codex_delete_account(_admin_request(), account.id)
+
+    assert exc_info.value.status_code == 409
+    assert accounts_path.read_text() == original
+    manager.end_codex_app_server_home_maintenance.assert_not_awaited()
+
+
+@pytest.mark.parametrize("missing_prerequisite", ["codex", "display"])
+async def test_login_preflight_does_not_touch_existing_auth(
+    monkeypatch, tmp_path, missing_prerequisite,
+):
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir(mode=0o755)
+    auth_path = codex_home / "auth.json"
+    original = b'{"tokens":"existing"}'
+    auth_path.write_bytes(original)
+    spawn = AsyncMock()
+    monkeypatch.setattr(codex_login.asyncio, "create_subprocess_exec", spawn)
+
+    if missing_prerequisite == "codex":
+        monkeypatch.setattr(codex_login.shutil, "which", lambda _name: None)
+        monkeypatch.setenv("DISPLAY", ":99")
+    else:
+        monkeypatch.setattr(codex_login.shutil, "which", lambda _name: "/usr/bin/codex")
+        monkeypatch.delenv("DISPLAY", raising=False)
+
+    result = await codex_login.codex_login(
+        "user@example.com", "token", str(codex_home), password="password",
+    )
+
+    assert result["ok"] is False
+    assert auth_path.read_bytes() == original
+    assert not list(codex_home.glob(".auth.json.login-backup-*"))
+    assert codex_home.stat().st_mode & 0o777 == 0o755
+    spawn.assert_not_awaited()
+
+
+class _NoAuthorizeUrlProcess:
+    returncode = 0
+    stdout = object()
+
+
+async def test_failed_login_restores_old_auth_and_secures_codex_home(monkeypatch, tmp_path):
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir(mode=0o755)
+    auth_path = codex_home / "auth.json"
+    original = b'{"tokens":"existing"}'
+    auth_path.write_bytes(original)
+    monkeypatch.setattr(codex_login.shutil, "which", lambda _name: "/usr/bin/codex")
+    monkeypatch.setenv("DISPLAY", ":99")
+    monkeypatch.setattr(codex_login, "AUTH_URL_TIMEOUT", 0)
+    monkeypatch.setattr(
+        codex_login.asyncio,
+        "create_subprocess_exec",
+        AsyncMock(return_value=_NoAuthorizeUrlProcess()),
+    )
+
+    result = await codex_login.codex_login(
+        "user@example.com", "token", str(codex_home), password="password",
+    )
+
+    assert result["ok"] is False
+    assert auth_path.read_bytes() == original
+    assert not list(codex_home.glob(".auth.json.login-backup-*"))
+    assert codex_home.stat().st_mode & 0o777 == 0o700
+
+
+async def test_login_spawn_exception_restores_old_auth(monkeypatch, tmp_path):
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    auth_path = codex_home / "auth.json"
+    original = b'{"tokens":"existing"}'
+    auth_path.write_bytes(original)
+    monkeypatch.setattr(codex_login.shutil, "which", lambda _name: "/usr/bin/codex")
+    monkeypatch.setenv("DISPLAY", ":99")
+    monkeypatch.setattr(
+        codex_login.asyncio,
+        "create_subprocess_exec",
+        AsyncMock(side_effect=OSError("could not spawn codex")),
+    )
+
+    with pytest.raises(OSError, match="could not spawn codex"):
+        await codex_login.codex_login(
+            "user@example.com", "token", str(codex_home), password="password",
+        )
+
+    assert auth_path.read_bytes() == original
+    assert not list(codex_home.glob(".auth.json.login-backup-*"))
+
+
+class _AuthorizeUrlStdout:
+    def __init__(self):
+        self._sent = False
+
+    async def readline(self):
+        if self._sent:
+            return b""
+        self._sent = True
+        return b"https://auth.openai.com/oauth/authorize?client_id=test\n"
+
+
+class _SuccessfulLoginProcess:
+    def __init__(self):
+        self.returncode = None
+        self.stdout = _AuthorizeUrlStdout()
+
+    def kill(self):
+        self.returncode = -9
+
+    async def wait(self):
+        return self.returncode
+
+
+class _FakePage:
+    async def goto(self, *_args, **_kwargs):
+        return None
+
+
+class _FakeBrowserContext:
+    async def new_page(self):
+        return _FakePage()
+
+
+class _FakeBrowser:
+    async def new_context(self, **_kwargs):
+        return _FakeBrowserContext()
+
+    async def close(self):
+        return None
+
+
+class _FakeChromium:
+    async def launch(self, **_kwargs):
+        return _FakeBrowser()
+
+
+class _FakePlaywrightContextManager:
+    async def __aenter__(self):
+        return SimpleNamespace(chromium=_FakeChromium())
+
+    async def __aexit__(self, *_args):
+        return False
+
+
+async def test_successful_login_replaces_auth_and_removes_backup(monkeypatch, tmp_path):
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir(mode=0o755)
+    auth_path = codex_home / "auth.json"
+    auth_path.write_text("old-auth")
+    monkeypatch.setattr(codex_login.shutil, "which", lambda _name: "/usr/bin/codex")
+    monkeypatch.setenv("DISPLAY", ":99")
+    spawn = AsyncMock(return_value=_SuccessfulLoginProcess())
+    monkeypatch.setattr(
+        codex_login.asyncio,
+        "create_subprocess_exec",
+        spawn,
+    )
+
+    playwright_package = ModuleType("playwright")
+    playwright_async_api = ModuleType("playwright.async_api")
+    playwright_async_api.async_playwright = lambda: _FakePlaywrightContextManager()
+    playwright_package.async_api = playwright_async_api
+    monkeypatch.setitem(sys.modules, "playwright", playwright_package)
+    monkeypatch.setitem(sys.modules, "playwright.async_api", playwright_async_api)
+
+    async def write_new_auth(
+        _page, _email, _password, _token, _timeout, target_auth_path, _logs, _provider,
+        _attempt_id, _manual_reader,
+    ):
+        target_auth_path.write_text("new-auth")
+
+    monkeypatch.setattr(codex_login, "_run_state_machine", write_new_auth)
+    monkeypatch.setattr(codex_login, "_smoke_test", AsyncMock(return_value=True))
+
+    result = await codex_login.codex_login(
+        "user@example.com", "token", str(codex_home), password="password",
+    )
+
+    assert result["ok"] is True
+    assert auth_path.read_text() == "new-auth"
+    assert not list(codex_home.glob(".auth.json.login-backup-*"))
+    assert codex_home.stat().st_mode & 0o777 == 0o700
+    assert spawn.await_args.kwargs["stdin"] is asyncio.subprocess.DEVNULL

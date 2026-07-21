@@ -1,9 +1,14 @@
 """Tests for GoalEvaluator — parsing and evaluation logic."""
+import asyncio
 import json
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from backend.services.goal_evaluator import GoalEvaluator, GoalEvalResult
+from backend.services.goal_evaluator import (
+    GoalEvaluationError,
+    GoalEvaluator,
+    GoalEvalResult,
+)
 
 
 class TestGoalEvalResult:
@@ -135,30 +140,61 @@ class TestEvaluateIntegration:
         evaluator = GoalEvaluator()
 
         mock_proc = MagicMock()
-        mock_proc.communicate = AsyncMock(side_effect=TimeoutError)
+        mock_proc.communicate = AsyncMock(side_effect=asyncio.TimeoutError)
+        mock_proc.returncode = None
+        mock_proc.kill = MagicMock()
+        mock_proc.wait = AsyncMock(return_value=-9)
 
         with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
-            with patch("asyncio.wait_for", side_effect=TimeoutError):
-                result = await evaluator.evaluate(
+            with pytest.raises(GoalEvaluationError) as exc_info:
+                await evaluator.evaluate(
                     condition="cond",
                     conversation_summary="conv",
                 )
 
-        assert result.achieved is False
-        assert "timed out" in result.reason.lower()
+        assert "timed out" in str(exc_info.value).lower()
+        mock_proc.kill.assert_called_once()
+        mock_proc.wait.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_evaluate_subprocess_error(self):
         evaluator = GoalEvaluator()
 
         with patch("asyncio.create_subprocess_exec", side_effect=OSError("binary not found")):
-            result = await evaluator.evaluate(
-                condition="cond",
-                conversation_summary="conv",
-            )
+            with pytest.raises(GoalEvaluationError) as exc_info:
+                await evaluator.evaluate(
+                    condition="cond",
+                    conversation_summary="conv",
+                )
 
-        assert result.achieved is False
-        assert "error" in result.reason.lower()
+        assert "binary not found" in exc_info.value.stderr
+        assert "binary not found" in exc_info.value.combined_output
+
+    @pytest.mark.asyncio
+    async def test_nonzero_exit_exposes_stderr_for_pool_classification(self):
+        evaluator = GoalEvaluator()
+        mock_proc = MagicMock()
+        mock_proc.communicate = AsyncMock(return_value=(
+            b'{"type":"turn.failed"}\n',
+            b"You have hit your usage limit. Try again later.",
+        ))
+        mock_proc.returncode = 1
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_proc):
+            with pytest.raises(GoalEvaluationError) as exc_info:
+                await evaluator.evaluate(
+                    condition="cond",
+                    conversation_summary="conv",
+                    provider="codex",
+                    codex_home="/tmp/codex-a",
+                )
+
+        error = exc_info.value
+        assert error.provider == "codex"
+        assert error.returncode == 1
+        assert "usage limit" in error.stderr
+        assert "usage limit" in error.combined_output
+        assert "turn.failed" in error.combined_output
 
     @pytest.mark.asyncio
     async def test_evaluate_uses_custom_model(self):
@@ -198,3 +234,26 @@ class TestEvaluateIntegration:
         assert "--max-turns" in call_args
         idx = list(call_args).index("--max-turns")
         assert call_args[idx + 1] == "1"
+
+    @pytest.mark.asyncio
+    async def test_codex_evaluation_sets_explicit_codex_home(self, tmp_path):
+        evaluator = GoalEvaluator()
+        agent_text = json.dumps({"achieved": True, "reason": "ok"})
+        stdout = json.dumps(
+            {"item": {"type": "agent_message", "text": agent_text}}
+        ).encode()
+        mock_proc = MagicMock()
+        mock_proc.communicate = AsyncMock(return_value=(stdout, b""))
+        codex_home = tmp_path / "codex-account-2"
+
+        with patch("asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+            result = await evaluator.evaluate(
+                condition="cond",
+                conversation_summary="conv",
+                provider="codex",
+                codex_home=str(codex_home),
+            )
+
+        assert result.achieved is True
+        assert mock_exec.call_args.kwargs["env"]["CODEX_HOME"] == str(codex_home)
+        assert mock_exec.call_args.args[1] == "exec"

@@ -22,6 +22,50 @@ class GoalEvalResult:
         self.reason = reason
 
 
+class GoalEvaluationError(RuntimeError):
+    """Operational evaluator failure with output preserved for classification."""
+
+    __slots__ = ("provider", "returncode", "stdout", "stderr")
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider: str,
+        returncode: int | None = None,
+        stdout: str = "",
+        stderr: str = "",
+    ):
+        detail = stderr.strip() or stdout.strip()
+        suffix = f": {detail[:1000]}" if detail else ""
+        super().__init__(f"{message}{suffix}")
+        self.provider = provider
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+    @property
+    def combined_output(self) -> str:
+        """Text consumed by the provider's usage/auth failure classifier."""
+        parts = [part.strip() for part in (self.stderr, self.stdout) if part.strip()]
+        return "\n".join(parts) or str(self)
+
+
+async def _terminate_process(process: asyncio.subprocess.Process | None) -> None:
+    if process is None or process.returncode is not None:
+        return
+    try:
+        process.kill()
+    except ProcessLookupError:
+        pass
+    except Exception:
+        logger.exception("Failed to stop goal evaluator process")
+    try:
+        await process.wait()
+    except Exception:
+        logger.exception("Failed to reap goal evaluator process")
+
+
 class GoalEvaluator:
     """Evaluate a goal condition against a conversation transcript."""
 
@@ -31,6 +75,7 @@ class GoalEvaluator:
         conversation_summary: str,
         model: str | None = None,
         provider: str = "claude",
+        codex_home: str | None = None,
     ) -> GoalEvalResult:
         provider = (provider or "claude").lower()
         if provider == "codex":
@@ -45,9 +90,12 @@ class GoalEvaluator:
             for k, v in os.environ.items()
             if k.upper() not in ("CLAUDECODE", "CLAUDE_CODE")
         }
+        if provider == "codex" and codex_home:
+            env["CODEX_HOME"] = os.path.expandvars(os.path.expanduser(codex_home))
 
         cmd = self._build_eval_command(provider, prompt, eval_model)
 
+        process: asyncio.subprocess.Process | None = None
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -59,14 +107,50 @@ class GoalEvaluator:
                 process.communicate(),
                 timeout=settings.goal_evaluation_timeout,
             )
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as exc:
             logger.warning("Goal evaluation timed out")
-            return GoalEvalResult(achieved=False, reason="Evaluation timed out")
-        except Exception as e:
-            logger.error(f"Goal evaluation failed: {e}")
-            return GoalEvalResult(achieved=False, reason=f"Evaluation error: {e}")
+            await _terminate_process(process)
+            returncode = (
+                process.returncode
+                if process is not None and isinstance(process.returncode, int)
+                else None
+            )
+            raise GoalEvaluationError(
+                "Goal evaluation timed out",
+                provider=provider,
+                returncode=returncode,
+            ) from exc
+        except Exception as exc:
+            logger.error("Goal evaluation failed: %s", exc)
+            await _terminate_process(process)
+            returncode = (
+                process.returncode
+                if process is not None and isinstance(process.returncode, int)
+                else None
+            )
+            raise GoalEvaluationError(
+                "Goal evaluation process failed",
+                provider=provider,
+                returncode=returncode,
+                stderr=str(exc),
+            ) from exc
 
-        raw = stdout.decode("utf-8", errors="replace")
+        raw = stdout.decode("utf-8", errors="replace") if stdout else ""
+        stderr_text = stderr.decode("utf-8", errors="replace") if stderr else ""
+        returncode = process.returncode if isinstance(process.returncode, int) else 0
+        if returncode != 0 or (not raw.strip() and stderr_text.strip()):
+            logger.warning(
+                "Goal evaluation exited with code %s: %s",
+                returncode,
+                stderr_text.strip()[:500],
+            )
+            raise GoalEvaluationError(
+                f"Goal evaluation exited with code {returncode}",
+                provider=provider,
+                returncode=returncode,
+                stdout=raw,
+                stderr=stderr_text,
+            )
         if provider == "codex":
             return self._parse_codex_response(raw)
         return self._parse_response(raw)

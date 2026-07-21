@@ -206,7 +206,7 @@ class TaskQueue:
         await self.db.commit()
         return True
 
-    async def dequeue(self) -> Task | None:
+    async def dequeue(self, exclude_ids: set[int] | None = None) -> Task | None:
         """Get the highest-priority pending task."""
         stmt = (
             select(Task)
@@ -215,6 +215,8 @@ class TaskQueue:
             .order_by(Task.priority.asc(), Task.created_at.asc())
             .limit(1)
         )
+        if exclude_ids:
+            stmt = stmt.where(Task.id.notin_(exclude_ids))
 
         result = await self.db.execute(stmt)
         task = result.scalar_one_or_none()
@@ -251,6 +253,34 @@ class TaskQueue:
             .values(status="failed", error_message=error, completed_at=datetime.utcnow())
         )
         await self.db.commit()
+
+    async def defer(self, task_id: int, reason: str) -> bool:
+        """Return an active task to pending without consuming retry budget.
+
+        Account routing can be temporarily unavailable before a process starts
+        (for example, every Codex account is cooling down or one account is
+        under login maintenance).  This is scheduling backpressure, not an
+        execution failure, so ``retry_count`` must remain unchanged.
+
+        The active-status guard is intentional: a concurrent user cancellation
+        must win instead of being overwritten back to ``pending``.
+        """
+        result = await self.db.execute(
+            update(Task)
+            .where(
+                Task.id == task_id,
+                Task.status.in_(("in_progress", "executing")),
+            )
+            .values(
+                status="pending",
+                instance_id=None,
+                error_message=reason,
+                started_at=None,
+                completed_at=None,
+            )
+        )
+        await self.db.commit()
+        return bool(result.rowcount)
 
     async def retry(self, task_id: int) -> Task | None:
         task = await self.get(task_id)

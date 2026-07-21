@@ -49,9 +49,136 @@ class RalphLoop:
         task = self._loops.get(instance_id)
         return task is not None and not task.done()
 
+    async def _launch_task_on_bound_account(
+        self,
+        instance_id: int,
+        task: Task,
+        prompt: str,
+        cwd: str,
+    ) -> int:
+        """Launch through the same provider-account resolver as Dispatcher.
+
+        Ralph is a legacy dequeue path, but it still runs normal Task rows.  A
+        Codex task must therefore keep its native thread and CODEX_HOME binding
+        instead of silently inheriting the service's default account.
+        """
+
+        from backend.main import dispatcher
+
+        config_dir = await dispatcher._resolve_resume_config_dir(
+            task.session_id,
+            task.provider,
+            task_id=task.id,
+        )
+        resume_session_id = (
+            task.session_id
+            if (task.provider or "claude").lower() == "codex"
+            else None
+        )
+        return await self.instance_manager.launch(
+            instance_id=instance_id,
+            prompt=prompt,
+            task_id=task.id,
+            cwd=cwd,
+            model=None,
+            resume_session_id=resume_session_id,
+            thinking_budget=task.thinking_budget,
+            provider=task.provider,
+            config_dir=config_dir,
+        )
+
+    async def _wait_for_turn(
+        self,
+        instance_id: int,
+        task: Task,
+        process,
+        *,
+        label: str,
+    ) -> None:
+        """Wait for both the CLI turn and its output/account bookkeeping."""
+
+        if process:
+            try:
+                await asyncio.wait_for(
+                    process.wait(), timeout=settings.task_timeout_seconds
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "%s for task %s timed out after %ss, killing process",
+                    label,
+                    task.id,
+                    settings.task_timeout_seconds,
+                )
+                process.kill()
+                await process.wait()
+
+        try:
+            await self.instance_manager.wait_for_output_consumer(
+                instance_id,
+                provider=task.provider,
+                timeout=30,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Output consumer did not finish after %s for task %s",
+                label,
+                task.id,
+            )
+
+    async def _handle_account_routing_failure(
+        self,
+        instance_id: int,
+        task_id: int,
+        reason: str,
+        *,
+        retry_after: float | None,
+    ) -> float:
+        """Release a Ralph-owned task when account routing cannot launch it."""
+
+        if retry_after is None:
+            async with self.db_factory() as db:
+                # A user cancellation/deletion may win while account routing is
+                # failing.  Only fail the task while Ralph still owns an active
+                # claim; never overwrite a concurrent terminal state.
+                result = await db.execute(
+                    update(Task)
+                    .where(
+                        Task.id == task_id,
+                        Task.status.in_(("in_progress", "executing")),
+                    )
+                    .values(
+                        status="failed",
+                        error_message=reason[:500],
+                        completed_at=datetime.utcnow(),
+                    )
+                )
+                await db.commit()
+            if not result.rowcount:
+                return 0.0
+            status = "failed"
+            delay = 0.0
+        else:
+            async with self.db_factory() as db:
+                queue = TaskQueue(db)
+                deferred = await queue.defer(task_id, reason[:500])
+            if not deferred:
+                return 0.0
+            status = "pending"
+            delay = max(1.0, min(float(retry_after), 300.0))
+
+        await self.broadcaster.broadcast("tasks", {
+            "event": "status_change",
+            "task_id": task_id,
+            "new_status": status,
+            "instance_id": instance_id,
+            "reason": "codex_account_wait" if status == "pending" else "codex_account_routing",
+        })
+        return delay
+
     async def _loop(self, instance_id: int):
         logger.info(f"Ralph loop running for instance {instance_id}")
         while True:
+            task = None
             try:
                 # Dequeue next task
                 async with self.db_factory() as db:
@@ -75,7 +202,6 @@ class RalphLoop:
 
                 cwd = task.target_repo or "."
 
-                thinking_budget = task.thinking_budget
                 async with self.db_factory() as db:
                     await db.execute(
                         update(Task)
@@ -88,23 +214,19 @@ class RalphLoop:
                 if task.mode == "plan" and not task.plan_approved:
                     logger.info(f"Task {task.id} is in plan mode, running plan phase")
                     plan_prompt = f"Please analyze the following task and create a detailed plan. Do NOT execute any changes, only describe what you would do:\n\n{task.description}"
-                    await self.instance_manager.launch(
-                        instance_id=instance_id,
-                        prompt=plan_prompt,
-                        task_id=task.id,
-                        cwd=cwd,
-                        model=None,
-                        thinking_budget=thinking_budget,
-                        provider=task.provider,
+                    await self._launch_task_on_bound_account(
+                        instance_id,
+                        task,
+                        plan_prompt,
+                        cwd,
                     )
                     process = self.instance_manager.processes.get(instance_id)
-                    if process:
-                        try:
-                            await asyncio.wait_for(process.wait(), timeout=settings.task_timeout_seconds)
-                        except asyncio.TimeoutError:
-                            logger.warning(f"Plan phase for task {task.id} timed out, killing process")
-                            process.kill()
-                            await process.wait()
+                    await self._wait_for_turn(
+                        instance_id,
+                        task,
+                        process,
+                        label="Plan phase",
+                    )
 
                     # Collect plan content from logs
                     async with self.db_factory() as db:
@@ -133,25 +255,21 @@ class RalphLoop:
                     continue  # Move to next task; this one waits for approval
 
                 # Normal execution — Claude Code is fully autonomous
-                await self.instance_manager.launch(
-                    instance_id=instance_id,
-                    prompt=task.description,
-                    task_id=task.id,
-                    cwd=cwd,
-                    model=None,
-                    thinking_budget=thinking_budget,
-                    provider=task.provider,
+                await self._launch_task_on_bound_account(
+                    instance_id,
+                    task,
+                    task.description,
+                    cwd,
                 )
 
                 # Wait for process to finish (with timeout)
                 process = self.instance_manager.processes.get(instance_id)
-                if process:
-                    try:
-                        await asyncio.wait_for(process.wait(), timeout=settings.task_timeout_seconds)
-                    except asyncio.TimeoutError:
-                        logger.warning(f"Task {task.id} timed out after {settings.task_timeout_seconds}s, killing process")
-                        process.kill()
-                        await process.wait()
+                await self._wait_for_turn(
+                    instance_id,
+                    task,
+                    process,
+                    label="Task run",
+                )
 
                 exit_code = process.returncode if process else -1
 
@@ -181,5 +299,33 @@ class RalphLoop:
                 logger.info(f"Ralph loop cancelled for instance {instance_id}")
                 break
             except Exception as e:
+                from backend.services.codex_app_server import (
+                    CodexAppServerBusyError,
+                    CodexThreadHomeMismatchError,
+                )
+                from backend.services.dispatcher import CodexAccountRoutingError
+
+                if task is not None and isinstance(
+                    e,
+                    (
+                        CodexAccountRoutingError,
+                        CodexAppServerBusyError,
+                        CodexThreadHomeMismatchError,
+                    ),
+                ):
+                    retry_after = (
+                        e.retry_after
+                        if isinstance(e, CodexAccountRoutingError)
+                        else 5.0
+                    )
+                    delay = await self._handle_account_routing_failure(
+                        instance_id,
+                        task.id,
+                        str(e),
+                        retry_after=retry_after,
+                    )
+                    if delay:
+                        await asyncio.sleep(delay)
+                    continue
                 logger.error(f"Ralph loop error for instance {instance_id}: {e}")
                 await asyncio.sleep(5)

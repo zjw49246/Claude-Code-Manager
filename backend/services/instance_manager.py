@@ -32,7 +32,10 @@ class InstanceManager:
         self.processes: dict[int, asyncio.subprocess.Process] = {}
         self._tasks: dict[int, asyncio.Task] = {}  # instance_id -> consumer task
         self._stopping: set[int] = set()  # instance_ids being intentionally stopped
-        self._config_dirs: dict[int, str] = {}  # instance_id -> CLAUDE_CONFIG_DIR used
+        # instance_id -> provider credential home used for the current/recent
+        # launch (CLAUDE_CONFIG_DIR for Claude, CODEX_HOME for Codex).  Retry
+        # paths read this map to stay on the same account.
+        self._config_dirs: dict[int, str] = {}
         self._container_tasks: dict[int, int] = {}  # instance_id -> project_id (if running in container)
         self._last_stderr: dict[int, str] = {}  # instance_id -> stderr from last run
         self._launch_params: dict[int, dict] = {}  # instance_id -> params for re-launch on rotation
@@ -49,6 +52,11 @@ class InstanceManager:
         # actionable rate_limit_event. Turn-scoped: reset at launch(), checked
         # after _wait_process in the chat path so dispatcher can rotate.
         self._pty_rate_limit_seen: set[int] = set()
+        # Preserve the event payload (especially resetsAt) until the completed
+        # PTY turn can migrate its session and quarantine the source account.
+        # ``hard_limit`` distinguishes a plain-text exhausted banner from a
+        # soft >=90% quota warning.
+        self._pty_rate_limit_info: dict[int, dict] = {}
         # PTY 权限透传：request_id -> {session_id, task_id, tool_name, expires_at}
         # bridge HTTP 线程收到 CC 的权限请求后经 _loop 调度进事件循环
         self._pty_permissions: dict[str, dict] = {}
@@ -56,6 +64,12 @@ class InstanceManager:
         # Codex persistent JSON-RPC backend.  Created lazily so Claude-only
         # deployments never start an extra process.
         self._codex_app_server = None
+        # Relogin/delete reserves a canonical CODEX_HOME here as well as in
+        # the app-server registry.  The manager-level gate also covers the
+        # `codex exec` path when app-server is disabled or falls back.
+        self._codex_home_maintenance: set[str] = set()
+        self._codex_home_locks: dict[str, asyncio.Lock] = {}
+        self._codex_exec_homes: dict[int, str] = {}
 
         # PTY persistent-session backend (claude provider only).
         # Runtime-switchable: env USE_PTY_MODE is the boot default, the
@@ -183,10 +197,44 @@ class InstanceManager:
         that loop-task chat history can be grouped by iteration in the frontend.
         """
         provider = (provider or "claude").lower()
+        if provider == "codex":
+            # A Codex turn is not reusable when its process adapter reaches a
+            # terminal returncode: the output consumer may still be migrating
+            # the rollout and persisting its new account binding.  Keep this
+            # guard in launch itself so API/manual callers cannot bypass the
+            # lifecycle-specific waits.  A consumer-driven retry is allowed to
+            # replace itself and therefore skips waiting on its own task.
+            await self.wait_for_output_consumer(instance_id, provider=provider)
+        if provider == "claude" and not config_dir:
+            # Instance ids are reused across tasks. A default-account launch
+            # must not inherit the explicit home recorded for an earlier task,
+            # otherwise lifecycle callers can report or reuse a stale account.
+            self._config_dirs.pop(instance_id, None)
+
+        # CODEX_HOME is process-scoped.  Resolve it once and pass the exact
+        # same canonical value through app-server, retries, and exec fallback;
+        # otherwise one failed app-server request can silently resume a thread
+        # with another account inherited from the service environment.
+        if provider == "codex":
+            from backend.services.codex_app_server import (
+                CodexAppServerBusyError,
+                CodexThreadHomeMismatchError,
+                normalize_codex_home,
+            )
+
+            config_dir = normalize_codex_home(config_dir)
+            codex_home_path = Path(config_dir)
+            codex_home_path.mkdir(parents=True, exist_ok=True, mode=0o700)
+            try:
+                os.chmod(codex_home_path, 0o700)
+            except OSError:
+                logger.warning("Could not enforce 0700 on CODEX_HOME %s", config_dir)
+            self._config_dirs[instance_id] = config_dir
 
         # New turn → clear per-turn flags.
         self._transient_seen.discard(instance_id)
         self._pty_rate_limit_seen.discard(instance_id)
+        self._pty_rate_limit_info.pop(instance_id, None)
 
         mcp_config_path = None
         if provider == "claude" and task_id:
@@ -235,28 +283,48 @@ class InstanceManager:
                 logger.debug("Container setup failed, falling back to bare process")
 
         if provider == "codex" and settings.codex_app_server_enabled:
-            try:
-                return await self._launch_codex_app_server(
-                    instance_id=instance_id,
-                    prompt=prompt,
-                    task_id=task_id,
-                    cwd=cwd,
-                    model=model,
-                    resume_session_id=resume_session_id,
-                    loop_iteration=loop_iteration,
-                    git_env=git_env,
-                    effort_level=effort_level,
-                    chat_initiated=chat_initiated,
-                    enable_workflows=enable_workflows,
-                    enabled_skills=enabled_skills,
-                )
-            except Exception:
-                # App-server is an experimental Codex surface.  A CLI upgrade
-                # must not take all Codex tasks down; retain the proven exec
-                # path as an automatic compatibility fallback.
-                logger.exception(
-                    "Codex app-server launch failed; falling back to codex exec"
-                )
+            home_lock = self._codex_home_lock(config_dir)
+            async with home_lock:
+                if config_dir in self._codex_home_maintenance:
+                    raise CodexAppServerBusyError(
+                        f"Codex account is under maintenance: {config_dir}"
+                    )
+                try:
+                    return await self._launch_codex_app_server(
+                        instance_id=instance_id,
+                        prompt=prompt,
+                        task_id=task_id,
+                        cwd=cwd,
+                        model=model,
+                        resume_session_id=resume_session_id,
+                        loop_iteration=loop_iteration,
+                        git_env=git_env,
+                        effort_level=effort_level,
+                        chat_initiated=chat_initiated,
+                        config_dir=config_dir,
+                        enable_workflows=enable_workflows,
+                        enabled_skills=enabled_skills,
+                    )
+                except (
+                    asyncio.TimeoutError,
+                    CodexAppServerBusyError,
+                    CodexThreadHomeMismatchError,
+                ):
+                    # These failures are not safe to replay through `codex exec`:
+                    # a timed-out turn/start may already be running, while busy or
+                    # owner-mismatch means the requested account route is invalid.
+                    # Falling back would duplicate work or mix auth/thread state.
+                    logger.exception(
+                        "Codex app-server launch cannot safely fall back to exec"
+                    )
+                    raise
+                except Exception:
+                    # App-server is an experimental Codex surface.  A CLI upgrade
+                    # must not take all Codex tasks down; retain the proven exec
+                    # path as an automatic compatibility fallback.
+                    logger.exception(
+                        "Codex app-server launch failed; falling back to codex exec"
+                    )
 
         if provider == "claude" and self.pty_mode_enabled:
             return await self._launch_pty(
@@ -300,9 +368,13 @@ class InstanceManager:
         if git_env:
             env.update(git_env)
 
-        # Pool: inject CLAUDE_CONFIG_DIR so this subprocess uses a specific account
+        # Provider account home.  The Codex assignment is especially important
+        # for app-server fallback: the rollout and auth.json must stay together.
         if config_dir and provider == "claude":
             env["CLAUDE_CONFIG_DIR"] = config_dir
+            self._config_dirs[instance_id] = config_dir
+        elif config_dir and provider == "codex":
+            env["CODEX_HOME"] = config_dir
             self._config_dirs[instance_id] = config_dir
 
         # Disable CC's auto-compact — CCM manages context/compaction itself
@@ -357,16 +429,38 @@ class InstanceManager:
             )
             self._container_tasks[instance_id] = container_project_id
         else:
-            process = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd or os.getcwd(),
-                env=env,
-                limit=10 * 1024 * 1024,
-            )
+            if provider == "codex":
+                # Hold the per-home gate through process creation and tracking.
+                # Maintenance can then either see this active exec or reserve
+                # the home first; it can never edit auth.json in the gap.
+                home_lock = self._codex_home_lock(config_dir)
+                async with home_lock:
+                    if config_dir in self._codex_home_maintenance:
+                        raise CodexAppServerBusyError(
+                            f"Codex account is under maintenance: {config_dir}"
+                        )
+                    process = await asyncio.create_subprocess_exec(
+                        *cmd,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        cwd=cwd or os.getcwd(),
+                        env=env,
+                        limit=10 * 1024 * 1024,
+                    )
+                    self.processes[instance_id] = process
+                    self._codex_exec_homes[instance_id] = config_dir
+            else:
+                process = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=cwd or os.getcwd(),
+                    env=env,
+                    limit=10 * 1024 * 1024,
+                )
 
-        self.processes[instance_id] = process
+        if provider != "codex":
+            self.processes[instance_id] = process
 
         # Store launch params for potential pool rotation re-launch
         if chat_initiated:
@@ -381,6 +475,7 @@ class InstanceManager:
                 "enable_workflows": enable_workflows,
                 "enabled_skills": enabled_skills,
                 "provider": provider,
+                "config_dir": config_dir,
             }
 
         # Update instance record
@@ -414,6 +509,27 @@ class InstanceManager:
 
         return process.pid
 
+    def _ensure_codex_app_server_registry(self):
+        """Return the lazy per-CODEX_HOME app-server registry."""
+
+        from backend.services.codex_app_server import CodexAppServerRegistry
+
+        if self._codex_app_server is None:
+            self._codex_app_server = CodexAppServerRegistry(
+                self._resolve_codex_binary(),
+                request_timeout=settings.codex_app_server_request_timeout,
+            )
+        return self._codex_app_server
+
+    def _codex_home_lock(self, codex_home: str) -> asyncio.Lock:
+        """Return the admission/maintenance lock for a canonical home."""
+
+        lock = self._codex_home_locks.get(codex_home)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._codex_home_locks[codex_home] = lock
+        return lock
+
     async def _launch_codex_app_server(
         self,
         *,
@@ -427,21 +543,17 @@ class InstanceManager:
         git_env: dict | None,
         effort_level: str | None,
         chat_initiated: bool,
+        config_dir: str | None,
         enable_workflows: bool,
         enabled_skills: dict | None,
     ) -> int:
-        """Launch one turn on the shared persistent Codex app-server."""
-        from backend.services.codex_app_server import CodexAppServer
-
-        if self._codex_app_server is None:
-            self._codex_app_server = CodexAppServer(
-                self._resolve_codex_binary(),
-                request_timeout=settings.codex_app_server_request_timeout,
-            )
+        """Launch one turn on the persistent app-server for its CODEX_HOME."""
+        registry = self._ensure_codex_app_server_registry()
 
         actual_cwd = cwd or os.getcwd()
         codex_effort = clamp_codex_effort(model, effort_level)
-        process, _thread_id = await self._codex_app_server.start_turn(
+        process, _thread_id = await registry.start_turn(
+            codex_home=config_dir,
             prompt=prompt,
             cwd=actual_cwd,
             model=model,
@@ -450,7 +562,12 @@ class InstanceManager:
             git_env=git_env,
             task_id=task_id,
         )
+        if config_dir:
+            self._config_dirs[instance_id] = config_dir
         self.processes[instance_id] = process
+        # This instance may previously have used the exec fallback.  It is now
+        # owned by the registry, whose active-turn check is authoritative.
+        self._codex_exec_homes.pop(instance_id, None)
 
         if chat_initiated:
             self._launch_params[instance_id] = {
@@ -464,6 +581,7 @@ class InstanceManager:
                 "enable_workflows": enable_workflows,
                 "enabled_skills": enabled_skills,
                 "provider": "codex",
+                "config_dir": config_dir,
             }
 
         async with self.db_factory() as db:
@@ -500,13 +618,151 @@ class InstanceManager:
         return process.pid
 
     async def shutdown_codex_app_server(self) -> None:
-        """Stop the persistent Codex transport during application shutdown."""
+        """Stop every persistent Codex account transport at app shutdown."""
         if self._codex_app_server is None:
             return
         try:
             await self._codex_app_server.shutdown()
         finally:
             self._codex_app_server = None
+
+    async def shutdown_codex_app_server_home(
+        self, codex_home: str, *, require_idle: bool = True,
+    ) -> bool:
+        """One-shot drain of an account transport before removal."""
+
+        started = False
+        try:
+            stopped = await self.begin_codex_home_maintenance(
+                codex_home, require_idle=require_idle,
+            )
+            started = True
+            return stopped
+        finally:
+            if started:
+                await self.end_codex_home_maintenance(codex_home)
+
+    async def begin_codex_home_maintenance(
+        self, codex_home: str, *, require_idle: bool = True,
+    ) -> bool:
+        """Reserve one CODEX_HOME while auth files are replaced or removed.
+
+        A registry is created even when Codex has not run yet so a concurrent
+        first turn cannot slip through the relogin/delete window.  Callers must
+        pair this with ``end_codex_home_maintenance`` in ``finally``.
+        """
+
+        from backend.services.codex_app_server import (
+            CodexAppServerBusyError,
+            normalize_codex_home,
+        )
+
+        home = normalize_codex_home(codex_home)
+        home_lock = self._codex_home_lock(home)
+        async with home_lock:
+            if home in self._codex_home_maintenance:
+                raise CodexAppServerBusyError(
+                    f"Codex account is already under maintenance: {home}"
+                )
+            if require_idle:
+                for instance_id, exec_home in self._codex_exec_homes.items():
+                    process = self.processes.get(instance_id)
+                    if (
+                        exec_home == home
+                        and process is not None
+                        and process.returncode is None
+                    ):
+                        raise CodexAppServerBusyError(
+                            f"Codex account still has an active exec turn: {home}"
+                        )
+
+            registry = self._ensure_codex_app_server_registry()
+            stopped = await registry.begin_home_maintenance(
+                home, require_idle=require_idle,
+            )
+            self._codex_home_maintenance.add(home)
+            return stopped
+
+    async def end_codex_home_maintenance(
+        self, codex_home: str,
+    ) -> None:
+        """Release a CODEX_HOME maintenance reservation."""
+
+        from backend.services.codex_app_server import normalize_codex_home
+
+        home = normalize_codex_home(codex_home)
+        home_lock = self._codex_home_lock(home)
+        async with home_lock:
+            try:
+                if self._codex_app_server is not None:
+                    await self._codex_app_server.end_home_maintenance(home)
+            finally:
+                self._codex_home_maintenance.discard(home)
+
+    async def begin_codex_app_server_home_maintenance(
+        self, codex_home: str, *, require_idle: bool = True,
+    ) -> bool:
+        """Compatibility alias for account API callers."""
+
+        return await self.begin_codex_home_maintenance(
+            codex_home, require_idle=require_idle,
+        )
+
+    async def end_codex_app_server_home_maintenance(
+        self, codex_home: str,
+    ) -> None:
+        """Compatibility alias for account API callers."""
+
+        await self.end_codex_home_maintenance(codex_home)
+
+    async def rebind_codex_app_server_thread(
+        self,
+        thread_id: str,
+        *,
+        source_codex_home: str | None,
+        target_codex_home: str,
+    ) -> None:
+        """Update the live registry after a rollout was migrated."""
+
+        if self._codex_app_server is None:
+            # No process has loaded the thread in this backend lifetime; the
+            # next resume can establish ownership directly in the target home.
+            return
+        await self._codex_app_server.rebind_thread(
+            thread_id,
+            source_codex_home=source_codex_home,
+            target_codex_home=target_codex_home,
+        )
+
+    async def rebind_codex_thread(
+        self,
+        thread_id: str,
+        *,
+        source_codex_home: str | None,
+        target_codex_home: str,
+    ) -> None:
+        """Dispatcher-facing alias for a migrated rollout rebind."""
+
+        await self.rebind_codex_app_server_thread(
+            thread_id,
+            source_codex_home=source_codex_home,
+            target_codex_home=target_codex_home,
+        )
+
+    async def clear_codex_thread_owner_for_recovery(
+        self,
+        thread_id: str,
+        *,
+        expected_codex_home: str,
+    ) -> bool:
+        """Forget an idle in-memory route so durable DB affinity wins again."""
+
+        if self._codex_app_server is None:
+            return True
+        return await self._codex_app_server.clear_thread_owner_for_recovery(
+            thread_id,
+            expected_codex_home=expected_codex_home,
+        )
 
     async def _launch_pty(
         self,
@@ -718,8 +974,27 @@ class InstanceManager:
         Any exception other than CancelledError is caught and logged so that
         a single bad line or transient DB error never kills the whole consumer.
         """
+        consumer_task = asyncio.current_task()
+
+        def owns_instance_turn() -> bool:
+            """Whether this consumer still owns the instance bookkeeping.
+
+            Direct unit callers do not register the process/consumer maps, so
+            an absent entry remains compatible.  A different entry, however,
+            proves a replacement turn was installed and the old consumer must
+            not reset its DB state or erase the replacement's maps.
+            """
+
+            mapped_process = self.processes.get(instance_id)
+            mapped_consumer = self._tasks.get(instance_id)
+            return (
+                (mapped_process is None or mapped_process is process)
+                and (mapped_consumer is None or mapped_consumer is consumer_task)
+            )
+
         _assistant_texts: list[str] = []
         _saw_rate_limit = False
+        _rate_limit_info: dict | None = None
         _saw_error = False
         try:
             while True:
@@ -744,7 +1019,7 @@ class InstanceManager:
                             await self._process_event(instance_id, task_id, event, loop_iteration)
                             if event.get("event_type") == "rate_limit_event":
                                 # Only a genuine near-limit/blocked event should
-                                # rotate+cooldown this account. The CLI emits an
+                                # evaluate a switch. The CLI emits an
                                 # "allowed" ping almost every turn; treating those
                                 # as rate limits benches healthy accounts and
                                 # starves the pool (prod #734/#740).
@@ -759,6 +1034,7 @@ class InstanceManager:
                                             info = None
                                 if rate_limit_event_is_actionable(info):
                                     _saw_rate_limit = True
+                                    _rate_limit_info = info
                             if event.get("is_error"):
                                 _saw_error = True
                             if event.get("event_type") in ("message", "result") and event.get("role") == "assistant":
@@ -822,10 +1098,17 @@ class InstanceManager:
                     # Still clean up instance below so it's available for the retry
                     # fall through to normal cleanup
 
-            # Proactive pool switch: turn completed OK but rate limit warning was seen
-            if task_id and chat_initiated and exit_code == 0 and _saw_rate_limit:
-                if await self._try_proactive_pool_switch(instance_id, task_id):
-                    pass  # switched — fall through to normal cleanup
+            # Quota-aware proactive switch after a successful turn. Claude is
+            # event-driven; Codex refreshes its rollout quota on every completed
+            # turn because its exec/app-server stream has no equivalent event.
+            if task_id and exit_code == 0 and (
+                provider == "codex" or _saw_rate_limit
+            ):
+                await self._try_proactive_pool_switch(
+                    instance_id,
+                    task_id,
+                    rate_limit_info=_rate_limit_info,
+                )
 
             if task_id and chat_initiated and exit_code not in (0, -2, 130):
                 # "Prompt is too long" — session context exceeded window.
@@ -864,6 +1147,15 @@ class InstanceManager:
                 # Clean turn — drop any transient-retry tally for this instance.
                 self._transient_attempts.pop(instance_id, None)
 
+            if not owns_instance_turn():
+                logger.info(
+                    "Skipping stale consumer cleanup for instance %s task %s; "
+                    "a replacement turn now owns the instance",
+                    instance_id,
+                    task_id,
+                )
+                return
+
             # Update instance status
             # SIGINT (exit code -2 or 130) = user interrupt, treat as idle not error
             async with self.db_factory() as db:
@@ -897,6 +1189,17 @@ class InstanceManager:
                         )
                         if result.rowcount:
                             final_status = "failed"
+                # ``launch`` waits for the old consumer, but retain a final
+                # ownership check as defense in depth for direct/internal map
+                # replacement.  Do not commit stale task/instance updates.
+                if not owns_instance_turn():
+                    await db.rollback()
+                    logger.info(
+                        "Discarding stale consumer DB cleanup for instance %s task %s",
+                        instance_id,
+                        task_id,
+                    )
+                    return
                 await db.commit()
             # 广播必须在 commit 之后：先广播的话手快的客户端收到事件立刻回读，
             # 拿到的还是旧状态，反而把 UI 钉在过期值上
@@ -973,9 +1276,16 @@ class InstanceManager:
                 "exit_code": exit_code,
             })
 
-            self.processes.pop(instance_id, None)
-            self._tasks.pop(instance_id, None)
-            self._launch_params.pop(instance_id, None)
+            # Never let an old consumer erase a replacement process/consumer.
+            # Conditional identity checks also make cleanup safe if a caller
+            # bypasses ``launch`` and installs a turn directly in the maps.
+            if self.processes.get(instance_id) is process:
+                self.processes.pop(instance_id, None)
+            if self._tasks.get(instance_id) is consumer_task:
+                self._tasks.pop(instance_id, None)
+            if owns_instance_turn():
+                self._launch_params.pop(instance_id, None)
+                self._codex_exec_homes.pop(instance_id, None)
 
     async def _try_chat_transient_retry(
         self, instance_id: int, task_id: int, exit_code: int, stderr_text: str,
@@ -988,6 +1298,8 @@ class InstanceManager:
         which launch() overwrites) so it survives the relaunch; it is cleared on
         a non-transient failure, on exhaustion, and on a clean turn.
         """
+        params: dict = {}
+        provider = "claude"
         try:
             from backend.config import settings as _settings
             if not getattr(_settings, "transient_retry_enabled", True):
@@ -999,7 +1311,7 @@ class InstanceManager:
             )
 
             params = self._launch_params.get(instance_id) or {}
-            provider = params.get("provider") or "claude"
+            provider = (params.get("provider") or "claude").lower()
             log_contents = await self.get_recent_log_contents(task_id, limit=10)
             combined = collect_process_output_for_detection(stderr_text, log_contents)
             if not is_transient_for(provider, combined):
@@ -1066,9 +1378,68 @@ class InstanceManager:
             )
             return True
 
-        except Exception:
+        except Exception as exc:
+            from backend.services.codex_app_server import (
+                CodexAppServerBusyError,
+                CodexThreadHomeMismatchError,
+            )
+            from backend.services.dispatcher import CodexAccountRoutingError
+
+            if provider == "codex" and isinstance(
+                exc,
+                (
+                    CodexAccountRoutingError,
+                    CodexAppServerBusyError,
+                    CodexThreadHomeMismatchError,
+                ),
+            ):
+                await self._requeue_codex_chat_prompt(
+                    task_id, params, exc, phase="transient retry",
+                )
+                self._transient_attempts.pop(instance_id, None)
+                return False
             logger.exception("Chat transient retry failed for task %d", task_id)
             self._transient_attempts.pop(instance_id, None)
+            return False
+    async def _requeue_codex_chat_prompt(
+        self,
+        task_id: int,
+        params: dict,
+        exc: Exception,
+        *,
+        phase: str,
+    ) -> bool:
+        """Preserve a Codex chat prompt when replacement routing is busy."""
+
+        prompt = params.get("prompt")
+        if not isinstance(prompt, str) or not prompt:
+            return False
+        try:
+            from backend.main import dispatcher
+            from backend.services.dispatcher import PRIORITY_USER
+
+            if not dispatcher:
+                return False
+            await dispatcher.enqueue_message(
+                task_id=task_id,
+                prompt=prompt,
+                priority=PRIORITY_USER,
+                source="routing_retry",
+            )
+            logger.warning(
+                "Codex chat task %d %s routing failed; requeued original "
+                "prompt for safe retry: %s",
+                task_id,
+                phase,
+                exc,
+            )
+            return True
+        except Exception:
+            logger.exception(
+                "Failed to requeue Codex chat prompt for task %d after %s",
+                task_id,
+                phase,
+            )
             return False
 
     async def _try_chat_pool_rotation(
@@ -1078,17 +1449,15 @@ class InstanceManager:
 
         Returns True if rotation succeeded and a new process was launched.
         """
+        params: dict = {}
+        provider = "claude"
         try:
             from backend.main import dispatcher
-            if not dispatcher or not dispatcher.pool or not dispatcher.pool.enabled:
+            if not dispatcher:
                 return False
 
-            # 号池是 claude 专属；codex 的限额文案（"hit your usage limit"）会
-            # 误命中 claude 的 _RATE_LIMIT_RE，若不拦会把 codex session 用
-            # claude --resume 重启（provider 丢失），必须显式挡掉。
             params = self._launch_params.get(instance_id, {})
-            if (params.get("provider") or "claude").lower() != "claude":
-                return False
+            provider = (params.get("provider") or "claude").lower()
 
             from backend.services.claude_pool import (
                 is_pool_rotatable, is_rate_limited, is_auth_failure,
@@ -1097,6 +1466,60 @@ class InstanceManager:
 
             log_contents = await self.get_recent_log_contents(task_id, limit=10)
             combined = collect_process_output_for_detection(stderr_text, log_contents)
+
+            if provider == "codex":
+                # Dispatcher owns Codex account cooldown, rollout migration,
+                # task binding, and registry rebind.  Reuse that single path
+                # instead of duplicating subtly different pool semantics here.
+                from backend.services.dispatcher import (
+                    CodexAccountRoutingError,
+                )
+
+                try:
+                    rotation = await dispatcher._check_rate_limit_and_rotate(
+                        instance_id, task_id, exit_code, combined=combined,
+                    )
+                except CodexAccountRoutingError as exc:
+                    # The failed turn is still cleaned up by _consume_output.
+                    # Preserve its exact prompt in the task queue so a rollout
+                    # migration/rebind race does not silently drop the user's
+                    # message; the queue's routing guard will retry it safely.
+                    await self._requeue_codex_chat_prompt(
+                        task_id, params, exc, phase="pool rotation",
+                    )
+                    return False
+                if not rotation or not rotation.get("config_dir"):
+                    return False
+
+                async with self.db_factory() as db:
+                    task = await db.get(Task, task_id)
+                    if not task:
+                        return False
+                    session_id = rotation.get("session_id") or task.session_id
+                    cwd = task.last_cwd or task.target_repo
+
+                await self.launch(
+                    instance_id=instance_id,
+                    prompt=params.get("prompt", "continue"),
+                    task_id=task_id,
+                    cwd=cwd,
+                    model=params.get("model"),
+                    resume_session_id=session_id,
+                    git_env=params.get("git_env"),
+                    thinking_budget=params.get("thinking_budget"),
+                    effort_level=params.get("effort_level"),
+                    chat_initiated=True,
+                    config_dir=rotation["config_dir"],
+                    provider="codex",
+                    enable_workflows=params.get("enable_workflows", False),
+                    enabled_skills=params.get("enabled_skills"),
+                )
+                return True
+
+            if provider != "claude":
+                return False
+            if not dispatcher.pool or not dispatcher.pool.enabled:
+                return False
 
             if not is_pool_rotatable(combined):
                 return False
@@ -1172,59 +1595,270 @@ class InstanceManager:
             )
             return True
 
-        except Exception:
+        except Exception as exc:
+            if provider == "codex":
+                from backend.services.codex_app_server import (
+                    CodexAppServerBusyError,
+                    CodexThreadHomeMismatchError,
+                )
+                from backend.services.dispatcher import CodexAccountRoutingError
+
+                if isinstance(
+                    exc,
+                    (
+                        CodexAccountRoutingError,
+                        CodexAppServerBusyError,
+                        CodexThreadHomeMismatchError,
+                    ),
+                ):
+                    await self._requeue_codex_chat_prompt(
+                        task_id, params, exc, phase="replacement launch",
+                    )
+                    return False
             logger.exception("Chat pool rotation failed for task %d", task_id)
             return False
 
-    async def _try_proactive_pool_switch(self, instance_id: int, task_id: int) -> bool:
-        """Switch pool account after a successful turn that saw rate_limit_event.
+    async def _try_proactive_pool_switch(
+        self,
+        instance_id: int,
+        task_id: int,
+        *,
+        rate_limit_info: dict | None = None,
+    ) -> bool:
+        """Move a completed session when its active quota reaches 90%.
 
-        Does NOT re-launch — just migrates the session to a new account so the
-        next turn uses a fresh account. Returns True if switched.
+        This never relaunches the just-completed turn. A soft quota warning only
+        changes account state after migration/rebind succeeds; if every other
+        account is unavailable or also known-high, the current account remains
+        usable. Plain-text/rejected hard limits retain the existing cooldown
+        behavior and are not handled as soft quota thresholds.
         """
         try:
             from backend.main import dispatcher
-            if not dispatcher or not dispatcher.pool or not dispatcher.pool.enabled:
+            if not dispatcher:
                 return False
 
-            from backend.services.claude_pool import migrate_session
+            async with self.db_factory() as db:
+                task = await db.get(Task, task_id)
+                if not task:
+                    return False
+                provider = (task.provider or "claude").lower()
+                session_id = task.session_id
+                bound_codex_id = (task.metadata_ or {}).get("codex_account_id")
+
+            if provider == "codex":
+                if not session_id:
+                    return False
+                pool = dispatcher.codex_pool
+                if not (pool and pool.enabled):
+                    return False
+                old_home = self._config_dirs.get(instance_id)
+                if not old_home and isinstance(bound_codex_id, str):
+                    old_home = pool.home_for_account(bound_codex_id)
+                if not old_home:
+                    return False
+                old_home = pool.canonical_home(old_home)
+                new_home = await pool.select_quota_alternative(old_home)
+                if not new_home:
+                    logger.info(
+                        "Codex quota switch: current account below 90%% or no "
+                        "usable alternative for task %d",
+                        task_id,
+                    )
+                    return False
+                new_home = pool.canonical_home(new_home)
+                old_quota = pool.cached_quota_for_home(old_home)
+
+                from backend.services.codex_session_migration import (
+                    migrate_codex_rollout_session,
+                )
+                from backend.services.codex_pool import quota_cooldown_seconds
+
+                try:
+                    await asyncio.to_thread(
+                        migrate_codex_rollout_session,
+                        session_id,
+                        old_home,
+                        new_home,
+                    )
+                    await self.rebind_codex_thread(
+                        session_id,
+                        source_codex_home=old_home,
+                        target_codex_home=new_home,
+                    )
+                except Exception as exc:
+                    # Do not cool or rebind the task on a partial failure. The
+                    # authoritative rollout and binding remain on the old home.
+                    logger.warning(
+                        "Codex quota switch failed for task %d (%s -> %s): %s",
+                        task_id,
+                        old_home,
+                        new_home,
+                        exc,
+                    )
+                    return False
+
+                old_account_id = pool.account_id_for_home(old_home)
+                new_account_id = pool.account_id_for_home(new_home)
+                try:
+                    await dispatcher._set_codex_task_binding(task_id, new_account_id)
+                except Exception as exc:
+                    # The live app-server registry moved before the durable
+                    # task binding. Restore its old owner so DB metadata and
+                    # in-memory routing cannot disagree on the next resume.
+                    try:
+                        await self.rebind_codex_thread(
+                            session_id,
+                            source_codex_home=new_home,
+                            target_codex_home=old_home,
+                        )
+                        rollback_succeeded = True
+                    except Exception:
+                        rollback_succeeded = False
+                        logger.exception(
+                            "Codex quota switch rollback failed for task %d "
+                            "(%s -> %s)",
+                            task_id,
+                            new_home,
+                            old_home,
+                        )
+                        try:
+                            await self.clear_codex_thread_owner_for_recovery(
+                                session_id,
+                                expected_codex_home=new_home,
+                            )
+                        except Exception:
+                            logger.exception(
+                                "Codex quota switch could not clear stale owner "
+                                "for task %d thread %s",
+                                task_id,
+                                session_id,
+                            )
+                    logger.warning(
+                        "Codex quota switch binding persist failed for task %d; "
+                        "old binding %s retained (owner rollback succeeded=%s): %s",
+                        task_id,
+                        old_account_id,
+                        rollback_succeeded,
+                        exc,
+                    )
+                    return False
+                self._config_dirs[instance_id] = new_home
+                pool.mark_rate_limited(
+                    old_home,
+                    duration=quota_cooldown_seconds(
+                        old_quota,
+                        fallback=pool._cooldown_seconds,
+                    ),
+                )
+                await self.broadcaster.broadcast(f"task:{task_id}", {
+                    "event_type": "pool_rotation",
+                    "provider": "codex",
+                    "old_account": old_account_id,
+                    "new_account": new_account_id,
+                    "reason": "quota_threshold",
+                })
+                logger.info(
+                    "Codex quota switch: task %d migrated %s -> %s",
+                    task_id,
+                    old_account_id,
+                    new_account_id,
+                )
+                return True
+
+            if provider != "claude" or not (
+                dispatcher.pool and dispatcher.pool.enabled
+            ):
+                return False
+
+            from backend.services.claude_pool import (
+                migrate_session,
+                quota_cooldown_seconds,
+                rate_limit_event_is_actionable,
+            )
 
             old_config_dir = self._config_dirs.get(instance_id)
             if not old_config_dir:
                 old_config_dir = os.path.expanduser("~/.claude")
 
-            dispatcher.pool.mark_rate_limited(old_config_dir)
-
             old_account_id = dispatcher.pool.account_id_from_config_dir(old_config_dir)
-            excluded = {old_account_id} if old_account_id else set()
-            new_config_dir = dispatcher.pool.select(exclude=excluded)
+            info = rate_limit_info or self._pty_rate_limit_info.get(instance_id)
+            status = str((info or {}).get("status") or "").lower()
+            hard_limit = bool((info or {}).get("hard_limit")) or (
+                bool(status) and status not in {"allowed", "allowed_warning"}
+            )
+
+            if hard_limit:
+                # Existing hard-limit semantics: quarantine immediately and try
+                # any other enabled account. Reactive non-PTY failures continue
+                # to use _check_rate_limit_and_rotate unchanged.
+                dispatcher.pool.mark_rate_limited(old_config_dir)
+                excluded = {old_account_id} if old_account_id else set()
+                new_config_dir = dispatcher.pool.select(exclude=excluded)
+                reason = "proactive_rate_limit"
+            else:
+                if not session_id:
+                    return False
+                if not rate_limit_event_is_actionable(info):
+                    return False
+                new_config_dir = await dispatcher.pool.select_quota_alternative(
+                    old_config_dir
+                )
+                reason = "quota_threshold"
 
             if not new_config_dir:
-                logger.info("Proactive pool switch: no alternative account for task %d", task_id)
+                logger.info(
+                    "Proactive pool switch: no usable alternative for task %d; "
+                    "continuing current account",
+                    task_id,
+                )
                 return False
 
-            async with self.db_factory() as db:
-                task = await db.get(Task, task_id)
-                if not task or not task.session_id:
-                    return False
-                session_id = task.session_id
+            if not session_id:
+                # Preserve the legacy hard-limit order: the exhausted account
+                # is already cooled even when a fresh turn has no resumable ID.
+                return False
 
             source_dir = dispatcher.pool.locate_session_config_dir(session_id) or old_config_dir
-            migrate_session(
+            migrated = migrate_session(
                 old_config_dir=source_dir,
                 new_config_dir=new_config_dir,
                 session_id=session_id,
             )
+            if not migrated:
+                logger.warning(
+                    "Proactive pool switch: session migration failed for task %d",
+                    task_id,
+                )
+                return False
+
+            if not hard_limit:
+                # Soft >=90% isolation begins only after context is safely
+                # available on the replacement account. Use the event's reset
+                # boundary (capped; expired/malformed falls back to pool default).
+                dispatcher.pool.mark_rate_limited(
+                    old_config_dir,
+                    duration=quota_cooldown_seconds(
+                        info,
+                        fallback=dispatcher.pool._cooldown_seconds,
+                    ),
+                )
 
             new_account_id = dispatcher.pool.account_id_from_config_dir(new_config_dir)
-            logger.info("Proactive pool switch: task %d migrated %s -> %s (rate limit warning)",
-                        task_id, old_account_id, new_account_id)
+            self._config_dirs[instance_id] = new_config_dir
+            logger.info(
+                "Proactive pool switch: task %d migrated %s -> %s (%s)",
+                task_id,
+                old_account_id,
+                new_account_id,
+                reason,
+            )
 
             await self.broadcaster.broadcast(f"task:{task_id}", {
                 "event_type": "pool_rotation",
                 "old_account": old_account_id,
                 "new_account": new_account_id,
-                "reason": "proactive_rate_limit",
+                "reason": reason,
             })
             return True
 
@@ -1503,6 +2137,9 @@ class InstanceManager:
 
     async def _process_event(self, instance_id: int, task_id: int | None, event: dict, loop_iteration: int | None = None):
         """Process a single parsed event: save to DB and broadcast."""
+        provider = str(
+            self._launch_params.get(instance_id, {}).get("provider") or "claude"
+        ).lower()
         # Extract session_id, cost, and context usage from event
         session_id = event.pop("session_id", None)
         cost_usd = event.pop("cost_usd", None)
@@ -1661,12 +2298,14 @@ class InstanceManager:
             and not event.get("orphan")
             and not event.get("autonomous")
         ):
-            from backend.services.claude_pool import is_transient_overload
-            if is_transient_overload(event.get("content") or ""):
+            from backend.services.claude_pool import is_transient_for
+            if is_transient_for(provider, event.get("content") or ""):
                 self._transient_seen.add(instance_id)
 
         # PTY rate-limit detection: actionable rate_limit_event during this turn
         if (
+            provider == "claude"
+            and
             event.get("event_type") == "rate_limit_event"
             and not event.get("orphan")
             and not event.get("autonomous")
@@ -1683,12 +2322,16 @@ class InstanceManager:
                         info = None
             if rate_limit_event_is_actionable(info):
                 self._pty_rate_limit_seen.add(instance_id)
+                if isinstance(info, dict):
+                    self._pty_rate_limit_info[instance_id] = info
 
         # PTY rate-limit detection from assistant text: CC outputs messages like
         # "You've hit your session limit" as plain assistant text, not as a
         # rate_limit_event. In PTY mode the process stays alive so
         # _check_rate_limit_and_rotate (which needs exit_code != 0) never fires.
         if (
+            provider == "claude"
+            and
             event.get("role") == "assistant"
             and event.get("event_type") in ("message", "result")
             and not event.get("orphan")
@@ -1699,6 +2342,7 @@ class InstanceManager:
                 from backend.services.claude_pool import is_rate_limited
                 if is_rate_limited(content):
                     self._pty_rate_limit_seen.add(instance_id)
+                    self._pty_rate_limit_info[instance_id] = {"hard_limit": True}
                     logger.info("PTY rate limit detected from assistant text (instance %s): %s",
                                 instance_id, content[:120])
 
@@ -2088,13 +2732,69 @@ class InstanceManager:
             })
 
         self.processes.pop(instance_id, None)
+        self._codex_exec_homes.pop(instance_id, None)
         self._transient_attempts.pop(instance_id, None)
+        self._pty_rate_limit_seen.discard(instance_id)
+        self._pty_rate_limit_info.pop(instance_id, None)
         self._stopping.discard(instance_id)
         return True
 
+    async def wait_for_output_consumer(
+        self,
+        instance_id: int,
+        *,
+        provider: str = "claude",
+        timeout: float | None = 30,
+    ) -> None:
+        """Wait until an instance's output bookkeeping is fully settled.
+
+        Codex consumers own post-turn rollout migration and account binding, so
+        an arbitrary timeout would expose a half-finished native thread to the
+        next launch.  They are therefore awaited without a timeout and followed
+        across consumer-driven retry replacement.  Claude keeps the historical
+        bounded wait, but shields the consumer so a timeout does not cancel its
+        remaining output processing.
+        """
+
+        provider = (provider or "claude").lower()
+        current = asyncio.current_task()
+        deadline = None
+        if provider != "codex" and timeout is not None:
+            deadline = asyncio.get_running_loop().time() + timeout
+
+        while True:
+            consumer = self._tasks.get(instance_id)
+            if consumer is None or consumer is current:
+                return
+            if consumer.done():
+                # Retrieve any exception instead of leaving a finished task
+                # unobserved, while preserving its normal propagation.
+                await asyncio.shield(consumer)
+            elif provider == "codex":
+                await asyncio.shield(consumer)
+            else:
+                remaining = None
+                if deadline is not None:
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0:
+                        raise asyncio.TimeoutError
+                await asyncio.wait_for(
+                    asyncio.shield(consumer), timeout=remaining
+                )
+
+            # A chat consumer may launch its own replacement on a transient or
+            # account-limit retry.  Codex callers must wait for that replacement
+            # too before considering the instance reusable.
+            if provider != "codex" or self._tasks.get(instance_id) is consumer:
+                return
+
     def is_running(self, instance_id: int) -> bool:
         process = self.processes.get(instance_id)
-        return process is not None and process.returncode is None
+        consumer = self._tasks.get(instance_id)
+        return (
+            (process is not None and process.returncode is None)
+            or (consumer is not None and not consumer.done())
+        )
 
     def get_last_stderr(self, instance_id: int) -> str:
         return self._last_stderr.pop(instance_id, "")
@@ -2111,6 +2811,17 @@ class InstanceManager:
         """True if the instance's most recent PTY turn saw an actionable
         rate_limit_event (turn-scoped; reset at next launch)."""
         return instance_id in self._pty_rate_limit_seen
+
+    def pty_rate_limit_info(self, instance_id: int) -> dict | None:
+        """Return the latest actionable PTY quota event for this turn."""
+
+        return self._pty_rate_limit_info.get(instance_id)
+
+    def clear_pty_rate_limit(self, instance_id: int) -> None:
+        """Clear the completed turn's PTY quota signal and reset metadata."""
+
+        self._pty_rate_limit_seen.discard(instance_id)
+        self._pty_rate_limit_info.pop(instance_id, None)
 
     async def get_recent_log_contents(self, task_id: int, limit: int = 10) -> list[str]:
         """Fetch recent log entry contents for a task (for rate-limit detection)."""

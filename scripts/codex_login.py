@@ -6,7 +6,7 @@ Flow:
 3. Drive headful real-Chrome Playwright browser through OpenAI login pages:
    - Email field → fill email → Continue
    - Password field → fill password (if present; passwordless accounts skip)
-   - OTP field → poll 171mail or MailCatcher with a provider-issued API token
+   - OTP field → poll 171mail/MailCatcher when available, otherwise wait for a human code
    - Consent/Authorize button → click
 4. Codex captures the callback, exchanges token, writes CODEX_HOME/auth.json
 5. Smoke-test with `codex exec`
@@ -15,7 +15,8 @@ Prerequisites:
 - Xvfb running on :99 (DISPLAY set)
 - google-chrome-stable installed
 - playwright installed
-- Onet/Gazeta use the query token issued by MailCatcher (never a mailbox password)
+- MailCatcher-backed addresses (including 163/mail.com/Onet/Gazeta) use the
+  query token issued by MailCatcher (never the mailbox password)
 - codex CLI installed
 """
 
@@ -30,7 +31,9 @@ import os
 import re
 import shutil
 import sys
+import tempfile
 import time
+import uuid
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
@@ -45,6 +48,10 @@ DEFAULT_LOGIN_TIMEOUT = 300
 AUTH_URL_TIMEOUT = 30
 AUTH_JSON_WAIT = 30
 STATE_STEP_PAUSE_MS = 2500
+MANUAL_OTP_TIMEOUT = 600
+MAX_OTP_ATTEMPTS = 3
+INPUT_INIT_TIMEOUT = 30
+LOGIN_EVENT_PREFIX = "CCM_CODEX_LOGIN_EVENT:"
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 AUTHORIZE_URL_RE = re.compile(r"(https://auth\.openai\.com/oauth/authorize\S+)")
@@ -54,12 +61,31 @@ MAIL_DECODE_API = "https://mail.claude-code-manager.com/api/v1/message"
 MAIL_POLL_TIMEOUT = 120
 MAIL_POLL_INTERVAL = 3
 
-WEBMAIL_PROVIDERS = {"onet.pl": "onet", "gazeta.pl": "gazeta"}
-MAILCATCHER_PROVIDERS = {"onet", "gazeta"}
+WEBMAIL_PROVIDERS = {
+    "163.com": "mailcatcher",
+    "mail.com": "mailcom",
+    "onet.pl": "onet",
+    "gazeta.pl": "gazeta",
+}
+MAILCATCHER_PROVIDERS = {"mailcatcher", "mailcom", "onet", "gazeta"}
+MAIL_PROVIDERS = {"171mail", *MAILCATCHER_PROVIDERS}
 
 EMAIL_SELECTOR = 'input[type="email"], input[name="email"]'
 PASSWORD_SELECTOR = 'input[type="password"]'
 OTP_SELECTOR = 'input[inputmode="numeric"], input[autocomplete="one-time-code"], input[name="code"]'
+OTP_ERROR_SELECTOR = (
+    '[role="alert"], [aria-live="assertive"], [data-error-code], '
+    '[data-testid*="error"], [class*="error"]'
+)
+OTP_ERROR_RE = re.compile(
+    r"(?:\b(?:invalid|incorrect|wrong|expired)\b.*\bcode\b|"
+    r"\bcode\b.*\b(?:invalid|incorrect|wrong|expired)\b|"
+    r"\bcode\b.*\bnot valid\b|"
+    r"\bcode\b.*(?:does not|doesn't|did not) match|"
+    r"could(?: not|n't) verify.*\bcode\b|"
+    r"too many (?:verification )?attempts)",
+    re.I,
+)
 CONTINUE_BUTTON_TEXTS = (
     "Continue", "Verify", "Next", "Log in", "Sign in",
     "Authorize", "Allow", "Approve", "Confirm",
@@ -102,6 +128,8 @@ async def poll_verification_code(token: str, after_ts: float, timeout_s: int = M
     deadline = time.time() + timeout_s
     seen: set[tuple[str, str, str]] = set()
     provider = provider or detect_mail_provider(email)
+    if provider not in MAIL_PROVIDERS:
+        raise ValueError(f"Unsupported mailbox provider: {provider}")
     uses_mailcatcher = provider in MAILCATCHER_PROVIDERS
 
     # The synchronous MailCatcher endpoint may wait up to 90 seconds for its
@@ -258,66 +286,266 @@ async def _visible_action_labels(page) -> list[str]:
     return labels
 
 
+async def _visible_otp_error(page) -> str | None:
+    """Return an explicit visible OTP rejection, ignoring generic page text."""
+    candidates = page.locator(OTP_ERROR_SELECTOR)
+    for index in range(min(await candidates.count(), 20)):
+        candidate = candidates.nth(index)
+        if not await candidate.is_visible():
+            continue
+        text = (await candidate.inner_text()).strip()
+        if text and OTP_ERROR_RE.search(text):
+            return text[:200]
+    return None
+
+
+def _emit_login_event(event: dict) -> None:
+    """Emit one machine-readable event without logging credentials or OTPs."""
+    print(f"{LOGIN_EVENT_PREFIX}{json.dumps(event, separators=(',', ':'))}", flush=True)
+
+
+def _write_private_json(path: Path, data: dict) -> None:
+    """Atomically persist JSON with owner-only permissions from first byte."""
+
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(path.parent, 0o700)
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    temporary = Path(temporary_name)
+    try:
+        os.fchmod(descriptor, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            descriptor = -1
+            json.dump(data, stream, indent=2, ensure_ascii=False)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+
+
+class _ManualOtpReader:
+    """Read initialization credentials and human OTPs over one stdin pipe."""
+
+    def __init__(self) -> None:
+        self._reader: asyncio.StreamReader | None = None
+        self._transport = None
+
+    async def _ensure_reader(self) -> asyncio.StreamReader:
+        if self._reader is not None:
+            return self._reader
+        loop = asyncio.get_running_loop()
+        reader = asyncio.StreamReader()
+        protocol = asyncio.StreamReaderProtocol(reader)
+        transport, _ = await loop.connect_read_pipe(lambda: protocol, sys.stdin)
+        self._reader = reader
+        self._transport = transport
+        return reader
+
+    async def read_credentials(
+        self,
+        *,
+        attempt_id: str,
+        timeout_s: int = INPUT_INIT_TIMEOUT,
+    ) -> tuple[str, str]:
+        """Read the first, in-memory-only credentials message from the parent."""
+        reader = await self._ensure_reader()
+        try:
+            raw = await asyncio.wait_for(reader.readline(), timeout=timeout_s)
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError("Timed out waiting for login credentials") from exc
+        if not raw:
+            raise RuntimeError("Login input channel closed before credentials arrived")
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("Invalid login credentials message") from exc
+        if (
+            payload.get("type") != "credentials"
+            or payload.get("attempt_id") != attempt_id
+        ):
+            raise RuntimeError("Invalid login credentials message")
+        token = payload.get("token", "")
+        password = payload.get("password", "")
+        if not isinstance(token, str) or not isinstance(password, str):
+            raise RuntimeError("Invalid login credentials message")
+        if not token and not password:
+            raise RuntimeError("Login credentials message is empty")
+        return token, password
+
+    async def read_code(
+        self,
+        *,
+        attempt_id: str,
+        timeout_s: int,
+        logs: list[str],
+    ) -> str:
+        reader = await self._ensure_reader()
+        challenge_id = uuid.uuid4().hex
+        expires_at = int(time.time() + timeout_s)
+        _emit_login_event({
+            "type": "otp_required",
+            "attempt_id": attempt_id,
+            "challenge_id": challenge_id,
+            "expires_at": expires_at,
+        })
+        logs.append("Waiting for a user-supplied email verification code")
+
+        while True:
+            remaining = expires_at - time.time()
+            if remaining <= 0:
+                _emit_login_event({
+                    "type": "otp_expired",
+                    "attempt_id": attempt_id,
+                    "challenge_id": challenge_id,
+                })
+                raise RuntimeError("Timed out waiting for a user-supplied verification code")
+            try:
+                raw = await asyncio.wait_for(reader.readline(), timeout=remaining)
+            except asyncio.TimeoutError as exc:
+                _emit_login_event({
+                    "type": "otp_expired",
+                    "attempt_id": attempt_id,
+                    "challenge_id": challenge_id,
+                })
+                raise RuntimeError(
+                    "Timed out waiting for a user-supplied verification code"
+                ) from exc
+            if not raw:
+                raise RuntimeError("Verification-code input channel closed")
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                continue
+            if payload.get("challenge_id") != challenge_id:
+                continue
+            code = str(payload.get("code") or "").strip()
+            if not re.fullmatch(r"\d{6}", code):
+                continue
+            _emit_login_event({
+                "type": "otp_received",
+                "attempt_id": attempt_id,
+                "challenge_id": challenge_id,
+            })
+            return code
+
+    def close(self) -> None:
+        if self._transport is not None:
+            self._transport.close()
+            self._transport = None
+
+
 async def _run_state_machine(
     page, email: str, password: str, token_171: str,
     timeout: int, auth_path: Path, logs: list[str], mail_provider: str | None = None,
+    attempt_id: str = "", manual_otp_reader=None,
 ) -> None:
     otp_poll_start = time.time()
     deadline = time.time() + timeout
-    otp_done = False
+    otp_submitted = False
+    otp_attempts = 0
+    owns_manual_reader = manual_otp_reader is None
+    manual_otp_reader = manual_otp_reader or _ManualOtpReader()
 
-    while time.time() < deadline:
-        await page.wait_for_timeout(STATE_STEP_PAUSE_MS)
+    try:
+        while time.time() < deadline:
+            await page.wait_for_timeout(STATE_STEP_PAUSE_MS)
 
-        if auth_path.exists():
-            logs.append("auth.json appeared — browser flow complete")
-            return
+            if auth_path.exists():
+                logs.append("auth.json appeared — browser flow complete")
+                return
 
-        email_field = await _first_visible(page, EMAIL_SELECTOR)
-        if email_field and not await email_field.input_value():
-            await email_field.fill(email)
-            logs.append("Email filled")
+            email_field = await _first_visible(page, EMAIL_SELECTOR)
+            if email_field and not await email_field.input_value():
+                await email_field.fill(email)
+                logs.append("Email filled")
+                await _click_continue(page, logs)
+                continue
+
+            password_field = await _first_visible(page, PASSWORD_SELECTOR)
+            if password_field and not await password_field.input_value():
+                if not password:
+                    if await _switch_to_email_code(page, logs):
+                        await page.wait_for_timeout(1500)
+                        continue
+                    labels = await _visible_action_labels(page)
+                    logs.append(f"Password page actions: {labels}")
+                    raise RuntimeError(
+                        "OpenAI login shows a password field and no email-code option; "
+                        "provide the OpenAI password"
+                    )
+                await password_field.fill(password)
+                logs.append("Password filled")
+                await _click_continue(page, logs)
+                continue
+
+            otp_field = await _first_visible(page, OTP_SELECTOR)
+            if otp_field:
+                if otp_submitted:
+                    # OpenAI can leave the OTP input visible while the callback and
+                    # auth.json write complete. Presence alone is never rejection.
+                    otp_error = await _visible_otp_error(page)
+                    if not otp_error:
+                        continue
+                    logs.append(f"OpenAI rejected the verification code: {otp_error}")
+                    try:
+                        await otp_field.fill("")
+                    except Exception:
+                        pass
+                    otp_submitted = False
+
+                if otp_attempts >= MAX_OTP_ATTEMPTS:
+                    raise RuntimeError("OpenAI verification code was rejected too many times")
+
+                code = ""
+                if token_171:
+                    provider = mail_provider or detect_mail_provider(email)
+                    logs.append(f"OTP field present, polling {provider}...")
+                    try:
+                        code = await poll_verification_code(
+                            token_171,
+                            after_ts=otp_poll_start,
+                            email=email,
+                            provider=provider,
+                        )
+                    except Exception as exc:
+                        logs.append(
+                            f"Mailbox OTP lookup unavailable ({type(exc).__name__}); "
+                            "falling back to user input"
+                        )
+
+                if not code:
+                    wait_started = time.time()
+                    code = await manual_otp_reader.read_code(
+                        attempt_id=attempt_id,
+                        timeout_s=MANUAL_OTP_TIMEOUT,
+                        logs=logs,
+                    )
+                    # Human time should not consume the browser automation budget.
+                    deadline += time.time() - wait_started
+
+                await otp_field.fill(code)
+                otp_attempts += 1
+                otp_submitted = True
+                logs.append(f"OTP entered (len={len(code)})")
+                await _click_continue(page, logs)
+                continue
+
+            # No fillable field — try clicking Continue (consent page)
             await _click_continue(page, logs)
-            continue
 
-        password_field = await _first_visible(page, PASSWORD_SELECTOR)
-        if password_field and not await password_field.input_value():
-            if not password:
-                if await _switch_to_email_code(page, logs):
-                    await page.wait_for_timeout(1500)
-                    continue
-                labels = await _visible_action_labels(page)
-                logs.append(f"Password page actions: {labels}")
-                await page.screenshot(path="/tmp/codex_openai_password_page.png", full_page=True)
-                raise RuntimeError(
-                    "OpenAI login shows a password field and no email-code option; "
-                    "provide the OpenAI password"
-                )
-            await password_field.fill(password)
-            logs.append("Password filled")
-            await _click_continue(page, logs)
-            continue
-
-        otp_field = await _first_visible(page, OTP_SELECTOR)
-        if otp_field and not otp_done:
-            provider = mail_provider or detect_mail_provider(email)
-            logs.append(f"OTP field present, polling {provider}...")
-            code = await poll_verification_code(
-                token_171, after_ts=otp_poll_start, email=email, provider=provider,
-            )
-            await otp_field.fill(code)
-            otp_done = True
-            logs.append(f"OTP entered (len={len(code)})")
-            await _click_continue(page, logs)
-            continue
-
-        # No fillable field — try clicking Continue (consent page)
-        await _click_continue(page, logs)
-
-    labels = await _visible_action_labels(page)
-    logs.append(f"Timed-out page actions: {labels}")
-    await page.screenshot(path="/tmp/codex_openai_login_timeout.png", full_page=True)
-    raise RuntimeError(f"Login flow did not complete within {timeout}s (url={str(page.url)[:80]})")
+        labels = await _visible_action_labels(page)
+        logs.append(f"Timed-out page actions: {labels}")
+        raise RuntimeError(f"Login flow did not complete within {timeout}s (url={str(page.url)[:80]})")
+    finally:
+        if owns_manual_reader:
+            manual_otp_reader.close()
 
 
 # --- Main login flow ---
@@ -329,18 +557,18 @@ async def codex_login(
     password: str = "",
     timeout: int = DEFAULT_LOGIN_TIMEOUT,
     mail_provider: str | None = None,
+    attempt_id: str = "",
+    manual_otp_reader=None,
 ) -> dict:
     """Run the full automated Codex login flow. Returns result dict."""
     t0 = time.time()
     logs: list[str] = []
-    auth_path = Path(codex_home) / "auth.json"
+    codex_home_path = Path(codex_home).expanduser()
+    auth_path = codex_home_path / "auth.json"
+    attempt_id = attempt_id or uuid.uuid4().hex
 
-    Path(codex_home).mkdir(parents=True, exist_ok=True)
-
-    # Clear stale auth.json so we can detect when codex writes a new one
-    if auth_path.exists():
-        auth_path.unlink()
-
+    # Do not touch CODEX_HOME or its credentials until all external
+    # prerequisites have passed their read-only checks.
     codex_bin = shutil.which("codex")
     if not codex_bin:
         return {"ok": False, "error": "codex CLI not found", "logs": logs}
@@ -348,18 +576,34 @@ async def codex_login(
     if not os.environ.get("DISPLAY"):
         return {"ok": False, "error": "DISPLAY not set — need Xvfb", "logs": logs}
 
+    codex_home_path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(codex_home_path, 0o700)
+    codex_home = str(codex_home_path)
     logs.append(f"Starting login for {email} (CODEX_HOME={codex_home})")
 
-    # 1. Start `codex login`
-    env = {**os.environ, "CODEX_HOME": codex_home, "NO_COLOR": "1", "TERM": "dumb"}
-    proc = await asyncio.create_subprocess_exec(
-        codex_bin, "login",
-        env=env,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-    )
-
+    had_auth = auth_path.exists()
+    backup_path: Path | None = None
+    proc: asyncio.subprocess.Process | None = None
+    login_succeeded = False
     try:
+        # Atomically move the previous credential aside.  A unique path avoids
+        # overwriting a recoverable backup left by an interrupted older run.
+        if had_auth:
+            candidate = codex_home_path / f".auth.json.login-backup-{uuid.uuid4().hex}"
+            os.replace(auth_path, candidate)
+            backup_path = candidate
+            os.chmod(backup_path, 0o600)
+
+        # 1. Start `codex login`
+        env = {**os.environ, "CODEX_HOME": codex_home, "NO_COLOR": "1", "TERM": "dumb"}
+        proc = await asyncio.create_subprocess_exec(
+            codex_bin, "login",
+            env=env,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+
         # 2. Parse authorize URL
         auth_url = None
         deadline = time.time() + AUTH_URL_TIMEOUT
@@ -414,6 +658,7 @@ async def codex_login(
                 await page.goto(auth_url, timeout=45000, wait_until="domcontentloaded")
                 await _run_state_machine(
                     page, email, password, token_171, timeout, auth_path, logs, mail_provider,
+                    attempt_id, manual_otp_reader,
                 )
             finally:
                 await browser.close()
@@ -436,10 +681,31 @@ async def codex_login(
         if not smoke_ok:
             logs.append("WARNING: smoke test failed, but auth.json exists")
 
+        login_succeeded = True
+
     finally:
-        if proc.returncode is None:
-            proc.kill()
-            await proc.wait()
+        cleanup_succeeded = False
+        try:
+            if proc is not None and proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+            cleanup_succeeded = True
+        finally:
+            if login_succeeded and cleanup_succeeded:
+                if backup_path is not None:
+                    try:
+                        backup_path.unlink(missing_ok=True)
+                    except BaseException:
+                        if backup_path.exists():
+                            os.replace(backup_path, auth_path)
+                        raise
+            elif backup_path is not None and backup_path.exists():
+                # os.replace atomically overwrites any partial/new auth.json.
+                os.replace(backup_path, auth_path)
+            elif not had_auth:
+                # Restore the original state (no credentials) after a failed
+                # first login, including failures during process creation.
+                auth_path.unlink(missing_ok=True)
 
     elapsed = time.time() - t0
     logs.append(f"Login complete in {elapsed:.1f}s")
@@ -471,9 +737,15 @@ async def _smoke_test(codex_bin: str, codex_home: str, logs: list[str]) -> bool:
 
 # --- Pool integration ---
 
-def add_to_codex_pool(account_id: str, email: str, codex_home: str):
-    """Add account to ~/.codex-pool/accounts.json."""
-    pool_path = Path.home() / ".codex-pool" / "accounts.json"
+def add_to_codex_pool(
+    account_id: str,
+    email: str,
+    codex_home: str,
+    *,
+    pool_path: str | os.PathLike[str] | None = None,
+):
+    """Add an account to the configured Codex pool JSON."""
+    pool_path = Path(pool_path) if pool_path else Path.home() / ".codex-pool" / "accounts.json"
     pool_path.parent.mkdir(parents=True, exist_ok=True)
 
     if pool_path.exists():
@@ -496,8 +768,80 @@ def add_to_codex_pool(account_id: str, email: str, codex_home: str):
             "enabled": True,
         })
     data["accounts"] = accounts
-    pool_path.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+    _write_private_json(pool_path, data)
     logger.info("Added %s to codex pool at %s", account_id, pool_path)
+
+
+def _load_json_object(path: Path, *, default: dict) -> tuple[dict, bool]:
+    if not path.exists():
+        return json.loads(json.dumps(default)), False
+    data = json.loads(path.read_text())
+    if not isinstance(data, dict):
+        raise ValueError(f"Expected a JSON object in {path}")
+    return data, True
+
+
+def _persist_new_pool_login(
+    *,
+    account_id: str,
+    email: str,
+    codex_home: str,
+    token: str,
+    password: str,
+    provider: str,
+    pool_path: Path,
+    tokens_path: Path,
+) -> None:
+    """Commit saved credentials and pool registration with rollback."""
+
+    original_tokens, tokens_existed = _load_json_object(tokens_path, default={})
+    pool_data, _pool_existed = _load_json_object(
+        pool_path, default={"accounts": []},
+    )
+    accounts = pool_data.get("accounts")
+    if not isinstance(accounts, list):
+        raise ValueError(f"Expected an accounts list in {pool_path}")
+
+    updated_tokens = json.loads(json.dumps(original_tokens))
+    updated_tokens[email] = {
+        "token": token,
+        "provider": provider,
+        "password": password,
+    }
+    updated_pool = json.loads(json.dumps(pool_data))
+    updated_accounts = updated_pool["accounts"]
+    existing = next(
+        (
+            account for account in updated_accounts
+            if isinstance(account, dict) and account.get("id") == account_id
+        ),
+        None,
+    )
+    if existing is None:
+        updated_accounts.append({
+            "id": account_id,
+            "codex_home": codex_home,
+            "email": email,
+            "enabled": True,
+        })
+    else:
+        existing.update({
+            "codex_home": codex_home,
+            "email": email,
+            "enabled": True,
+        })
+        existing.pop("retired", None)
+        existing.pop("cleanup_pending", None)
+
+    _write_private_json(tokens_path, updated_tokens)
+    try:
+        _write_private_json(pool_path, updated_pool)
+    except BaseException:
+        if tokens_existed:
+            _write_private_json(tokens_path, original_tokens)
+        else:
+            tokens_path.unlink(missing_ok=True)
+        raise
 
 
 # --- CLI entry ---
@@ -506,17 +850,37 @@ async def main():
     parser = argparse.ArgumentParser(description="Automated Codex login via Playwright + mailbox OTP")
     parser.add_argument("--email", required=True, help="OpenAI account email")
     parser.add_argument(
-        "--token", required=True,
-        help="171mail token, or the query token issued by MailCatcher for Onet/Gazeta",
+        "--token",
+        default="",
+        help="Optional 171mail/MailCatcher query token used only if OpenAI requests an email OTP",
     )
     parser.add_argument("--codex-home", help="CODEX_HOME directory (default: ~/.codex or ~/.codex-<account-id>)")
     parser.add_argument("--password", default="", help="Account password (empty for passwordless)")
-    parser.add_argument("--mail-provider", choices=["171mail", "onet", "gazeta"], default=None,
+    parser.add_argument("--mail-provider", choices=sorted(MAIL_PROVIDERS), default=None,
                         help="OTP mailbox provider (default: detect from email suffix)")
     parser.add_argument("--add-to-pool", metavar="ACCOUNT_ID", help="Add to codex pool after login")
-    parser.add_argument("--save-token", action="store_true", help="Save mailbox API token for future use")
+    parser.add_argument("--save-token", action="store_true", help="Save login credentials for future use")
+    parser.add_argument("--attempt-id", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--credentials-stdin", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--pool-config", default="", help=argparse.SUPPRESS)
+    parser.add_argument("--credential-store", default="", help=argparse.SUPPRESS)
     parser.add_argument("--timeout", type=int, default=DEFAULT_LOGIN_TIMEOUT)
     args = parser.parse_args()
+
+    input_reader = None
+    if args.credentials_stdin:
+        if not args.attempt_id:
+            parser.error("--credentials-stdin requires --attempt-id")
+        input_reader = _ManualOtpReader()
+        try:
+            args.token, args.password = await input_reader.read_credentials(
+                attempt_id=args.attempt_id,
+            )
+        except BaseException:
+            input_reader.close()
+            raise
+    elif not args.token and not args.password:
+        parser.error("at least one of --password or --token is required")
 
     codex_home = args.codex_home
     if not codex_home:
@@ -528,46 +892,87 @@ async def main():
         else:
             codex_home = str(Path.home() / ".codex")
 
-    result = await codex_login(
-        email=args.email,
-        token_171=args.token,
-        codex_home=codex_home,
-        password=args.password,
-        timeout=args.timeout,
-        mail_provider=args.mail_provider,
-    )
+    try:
+        had_auth_before_login = (Path(codex_home).expanduser() / "auth.json").exists()
+        result = await codex_login(
+            email=args.email,
+            token_171=args.token,
+            codex_home=codex_home,
+            password=args.password,
+            timeout=args.timeout,
+            mail_provider=args.mail_provider,
+            attempt_id=args.attempt_id,
+            manual_otp_reader=input_reader,
+        )
 
-    for line in result.get("logs", []):
-        print(f"  {line}")
+        for line in result.get("logs", []):
+            print(f"  {line}")
 
-    if result["ok"]:
-        print(f"\n✓ Login successful ({result.get('elapsed', 0):.1f}s)")
-        # Keep failed or rejected credentials out of the reusable pool file.
-        if args.save_token:
-            tokens_path = Path.home() / ".codex-pool" / "email_tokens.json"
-            tokens_path.parent.mkdir(parents=True, exist_ok=True)
-            tokens = {}
-            if tokens_path.exists():
-                try:
-                    tokens = json.loads(tokens_path.read_text())
-                except Exception:
-                    pass
-            if not isinstance(tokens, dict):
-                tokens = {}
-            tokens[args.email] = {
-                "token": args.token,
-                "provider": args.mail_provider or detect_mail_provider(args.email),
-                "password": args.password,
-            }
-            tokens_path.write_text(json.dumps(tokens, indent=2))
-            os.chmod(tokens_path, 0o600)
-        if args.add_to_pool:
-            add_to_codex_pool(args.add_to_pool, args.email, codex_home)
-            print(f"  Added to pool as '{args.add_to_pool}'")
-        sys.exit(0)
-    else:
-        print(f"\n✗ Login failed: {result.get('error')}")
-        sys.exit(1)
+        if result["ok"]:
+            print(f"\n✓ Login successful ({result.get('elapsed', 0):.1f}s)")
+            tokens_path = (
+                Path(args.credential_store)
+                if args.credential_store
+                else Path.home() / ".codex-pool" / "email_tokens.json"
+            )
+            pool_path = (
+                Path(args.pool_config)
+                if args.pool_config
+                else Path.home() / ".codex-pool" / "accounts.json"
+            )
+            try:
+                # API add uses both flags. Commit the two files as one logical
+                # registration so a pool write failure cannot strand a saved
+                # password/token for an account that the pool cannot address.
+                if args.save_token and args.add_to_pool:
+                    _persist_new_pool_login(
+                        account_id=args.add_to_pool,
+                        email=args.email,
+                        codex_home=codex_home,
+                        token=args.token,
+                        password=args.password,
+                        provider=(
+                            args.mail_provider or detect_mail_provider(args.email)
+                        ),
+                        pool_path=pool_path,
+                        tokens_path=tokens_path,
+                    )
+                else:
+                    if args.save_token:
+                        tokens, _ = _load_json_object(tokens_path, default={})
+                        tokens[args.email] = {
+                            "token": args.token,
+                            "provider": (
+                                args.mail_provider or detect_mail_provider(args.email)
+                            ),
+                            "password": args.password,
+                        }
+                        _write_private_json(tokens_path, tokens)
+                    if args.add_to_pool:
+                        add_to_codex_pool(
+                            args.add_to_pool,
+                            args.email,
+                            codex_home,
+                            pool_path=pool_path,
+                        )
+            except BaseException:
+                if args.add_to_pool and not had_auth_before_login:
+                    # The API allocator only gives a new account a home with no
+                    # auth. Avoid stranding usable OAuth credentials if its
+                    # registration transaction cannot commit.
+                    (Path(codex_home).expanduser() / "auth.json").unlink(
+                        missing_ok=True
+                    )
+                raise
+            if args.add_to_pool:
+                print(f"  Added to pool as '{args.add_to_pool}'")
+            sys.exit(0)
+        else:
+            print(f"\n✗ Login failed: {result.get('error')}")
+            sys.exit(1)
+    finally:
+        if input_reader is not None:
+            input_reader.close()
 
 
 if __name__ == "__main__":

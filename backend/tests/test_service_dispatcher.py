@@ -14,6 +14,7 @@ def _make_dispatcher(db_factory):
     instance_manager.launch = AsyncMock(return_value=12345)
     instance_manager.processes = {}
     instance_manager._tasks = {}
+    instance_manager.wait_for_output_consumer = AsyncMock()
     # Model the real InstanceManager interface used by failure classification.
     instance_manager.pty_mode_enabled = False
     instance_manager.transient_error_seen = MagicMock(return_value=False)
@@ -170,6 +171,41 @@ async def test_lifecycle_success(db_factory):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("pty_enabled, expected_switches", [(False, 0), (True, 1)])
+async def test_lifecycle_proactive_switch_is_pty_only(
+    db_factory, pty_enabled, expected_switches,
+):
+    """The subprocess consumer owns non-PTY switching; lifecycle owns PTY."""
+    d = _make_dispatcher(db_factory)
+    d.instance_manager.pty_mode_enabled = pty_enabled
+    d.instance_manager.pty_rate_limit_seen.return_value = True
+    d.instance_manager.pty_rate_limit_info = MagicMock(return_value={
+        "status": "allowed_warning",
+        "rateLimitType": "five_hour",
+        "utilization": 0.95,
+    })
+    d.instance_manager.clear_pty_rate_limit = MagicMock()
+
+    async with db_factory() as db:
+        inst = Instance(name=f"quota-pty-{pty_enabled}")
+        task = Task(title="quota gate", description="done", target_repo="/repo")
+        db.add_all([inst, task])
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+
+    process = MagicMock(returncode=0, wait=AsyncMock(return_value=0))
+    d.instance_manager.processes = {inst.id: process}
+
+    await d._run_task_lifecycle(inst.id, task)
+
+    assert d.instance_manager._try_proactive_pool_switch.await_count == expected_switches
+    assert d.instance_manager.clear_pty_rate_limit.call_count == expected_switches
+    if not pty_enabled:
+        d.instance_manager.pty_rate_limit_seen.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_lifecycle_failure_retry(db_factory):
     """Failed task with retries left goes back to pending."""
     d = _make_dispatcher(db_factory)
@@ -251,6 +287,136 @@ async def test_lifecycle_exception(db_factory):
         t = await db.get(Task, task_obj.id)
         assert t.status == "failed"
         assert t.error_message is not None
+
+
+@pytest.mark.asyncio
+async def test_fresh_codex_all_accounts_cooling_defers_without_retry_budget(
+    db_factory, tmp_path,
+):
+    """Pool backpressure keeps a fresh task pending instead of hard-failing."""
+    import json
+    import time
+
+    from backend.services.codex_pool import CodexPool
+
+    config_path = tmp_path / "codex-accounts.json"
+    homes = [tmp_path / "codex-a", tmp_path / "codex-b"]
+    config_path.write_text(json.dumps({"accounts": [
+        {"id": "codex-a", "codex_home": str(homes[0]), "enabled": True},
+        {"id": "codex-b", "codex_home": str(homes[1]), "enabled": True},
+    ]}))
+
+    d = _make_dispatcher(db_factory)
+    d.codex_pool = CodexPool(config_path=config_path, cooldown_seconds=60)
+    future = time.time() + 60
+    d.codex_pool._cooldowns = {"codex-a": future, "codex-b": future}
+
+    async with db_factory() as db:
+        inst = Instance(name="codex-cooldown-worker")
+        task = Task(
+            title="fresh-codex",
+            description="do work",
+            target_repo="/repo",
+            provider="codex",
+            max_retries=0,
+        )
+        db.add_all([inst, task])
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_id = task.id
+        task_obj = task
+
+    await d._run_task_lifecycle(inst_id, task_obj)
+
+    async with db_factory() as db:
+        deferred = await db.get(Task, task_id)
+        assert deferred.status == "pending"
+        assert deferred.retry_count == 0
+        assert deferred.instance_id is None
+        assert deferred.started_at is None
+        assert deferred.completed_at is None
+        assert "no available account" in deferred.error_message
+    assert task_id in d._codex_routing_not_before
+    assert d._codex_routing_not_before[task_id] > time.monotonic()
+    d.instance_manager.launch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fresh_codex_maintenance_busy_defers_without_retry_budget(
+    db_factory,
+):
+    """A login-maintenance race is scheduling backpressure, not task failure."""
+    from backend.services.codex_app_server import CodexAppServerBusyError
+
+    d = _make_dispatcher(db_factory)
+    d._resolve_resume_config_dir = AsyncMock(return_value="/tmp/codex-a")
+    d.instance_manager.launch = AsyncMock(
+        side_effect=CodexAppServerBusyError("account is under maintenance")
+    )
+
+    async with db_factory() as db:
+        inst = Instance(name="codex-maintenance-worker")
+        task = Task(
+            title="fresh-codex-maintenance",
+            description="do work",
+            target_repo="/repo",
+            provider="codex",
+            max_retries=0,
+        )
+        db.add_all([inst, task])
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_id = task.id
+        task_obj = task
+
+    await d._run_task_lifecycle(inst_id, task_obj)
+
+    async with db_factory() as db:
+        deferred = await db.get(Task, task_id)
+        assert deferred.status == "pending"
+        assert deferred.retry_count == 0
+        assert deferred.started_at is None
+        assert "under maintenance" in deferred.error_message
+    assert task_id in d._codex_routing_not_before
+
+
+@pytest.mark.asyncio
+async def test_permanent_codex_routing_error_still_fails_fresh_task(db_factory):
+    """Ambiguous/unsafe ownership is not retried forever as if it were cooldown."""
+    from backend.services.dispatcher import CodexAccountRoutingError
+
+    d = _make_dispatcher(db_factory)
+    d._resolve_resume_config_dir = AsyncMock(
+        side_effect=CodexAccountRoutingError("ambiguous rollout ownership")
+    )
+
+    async with db_factory() as db:
+        inst = Instance(name="codex-permanent-routing-worker")
+        task = Task(
+            title="unsafe-codex",
+            description="do work",
+            target_repo="/repo",
+            provider="codex",
+        )
+        db.add_all([inst, task])
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_id = task.id
+        task_obj = task
+
+    await d._run_task_lifecycle(inst_id, task_obj)
+
+    async with db_factory() as db:
+        failed = await db.get(Task, task_id)
+        assert failed.status == "failed"
+        assert "ambiguous rollout ownership" in failed.error_message
+    assert task_id not in d._codex_routing_not_before
 
 
 @pytest.mark.asyncio
@@ -2012,6 +2178,164 @@ async def test_goal_turn_passes_pool_config_dir(db_factory):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure_text",
+    [
+        "You have hit your usage limit. Try again later.",
+        "The refresh token was revoked. Please log in again.",
+    ],
+    ids=["usage-limit", "auth-failure"],
+)
+async def test_codex_goal_evaluator_rotates_without_consuming_extra_turn(
+    db_factory, failure_text,
+):
+    """Evaluator account failure retries evaluation, not the completed agent turn."""
+    d = _make_dispatcher(db_factory)
+    d._resolve_resume_config_dir = AsyncMock(return_value="/codex/account-a")
+    d._check_rate_limit_and_rotate = AsyncMock(return_value={
+        "config_dir": "/codex/account-b",
+        "session_id": "codex-thread-1",
+        "excluded": {"codex-a"},
+    })
+
+    async with db_factory() as db:
+        inst = Instance(name="goal-codex-evaluator-worker")
+        db.add(inst)
+        task = _make_goal_task(db)
+        task.provider = "codex"
+        task.model = "gpt-5.6-sol"
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_obj = task
+
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.wait = AsyncMock(return_value=0)
+    d.instance_manager.processes = {inst_id: mock_proc}
+
+    from backend.services.goal_evaluator import GoalEvaluationError, GoalEvalResult
+    evaluator_error = GoalEvaluationError(
+        "Goal evaluation exited with code 1",
+        provider="codex",
+        returncode=1,
+        stderr=failure_text,
+    )
+    with patch(
+        "backend.services.goal_evaluator.GoalEvaluator.evaluate",
+        new_callable=AsyncMock,
+    ) as evaluate:
+        evaluate.side_effect = [
+            evaluator_error,
+            GoalEvalResult(achieved=True, reason="done"),
+        ]
+        await d._run_goal_lifecycle(inst_id, task_obj, "/repo")
+
+    assert d.instance_manager.launch.await_count == 1
+    assert evaluate.await_count == 2
+    assert evaluate.await_args_list[0].kwargs["codex_home"] == "/codex/account-a"
+    assert evaluate.await_args_list[1].kwargs["codex_home"] == "/codex/account-b"
+    rotation_kwargs = d._check_rate_limit_and_rotate.await_args.kwargs
+    assert failure_text in rotation_kwargs["combined"]
+    async with db_factory() as db:
+        persisted = await db.get(Task, task_obj.id)
+        assert persisted.status == "completed"
+        assert persisted.goal_turns_used == 1
+
+
+@pytest.mark.asyncio
+async def test_goal_lifecycle_retry_resumes_persisted_turn_and_session(db_factory):
+    """A requeued lifecycle continues its durable turn/session progress."""
+    d = _make_dispatcher(db_factory)
+    d._resolve_resume_config_dir = AsyncMock(return_value="/pool/resident")
+
+    async with db_factory() as db:
+        inst = Instance(name="goal-resume-worker")
+        db.add(inst)
+        task = _make_goal_task(db, goal_max_turns=5)
+        task.goal_turns_used = 2
+        task.goal_last_reason = "two checks remain"
+        task.session_id = "sess-goal-persisted"
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_obj = task
+
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.wait = AsyncMock(return_value=0)
+    d.instance_manager.processes = {inst_id: mock_proc}
+
+    from backend.services.goal_evaluator import GoalEvalResult
+    with patch(
+        "backend.services.goal_evaluator.GoalEvaluator.evaluate",
+        return_value=GoalEvalResult(achieved=True, reason="now complete"),
+    ):
+        await d._run_goal_lifecycle(inst_id, task_obj, "/repo")
+
+    launch_kwargs = d.instance_manager.launch.await_args.kwargs
+    assert launch_kwargs["resume_session_id"] == "sess-goal-persisted"
+    assert launch_kwargs["loop_iteration"] == 2
+    assert "two checks remain" in launch_kwargs["prompt"]
+    d._resolve_resume_config_dir.assert_awaited_once_with(
+        "sess-goal-persisted", "claude", task_id=task_obj.id,
+    )
+    async with db_factory() as db:
+        persisted = await db.get(Task, task_obj.id)
+        assert persisted.status == "completed"
+        assert persisted.goal_turns_used == 3
+        assert persisted.goal_last_reason == "now complete"
+
+
+@pytest.mark.asyncio
+async def test_goal_evaluation_error_requeues_without_advancing_turn(db_factory):
+    """Operational evaluator errors use lifecycle retry budget, not goal turns."""
+    d = _make_dispatcher(db_factory)
+
+    async with db_factory() as db:
+        inst = Instance(name="goal-evaluator-error-worker")
+        db.add(inst)
+        task = _make_goal_task(db, goal_max_turns=5)
+        task.goal_turns_used = 1
+        task.goal_last_reason = "work remains"
+        task.session_id = "sess-goal-existing"
+        db.add(task)
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id = inst.id
+        task_obj = task
+
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.wait = AsyncMock(return_value=0)
+    d.instance_manager.processes = {inst_id: mock_proc}
+
+    from backend.services.goal_evaluator import GoalEvaluationError
+    with patch(
+        "backend.services.goal_evaluator.GoalEvaluator.evaluate",
+        new_callable=AsyncMock,
+        side_effect=GoalEvaluationError(
+            "Goal evaluation process failed",
+            provider="claude",
+            stderr="temporary evaluator failure",
+        ),
+    ):
+        await d._run_goal_lifecycle(inst_id, task_obj, "/repo")
+
+    async with db_factory() as db:
+        persisted = await db.get(Task, task_obj.id)
+        assert persisted.status == "pending"
+        assert persisted.retry_count == 1
+        assert persisted.goal_turns_used == 1
+        assert persisted.session_id == "sess-goal-existing"
+
+
+@pytest.mark.asyncio
 async def test_goal_achieved_after_multiple_turns(db_factory):
     """Goal task continues until evaluator says achieved."""
     d = _make_dispatcher(db_factory)
@@ -2745,6 +3069,197 @@ async def test_create_task_fills_default_model_and_effort(client):
 
 
 @pytest.mark.asyncio
+async def test_mode_turn_retries_same_native_session_after_codex_rotation(db_factory):
+    """Plan/loop/goal bypass normal Step 5, so their turn helper must rotate."""
+    d = _make_dispatcher(db_factory)
+    manager = MagicMock()
+    manager.processes = {}
+    manager._tasks = {}
+    codes = iter([1, 0])
+
+    async def fake_launch(**kwargs):
+        manager.processes[kwargs["instance_id"]] = MagicMock(
+            returncode=next(codes)
+        )
+
+    manager.launch = AsyncMock(side_effect=fake_launch)
+    manager.wait_for_output_consumer = AsyncMock()
+    manager.get_config_dir = MagicMock(return_value="/tmp/codex-b")
+    d.instance_manager = manager
+    d._wait_process = AsyncMock()
+    d._collect_failure_output = AsyncMock(
+        return_value="You've hit your usage limit for codex"
+    )
+    d._check_rate_limit_and_rotate = AsyncMock(return_value={
+        "config_dir": "/tmp/codex-b",
+        "session_id": "thread-1",
+        "excluded": {"codex-a"},
+    })
+    task = MagicMock(
+        id=42,
+        model="gpt-5.6-sol",
+        provider="codex",
+        thinking_budget=None,
+        effort_level="high",
+        enable_workflows=False,
+        enabled_skills=None,
+    )
+
+    exit_code, home = await d._launch_mode_turn_with_rotation(
+        7,
+        task,
+        "/repo",
+        {},
+        prompt="mode prompt",
+        config_dir="/tmp/codex-a",
+        resume_session_id=None,
+        loop_iteration=0,
+        effort_level="high",
+        label="Goal turn",
+    )
+
+    assert exit_code == 0
+    assert home == "/tmp/codex-b"
+    assert manager.launch.await_count == 2
+    assert manager.launch.await_args_list[1].kwargs["config_dir"] == "/tmp/codex-b"
+    assert manager.launch.await_args_list[1].kwargs["resume_session_id"] == "thread-1"
+
+
+@pytest.mark.asyncio
+async def test_successful_mode_turn_returns_home_after_proactive_switch(db_factory):
+    """Goal evaluation must follow a quota switch completed by the consumer."""
+    d = _make_dispatcher(db_factory)
+    manager = MagicMock()
+    manager.processes = {7: MagicMock(returncode=0)}
+    manager._tasks = {}
+    manager.launch = AsyncMock()
+    manager.wait_for_output_consumer = AsyncMock()
+    manager.get_config_dir = MagicMock(return_value="/tmp/codex-after-switch")
+    d.instance_manager = manager
+    d._wait_process = AsyncMock()
+    task = MagicMock(
+        id=43,
+        model="gpt-5.6-sol",
+        provider="codex",
+        thinking_budget=None,
+        effort_level="high",
+        enable_workflows=False,
+        enabled_skills=None,
+    )
+
+    exit_code, home = await d._launch_mode_turn_with_rotation(
+        7,
+        task,
+        "/repo",
+        {},
+        prompt="goal prompt",
+        config_dir="/tmp/codex-before-switch",
+        resume_session_id="thread-1",
+        loop_iteration=0,
+        effort_level="high",
+        label="Goal turn",
+    )
+
+    assert exit_code == 0
+    assert home == "/tmp/codex-after-switch"
+
+
+@pytest.mark.asyncio
+async def test_codex_mode_turn_does_not_timeout_output_consumer(
+    db_factory, monkeypatch,
+):
+    """Final CODEX_HOME is unavailable until quota/rebind cleanup finishes."""
+    import backend.services.dispatcher as dispatcher_module
+
+    d = _make_dispatcher(db_factory)
+    manager = MagicMock()
+    manager.processes = {7: MagicMock(returncode=0)}
+    switch_finished = asyncio.Event()
+
+    async def finish_switch():
+        await asyncio.sleep(0)
+        switch_finished.set()
+
+    consumer = asyncio.create_task(finish_switch())
+    manager._tasks = {7: consumer}
+    manager.launch = AsyncMock()
+
+    async def wait_for_consumer(*_args, **_kwargs):
+        await consumer
+
+    manager.wait_for_output_consumer = AsyncMock(
+        side_effect=wait_for_consumer
+    )
+    manager.get_config_dir = MagicMock(
+        side_effect=lambda _instance_id: (
+            "/tmp/codex-after-switch"
+            if switch_finished.is_set()
+            else "/tmp/codex-before-switch"
+        )
+    )
+    d.instance_manager = manager
+    d._wait_process = AsyncMock()
+    task = MagicMock(
+        id=44,
+        model="gpt-5.6-sol",
+        provider="codex",
+        thinking_budget=None,
+        effort_level="high",
+        enable_workflows=False,
+        enabled_skills=None,
+    )
+
+    # Claude retains its bounded cleanup wait. Codex must not use that timeout:
+    # its consumer owns rollout migration and the final account binding.
+    wait_for = AsyncMock(side_effect=AssertionError("Codex consumer was timed out"))
+    monkeypatch.setattr(dispatcher_module.asyncio, "wait_for", wait_for)
+
+    exit_code, home = await d._launch_mode_turn_with_rotation(
+        7,
+        task,
+        "/repo",
+        {},
+        prompt="goal prompt",
+        config_dir="/tmp/codex-before-switch",
+        resume_session_id="thread-1",
+        loop_iteration=0,
+        effort_level="high",
+        label="Goal turn",
+    )
+
+    assert exit_code == 0
+    assert home == "/tmp/codex-after-switch"
+    assert consumer.done()
+    wait_for.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_codex_routing_failure_requeues_exact_message(db_factory, monkeypatch):
+    """A temporary account/home conflict must not acknowledge and lose chat."""
+    import backend.services.dispatcher as disp_mod
+
+    monkeypatch.setattr(disp_mod, "CODEX_ROUTING_RETRY_DELAY", 0.01)
+    d = _make_dispatcher(db_factory)
+    processed = asyncio.Event()
+    seen = []
+
+    async def fake_process(task_id, msg):
+        seen.append(msg)
+        if len(seen) == 1:
+            raise disp_mod.CodexAccountRoutingError("all accounts cooling down")
+        processed.set()
+
+    d._process_queued_message = fake_process
+    await d.enqueue_message(1, "must survive")
+    await asyncio.wait_for(processed.wait(), 1)
+
+    assert len(seen) == 2
+    assert seen[0] is seen[1]
+    assert seen[1].prompt == "must survive"
+    d._task_queue_workers[1].cancel()
+
+
+@pytest.mark.asyncio
 async def test_long_turn_does_not_respawn_consumer(db_factory, monkeypatch):
     """A turn longer than the stuck-threshold must NOT trip the watchdog into
     respawning the consumer.
@@ -2889,6 +3404,40 @@ async def _setup_queued_msg_two_idle(db_factory, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_queued_codex_busy_launch_rolls_back_status_and_temp_skills(
+    db_factory, monkeypatch,
+):
+    from backend.services.codex_app_server import CodexAppServerBusyError
+
+    d, _id1, _id2, task_id, msg = await _setup_queued_msg_two_idle(
+        db_factory, monkeypatch
+    )
+    d._resolve_resume_config_dir = AsyncMock(return_value="/tmp/codex-a")
+    d.instance_manager.launch = AsyncMock(
+        side_effect=CodexAppServerBusyError("account maintenance")
+    )
+    msg.source = "monitor:complete"
+    msg.command_skills = {"temporary": True}
+
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+        task.provider = "codex"
+        task.status = "completed"
+        task.enabled_skills = {"base": True}
+        await db.commit()
+
+    with pytest.raises(CodexAppServerBusyError):
+        await d._process_queued_message(task_id, msg)
+
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+        assert task.status == "completed"
+        assert task.enabled_skills == {"base": True}
+    assert msg.source_logged is True
+    assert not d._launching_instances
+
+
+@pytest.mark.asyncio
 async def test_queued_message_skips_dispatch_claimed_instance(db_factory, monkeypatch):
     """Regression for prod task #676.
 
@@ -2953,6 +3502,96 @@ async def test_failed_codex_task_reuses_present_native_thread(db_factory, monkey
 
     clone.assert_not_awaited()
     assert d.instance_manager.launch.await_args.kwargs["resume_session_id"] == "sess-1"
+
+
+@pytest.mark.asyncio
+async def test_queued_codex_turn_never_runs_claude_pty_finalizer(
+    db_factory, monkeypatch,
+):
+    """Global PTY enablement must not synthesize Codex completion/exit events."""
+    d, _id1, _id2, task_id, msg = await _setup_queued_msg_two_idle(
+        db_factory, monkeypatch
+    )
+    d._resolve_resume_config_dir = AsyncMock(return_value="/tmp/codex-a")
+    d.instance_manager.pty_mode_enabled = True
+    d.instance_manager.pty_rate_limit_seen.return_value = True
+    d.instance_manager.transient_error_seen.return_value = True
+
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+        task.provider = "codex"
+        await db.commit()
+
+    await d._process_queued_message(task_id, msg)
+
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+        assert task.status == "executing"
+    d.instance_manager._try_proactive_pool_switch.assert_not_awaited()
+    assert not any(
+        call.args[1].get("event_type") == "process_exit"
+        for call in d.broadcaster.broadcast.await_args_list
+        if len(call.args) > 1 and isinstance(call.args[1], dict)
+    )
+
+
+@pytest.mark.asyncio
+async def test_queued_codex_message_waits_for_replacement_turn_chain(
+    db_factory, monkeypatch,
+):
+    """A rotation/retry launched by output cleanup stays inside queue serialization."""
+    d, _id1, _id2, task_id, msg = await _setup_queued_msg_two_idle(
+        db_factory, monkeypatch
+    )
+    d._resolve_resume_config_dir = AsyncMock(return_value="/tmp/codex-a")
+    first = MagicMock(name="first-turn", returncode=1)
+    second = MagicMock(name="replacement-turn", returncode=0)
+    first_waited = asyncio.Event()
+    second_waited = asyncio.Event()
+    replacement_finished = asyncio.Event()
+
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+        task.provider = "codex"
+        await db.commit()
+
+    async def fake_launch(**kwargs):
+        instance_id = kwargs["instance_id"]
+
+        async def replacement_consumer():
+            await second_waited.wait()
+            d.instance_manager.processes.pop(instance_id, None)
+            d.instance_manager._tasks.pop(instance_id, None)
+            replacement_finished.set()
+
+        async def first_consumer():
+            await first_waited.wait()
+            d.instance_manager.processes[instance_id] = second
+            d.instance_manager._tasks[instance_id] = asyncio.create_task(
+                replacement_consumer()
+            )
+
+        d.instance_manager.processes[instance_id] = first
+        d.instance_manager._tasks[instance_id] = asyncio.create_task(
+            first_consumer()
+        )
+
+    async def fake_wait(process, _task, _label):
+        if process is first:
+            first_waited.set()
+        elif process is second:
+            second_waited.set()
+
+    d.instance_manager.launch = AsyncMock(side_effect=fake_launch)
+    d._wait_process = AsyncMock(side_effect=fake_wait)
+
+    await d._process_queued_message(task_id, msg)
+
+    assert replacement_finished.is_set()
+    assert [call.args[0] for call in d._wait_process.await_args_list] == [
+        first,
+        second,
+    ]
 
 
 # === Codex provider prompt tests (provider-aware agent doc) ===

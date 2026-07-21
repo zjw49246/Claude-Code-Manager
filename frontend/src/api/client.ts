@@ -432,6 +432,62 @@ export interface PoolUsageStatus {
   accounts: PoolAccountUsage[];
 }
 
+export type CodexLoginMethod = '171mail' | 'mailcatcher' | 'mailcom' | 'onet' | 'gazeta';
+
+export interface CodexPoolQuota {
+  primary_used_percent: number | null;
+  primary_window_minutes: number | null;
+  primary_resets_at: number | null;
+  secondary_used_percent: number | null;
+  secondary_window_minutes: number | null;
+  secondary_resets_at: number | null;
+  plan_type?: string | null;
+  is_rate_limited: boolean;
+  has_credits: boolean;
+}
+
+export interface CodexPoolAccountUsage {
+  id: string;
+  codex_home: string;
+  email: string;
+  enabled: boolean;
+  available: boolean;
+  cooldown_until: number | null;
+  cooldown_remaining: number;
+  plan_type?: string | null;
+  quota?: CodexPoolQuota | null;
+  quota_error?: string | null;
+}
+
+export interface CodexPoolUsageStatus {
+  enabled: boolean;
+  total: number;
+  available: number;
+  cooldown: number;
+  disabled: number;
+  preferred: string | null;
+  last_selected?: string | null;
+  accounts: CodexPoolAccountUsage[];
+}
+
+export type CodexLoginStatusName =
+  | 'idle'
+  | 'running'
+  | 'awaiting_otp'
+  | 'verifying_otp'
+  | 'success'
+  | 'failed'
+  | 'expired';
+
+export interface CodexLoginStatus {
+  status: CodexLoginStatusName;
+  detail?: string;
+  attempt_id?: string;
+  challenge_id?: string;
+  expires_at?: number;
+  account_id?: string;
+}
+
 
 export interface TeamUser {
   id: number;
@@ -1024,22 +1080,29 @@ export const api = {
     request<{ ok: boolean; synced: number; settings: Record<string, unknown> }>('/api/pool/cc-settings', { method: 'PUT', body: JSON.stringify({ settings }) }),
 
   // Codex Pool
-  getCodexPoolStatus: () => request<any>('/api/codex-pool/status'),
-  getCodexPoolUsage: (force?: boolean) => request<any>('/api/codex-pool/usage' + (force ? '?force=true' : '')),
+  getCodexPoolStatus: () => request<CodexPoolUsageStatus>('/api/codex-pool/status'),
+  getCodexPoolUsage: (force?: boolean) => request<CodexPoolUsageStatus>('/api/codex-pool/usage' + (force ? '?force=true' : '')),
   clearCodexPoolCooldown: (accountId: string) =>
     request<{ ok: boolean }>(`/api/codex-pool/accounts/${accountId}/clear-cooldown`, { method: 'POST' }),
+  setCodexPoolPreferred: (accountId: string | null) =>
+    request<{ ok: boolean; preferred: string | null }>('/api/codex-pool/preferred', { method: 'POST', body: JSON.stringify({ account_id: accountId }) }),
   codexPoolDeleteAccount: (accountId: string) =>
     request<{ ok: boolean }>(`/api/codex-pool/accounts/${accountId}`, { method: 'DELETE' }),
   codexPoolVerify: (accountId: string) =>
     request<any>(`/api/codex-pool/accounts/${accountId}/verify`),
   codexPoolRelogin: (accountId: string) =>
-    request<{ ok: boolean; status: string }>(`/api/codex-pool/accounts/${accountId}/relogin`, { method: 'POST' }),
+    request<{ ok: boolean; status: CodexLoginStatusName; attempt_id?: string }>(`/api/codex-pool/accounts/${accountId}/relogin`, { method: 'POST' }),
   codexPoolReloginStatus: (accountId: string) =>
-    request<{ status: string; detail?: string }>(`/api/codex-pool/accounts/${accountId}/relogin`),
-  codexPoolAddAccount: (data: { email: string; token: string; password?: string; login_method?: string }) =>
-    request<{ ok: boolean; status: string; account_id?: string }>('/api/codex-pool/add', { method: 'POST', body: JSON.stringify(data) }),
+    request<CodexLoginStatus>(`/api/codex-pool/accounts/${accountId}/relogin`),
+  codexPoolAddAccount: (data: { email: string; token?: string; password?: string; login_method?: CodexLoginMethod }) =>
+    request<{ ok: boolean; status: CodexLoginStatusName; account_id?: string; attempt_id?: string }>('/api/codex-pool/add', { method: 'POST', body: JSON.stringify(data) }),
   codexPoolAddStatus: (email: string) =>
-    request<{ status: string; detail?: string }>(`/api/codex-pool/add/${encodeURIComponent(email)}`),
+    request<CodexLoginStatus>(`/api/codex-pool/add/${encodeURIComponent(email)}`),
+  codexPoolSubmitOtp: (attemptId: string, challengeId: string, code: string) =>
+    request<{ ok: boolean; status: CodexLoginStatusName }>(`/api/codex-pool/login-attempts/${attemptId}/otp`, {
+      method: 'POST',
+      body: JSON.stringify({ challenge_id: challengeId, code }),
+    }),
 
   // User Skills
   listUserSkills: () => request<any[]>('/api/user-skills'),

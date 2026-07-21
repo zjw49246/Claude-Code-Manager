@@ -16,6 +16,8 @@ from backend.services.claude_pool import (
     transient_retry_delay,
     migrate_session,
     collect_process_output_for_detection,
+    quota_cooldown_seconds,
+    quota_usage_at_or_above,
     rate_limit_event_is_actionable,
 )
 
@@ -736,9 +738,9 @@ class TestLastSelected:
 class TestRateLimitEventActionable:
     """Only a genuine near-limit/blocked rate_limit_event may bench an account.
 
-    Routine "allowed" pings (emitted almost every turn) and low-utilization or
-    seven_day warnings must NOT — that was starving the 3-account pool and
-    making resumes hit "no available accounts" (prod #734/#740).
+    Routine "allowed" pings (emitted almost every turn) and low-utilization
+    warnings must NOT — that was starving the 3-account pool and making resumes
+    hit "no available accounts" (prod #734/#740).
     """
 
     def test_allowed_is_not_actionable(self):
@@ -752,11 +754,10 @@ class TestRateLimitEventActionable:
             {"status": "allowed_warning", "rateLimitType": "seven_day", "utilization": 0.37}
         ) is False
 
-    def test_seven_day_warning_high_util_still_not_actionable(self):
-        # A 5-min cooldown can't change a 7-day window — never rotate on it.
+    def test_seven_day_warning_high_util_is_actionable(self):
         assert rate_limit_event_is_actionable(
             {"status": "allowed_warning", "rateLimitType": "seven_day", "utilization": 0.99}
-        ) is False
+        ) is True
 
     def test_five_hour_low_warning_not_actionable(self):
         assert rate_limit_event_is_actionable(
@@ -786,6 +787,104 @@ class TestRateLimitEventActionable:
         assert rate_limit_event_is_actionable(
             {"status": "allowed_warning", "rateLimitType": "five_hour", "utilization": None}
         ) is False
+
+
+class TestQuotaAwareSelection:
+    def test_usage_threshold_checks_five_hour_or_week(self):
+        assert quota_usage_at_or_above({
+            "five_hour": {"utilization": 90},
+            "seven_day": {"utilization": 20},
+        })
+        assert quota_usage_at_or_above({
+            "five_hour": {"utilization": 20},
+            "seven_day": {"utilization": 91},
+        })
+        assert not quota_usage_at_or_above({
+            "five_hour": {"utilization": 89.9},
+            "seven_day": {"utilization": 89},
+        })
+
+    @pytest.mark.asyncio
+    async def test_selects_below_threshold_alternative(self, pool, tmp_path):
+        pool.fetch_usage = AsyncMock(return_value=[
+            {"id": "acc-1", "usage": {"five_hour": {"utilization": 95}}},
+            {"id": "acc-2", "usage": {"seven_day": {"utilization": 35}}},
+        ])
+
+        selected = await pool.select_quota_alternative(
+            str(tmp_path / "claude-1")
+        )
+
+        assert selected == str(tmp_path / "claude-2")
+        pool.fetch_usage.assert_awaited_once_with(force=True)
+
+    @pytest.mark.asyncio
+    async def test_known_high_alternative_is_rejected_but_unknown_is_allowed(
+        self, pool, tmp_path,
+    ):
+        # acc-2 is known-high, so no enabled alternative remains.
+        pool.fetch_usage = AsyncMock(return_value=[
+            {"id": "acc-1", "usage": {"five_hour": {"utilization": 95}}},
+            {"id": "acc-2", "usage": {"seven_day": {"utilization": 90}}},
+        ])
+        assert await pool.select_quota_alternative(
+            str(tmp_path / "claude-1")
+        ) is None
+
+        # A failed/missing snapshot is explicitly an eligible fallback.
+        pool.fetch_usage = AsyncMock(return_value=[
+            {"id": "acc-1", "usage": {"five_hour": {"utilization": 95}}},
+            {"id": "acc-2", "usage": None, "error": "request_failed"},
+        ])
+        assert await pool.select_quota_alternative(
+            str(tmp_path / "claude-1")
+        ) == str(tmp_path / "claude-2")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "error",
+        ["no_credentials", "token_expired", "http_401", "http_403"],
+    )
+    async def test_definitive_auth_error_is_not_an_alternative(
+        self, pool, tmp_path, error,
+    ):
+        pool.fetch_usage = AsyncMock(return_value=[
+            {"id": "acc-1", "usage": {"five_hour": {"utilization": 95}}},
+            {"id": "acc-2", "usage": None, "error": error},
+        ])
+
+        assert await pool.select_quota_alternative(
+            str(tmp_path / "claude-1")
+        ) is None
+
+    @pytest.mark.asyncio
+    async def test_request_failure_remains_an_unknown_but_eligible_alternative(
+        self, pool, tmp_path,
+    ):
+        pool.fetch_usage = AsyncMock(return_value=[
+            {"id": "acc-1", "usage": {"five_hour": {"utilization": 95}}},
+            {"id": "acc-2", "usage": None, "error": "request_failed: timeout"},
+        ])
+
+        assert await pool.select_quota_alternative(
+            str(tmp_path / "claude-1")
+        ) == str(tmp_path / "claude-2")
+
+    def test_reset_timestamp_controls_soft_cooldown(self):
+        assert quota_cooldown_seconds(
+            {"resetsAt": 1_700_000_900}, now=1_700_000_000
+        ) == 900
+        assert quota_cooldown_seconds(
+            {"resetsAt": 1_700_000_900_000}, now=1_700_000_000
+        ) == 900
+        assert quota_cooldown_seconds(
+            {"resetsAt": 1_699_999_999}, now=1_700_000_000, fallback=77
+        ) == 77
+        assert quota_cooldown_seconds(
+            {"resetsAt": 1_800_000_000},
+            now=1_700_000_000,
+            maximum=123,
+        ) == 123
 
 
 # ---------------------------------------------------------------------------

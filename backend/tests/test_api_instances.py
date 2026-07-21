@@ -115,6 +115,8 @@ async def test_run_with_prompt(client):
         resp = await client.post(f"/api/instances/{inst_id}/run?prompt=hello")
     assert resp.status_code == 200
     assert resp.json()["pid"] == 999
+    assert mock_im.launch.await_args.kwargs["config_dir"] is None
+    assert mock_im.launch.await_args.kwargs["resume_session_id"] is None
 
 
 @pytest.mark.asyncio
@@ -147,14 +149,65 @@ async def test_run_with_task_id(client):
     inst_id = inst_resp.json()["id"]
     task_resp = await client.post("/api/tasks", json={
         "title": "T", "description": "Do work", "target_repo": "/tmp",
+        "provider": "claude",
     })
     task_id = task_resp.json()["id"]
 
     mock_im = _make_mock_instance_manager(is_running_val=False, launch_pid=111)
-    with patch("backend.main.instance_manager", mock_im):
+    mock_dispatcher = MagicMock()
+    mock_dispatcher._resolve_resume_config_dir = AsyncMock(
+        return_value="/pool/claude-2"
+    )
+    with (
+        patch("backend.main.instance_manager", mock_im),
+        patch("backend.main.dispatcher", mock_dispatcher),
+    ):
         resp = await client.post(f"/api/instances/{inst_id}/run?task_id={task_id}")
     assert resp.status_code == 200
     assert resp.json()["pid"] == 111
+    mock_dispatcher._resolve_resume_config_dir.assert_awaited_once_with(
+        None,
+        "claude",
+        task_id=task_id,
+    )
+    assert mock_im.launch.await_args.kwargs["config_dir"] == "/pool/claude-2"
+    assert mock_im.launch.await_args.kwargs["resume_session_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_run_codex_task_resumes_on_dispatcher_bound_home(client):
+    inst_resp = await client.post("/api/instances", json={"name": "codex-task-runner"})
+    inst_id = inst_resp.json()["id"]
+    task_resp = await client.post("/api/tasks", json={
+        "title": "Codex task",
+        "description": "Continue work",
+        "target_repo": "/tmp",
+        "provider": "codex",
+        "session_id": "thread-manual-1",
+    })
+    task_id = task_resp.json()["id"]
+
+    mock_im = _make_mock_instance_manager(is_running_val=False, launch_pid=222)
+    mock_dispatcher = MagicMock()
+    mock_dispatcher._resolve_resume_config_dir = AsyncMock(
+        return_value="/pool/codex-2"
+    )
+    with (
+        patch("backend.main.instance_manager", mock_im),
+        patch("backend.main.dispatcher", mock_dispatcher),
+    ):
+        resp = await client.post(f"/api/instances/{inst_id}/run?task_id={task_id}")
+
+    assert resp.status_code == 200
+    mock_dispatcher._resolve_resume_config_dir.assert_awaited_once_with(
+        "thread-manual-1",
+        "codex",
+        task_id=task_id,
+    )
+    launch_kwargs = mock_im.launch.await_args.kwargs
+    assert launch_kwargs["provider"] == "codex"
+    assert launch_kwargs["config_dir"] == "/pool/codex-2"
+    assert launch_kwargs["resume_session_id"] == "thread-manual-1"
 
 
 # === Logs ===

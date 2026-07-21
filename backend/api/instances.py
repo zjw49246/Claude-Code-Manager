@@ -90,7 +90,7 @@ async def run_task_on_instance(
     db: AsyncSession = Depends(get_db),
 ):
     """Manually run a prompt or task on a specific instance."""
-    from backend.main import instance_manager
+    from backend.main import dispatcher, instance_manager
     from backend.services.task_queue import TaskQueue
 
     instance = await db.get(Instance, instance_id)
@@ -99,6 +99,7 @@ async def run_task_on_instance(
     if instance_manager.is_running(instance_id):
         raise HTTPException(400, "Instance is already running")
 
+    task = None
     if task_id:
         queue = TaskQueue(db)
         task = await queue.get(task_id)
@@ -117,6 +118,16 @@ async def run_task_on_instance(
     task_provider = task.provider if task_id and task else "claude"
     task_effort = (task.effort_level if task_id and task else None) or app_settings.default_effort
     task_thinking = task.thinking_budget if task_id and task else None
+    config_dir = None
+    resume_session_id = None
+    if task is not None:
+        config_dir = await dispatcher._resolve_resume_config_dir(
+            task.session_id,
+            task_provider,
+            task_id=task.id,
+        )
+        if (task_provider or "claude").lower() == "codex":
+            resume_session_id = task.session_id
 
     pid = await instance_manager.launch(
         instance_id=instance_id,
@@ -127,6 +138,8 @@ async def run_task_on_instance(
         provider=task_provider,
         thinking_budget=task_thinking,
         effort_level=task_effort,
+        resume_session_id=resume_session_id,
+        config_dir=config_dir,
     )
     return {"ok": True, "pid": pid}
 

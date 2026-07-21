@@ -74,6 +74,8 @@ class TestFindSessionJsonl:
 
     def test_finds_codex_rollout_under_codex_home(self, tmp_path, monkeypatch):
         """Regression: every valid Codex follow-up was treated as session_gone."""
+        import backend.main as main_mod
+        monkeypatch.setattr(main_mod, "codex_pool", None, raising=False)
         monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
         sid = "019f7991-3ef9-75a1-8441-8bfd420ab006"
         day = tmp_path / "codex-home" / "sessions" / "2026" / "07" / "19"
@@ -83,7 +85,43 @@ class TestFindSessionJsonl:
 
         assert _find_session_jsonl(sid, provider="codex") == rollout
 
+    def test_finds_codex_rollout_under_pool_account_home(self, tmp_path, monkeypatch):
+        import backend.main as main_mod
+
+        pool_home = tmp_path / "pool-account-2"
+        sid = "019f7991-3ef9-75a1-8441-8bfd420ab007"
+        day = pool_home / "sessions" / "2026" / "07" / "20"
+        day.mkdir(parents=True)
+        rollout = day / f"rollout-2026-07-20T08-49-49-{sid}.jsonl"
+        rollout.write_text('{"type":"session_meta"}\n')
+        pool = types.SimpleNamespace(
+            list_accounts=lambda: [
+                {"codex_home": str(tmp_path / "pool-account-1")},
+                {"codex_home": str(pool_home)},
+            ]
+        )
+        monkeypatch.setattr(main_mod, "codex_pool", pool, raising=False)
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "missing-default"))
+
+        assert _find_session_jsonl(sid, provider="codex") == rollout
+
+    def test_finds_codex_rollout_under_legacy_codex_star_home(self, tmp_path, monkeypatch):
+        import backend.main as main_mod
+
+        monkeypatch.setattr(main_mod, "codex_pool", None, raising=False)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CODEX_HOME", raising=False)
+        sid = "019f7991-3ef9-75a1-8441-8bfd420ab008"
+        day = tmp_path / ".codex-account-old" / "sessions" / "2026" / "07" / "20"
+        day.mkdir(parents=True)
+        rollout = day / f"rollout-2026-07-20T09-49-49-{sid}.jsonl"
+        rollout.write_text('{"type":"session_meta"}\n')
+
+        assert _find_session_jsonl(sid, provider="codex") == rollout
+
     def test_codex_lookup_does_not_accept_claude_session(self, tmp_path, monkeypatch):
+        import backend.main as main_mod
+        monkeypatch.setattr(main_mod, "codex_pool", None, raising=False)
         monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
         _write_session(tmp_path / "claude", "-repo", "same-sid")

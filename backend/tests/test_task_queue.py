@@ -67,6 +67,22 @@ async def test_dequeue_returns_none_when_empty(queue):
 
 
 @pytest.mark.asyncio
+async def test_dequeue_skips_temporarily_excluded_task(queue):
+    waiting = await queue.create(
+        title="waiting-codex", description="d", target_repo="/tmp", priority=0,
+    )
+    runnable = await queue.create(
+        title="runnable", description="d", target_repo="/tmp", priority=1,
+    )
+
+    selected = await queue.dequeue(exclude_ids={waiting.id})
+
+    assert selected is not None
+    assert selected.id == runnable.id
+    assert (await queue.get(waiting.id)).status == "pending"
+
+
+@pytest.mark.asyncio
 async def test_mark_completed(queue):
     task = await queue.create(title="t", description="d", target_repo="/tmp")
     await queue.mark_completed(task.id)
@@ -100,6 +116,40 @@ async def test_retry_increments_count(queue):
     assert retried.status == "pending"
     assert retried.retry_count == 1
     assert retried.error_message is None
+
+
+@pytest.mark.asyncio
+async def test_defer_returns_active_task_without_consuming_retry_budget(queue):
+    task = await queue.create(title="t", description="d", target_repo="/tmp")
+    task_id = task.id
+    claimed = await queue.dequeue()
+    assert claimed.id == task_id
+    claimed.instance_id = 99
+    await queue.db.commit()
+
+    assert await queue.defer(task_id, "all Codex accounts cooling down") is True
+
+    queue.db.expire_all()
+    deferred = await queue.get(task_id)
+    assert deferred.status == "pending"
+    assert deferred.retry_count == 0
+    assert deferred.instance_id is None
+    assert deferred.started_at is None
+    assert deferred.completed_at is None
+    assert deferred.error_message == "all Codex accounts cooling down"
+
+
+@pytest.mark.asyncio
+async def test_defer_does_not_resurrect_cancelled_task(queue):
+    task = await queue.create(title="t", description="d", target_repo="/tmp")
+    task_id = task.id
+    await queue.dequeue()
+    await queue.cancel(task_id)
+
+    assert await queue.defer(task_id, "temporary routing failure") is False
+
+    queue.db.expire_all()
+    assert (await queue.get(task_id)).status == "cancelled"
 
 
 @pytest.mark.asyncio

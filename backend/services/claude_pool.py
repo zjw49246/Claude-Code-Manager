@@ -68,8 +68,7 @@ def is_pool_rotatable(text: str) -> bool:
 def rate_limit_event_is_actionable(
     rate_limit_info: dict | None, *, warn_threshold: float = 0.9
 ) -> bool:
-    """Whether a CLI ``rate_limit_event`` warrants rotating off + cooling down
-    the current account.
+    """Whether a CLI ``rate_limit_event`` warrants evaluating a pool switch.
 
     The Claude CLI emits a ``rate_limit_event`` on almost every turn as a
     routine quota-status ping; its ``status`` field is the real signal:
@@ -80,11 +79,9 @@ def rate_limit_event_is_actionable(
                              starves and resumes hit "no available accounts"
                              (prod #734/#740 — a 37%-of-7-day *warning* was
                              benching accounts for 5 min).
-    - ``allowed_warning``  → approaching a threshold. Only actionable for the
-                             **short** (``five_hour``) window AND when utilization
-                             is genuinely high (``>= warn_threshold``). A
-                             ``seven_day`` warning is never actionable: a 5-min
-                             cooldown can't change a 7-day window, it just churns.
+    - ``allowed_warning``  → approaching a threshold. Actionable for either the
+                             5-hour or 7-day window only when utilization is
+                             genuinely high (``>= warn_threshold``).
     - anything else (``rejected``/``blocked``/…) → actionable.
 
     Note the reactive rotation path (on an actual failure with a usage-limit
@@ -96,7 +93,7 @@ def rate_limit_event_is_actionable(
     if status == "allowed":
         return False
     if status == "allowed_warning":
-        if rate_limit_info.get("rateLimitType") != "five_hour":
+        if rate_limit_info.get("rateLimitType") not in {"five_hour", "seven_day"}:
             return False
         util = rate_limit_info.get("utilization")
         if util is None:
@@ -107,6 +104,67 @@ def rate_limit_event_is_actionable(
             return False
     # rejected / blocked / unknown non-"allowed" status → be safe, rotate.
     return True
+
+
+QUOTA_SWITCH_THRESHOLD_PERCENT = 90.0
+PROACTIVE_QUOTA_MAX_COOLDOWN_SECONDS = 8 * 24 * 60 * 60
+_DEFINITIVE_QUOTA_AUTH_ERRORS = {
+    "no_credentials",
+    "token_expired",
+    "http_401",
+    "http_403",
+}
+
+
+def quota_usage_at_or_above(
+    usage: dict | None, *, threshold: float = QUOTA_SWITCH_THRESHOLD_PERCENT
+) -> bool:
+    """Whether either user-visible Claude quota window reached ``threshold``.
+
+    The OAuth usage endpoint reports percentages on a 0..100 scale. Missing
+    data is deliberately not treated as exhausted: an account whose quota could
+    not be read remains an eligible fallback rather than starving the pool.
+    """
+
+    if not isinstance(usage, dict):
+        return False
+    for name in ("five_hour", "seven_day"):
+        window = usage.get(name)
+        if not isinstance(window, dict):
+            continue
+        try:
+            if float(window.get("utilization")) >= threshold:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def quota_cooldown_seconds(
+    rate_limit_info: dict | None,
+    *,
+    now: float | None = None,
+    fallback: int = 300,
+    maximum: int = PROACTIVE_QUOTA_MAX_COOLDOWN_SECONDS,
+) -> int:
+    """Convert a Claude ``resetsAt`` event timestamp into a safe cooldown.
+
+    Both seconds and millisecond Unix timestamps are accepted. Expired or
+    malformed values fall back to the normal short cooldown; corrupt far-future
+    values are capped so one event cannot quarantine an account forever.
+    """
+
+    reset_at = rate_limit_info.get("resetsAt") if isinstance(rate_limit_info, dict) else None
+    try:
+        reset_at = float(reset_at)
+        if reset_at > 10_000_000_000:  # milliseconds, not seconds
+            reset_at /= 1000
+        remaining = int(reset_at - (time.time() if now is None else now))
+    except (TypeError, ValueError):
+        return max(1, int(fallback))
+    if remaining <= 0:
+        return max(1, int(fallback))
+    return min(remaining, max(1, int(maximum)))
 
 
 # ---------------------------------------------------------------------------
@@ -144,10 +202,10 @@ def is_transient_overload(text: str) -> bool:
 
 # ---------------------------------------------------------------------------
 # Codex (OpenAI) counterparts — exact texts from codex-rs protocol/src/error.rs
-# (rust-v0.144.6, 与本机 CLI 同版实证)。Codex 无号池：usage-limit / auth 失败
-# 不轮换（无号可换），只用于与 transient 互斥；transient 对应 CLI 自身
-# is_retryable=true 的错误（外加 ServerOverloaded——CLI 只是想让用户换模型，
-# 对 CCM 而言退避重试同样有效）。
+# (rust-v0.144.6, 与本机 CLI 同版实证)。usage-limit / auth 失败由独立
+# CodexPool 做账号轮换，并与 transient 同号重试保持互斥；transient 对应
+# CLI 自身 is_retryable=true 的错误（外加 ServerOverloaded——CLI 只是想让
+# 用户换模型，对 CCM 而言退避重试同样有效）。
 # ---------------------------------------------------------------------------
 
 _CODEX_USAGE_LIMIT_RE = re.compile(
@@ -724,6 +782,42 @@ class ClaudePool:
         self._usage_cache = list(results)
         self._usage_cache_at = now
         return self._usage_cache
+
+    async def select_quota_alternative(
+        self,
+        current_config_dir: str,
+        *,
+        threshold: float = QUOTA_SWITCH_THRESHOLD_PERCENT,
+    ) -> str | None:
+        """Pick an available alternative whose known quota is below threshold.
+
+        A missing/failed usage snapshot is allowed as a candidate, per the pool
+        fallback contract. The current account and alternatives known to have
+        either their 5-hour or 7-day window at/above the threshold are excluded.
+        This method never cools the current account; callers do that only after
+        a session migration has succeeded.
+        """
+
+        current_id = self.account_id_from_config_dir(current_config_dir)
+        if not current_id:
+            return None
+        usage_by_id = {
+            row["id"]: row for row in await self.fetch_usage(force=True)
+        }
+        excluded = {current_id}
+        for account in self._accounts:
+            if account.id == current_id:
+                continue
+            row = usage_by_id.get(account.id)
+            if row and (
+                str(row.get("error") or "").lower()
+                in _DEFINITIVE_QUOTA_AUTH_ERRORS
+                or quota_usage_at_or_above(
+                    row.get("usage"), threshold=threshold
+                )
+            ):
+                excluded.add(account.id)
+        return self.select(exclude=excluded, validate=False)
 
 
 # ---------------------------------------------------------------------------

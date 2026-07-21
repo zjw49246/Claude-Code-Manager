@@ -16,8 +16,11 @@ import asyncio
 import glob
 import logging
 import os
+import re
+import shlex
 import shutil
 import tempfile
+from pathlib import PurePosixPath
 
 import httpx
 
@@ -28,6 +31,8 @@ from backend.models.worker import Worker
 from backend.services.ssh_executor import SSHExecutor
 
 logger = logging.getLogger(__name__)
+_CODEX_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_COPY_BUFFER_SIZE = 1024 * 1024
 
 
 class MigrationError(Exception):
@@ -76,6 +81,7 @@ class TaskMigrator:
             )
 
         await self._set_status(task_id, "migrating")
+        local_codex_target_home: str | None = None
         try:
             # 1. 源是 worker：先把 relay 收不到的字段同步回来（session_id/last_cwd）
             if src is not None:
@@ -99,7 +105,11 @@ class TaskMigrator:
             # 3. session 文件搬运（claude 落目标机 ~/.claude；codex 落 ~/.codex/sessions）
             if session_id:
                 if provider == "codex":
-                    await self._move_codex_session(src, dst, session_id)
+                    moved_codex_home = await self._move_codex_session(
+                        src, dst, session_id
+                    )
+                    if dst is None:
+                        local_codex_target_home = moved_codex_home
                 else:
                     await self._move_session(src, dst, session_id)
 
@@ -122,6 +132,10 @@ class TaskMigrator:
                 task = await db.get(Task, task_id)
                 task.worker_id = target
                 task.status = prev_status
+                if provider == "codex" and target is None and local_codex_target_home:
+                    self._sync_local_codex_account_binding(
+                        task, local_codex_target_home
+                    )
                 # last_cwd 防护：失败启动会把 os.getcwd() 写进 last_cwd（污染），
                 # 且它优先于 target_repo——切回本机时不存在/不在项目内的一律清掉，
                 # 让 cwd 解析回落到 target_repo
@@ -262,40 +276,167 @@ class TaskMigrator:
 
     @staticmethod
     def _local_codex_session_glob(session_id: str) -> list[str]:
+        if not _CODEX_SESSION_ID_RE.fullmatch(session_id):
+            raise MigrationError("无效 Codex session id")
         home = os.path.expanduser("~")
-        return glob.glob(f"{home}/.codex/sessions/*/*/*/rollout-*-{session_id}.jsonl")
-
-    async def _move_codex_session(self, src: Worker | None, dst: Worker | None, session_id: str):
-        codex_root = os.path.expanduser("~/.codex/sessions")
-        if src is None:
-            matches = self._local_codex_session_glob(session_id)
-            if not matches:
-                logger.warning("codex session %s 本机未找到，跳过 session 搬运", session_id)
-                return
-            src_file = matches[0]
-            rel = os.path.relpath(src_file, codex_root)
-        else:
-            ssh = self._ssh(src)
-            code, out = await ssh.run(
-                f"ls ~/.codex/sessions/*/*/*/rollout-*-{session_id}.jsonl 2>/dev/null | head -1"
+        escaped_session_id = glob.escape(session_id)
+        return sorted(
+            glob.glob(
+                f"{home}/.codex*/sessions/*/*/*/rollout-*-{escaped_session_id}.jsonl"
             )
-            remote_file = out.strip().splitlines()[0].strip() if out.strip() else ""
-            if not remote_file:
-                logger.warning("codex session %s 在 worker %s 未找到，跳过", session_id, src.id)
-                return
-            rel = os.path.relpath(remote_file, f"/home/{src.ssh_user}/.codex/sessions")
-            tmp = tempfile.mkdtemp(prefix="ccm-sess-")
-            src_file = os.path.join(tmp, os.path.basename(remote_file))
-            await ssh.rsync_from(remote_file, src_file, delete=False)
+        )
 
-        if dst is None:
-            target = os.path.join(codex_root, rel)
-            os.makedirs(os.path.dirname(target), exist_ok=True)
-            if os.path.abspath(src_file) != os.path.abspath(target):
-                shutil.copy2(src_file, target)
+    @staticmethod
+    def _codex_sessions_root_and_relative(rollout_file: str) -> tuple[str, str]:
+        """Return the matched account's sessions root and safe date/file path."""
+        rollout = PurePosixPath(rollout_file)
+        try:
+            sessions_root = rollout.parents[3]
+            relative = rollout.relative_to(sessions_root)
+        except (IndexError, ValueError) as exc:
+            raise MigrationError(f"无效 Codex rollout 路径: {rollout_file}") from exc
+
+        if (
+            sessions_root.name != "sessions"
+            or len(relative.parts) != 4
+            or any(part in ("", ".", "..") for part in relative.parts)
+            or not relative.name.startswith("rollout-")
+            or not relative.name.endswith(".jsonl")
+        ):
+            raise MigrationError(f"无效 Codex rollout 路径: {rollout_file}")
+        return str(sessions_root), relative.as_posix()
+
+    @staticmethod
+    def _file_is_prefix(prefix_file: str, full_file: str) -> bool:
+        """Whether one rollout is a byte-prefix of another rollout."""
+
+        if os.path.getsize(prefix_file) > os.path.getsize(full_file):
+            return False
+        with open(prefix_file, "rb") as prefix_stream, open(full_file, "rb") as full_stream:
+            while True:
+                chunk = prefix_stream.read(_COPY_BUFFER_SIZE)
+                if not chunk:
+                    return True
+                if full_stream.read(len(chunk)) != chunk:
+                    return False
+
+    @classmethod
+    def _select_authoritative_codex_rollout(cls, candidates: list[str]) -> str:
+        """Choose the longest rollout only when every other copy is its prefix.
+
+        Account rotation intentionally keeps recovery copies.  Picking the
+        lexicographically first home loses later turns, while picking by mtime
+        can choose a touched stale file.  Prefix validation proves that the
+        selected file contains all known history; divergent histories fail
+        closed and require manual reconciliation.
+        """
+
+        if not candidates:
+            raise MigrationError("未找到 Codex rollout")
+        ordered = sorted(candidates, key=lambda path: (-os.path.getsize(path), path))
+        selected = ordered[0]
+        for candidate in ordered[1:]:
+            if not cls._file_is_prefix(candidate, selected):
+                raise MigrationError(
+                    "Codex session 存在分叉 rollout，拒绝猜测并迁移可能过期的上下文"
+                )
+        return selected
+
+    @staticmethod
+    def _sync_local_codex_account_binding(task: Task, target_home: str) -> None:
+        """Align a migrated task with the local account that received rollout.
+
+        Worker and manager account IDs are machine-local.  Keeping the worker's
+        old ID (or an earlier local ID) after copying into ``~/.codex`` makes
+        the resolver trust a stale recovery copy.  Persist the actual local
+        account when it is registered; otherwise clear the foreign binding so
+        it is never treated as authoritative.
+        """
+
+        account_id: str | None = None
+        try:
+            from backend.main import codex_pool
+
+            if codex_pool is not None:
+                resolved = codex_pool.account_id_for_home(target_home)
+                if isinstance(resolved, str) and resolved:
+                    account_id = resolved
+        except Exception:
+            logger.exception(
+                "Failed to map migrated CODEX_HOME %s to a local account",
+                target_home,
+            )
+
+        metadata = dict(task.metadata_ or {})
+        if account_id:
+            metadata["codex_account_id"] = account_id
         else:
-            target = f"/home/{dst.ssh_user}/.codex/sessions/{rel}"
-            await self._ssh(dst).copy_file(src_file, target)
+            metadata.pop("codex_account_id", None)
+        task.metadata_ = metadata
+
+    async def _move_codex_session(
+        self,
+        src: Worker | None,
+        dst: Worker | None,
+        session_id: str,
+    ) -> str | None:
+        codex_home = os.path.expanduser("~/.codex")
+        codex_root = os.path.join(codex_home, "sessions")
+        if not _CODEX_SESSION_ID_RE.fullmatch(session_id):
+            raise MigrationError("无效 Codex session id")
+        temporary_dir: str | None = None
+        target_home: str | None = None
+        try:
+            if src is None:
+                matches = self._local_codex_session_glob(session_id)
+                if not matches:
+                    logger.warning("codex session %s 本机未找到，跳过 session 搬运", session_id)
+                    return
+                src_file = self._select_authoritative_codex_rollout(matches)
+                _, rel = self._codex_sessions_root_and_relative(src_file)
+            else:
+                ssh = self._ssh(src)
+                quoted_name = shlex.quote(f"rollout-*-{session_id}.jsonl")
+                _code, out = await ssh.run(
+                    "find ~/.codex*/sessions -mindepth 4 -maxdepth 4 -type f "
+                    f"-name {quoted_name} -print 2>/dev/null"
+                )
+                remote_files = [line.strip() for line in out.splitlines() if line.strip()]
+                if not remote_files:
+                    logger.warning("codex session %s 在 worker %s 未找到，跳过", session_id, src.id)
+                    return
+                temporary_dir = tempfile.mkdtemp(prefix="ccm-codex-sess-")
+                local_to_remote: dict[str, str] = {}
+                for index, remote_file in enumerate(remote_files):
+                    # Prefix the basename because migrated account copies
+                    # usually have the exact same rollout filename.
+                    local_file = os.path.join(
+                        temporary_dir,
+                        f"{index:04d}-{os.path.basename(remote_file)}",
+                    )
+                    await ssh.rsync_from(remote_file, local_file, delete=False)
+                    local_to_remote[local_file] = remote_file
+                src_file = self._select_authoritative_codex_rollout(
+                    list(local_to_remote)
+                )
+                _, rel = self._codex_sessions_root_and_relative(
+                    local_to_remote[src_file]
+                )
+
+            if dst is None:
+                target = os.path.join(codex_root, rel)
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                if os.path.abspath(src_file) != os.path.abspath(target):
+                    shutil.copy2(src_file, target)
+                target_home = codex_home
+            else:
+                target = f"/home/{dst.ssh_user}/.codex/sessions/{rel}"
+                await self._ssh(dst).copy_file(src_file, target)
+                target_home = f"/home/{dst.ssh_user}/.codex"
+            return target_home
+        finally:
+            if temporary_dir is not None:
+                shutil.rmtree(temporary_dir, ignore_errors=True)
 
     # -- 目标 worker 上重建 task ----------------------------------------
 

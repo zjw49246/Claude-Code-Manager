@@ -1,8 +1,10 @@
 """Tests for RalphLoop — only lifecycle management, not the full _loop body."""
 import asyncio
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
+from backend.models.instance import Instance
+from backend.models.task import Task
 from backend.services.ralph_loop import RalphLoop
 
 
@@ -93,3 +95,145 @@ async def test_is_running_false():
     rl = _make_ralph_loop()
     assert rl.is_running(1) is False
     assert rl.is_running(999) is False
+
+
+@pytest.mark.asyncio
+async def test_codex_task_launch_resolves_home_and_resumes_native_thread():
+    rl = _make_ralph_loop()
+    rl.instance_manager.launch = AsyncMock(return_value=4321)
+    dispatcher = MagicMock()
+    dispatcher._resolve_resume_config_dir = AsyncMock(
+        return_value="/pool/codex-2"
+    )
+    task = MagicMock(
+        id=77,
+        provider="codex",
+        session_id="thread-ralph-1",
+        thinking_budget=1234,
+    )
+
+    with patch("backend.main.dispatcher", dispatcher):
+        pid = await rl._launch_task_on_bound_account(
+            9,
+            task,
+            "continue work",
+            "/repo",
+        )
+
+    assert pid == 4321
+    dispatcher._resolve_resume_config_dir.assert_awaited_once_with(
+        "thread-ralph-1",
+        "codex",
+        task_id=77,
+    )
+    launch_kwargs = rl.instance_manager.launch.await_args.kwargs
+    assert launch_kwargs["config_dir"] == "/pool/codex-2"
+    assert launch_kwargs["resume_session_id"] == "thread-ralph-1"
+    assert launch_kwargs["provider"] == "codex"
+
+
+@pytest.mark.asyncio
+async def test_claude_task_launch_uses_resolved_home_without_forcing_resume():
+    rl = _make_ralph_loop()
+    rl.instance_manager.launch = AsyncMock(return_value=123)
+    dispatcher = MagicMock()
+    dispatcher._resolve_resume_config_dir = AsyncMock(
+        return_value="/pool/claude-2"
+    )
+    task = MagicMock(
+        id=78,
+        provider="claude",
+        session_id="claude-session",
+        thinking_budget=None,
+    )
+
+    with patch("backend.main.dispatcher", dispatcher):
+        await rl._launch_task_on_bound_account(10, task, "work", "/repo")
+
+    dispatcher._resolve_resume_config_dir.assert_awaited_once_with(
+        "claude-session",
+        "claude",
+        task_id=78,
+    )
+    launch_kwargs = rl.instance_manager.launch.await_args.kwargs
+    assert launch_kwargs["config_dir"] == "/pool/claude-2"
+    assert launch_kwargs["resume_session_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_retryable_account_routing_failure_defers_claimed_task(db_factory):
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    rl = RalphLoop(
+        db_factory=db_factory,
+        instance_manager=MagicMock(),
+        broadcaster=broadcaster,
+    )
+    async with db_factory() as db:
+        instance = Instance(name="ralph-routing-worker")
+        db.add(instance)
+        await db.flush()
+        task = Task(
+            title="routing wait",
+            description="continue",
+            provider="codex",
+            status="in_progress",
+            instance_id=instance.id,
+            retry_count=2,
+        )
+        db.add(task)
+        await db.commit()
+        await db.refresh(task)
+        task_id = task.id
+        instance_id = instance.id
+
+    delay = await rl._handle_account_routing_failure(
+        instance_id,
+        task_id,
+        "all Codex accounts are cooling down",
+        retry_after=7,
+    )
+
+    assert delay == 7
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+        assert task.status == "pending"
+        assert task.instance_id is None
+        assert task.retry_count == 2
+        assert "cooling down" in task.error_message
+    broadcaster.broadcast.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_permanent_routing_failure_does_not_overwrite_cancellation(db_factory):
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    rl = RalphLoop(
+        db_factory=db_factory,
+        instance_manager=MagicMock(),
+        broadcaster=broadcaster,
+    )
+    async with db_factory() as db:
+        task = Task(
+            title="cancel wins routing failure",
+            description="continue",
+            provider="codex",
+            status="cancelled",
+        )
+        db.add(task)
+        await db.commit()
+        await db.refresh(task)
+        task_id = task.id
+
+    delay = await rl._handle_account_routing_failure(
+        7,
+        task_id,
+        "permanent account binding error",
+        retry_after=None,
+    )
+
+    assert delay == 0
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+        assert task.status == "cancelled"
+    broadcaster.broadcast.assert_not_awaited()

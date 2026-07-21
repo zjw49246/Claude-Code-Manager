@@ -17,6 +17,7 @@ import signal
 import time
 from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,21 @@ logger = logging.getLogger(__name__)
 
 class CodexAppServerError(RuntimeError):
     """Raised when app-server rejects a request or loses its transport."""
+
+
+class CodexAppServerBusyError(CodexAppServerError):
+    """The requested account home still has an active Codex turn."""
+
+
+class CodexThreadHomeMismatchError(CodexAppServerError):
+    """A thread was routed to a different account without an explicit rebind."""
+
+
+def normalize_codex_home(codex_home: str | os.PathLike[str] | None = None) -> str:
+    """Return the canonical, absolute CODEX_HOME used as the process key."""
+
+    configured = codex_home or os.environ.get("CODEX_HOME") or Path.home() / ".codex"
+    return str(Path(configured).expanduser().resolve(strict=False))
 
 
 class CodexTurnProcess:
@@ -97,11 +113,18 @@ class _TurnContext:
 
 
 class CodexAppServer:
-    """One lazily started app-server shared by all local Codex tasks."""
+    """One lazily started app-server permanently bound to one CODEX_HOME."""
 
-    def __init__(self, binary: str, request_timeout: float = 30.0) -> None:
+    def __init__(
+        self,
+        binary: str,
+        request_timeout: float = 30.0,
+        *,
+        codex_home: str | os.PathLike[str] | None = None,
+    ) -> None:
         self.binary = binary
         self.request_timeout = request_timeout
+        self.codex_home = normalize_codex_home(codex_home)
         self._process: asyncio.subprocess.Process | None = None
         self._reader_task: asyncio.Task | None = None
         self._stderr_task: asyncio.Task | None = None
@@ -112,6 +135,10 @@ class CodexAppServer:
         self._request_id = 0
         self._write_lock = asyncio.Lock()
         self._start_lock = asyncio.Lock()
+        # App-server keeps completed threads loaded in memory.  The registry
+        # uses this set to restart an idle target server before a migrated
+        # rollout is resumed there again, avoiding stale in-memory history.
+        self._known_threads: set[str] = set()
 
     @property
     def is_alive(self) -> bool:
@@ -120,6 +147,20 @@ class CodexAppServer:
     @property
     def pid(self) -> int:
         return self._process.pid if self._process else 0
+
+    @property
+    def has_active_turns(self) -> bool:
+        return any(
+            context.process.returncode is None
+            for context in self._contexts_by_thread.values()
+        )
+
+    def has_active_thread(self, thread_id: str) -> bool:
+        context = self._contexts_by_thread.get(thread_id)
+        return bool(context and context.process.returncode is None)
+
+    def knows_thread(self, thread_id: str) -> bool:
+        return thread_id in self._known_threads
 
     async def ensure_started(self) -> None:
         if self.is_alive:
@@ -136,11 +177,18 @@ class CodexAppServer:
 
     async def _start(self) -> None:
         self._stderr_lines.clear()
+        codex_home = Path(self.codex_home)
+        codex_home.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            os.chmod(codex_home, 0o700)
+        except OSError:
+            logger.warning("Could not enforce 0700 on CODEX_HOME %s", codex_home)
         env = {
             key: value
             for key, value in os.environ.items()
             if key.upper() not in ("CLAUDECODE", "CLAUDE_CODE")
         }
+        env["CODEX_HOME"] = self.codex_home
         started = time.perf_counter()
         self._process = await asyncio.create_subprocess_exec(
             self.binary,
@@ -172,8 +220,9 @@ class CodexAppServer:
             await self.shutdown()
             raise
         logger.info(
-            "Codex app-server ready pid=%s startup_ms=%.1f",
+            "Codex app-server ready pid=%s home=%s startup_ms=%.1f",
             self.pid,
+            self.codex_home,
             (time.perf_counter() - started) * 1000,
         )
 
@@ -222,9 +271,10 @@ class CodexAppServer:
         thread_id = thread.get("id") if isinstance(thread, dict) else None
         if not thread_id:
             raise CodexAppServerError("thread start/resume returned no thread id")
+        self._known_threads.add(thread_id)
         existing = self._contexts_by_thread.get(thread_id)
         if existing and existing.process.returncode is None:
-            raise CodexAppServerError(
+            raise CodexAppServerBusyError(
                 f"thread {thread_id} already has an active turn"
             )
 
@@ -621,3 +671,326 @@ class CodexAppServer:
             self._process = None
         self._reader_task = None
         self._stderr_task = None
+
+
+class CodexAppServerRegistry:
+    """Route Codex turns to one persistent app-server per account home.
+
+    ``CODEX_HOME`` is process-scoped, so changing an environment variable per
+    thread on one app-server can never provide account isolation.  This facade
+    keeps the old InstanceManager-facing surface while enforcing a stable
+    thread -> home owner and independent process lifecycle for every account.
+    """
+
+    def __init__(self, binary: str, request_timeout: float = 30.0) -> None:
+        self.binary = binary
+        self.request_timeout = request_timeout
+        self._servers: dict[str, CodexAppServer] = {}
+        self._thread_owners: dict[str, str] = {}
+        self._draining: set[str] = set()
+        # A thread rebind spans an optional target-server shutdown. Keep the
+        # route reserved across that await so a manual resume or account
+        # maintenance operation cannot reopen the source/target midway.
+        self._rebindings: dict[str, tuple[str, str]] = {}
+        # Number of start/resume RPC sequences admitted for each home but not
+        # yet returned to the caller.  Maintenance checks this under the same
+        # lock so relogin cannot race between server lookup and context setup.
+        self._starting: dict[str, int] = {}
+        self._lock = asyncio.Lock()
+
+    async def start_turn(
+        self,
+        *,
+        codex_home: str | os.PathLike[str] | None = None,
+        **kwargs: Any,
+    ) -> tuple[CodexTurnProcess, str]:
+        home = normalize_codex_home(codex_home)
+        resume_session_id = kwargs.get("resume_session_id")
+        reserved_owner = False
+
+        async with self._lock:
+            if home in self._draining:
+                raise CodexAppServerBusyError(
+                    f"Codex account app-server is draining: {home}"
+                )
+            if resume_session_id:
+                if resume_session_id in self._rebindings:
+                    raise CodexAppServerBusyError(
+                        f"Codex thread {resume_session_id} is being rebound"
+                    )
+                owner = self._thread_owners.get(resume_session_id)
+                if owner is not None and owner != home:
+                    raise CodexThreadHomeMismatchError(
+                        f"Codex thread {resume_session_id} is bound to {owner}, not {home}; "
+                        "migrate and rebind it before resume"
+                    )
+                if owner is None:
+                    # Reserve the route while the RPC is in flight so two
+                    # concurrent resumes cannot load one rollout in two homes.
+                    self._thread_owners[resume_session_id] = home
+                    reserved_owner = True
+            server = self._servers.get(home)
+            if server is None:
+                server = CodexAppServer(
+                    self.binary,
+                    request_timeout=self.request_timeout,
+                    codex_home=home,
+                )
+                self._servers[home] = server
+            self._starting[home] = self._starting.get(home, 0) + 1
+
+        try:
+            process, thread_id = await server.start_turn(**kwargs)
+        except BaseException:
+            async with self._lock:
+                starting = self._starting.get(home, 0) - 1
+                if starting > 0:
+                    self._starting[home] = starting
+                else:
+                    self._starting.pop(home, None)
+                if reserved_owner:
+                    if self._thread_owners.get(resume_session_id) == home:
+                        self._thread_owners.pop(resume_session_id, None)
+            raise
+
+        async with self._lock:
+            starting = self._starting.get(home, 0) - 1
+            if starting > 0:
+                self._starting[home] = starting
+            else:
+                self._starting.pop(home, None)
+            owner = self._thread_owners.get(thread_id)
+            if owner is not None and owner != home:
+                # This should only be reachable for a broken/malicious server
+                # returning another active thread id.  Interrupt this turn
+                # instead of letting account ownership silently change.
+                process.terminate()
+                raise CodexThreadHomeMismatchError(
+                    f"Codex thread {thread_id} is already owned by {owner}, not {home}"
+                )
+            self._thread_owners[thread_id] = home
+        return process, thread_id
+
+    async def steer_turn(self, thread_id: str, content: str) -> bool:
+        async with self._lock:
+            home = self._thread_owners.get(thread_id)
+            server = self._servers.get(home) if home else None
+        if server is None:
+            return False
+        return await server.steer_turn(thread_id, content)
+
+    async def rebind_thread(
+        self,
+        thread_id: str,
+        *,
+        source_codex_home: str | os.PathLike[str] | None,
+        target_codex_home: str | os.PathLike[str],
+    ) -> None:
+        """Move registry ownership after the rollout was safely copied.
+
+        App-server keeps completed threads in memory.  If the target server has
+        loaded this thread before (the B -> A leg of a round trip), an idle
+        target process is restarted so its next ``thread/resume`` reads the
+        newly copied rollout.  Active target turns are never killed; callers
+        receive a retryable busy error instead.
+        """
+
+        source = normalize_codex_home(source_codex_home)
+        target = normalize_codex_home(target_codex_home)
+        if source == target:
+            async with self._lock:
+                self._thread_owners[thread_id] = target
+            return
+
+        restart_server: CodexAppServer | None = None
+        async with self._lock:
+            if thread_id in self._rebindings:
+                raise CodexAppServerBusyError(
+                    f"Codex thread {thread_id} is already being rebound"
+                )
+            owner = self._thread_owners.get(thread_id)
+            if owner is not None and owner != source:
+                raise CodexThreadHomeMismatchError(
+                    f"Codex thread {thread_id} is owned by {owner}, expected {source}"
+                )
+            source_server = self._servers.get(source)
+            if self._starting.get(source, 0) > 0:
+                raise CodexAppServerBusyError(
+                    f"Codex source account has a start/resume request in flight: {source}"
+                )
+            if source_server and source_server.has_active_thread(thread_id):
+                raise CodexAppServerBusyError(
+                    f"Codex thread {thread_id} still has an active turn in {source}"
+                )
+            if target in self._draining:
+                raise CodexAppServerBusyError(
+                    f"Codex target account app-server is draining: {target}"
+                )
+            target_server = self._servers.get(target)
+            if target_server and target_server.knows_thread(thread_id):
+                if self._starting.get(target, 0) > 0:
+                    raise CodexAppServerBusyError(
+                        f"Codex target account has a start/resume request in flight "
+                        f"and a stale cached copy of thread {thread_id}: {target}"
+                    )
+                if target_server.has_active_turns:
+                    raise CodexAppServerBusyError(
+                        f"Codex target account has active turns and a stale cached "
+                        f"copy of thread {thread_id}: {target}"
+                    )
+                self._draining.add(target)
+                restart_server = target_server
+            self._rebindings[thread_id] = (source, target)
+
+        try:
+            if restart_server is not None:
+                try:
+                    await restart_server.shutdown()
+                finally:
+                    async with self._lock:
+                        if self._servers.get(target) is restart_server:
+                            self._servers.pop(target, None)
+                        self._draining.discard(target)
+
+            async with self._lock:
+                owner = self._thread_owners.get(thread_id)
+                if owner is not None and owner != source:
+                    raise CodexThreadHomeMismatchError(
+                        f"Codex thread {thread_id} changed owner to {owner} "
+                        f"while rebinding from {source}"
+                    )
+                self._thread_owners[thread_id] = target
+        finally:
+            async with self._lock:
+                self._rebindings.pop(thread_id, None)
+
+    async def clear_thread_owner_for_recovery(
+        self,
+        thread_id: str,
+        *,
+        expected_codex_home: str | os.PathLike[str],
+    ) -> bool:
+        """Drop an idle owner reservation after a failed migration rollback.
+
+        Completed turn contexts are already removed by ``turn/completed``;
+        only the registry's thread-to-home reservation can remain split from
+        the durable task binding. Clearing that one mapping is safer than
+        shutting down an account server that may be serving unrelated turns.
+        The next resume then cold-routes from the DB-authoritative account.
+        """
+
+        expected = normalize_codex_home(expected_codex_home)
+        async with self._lock:
+            if thread_id in self._rebindings:
+                raise CodexAppServerBusyError(
+                    f"Codex thread {thread_id} is being rebound"
+                )
+            owner = self._thread_owners.get(thread_id)
+            if owner is None:
+                return True
+            if owner != expected:
+                raise CodexThreadHomeMismatchError(
+                    f"Codex thread {thread_id} is owned by {owner}, expected {expected}"
+                )
+            server = self._servers.get(owner)
+            if server and server.has_active_thread(thread_id):
+                raise CodexAppServerBusyError(
+                    f"Codex thread {thread_id} still has an active turn in {owner}"
+                )
+            self._thread_owners.pop(thread_id, None)
+            return True
+
+    async def begin_home_maintenance(
+        self,
+        codex_home: str | os.PathLike[str],
+        *,
+        require_idle: bool = True,
+    ) -> bool:
+        """Reserve and stop one home until ``end_home_maintenance``.
+
+        This is the relogin/delete primitive: once it returns, new turns for
+        the home are rejected even though its old process has already stopped.
+        The caller must release the reservation in a ``finally`` block.
+        """
+
+        home = normalize_codex_home(codex_home)
+        async with self._lock:
+            if home in self._draining:
+                raise CodexAppServerBusyError(
+                    f"Codex account app-server is already draining: {home}"
+                )
+            if any(home in pair for pair in self._rebindings.values()):
+                raise CodexAppServerBusyError(
+                    f"Codex account has a thread rebind in flight: {home}"
+                )
+            server = self._servers.get(home)
+            if require_idle and (
+                self._starting.get(home, 0) > 0
+                or (server is not None and server.has_active_turns)
+            ):
+                raise CodexAppServerBusyError(
+                    f"Codex account still has an active or starting turn: {home}"
+                )
+            self._draining.add(home)
+
+        if server is not None:
+            try:
+                await server.shutdown()
+            except BaseException:
+                async with self._lock:
+                    self._draining.discard(home)
+                raise
+
+        async with self._lock:
+            if server is not None and self._servers.get(home) is server:
+                self._servers.pop(home, None)
+            for thread_id, owner in list(self._thread_owners.items()):
+                if owner == home:
+                    self._thread_owners.pop(thread_id, None)
+        return server is not None
+
+    async def end_home_maintenance(
+        self, codex_home: str | os.PathLike[str],
+    ) -> None:
+        """Release a reservation created by ``begin_home_maintenance``."""
+
+        home = normalize_codex_home(codex_home)
+        async with self._lock:
+            self._draining.discard(home)
+
+    async def shutdown_home(
+        self,
+        codex_home: str | os.PathLike[str],
+        *,
+        require_idle: bool = True,
+    ) -> bool:
+        """One-shot idle shutdown; unlike maintenance it immediately reopens."""
+
+        maintenance_started = False
+        try:
+            stopped = await self.begin_home_maintenance(
+                codex_home, require_idle=require_idle,
+            )
+            maintenance_started = True
+            return stopped
+        finally:
+            if maintenance_started:
+                await self.end_home_maintenance(codex_home)
+
+    async def shutdown(self) -> None:
+        async with self._lock:
+            servers = list(self._servers.items())
+            self._draining.update(self._servers)
+        results = await asyncio.gather(
+            *(server.shutdown() for _, server in servers),
+            return_exceptions=True,
+        )
+        for (home, _), result in zip(servers, results):
+            if isinstance(result, Exception):
+                logger.error("Failed to stop Codex app-server home=%s: %s", home, result)
+        async with self._lock:
+            self._servers.clear()
+            self._thread_owners.clear()
+            self._rebindings.clear()
+            self._starting.clear()
+            self._draining.clear()
