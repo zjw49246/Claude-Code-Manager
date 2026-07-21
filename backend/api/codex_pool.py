@@ -116,7 +116,7 @@ async def codex_relogin(request: Request, account_id: str):
         running = [k for k, v in _relogin_state.items() if v.get("status") == "running"]
         raise HTTPException(status_code=409, detail=f"另一个账号正在登录中（{', '.join(running)}）")
 
-    # Look up the saved OTP receiver credential (171mail or webmail token/password).
+    # Look up the saved OTP receiver API token (171mail or MailCatcher).
     tokens_path = Path.home() / ".codex-pool" / "email_tokens.json"
     receiver_credential = ""
     openai_password = ""
@@ -179,7 +179,7 @@ async def codex_relogin_status(account_id: str):
 
 class AddCodexAccountRequest(BaseModel):
     email: str
-    token: str  # 171mail token, or Onet/Gazeta webmail token/password
+    token: str  # 171mail token, or a MailCatcher-issued Onet/Gazeta query token
     password: str = ""
     login_method: str = ""
 

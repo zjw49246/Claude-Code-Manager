@@ -350,9 +350,10 @@ function AddAccountModal({ onClose, onAdded }: { onClose: () => void; onAdded: (
               value={email} onChange={e => setEmail(e.target.value)} placeholder="user@example.com" required />
           </div>
           <div>
-            <label className="block text-xs text-gray-400 mb-1">接码 Token / 密码</label>
+            <label className="block text-xs text-gray-400 mb-1">接码 API Token</label>
             <input className="w-full bg-gray-700 text-foreground text-xs rounded px-2.5 py-1.5 outline-none focus:ring-1 focus:ring-indigo-500"
-              value={token} onChange={e => setToken(e.target.value)} placeholder="Token 或邮箱密码" required />
+              type="password" value={token} onChange={e => setToken(e.target.value)}
+              placeholder="171mail / MailCatcher Token" required />
           </div>
           <div>
             <label className="block text-xs text-gray-400 mb-1">登录方式</label>
@@ -395,7 +396,7 @@ function AddCodexAccountModal({ onClose, onAdded }: { onClose: () => void; onAdd
   const emailDomain = email.trim().toLowerCase().split('@').pop() || '';
   const detectedMethod = emailDomain === 'onet.pl' ? 'onet' : emailDomain === 'gazeta.pl' ? 'gazeta' : '171mail';
   const activeMethod = loginMethod || detectedMethod;
-  const usesWebmail = activeMethod === 'onet' || activeMethod === 'gazeta';
+  const usesMailCatcher = activeMethod === 'onet' || activeMethod === 'gazeta';
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -450,12 +451,12 @@ function AddCodexAccountModal({ onClose, onAdded }: { onClose: () => void; onAdd
           </div>
           <div>
             <label className="block text-xs text-gray-400 mb-1">
-              {usesWebmail ? '邮箱接码 Token' : '接码 Token'}
+              {usesMailCatcher ? 'MailCatcher 查询 Token' : '接码 Token'}
             </label>
             <input className="w-full bg-gray-700 text-foreground text-xs rounded px-2.5 py-1.5 outline-none focus:ring-1 focus:ring-emerald-500"
-              type="text" value={token} onChange={e => setToken(e.target.value)}
+              type="password" value={token} onChange={e => setToken(e.target.value)}
               placeholder="接码 Token" required />
-            {usesWebmail && <p className="mt-1 text-[11px] text-gray-500">Token 用于接码 API 获取 OpenAI 邮箱验证码。</p>}
+            {usesMailCatcher && <p className="mt-1 text-[11px] text-gray-500">使用 MailCatcher 平台签发的 Token，不是邮箱密码。</p>}
           </div>
           <div>
             <label className="block text-xs text-gray-400 mb-1">密码（留空=无密码登录 OTP）</label>

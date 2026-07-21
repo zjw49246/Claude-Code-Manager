@@ -1,11 +1,34 @@
 """Chrome CDP 登录模块（从 auto_login.py 调用）。"""
-import asyncio, json, os, re, select, shutil, subprocess, sys, tempfile, time
+import asyncio, datetime, json, os, re, select, shutil, subprocess, sys, tempfile, time
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 import httpx, websockets
 
 MAILCATCHER = "https://mail.claude-code-manager.com"
 CDP_PORT = 9222
+
+
+def _mail_timestamp(data: dict) -> float | None:
+    """Return the message timestamp across current and legacy API schemas."""
+    raw = data.get("date") or data.get("Date")
+    if raw:
+        value = str(raw).strip()
+        try:
+            return datetime.datetime.fromisoformat(
+                value.replace("Z", "+00:00")
+            ).timestamp()
+        except ValueError:
+            try:
+                return parsedate_to_datetime(value).timestamp()
+            except (TypeError, ValueError):
+                pass
+
+    subject = str(data.get("subject") or "")
+    match = re.search(r"\|\s+(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", subject)
+    if match:
+        return time.mktime(time.strptime(match.group(1), "%Y-%m-%d %H:%M:%S"))
+    return None
 
 
 async def poll_mailcatcher_magic_link(token: str, after_ts: float, timeout_s: int = 360) -> str | None:
@@ -18,7 +41,15 @@ async def poll_mailcatcher_magic_link(token: str, after_ts: float, timeout_s: in
                     f"{MAILCATCHER}/api/v1/message",
                     params={"token": token, "type": "claude"},
                 )
+                status_code = getattr(response, "status_code", 200)
+                if status_code in {401, 403}:
+                    raise RuntimeError("MailCatcher API rejected the query token")
+                if status_code >= 400:
+                    response.raise_for_status()
                 payload = response.json()
+                if not isinstance(payload, dict):
+                    await asyncio.sleep(2)
+                    continue
                 if payload.get("code") == 202:
                     print("  MailCatcher task still processing")
                     await asyncio.sleep(3)
@@ -27,18 +58,18 @@ async def poll_mailcatcher_magic_link(token: str, after_ts: float, timeout_s: in
                     message = payload.get("message") or payload.get("error") or "unknown error"
                     raise RuntimeError(f"MailCatcher API rejected the mailbox token: {message}")
                 data = payload.get("data") or {}
+                if not isinstance(data, dict):
+                    await asyncio.sleep(2)
+                    continue
             except (httpx.HTTPError, ValueError) as exc:
                 print(f"  MailCatcher retry after {type(exc).__name__}")
                 await asyncio.sleep(2)
                 continue
-            subject = data.get("subject", "")
             code = data.get("code", "")
-            if code.startswith("http") and subject:
-                match = re.search(r"\|\s+(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})", subject)
-                if match:
-                    received_at = time.mktime(time.strptime(match.group(1), "%Y-%m-%d %H:%M:%S"))
-                    if received_at >= after_ts - 10:
-                        return code
+            received_at = _mail_timestamp(data)
+            if code.startswith("http") and received_at is not None:
+                if received_at >= int(after_ts):
+                    return code
             await asyncio.sleep(2)
     return None
 
@@ -124,20 +155,95 @@ async def _wait_cli_oauth_url(cli, capture_path: Path | None, timeout: int):
         await asyncio.sleep(0.1)
     return None, captured
 
+
+def _stop_process(process) -> None:
+    """Terminate and reap a child process without masking the login result."""
+    if process is None:
+        return
+    try:
+        if process.poll() is None:
+            process.kill()
+    except (OSError, ProcessLookupError):
+        pass
+    try:
+        process.wait(timeout=5)
+    except (OSError, ProcessLookupError, subprocess.TimeoutExpired):
+        pass
+
+
+class _LoginResources:
+    """Own all resources that must survive across the CDP login flow."""
+
+    def __init__(self) -> None:
+        self.cli = None
+        self.chrome = None
+        self.chrome_stderr = None
+        self.temporary_auth_dir: Path | None = None
+
+    def cleanup(self) -> None:
+        chrome, self.chrome = self.chrome, None
+        cli, self.cli = self.cli, None
+        chrome_stderr, self.chrome_stderr = self.chrome_stderr, None
+        temporary_auth_dir, self.temporary_auth_dir = self.temporary_auth_dir, None
+        _stop_process(chrome)
+        _stop_process(cli)
+        if chrome_stderr is not None:
+            try:
+                chrome_stderr.close()
+            except OSError:
+                pass
+        if temporary_auth_dir is not None:
+            shutil.rmtree(temporary_auth_dir, ignore_errors=True)
+
+
+def _commit_temporary_credentials(source_dir: Path, target_dir: Path) -> None:
+    """Commit every credential file produced in the isolated auth directory."""
+    target_dir.mkdir(parents=True, exist_ok=True)
+    for name in (".credentials.json", ".claude.json"):
+        source = source_dir / name
+        if not source.exists():
+            continue
+        target = target_dir / name
+        target.write_bytes(source.read_bytes())
+        target.chmod(0o600)
+
+
 async def cdp_login(email: str, token: str, config_dir: str, oauth_url: str = "",
+                    cookies_171: list[dict] | None = None, magic_link: str | None = None,
+                    mail_provider: str = "171mail") -> dict | None:
+    """Run CDP login and deterministically release preflight/browser resources."""
+    resources = _LoginResources()
+    try:
+        return await _cdp_login(
+            email=email,
+            token=token,
+            config_dir=config_dir,
+            oauth_url=oauth_url,
+            cookies_171=cookies_171,
+            magic_link=magic_link,
+            mail_provider=mail_provider,
+            resources=resources,
+        )
+    finally:
+        resources.cleanup()
+
+
+async def _cdp_login(email: str, token: str, config_dir: str, oauth_url: str = "",
                      cookies_171: list[dict] | None = None, magic_link: str | None = None,
-                     mail_provider: str = "171mail") -> dict | None:
+                     mail_provider: str = "171mail", resources: _LoginResources | None = None) -> dict | None:
     """Chrome CDP 登录全流程。
 
     magic_link: 171mail 预取的 magic link，有则直接导航，无则走 MailCatcher 接码。
     cookies_171: 已废弃，保留参数兼容但不使用。
     """
+    resources = resources or _LoginResources()
     temporary_auth_dir = None
     oauth_capture_path = None
     cli = None
     captured = b""
     if mail_provider in {"onet", "gazeta"}:
         temporary_auth_dir = Path(tempfile.mkdtemp(prefix="ccm-claude-auth-"))
+        resources.temporary_auth_dir = temporary_auth_dir
         oauth_capture_path = temporary_auth_dir / "oauth-url"
         cli_env = {
             "CLAUDE_CONFIG_DIR": str(temporary_auth_dir),
@@ -152,13 +258,12 @@ async def cdp_login(email: str, token: str, config_dir: str, oauth_url: str = ""
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, bufsize=0,
         )
+        resources.cli = cli
         print(f"  Preflight CLI pid={cli.pid}")
         oauth_url, captured = await _wait_cli_oauth_url(cli, oauth_capture_path, 30)
         if not oauth_url:
-            if cli.poll() is None: cli.kill()
             diagnostic = re.sub(r"https?://\S+", "[URL]", captured.decode(errors="replace"))
             print(f"  Preflight CLI produced no OAuth URL: {diagnostic[:500]}")
-            shutil.rmtree(temporary_auth_dir, ignore_errors=True)
             return None
         print(f"  Preflight OAuth URL ({len(oauth_url)} chars)")
 
@@ -174,12 +279,14 @@ async def cdp_login(email: str, token: str, config_dir: str, oauth_url: str = ""
     # 不加会让渲染进程因共享内存不足直接崩溃 → CDP 9222 端口起不来，
     # 后面连 http://127.0.0.1:9222/json 报 ConnectError（登录整段失败）。
     chrome_env = _ensure_display(dict(os.environ))
+    resources.chrome_stderr = open("/tmp/chrome-cdp-stderr.log", "w")
     chrome = subprocess.Popen(["google-chrome", "--no-sandbox", "--disable-gpu",
         "--disable-dev-shm-usage", "--disable-software-rasterizer",
         "--no-first-run", "--disable-extensions", "--window-size=1365,900",
         f"--remote-debugging-port={CDP_PORT}", "--user-data-dir=/tmp/chrome-test-login",
         "about:blank"], stdout=subprocess.DEVNULL,
-        stderr=open("/tmp/chrome-cdp-stderr.log", "w"), env=chrome_env)
+        stderr=resources.chrome_stderr, env=chrome_env)
+    resources.chrome = chrome
     print(f"Chrome pid={chrome.pid}")
 
     # 3. Connect CDP (poll until ready)
@@ -198,9 +305,12 @@ async def cdp_login(email: str, token: str, config_dir: str, oauth_url: str = ""
             pass
     if not tabs:
         print("  Chrome CDP not ready after 30s")
-        chrome.kill()
         return None
-    ws_url = next(t["webSocketDebuggerUrl"] for t in tabs if t["type"] == "page")
+    page_tab = next((t for t in tabs if t.get("type") == "page"), None)
+    if not page_tab or not page_tab.get("webSocketDebuggerUrl"):
+        print("  Chrome CDP returned no page tab")
+        return None
+    ws_url = page_tab["webSocketDebuggerUrl"]
 
     try:
         # Mailbox decoding may take over a minute. This is a loopback CDP
@@ -234,11 +344,14 @@ async def cdp_login(email: str, token: str, config_dir: str, oauth_url: str = ""
                 return None
             await asyncio.sleep(0.5)
             r = None
+            mail_request_ts = time.time()
             for _ in range(15):
+                attempt_ts = time.time()
                 r = await cdp_eval(ws, JS_BTN.format(
                     cond="t.includes('Continue with email')||t==='Continue'",
                 ))
                 if str(r).startswith("clicked:"):
+                    mail_request_ts = attempt_ts
                     break
                 await asyncio.sleep(2)
             print(f"  Button: {r}")
@@ -254,10 +367,9 @@ async def cdp_login(email: str, token: str, config_dir: str, oauth_url: str = ""
                 print(f"  Using pre-fetched magic link ({len(magic_link)} chars)")
                 link = magic_link
             else:
-                # mail.com 路径：poll MailCatcher
-                send_ts = time.time()
+                # MailCatcher 路径：mail.com / Onet / Gazeta
                 print("  Polling MailCatcher...")
-                link = await poll_mailcatcher_magic_link(token, send_ts)
+                link = await poll_mailcatcher_magic_link(token, mail_request_ts)
                 if link:
                     print(f"  Got magic link ({len(link)} chars)")
                 if not link:
@@ -293,6 +405,7 @@ async def cdp_login(email: str, token: str, config_dir: str, oauth_url: str = ""
                 cli = subprocess.Popen(["claude", "auth", "login", "--email", email],
                     env=cli_env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT, bufsize=0)
+                resources.cli = cli
                 print(f"  CLI pid={cli.pid}")
                 oauth_url, captured = await _wait_cli_oauth_url(cli, None, 60)
             else:
@@ -538,9 +651,9 @@ async def cdp_login(email: str, token: str, config_dir: str, oauth_url: str = ""
                         creds = json.loads(cred_path.read_text())
                         if creds.get("claudeAiOauth", {}).get("accessToken"):
                             if temporary_auth_dir:
-                                target_cred_path = Path(config_dir) / ".credentials.json"
-                                target_cred_path.write_bytes(cred_path.read_bytes())
-                                target_cred_path.chmod(0o600)
+                                _commit_temporary_credentials(
+                                    temporary_auth_dir, Path(config_dir),
+                                )
                             print("SUCCESS!")
                             return {"code": code, "state": state, "success": True}
                     except Exception:
@@ -550,11 +663,7 @@ async def cdp_login(email: str, token: str, config_dir: str, oauth_url: str = ""
             print("FAILED: authorize (no code/state obtained)")
             return None
     finally:
-        chrome.kill(); chrome.wait()
-        if cli is not None and cli.poll() is None:
-            cli.kill()
-        if temporary_auth_dir:
-            shutil.rmtree(temporary_auth_dir, ignore_errors=True)
+        resources.cleanup()
 
 
 if __name__ == "__main__":

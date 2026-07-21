@@ -11,9 +11,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import os
 import secrets as pysecrets
+import shlex
 from datetime import datetime
 
 import httpx
@@ -34,6 +36,59 @@ logger = logging.getLogger(__name__)
 DEPLOY_EXCLUDES = [
     ".git", ".env", ".env.*", "uploads/", ".claude-manager/", "archive-do-not-use/",
 ]
+
+LOGIN_METHODS = frozenset({"", "171mail", "mailcom", "onet", "gazeta"})
+
+
+def _build_account_login_script(
+    remote_dir: str,
+    *,
+    email: str,
+    token: str,
+    slot: str,
+    login_method: str,
+) -> str:
+    """Build the login script without interpolating unquoted account data."""
+    config_name = ".claude" if slot == "default" else f".claude-{slot}"
+    argv = [
+        "uv",
+        "run",
+        "python",
+        "scripts/auto_login.py",
+        "--email",
+        email,
+        "--token",
+        token,
+        "--add-to-pool",
+        slot,
+        "--save-token",
+    ]
+    if login_method:
+        argv.extend(["--login-method", login_method])
+    return "\n".join([
+        "#!/bin/bash",
+        "set +e",
+        'export PATH="$HOME/.local/bin:$PATH"',
+        f"cd {shlex.quote(remote_dir)}",
+        "pkill -f 'Xvfb :99' 2>/dev/null",
+        "sleep 0.5",
+        "Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp -ac > /dev/null 2>&1 &",
+        "sleep 1",
+        "export DISPLAY=:99",
+        f'CONFIG_DIR="$HOME/"{shlex.quote(config_name)}',
+        f'{shlex.join(argv)} --config-dir "$CONFIG_DIR"',
+        "",
+    ])
+
+
+def _build_script_upload_command(script: str, remote_path: str) -> str:
+    """Transfer a script as base64 so its contents cannot terminate a heredoc."""
+    encoded = base64.b64encode(script.encode()).decode("ascii")
+    quoted_path = shlex.quote(remote_path)
+    return (
+        f"umask 077 && printf %s {shlex.quote(encoded)} | "
+        f"base64 -d > {quoted_path} && chmod 700 {quoted_path}"
+    )
 
 
 class BootstrapError(Exception):
@@ -332,32 +387,52 @@ echo deploy-ok
             await self._log(worker_id, "no accounts given, skipping login (worker 已有凭证或稍后手动登录)")
             return
         remote_dir = settings.worker_remote_dir
+        normalized_accounts = []
+        for account in accounts:
+            email = str(account.get("email", "")).strip()
+            raw_token = account.get("token") or ""
+            login_method = str(account.get("login_method") or "").strip().lower()
+            if not email:
+                raise BootstrapError("account-login", "账号 email 必填")
+            if not isinstance(raw_token, str) or not raw_token.strip():
+                raise BootstrapError("account-login", f"账号 {email} 缺少 token")
+            token = raw_token.strip()
+            if login_method not in LOGIN_METHODS:
+                raise BootstrapError("account-login", f"账号 {email} 的登录方式无效: {login_method}")
+            normalized_accounts.append({
+                "email": email,
+                "token": token,
+                "login_method": login_method,
+            })
+
         results = []
-        for i, acct in enumerate(accounts):
-            email = acct.get("email", "")
-            token = acct.get("token", "")
-            login_method = acct.get("login_method", "")
+        for i, acct in enumerate(normalized_accounts):
+            email = acct["email"]
+            token = acct["token"]
+            login_method = acct["login_method"]
             name = "default" if i == 0 else f"account-{i + 1}"
             await self._log(worker_id, f"login {email} -> pool slot {name} (method: {login_method or 'auto'})")
-            login_method_arg = f" --login-method {login_method}" if login_method in ("171mail", "mailcom") else ""
-            login_script = f"""#!/bin/bash
-set +e
-export PATH="$HOME/.local/bin:$PATH"
-cd {remote_dir}
-pkill -f 'Xvfb :99' 2>/dev/null
-sleep 0.5
-Xvfb :99 -screen 0 1920x1080x24 -nolisten tcp -ac > /dev/null 2>&1 &
-sleep 1
-export DISPLAY=:99
-CONFIG_DIR="$HOME/.claude" && [ "{name}" != "default" ] && CONFIG_DIR="$HOME/.claude-{name}"
-uv run python scripts/auto_login.py --email '{email}' --token '{token}' --config-dir "$CONFIG_DIR" --add-to-pool {name} --save-token{login_method_arg}
-"""
-            # 写脚本到 worker 再执行
-            await ssh.run(f"cat > /tmp/ccm_login.sh << 'SCRIPT'\n{login_script}SCRIPT\nchmod +x /tmp/ccm_login.sh")
-            cmd = "bash /tmp/ccm_login.sh && rm -f /tmp/ccm_login.sh"
-            code, out = await ssh.run(cmd, timeout=600)
+            login_script = _build_account_login_script(
+                remote_dir,
+                email=email,
+                token=token,
+                slot=name,
+                login_method=login_method,
+            )
+            remote_script = f"/tmp/ccm_login_{worker_id}_{i}.sh"
+            upload_cmd = _build_script_upload_command(login_script, remote_script)
+            code, out = await ssh.run(upload_cmd, sensitive=True)
+            if code == 0:
+                quoted_script = shlex.quote(remote_script)
+                cmd = (
+                    f"bash {quoted_script}; rc=$?; "
+                    f"rm -f {quoted_script}; exit $rc"
+                )
+                code, out = await ssh.run(cmd, timeout=600)
+            else:
+                await ssh.run(f"rm -f {shlex.quote(remote_script)}")
             status = "logged_in" if code == 0 else "failed"
-            results.append({"email": email, "status": status})
+            results.append({**acct, "status": status})
             await self._log(worker_id, f"login {email}: {status}")
             if code != 0:
                 await self._log(worker_id, f"login output: {out[-500:]}")

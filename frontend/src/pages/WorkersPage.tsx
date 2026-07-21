@@ -71,7 +71,7 @@ function AddWorkerModal({ onClose, onSaved }: { onClose: () => void; onSaved: ()
                 />
                 <input
                   className="w-full bg-gray-700 text-foreground text-sm rounded px-3 py-2 outline-none focus:ring-1 focus:ring-indigo-500"
-                  value={acct.token} placeholder="Token 或邮箱密码"
+                  type="password" value={acct.token} placeholder="171mail / MailCatcher Token"
                   onChange={(e) => setAccounts(accounts.map((a, j) => (j === i ? { ...a, token: e.target.value } : a)))}
                 />
                 <select

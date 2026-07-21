@@ -973,7 +973,7 @@ export const api = {
     request<RuntimeSettings>(`/api/workers/${id}/settings/runtime`, { method: 'PUT', body: JSON.stringify(data) }),
   getWorkerPool: (id: number) =>
     request<{ enabled: boolean; total: number; available: number; accounts: { id: string; email: string | null; enabled: boolean; available: boolean; cooldown_remaining: number }[] }>(`/api/workers/${id}/pool`),
-  createWorker: (data: { accounts: { email: string; token?: string }[]; name?: string }) =>
+  createWorker: (data: { accounts: { email: string; token?: string; login_method?: string }[]; name?: string }) =>
     request<Worker>('/api/workers', { method: 'POST', body: JSON.stringify(data) }),
   getWorker: (id: number) => request<Worker>(`/api/workers/${id}`),
   getWorkerLogs: (id: number) => request<{ id: number; bootstrap_log: string | null }>(`/api/workers/${id}/logs`),

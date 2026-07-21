@@ -36,8 +36,8 @@ class Worker(Base):
     auth_token: Mapped[str | None] = mapped_column(String(128), nullable=True)
     ccm_commit: Mapped[str | None] = mapped_column(String(64), nullable=True)  # 版本锁定校验
 
-    # 账号信息（在 Worker 本机登录；密码经 secrets 机制加密后只存引用）
-    accounts: Mapped[list | None] = mapped_column(JSON, default=list)  # [{"email", "status": pending/logged_in/failed}]
+    # 账号信息（在 Worker 本机登录；接码 token 留存供 bootstrap retry，API 响应脱敏）
+    accounts: Mapped[list | None] = mapped_column(JSON, default=list)  # email/token/login_method/status
 
     # Project ID 映射（manager_project_id → worker_project_id）
     project_mapping: Mapped[dict | None] = mapped_column(JSON, default=dict)
