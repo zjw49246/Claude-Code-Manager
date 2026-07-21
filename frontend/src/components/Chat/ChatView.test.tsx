@@ -107,7 +107,6 @@ describe('ChatView', () => {
 
   describe('Live turn injection', () => {
     it('steers an executing Codex turn even when Claude PTY is off', async () => {
-      const user = userEvent.setup();
       const task = makeTask({
         provider: 'codex',
         status: 'executing',
@@ -117,9 +116,9 @@ describe('ChatView', () => {
       render(<ChatView task={task} projects={projects} onBack={onBack} onTaskUpdated={onTaskUpdated} />);
 
       const toggle = await screen.findByTitle(/Codex turn\/steer.*插入运行中的 turn/);
-      await user.click(toggle);
-      await user.type(screen.getByRole('textbox'), 'change direction');
-      await user.click(screen.getByTitle('注入到运行中的 turn (Ctrl+Enter)'));
+      await userEvent.click(toggle);
+      await userEvent.type(screen.getByRole('textbox'), 'change direction');
+      await userEvent.click(screen.getByTitle('注入到运行中的 turn (Ctrl+Enter)'));
 
       await waitFor(() => {
         expect(api.injectTaskMessage).toHaveBeenCalledWith(task.id, 'change direction');
