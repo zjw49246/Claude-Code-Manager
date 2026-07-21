@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { TaskForm } from './TaskForm';
 
@@ -407,5 +407,67 @@ describe('Codex provider UI gating', () => {
 
     await userEvent.selectOptions(cliSelect, 'codex');
     expect(screen.getByText('Skills / Monitor 仅支持 Claude')).toBeInTheDocument();
+  });
+});
+
+describe('TaskForm persisted defaults', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    localStorage.clear();
+  });
+
+  it('keeps a stored Codex default when the server config resolves later', async () => {
+    let resolveConfig!: (value: Awaited<ReturnType<typeof api.config>>) => void;
+    (api.config as ReturnType<typeof vi.fn>).mockReturnValue(new Promise((resolve) => {
+      resolveConfig = resolve;
+    }));
+    localStorage.setItem('cc_default_task_config', JSON.stringify({
+      provider: 'codex',
+      model: 'gpt-5.6-sol',
+      effort: 'ultra',
+    }));
+
+    render(<TaskForm onCreated={vi.fn()} />);
+    await openConfigPanel();
+    expect(screen.getByDisplayValue('Codex')).toBeInTheDocument();
+
+    await act(async () => resolveConfig({
+      default_provider: 'claude',
+      provider_options: ['claude', 'codex'],
+      default_model: 'claude-opus-4-6',
+      model_options: ['claude-opus-4-6'],
+      default_codex_model: 'gpt-5.5',
+      codex_model_options: ['gpt-5.6-sol', 'gpt-5.5'],
+      default_effort: 'medium',
+      effort_options: ['low', 'medium', 'high'],
+      codex_effort_options: ['low', 'medium', 'high', 'xhigh', 'ultra'],
+      codex_model_efforts: {
+        'gpt-5.6-sol': ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+      },
+    }));
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue('Codex')).toBeInTheDocument();
+      expect(screen.getByDisplayValue('gpt-5.6-sol')).toBeInTheDocument();
+      expect(screen.getByDisplayValue('ultra')).toBeInTheDocument();
+    });
+  });
+
+  it('restores stored defaults when the server config request fails', async () => {
+    (api.config as ReturnType<typeof vi.fn>).mockRejectedValue(new Error('offline'));
+    localStorage.setItem('cc_default_task_config', JSON.stringify({
+      provider: 'codex',
+      mode: 'goal',
+      timeoutHours: '2',
+    }));
+
+    render(<TaskForm onCreated={vi.fn()} />);
+    await userEvent.click(screen.getByText('Config'));
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue('Codex')).toBeInTheDocument();
+      expect(screen.getByDisplayValue('Goal')).toBeInTheDocument();
+      expect(screen.getByDisplayValue('2 hours')).toBeInTheDocument();
+    });
   });
 });

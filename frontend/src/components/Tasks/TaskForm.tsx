@@ -13,6 +13,31 @@ interface TaskFormProps {
 }
 
 const NEW_PROJECT_VALUE = '__new__';
+const STORAGE_KEY = 'cc_default_task_config';
+
+interface StoredTaskDefaults {
+  priority?: number;
+  mode?: string;
+  provider?: string;
+  model?: string;
+  effort?: string;
+  thinkingBudget?: string;
+  timeoutHours?: string;
+  systemPromptMode?: string;
+}
+
+function readStoredTaskDefaults(): StoredTaskDefaults | null {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    const parsed: unknown = JSON.parse(raw);
+    return parsed && typeof parsed === 'object'
+      ? parsed as StoredTaskDefaults
+      : null;
+  } catch {
+    return null;
+  }
+}
 
 export function TaskForm({ onCreated }: TaskFormProps) {
   const ccUser = JSON.parse(localStorage.getItem('cc_user') || '{}');
@@ -67,7 +92,20 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   const [contextTasks, setContextTasks] = useState<Task[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
-  const STORAGE_KEY = 'cc_default_task_config';
+
+  const applyStoredDefaults = (
+    stored: StoredTaskDefaults | null,
+    fallbackProvider: string,
+  ) => {
+    setPriority(stored?.priority ?? 0);
+    setMode(stored?.mode || 'auto');
+    setProvider(stored?.provider || fallbackProvider);
+    setModel(stored?.model || '');
+    setEffort(stored?.effort || '');
+    setThinkingBudget(stored?.thinkingBudget || '');
+    setTimeoutHours(stored?.timeoutHours || '');
+    setSystemPromptMode(stored?.systemPromptMode || '');
+  };
 
   const loadProjects = () => {
     api.listProjects().then(setProjects).catch(() => {});
@@ -77,6 +115,9 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   useEffect(() => {
     loadProjects();
     if (!isAdmin) api.listWorkers().then(w => setHasWorker(w.length > 0)).catch(() => {});
+    // Restore persisted user choices independently of the server request.
+    // A slow or unavailable backend must not make local defaults disappear.
+    applyStoredDefaults(readStoredTaskDefaults(), 'codex');
     api.config().then((c) => {
       const configuredProvider = c.default_provider || 'codex';
       setDefaultProvider(configuredProvider);
@@ -89,24 +130,12 @@ export function TaskForm({ onCreated }: TaskFormProps) {
       setEffortOptions(c.effort_options);
       setCodexEffortOptions(c.codex_effort_options || ['low', 'medium', 'high', 'xhigh']);
       setCodexModelEfforts(c.codex_model_efforts || {});
-      // Apply localStorage defaults AFTER server config so user overrides win
-      let userProvider = configuredProvider;
-      try {
-        const saved = localStorage.getItem(STORAGE_KEY);
-        if (saved) {
-          const cfg = JSON.parse(saved);
-          if (cfg.provider) userProvider = cfg.provider;
-          if (cfg.priority != null) setPriority(cfg.priority);
-          if (cfg.mode) setMode(cfg.mode);
-          if (cfg.model) setModel(cfg.model);
-          if (cfg.effort) setEffort(cfg.effort);
-          if (cfg.thinkingBudget) setThinkingBudget(cfg.thinkingBudget);
-          if (cfg.timeoutHours) setTimeoutHours(cfg.timeoutHours);
-          if (cfg.systemPromptMode) setSystemPromptMode(cfg.systemPromptMode);
-        }
-      } catch {}
-      setProvider(userProvider);
-    }).catch(() => {});
+      // Re-read after the async request so a default saved while it was in
+      // flight still wins over the server defaults.
+      applyStoredDefaults(readStoredTaskDefaults(), configuredProvider);
+    }).catch(() => {
+      applyStoredDefaults(readStoredTaskDefaults(), 'codex');
+    });
   }, []);
 
   useEffect(() => {
@@ -348,34 +377,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
       setSelectedSecretIds([]);
       setCloneFromTaskId('');
       // Restore localStorage defaults (or fall back to server defaults)
-      try {
-        const saved = localStorage.getItem(STORAGE_KEY);
-        if (saved) {
-          const cfg = JSON.parse(saved);
-          setPriority(cfg.priority ?? 0);
-          setMode(cfg.mode || 'auto');
-          setProvider(cfg.provider || defaultProvider);
-          setModel(cfg.model || '');
-          setEffort(cfg.effort || '');
-          setThinkingBudget(cfg.thinkingBudget || '');
-          setTimeoutHours(cfg.timeoutHours || '');
-          setSystemPromptMode(cfg.systemPromptMode || '');
-        } else {
-          setPriority(0);
-          setModel('');
-          setEffort('');
-          setThinkingBudget('');
-          setSystemPromptMode('');
-          setTimeoutHours('');
-        }
-      } catch {
-        setPriority(0);
-        setModel('');
-        setEffort('');
-        setThinkingBudget('');
-        setSystemPromptMode('');
-        setTimeoutHours('');
-      }
+      applyStoredDefaults(readStoredTaskDefaults(), defaultProvider);
       onCreated();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create task');
