@@ -1,6 +1,7 @@
 """API endpoints for Codex account pool management."""
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -8,6 +9,7 @@ import re
 import secrets
 import signal
 import shutil
+import stat
 import tempfile
 import time
 import uuid
@@ -27,40 +29,79 @@ _relogin_state: dict[str, dict] = {}
 _add_state: dict[str, dict] = {}
 _login_lock = asyncio.Lock()
 _login_attempts: dict[str, dict] = {}
-ACTIVE_LOGIN_STATUSES = {"running", "awaiting_otp", "verifying_otp"}
+ACTIVE_LOGIN_STATUSES = {
+    "running", "awaiting_otp", "verifying_otp", "finalizing",
+}
 LOGIN_EVENT_PREFIX = "CCM_CODEX_LOGIN_EVENT:"
 # ``mailcatcher`` is the source-level name.  Domain-shaped values remain
 # accepted for saved credentials created by older CCM builds; MailCatcher's
 # query token itself identifies the account and is not restricted to mail.com.
 MAIL_PROVIDERS = {"171mail", "mailcatcher", "mailcom", "onet", "gazeta"}
+LOGIN_TRANSACTION_VERSION = 1
+LOGIN_TRANSACTION_DIR = "login-transactions"
+LOGIN_REAP_TIMEOUT_SECONDS = 15.0
 
 
-def _write_private_json(path: Path, data: dict) -> None:
-    """Atomically write a credential-bearing JSON file as mode 0600."""
+class LoginProcessNotTerminal(RuntimeError):
+    """Wrapper termination could not be proven; credential files stay frozen."""
 
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(path.parent, 0o700)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent,
-    )
-    temporary = Path(temporary_name)
+
+def _fsync_directory(path: Path) -> None:
+    """Durably persist a create/replace/unlink in a private directory."""
+
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    descriptor = os.open(path, flags)
     try:
-        os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
-            descriptor = -1
-            json.dump(data, stream, indent=2, ensure_ascii=False)
-            stream.write("\n")
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
+        os.fsync(descriptor)
     finally:
-        if descriptor >= 0:
-            os.close(descriptor)
-        temporary.unlink(missing_ok=True)
+        os.close(descriptor)
 
 
-def _write_private_text(path: Path, value: str) -> None:
-    """Atomically write a small private text file as mode 0600."""
+def _fsync_regular_file_and_parent(path: Path) -> None:
+    """Durably pin one exact non-symlink file and its directory entry."""
+
+    directory_flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        directory_flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        directory_flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_CLOEXEC"):
+        directory_flags |= os.O_CLOEXEC
+
+    file_flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        file_flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_CLOEXEC"):
+        file_flags |= os.O_CLOEXEC
+
+    directory_fd = os.open(path.parent, directory_flags)
+    file_fd = -1
+    try:
+        file_fd = os.open(path.name, file_flags, dir_fd=directory_fd)
+        opened = os.fstat(file_fd)
+        if not stat.S_ISREG(opened.st_mode):
+            raise RuntimeError(f"Login commit target is not a regular file: {path}")
+        os.fsync(file_fd)
+        current = os.stat(
+            path.name, dir_fd=directory_fd, follow_symlinks=False,
+        )
+        if (
+            not stat.S_ISREG(current.st_mode)
+            or current.st_dev != opened.st_dev
+            or current.st_ino != opened.st_ino
+        ):
+            raise RuntimeError(f"Login commit target changed during fsync: {path}")
+        os.fsync(directory_fd)
+    finally:
+        if file_fd >= 0:
+            os.close(file_fd)
+        os.close(directory_fd)
+
+
+def _write_private_bytes(path: Path, value: bytes) -> None:
+    """Atomically write secret bytes with mode 0600 and durable rename."""
 
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(path.parent, 0o700)
@@ -70,16 +111,390 @@ def _write_private_text(path: Path, value: str) -> None:
     temporary = Path(temporary_name)
     try:
         os.fchmod(descriptor, 0o600)
-        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        with os.fdopen(descriptor, "wb") as stream:
             descriptor = -1
             stream.write(value)
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
+        _fsync_directory(path.parent)
     finally:
         if descriptor >= 0:
             os.close(descriptor)
         temporary.unlink(missing_ok=True)
+
+
+def _write_private_json(path: Path, data: dict) -> None:
+    """Atomically write a credential-bearing JSON file as mode 0600."""
+
+    payload = (json.dumps(data, indent=2, ensure_ascii=False) + "\n").encode(
+        "utf-8"
+    )
+    _write_private_bytes(path, payload)
+
+
+def _write_private_text(path: Path, value: str) -> None:
+    """Atomically write a small private text file as mode 0600."""
+
+    _write_private_bytes(path, value.encode("utf-8"))
+
+
+def _snapshot_private_file(path: Path) -> dict:
+    """Capture exact pre-transaction bytes without following symlinks."""
+
+    if not path.exists() and not path.is_symlink():
+        return {"path": str(path), "existed": False, "content_b64": ""}
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeError(f"Refusing unsafe login transaction file: {path}")
+    return {
+        "path": str(path),
+        "existed": True,
+        "content_b64": base64.b64encode(path.read_bytes()).decode("ascii"),
+    }
+
+
+def _restore_private_file(snapshot: dict) -> None:
+    path = Path(str(snapshot["path"]))
+    if snapshot.get("existed"):
+        try:
+            content = base64.b64decode(
+                str(snapshot.get("content_b64") or ""), validate=True,
+            )
+        except (ValueError, TypeError) as exc:
+            raise RuntimeError(f"Invalid login transaction snapshot for {path}") from exc
+        _write_private_bytes(path, content)
+    else:
+        path.unlink(missing_ok=True)
+        if path.parent.exists():
+            _fsync_directory(path.parent)
+
+
+def _login_transaction_directory(pool=None) -> Path:
+    return _pool_config_path(pool).parent / LOGIN_TRANSACTION_DIR
+
+
+def _pending_login_transaction_paths(pool=None) -> list[Path]:
+    transaction_dir = _login_transaction_directory(pool)
+    if not transaction_dir.exists():
+        return []
+    if transaction_dir.is_symlink() or not transaction_dir.is_dir():
+        raise RuntimeError(
+            f"Unsafe Codex login transaction directory: {transaction_dir}"
+        )
+    return sorted(transaction_dir.glob("*.json"))
+
+
+def _reject_unresolved_login_transactions(pool=None) -> None:
+    pending = _pending_login_transaction_paths(pool)
+    if pending:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Codex 登录恢复仍处于隔离状态；请先重启 CCM 完成 journal "
+                f"恢复（pending={len(pending)}）"
+            ),
+        )
+
+
+def _begin_login_transaction(
+    *,
+    attempt_id: str,
+    kind: str,
+    account_id: str,
+    codex_home: str,
+    pool=None,
+) -> Path:
+    """Persist the parent's rollback point before the wrapper can mutate state."""
+
+    home = Path(codex_home).expanduser()
+    if home.is_symlink():
+        raise RuntimeError(f"Refusing symlink CODEX_HOME transaction: {home}")
+    home = home.resolve()
+    transaction_dir = _login_transaction_directory(pool)
+    if transaction_dir.parent.is_symlink() or transaction_dir.is_symlink():
+        raise RuntimeError(
+            f"Refusing symlink Codex transaction directory: {transaction_dir}"
+        )
+    transaction_dir_existed = transaction_dir.exists()
+    transaction_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(transaction_dir, 0o700)
+    if not transaction_dir_existed:
+        _fsync_directory(transaction_dir.parent)
+    journal = {
+        "version": LOGIN_TRANSACTION_VERSION,
+        "attempt_id": attempt_id,
+        "kind": kind,
+        "account_id": account_id,
+        "codex_home": str(home),
+        "created_at": time.time(),
+        "auth": _snapshot_private_file(home / "auth.json"),
+        "previous_backups": sorted(
+            path.name for path in home.glob(".auth.json.login-backup-*")
+        ),
+        # Relogin does not normally mutate the pool file, but its emergency
+        # quarantine may disable the account. Keeping the snapshot makes that
+        # isolation reversible on the next clean startup recovery.
+        "pool_config": _snapshot_private_file(_pool_config_path(pool)),
+    }
+    if kind == "add":
+        journal["credential_store"] = _snapshot_private_file(
+            _credential_store_path(pool)
+        )
+    journal_path = transaction_dir / f"{attempt_id}.json"
+    _write_private_json(journal_path, journal)
+    return journal_path
+
+
+def _read_login_transaction(
+    journal_path: Path,
+    *,
+    expected_pool_path: Path | None = None,
+) -> dict:
+    if journal_path.is_symlink() or not journal_path.is_file():
+        raise RuntimeError(f"Unsafe Codex login transaction journal: {journal_path}")
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    if not isinstance(journal, dict) or journal.get("version") != LOGIN_TRANSACTION_VERSION:
+        raise RuntimeError(f"Unsupported Codex login transaction: {journal_path}")
+    if journal.get("attempt_id") != journal_path.stem:
+        raise RuntimeError(f"Mismatched Codex login transaction id: {journal_path}")
+    if journal.get("kind") not in {"add", "relogin"}:
+        raise RuntimeError(f"Invalid Codex login transaction kind: {journal_path}")
+    home = Path(str(journal.get("codex_home") or ""))
+    if (
+        not home.is_absolute()
+        or home.is_symlink()
+        or home.resolve() != home
+    ):
+        raise RuntimeError(f"Unsafe CODEX_HOME in login transaction: {journal_path}")
+    auth = journal.get("auth")
+    if not isinstance(auth, dict) or Path(str(auth.get("path") or "")) != home / "auth.json":
+        raise RuntimeError(f"Invalid auth snapshot in login transaction: {journal_path}")
+    pool_snapshot = journal.get("pool_config")
+    if not isinstance(pool_snapshot, dict):
+        raise RuntimeError(f"Missing pool snapshot in login transaction: {journal_path}")
+    pool_path = Path(str(pool_snapshot.get("path") or ""))
+    if not pool_path.is_absolute() or pool_path.parent != journal_path.parent.parent:
+        raise RuntimeError(f"Invalid pool snapshot path in login transaction: {journal_path}")
+    if expected_pool_path is not None and pool_path != expected_pool_path.resolve():
+        raise RuntimeError(
+            f"Mismatched pool snapshot path in login transaction: {journal_path}"
+        )
+    if journal["kind"] == "add":
+        credential = journal.get("credential_store")
+        credential_path = Path(str((credential or {}).get("path") or ""))
+        if (
+            not isinstance(credential, dict)
+            or credential_path != pool_path.parent / "email_tokens.json"
+        ):
+            raise RuntimeError(
+                f"Invalid credential snapshot in login transaction: {journal_path}"
+            )
+    return journal
+
+
+def _remove_login_transaction(journal_path: Path) -> None:
+    journal_path.unlink(missing_ok=True)
+    if journal_path.parent.exists():
+        _fsync_directory(journal_path.parent)
+
+
+def _durably_prepare_login_commit(
+    journal_path: Path,
+    *,
+    expected_pool_path: Path,
+) -> dict:
+    """Make every wrapper-owned success file durable before journal commit."""
+
+    journal = _read_login_transaction(
+        journal_path, expected_pool_path=expected_pool_path,
+    )
+    auth_path = Path(str(journal["auth"]["path"]))
+    _fsync_regular_file_and_parent(auth_path)
+    if journal["kind"] == "add":
+        _fsync_regular_file_and_parent(
+            Path(str(journal["credential_store"]["path"]))
+        )
+        _fsync_regular_file_and_parent(
+            Path(str(journal["pool_config"]["path"]))
+        )
+    return journal
+
+
+def _rollback_login_transaction(
+    journal_path: Path,
+    *,
+    expected_pool_path: Path | None = None,
+) -> dict:
+    """Idempotently restore every parent-owned file, then delete the journal."""
+
+    journal = _read_login_transaction(
+        journal_path, expected_pool_path=expected_pool_path,
+    )
+    home = Path(str(journal["codex_home"]))
+    if home.is_symlink():
+        raise RuntimeError(f"CODEX_HOME became a symlink during rollback: {home}")
+    _restore_private_file(journal["auth"])
+    previous = set(journal.get("previous_backups") or [])
+    for backup in home.glob(".auth.json.login-backup-*"):
+        if backup.name not in previous:
+            backup.unlink(missing_ok=True)
+    (home / f".auth.json.ccm-quarantine-{journal['attempt_id']}").unlink(
+        missing_ok=True
+    )
+    (home / ".ccm-login-recovery-failed").unlink(missing_ok=True)
+    # Persist removal of wrapper backups/quarantine artifacts before the
+    # journal is allowed to disappear. A retry remains idempotent if this
+    # fsync itself is interrupted.
+    if home.exists():
+        _fsync_directory(home)
+    if journal["kind"] == "add":
+        _restore_private_file(journal["credential_store"])
+    _restore_private_file(journal["pool_config"])
+    _remove_login_transaction(journal_path)
+    return journal
+
+
+def _quarantine_login_transaction(
+    journal_path: Path,
+    reason: str,
+    *,
+    expected_pool_path: Path | None = None,
+) -> bool:
+    """Fail closed when rollback itself cannot complete.
+
+    Removing ``auth.json`` from the well-known location prevents a fresh Codex
+    process from loading partial credentials.  If the pool record exists it is
+    also disabled atomically.  The journal remains for a later startup retry.
+    """
+
+    journal = _read_login_transaction(
+        journal_path, expected_pool_path=expected_pool_path,
+    )
+    home = Path(str(journal["codex_home"]))
+    if home.is_symlink():
+        raise RuntimeError(f"Refusing to quarantine symlink CODEX_HOME: {home}")
+    home.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(home, 0o700)
+    auth_path = home / "auth.json"
+    try:
+        auth_stat = auth_path.lstat()
+    except FileNotFoundError:
+        auth_stat = None
+    auth_isolated = auth_stat is None
+    if auth_stat is not None and stat.S_ISLNK(auth_stat.st_mode):
+        # Never chmod or otherwise follow a partial/dangling auth symlink. The
+        # parent-owned journal already contains the only rollback copy needed.
+        auth_path.unlink()
+        _fsync_directory(home)
+        auth_isolated = True
+    elif auth_stat is not None and stat.S_ISREG(auth_stat.st_mode):
+        quarantine_path = home / (
+            f".auth.json.ccm-quarantine-{journal['attempt_id']}"
+        )
+        os.replace(auth_path, quarantine_path)
+        quarantine_flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            quarantine_flags |= os.O_NOFOLLOW
+        quarantine_fd = os.open(quarantine_path, quarantine_flags)
+        try:
+            quarantined = os.fstat(quarantine_fd)
+            if not stat.S_ISREG(quarantined.st_mode):
+                raise RuntimeError(
+                    f"Unsafe quarantined auth file: {quarantine_path}"
+                )
+            os.fchmod(quarantine_fd, 0o600)
+            os.fsync(quarantine_fd)
+        finally:
+            os.close(quarantine_fd)
+        _fsync_directory(home)
+        auth_isolated = True
+    elif auth_stat is not None:
+        raise RuntimeError(f"Unsafe auth entry during quarantine: {auth_path}")
+    _write_private_text(
+        home / ".ccm-login-recovery-failed",
+        f"attempt={journal['attempt_id']}\nreason={reason[:1000]}\n",
+    )
+
+    pool_snapshot = journal.get("pool_config")
+    pool_disabled = False
+    if isinstance(pool_snapshot, dict):
+        pool_path = Path(str(pool_snapshot["path"]))
+    else:
+        pool_path = journal_path.parent.parent / "accounts.json"
+    if pool_path.exists() and not pool_path.is_symlink():
+        data = json.loads(pool_path.read_text(encoding="utf-8"))
+        accounts = data.get("accounts") if isinstance(data, dict) else None
+        if isinstance(accounts, list):
+            for record in accounts:
+                if not isinstance(record, dict):
+                    continue
+                if (
+                    record.get("id") == journal.get("account_id")
+                    or os.path.abspath(os.path.expanduser(str(record.get("codex_home") or "")))
+                    == os.path.abspath(str(home))
+                ):
+                    record["enabled"] = False
+                    record["login_recovery_failed"] = True
+                    pool_disabled = True
+            if pool_disabled:
+                _write_private_json(pool_path, data)
+    # An absent auth is sufficient isolation even when an add never registered
+    # its account record. A registered record is disabled as defense in depth.
+    return auth_isolated
+
+
+def recover_pending_codex_login_transactions(
+    pool_config_path: str | os.PathLike[str] | None,
+) -> dict:
+    """Rollback journals left by an all-process service restart.
+
+    This function is synchronous by design and must run before ``CodexPool`` is
+    constructed, so no task can observe wrapper-mutated files first.
+    """
+
+    raw_pool_path = (
+        Path(os.path.expandvars(os.path.expanduser(os.fspath(pool_config_path))))
+        if pool_config_path
+        else Path.home() / ".codex-pool" / "accounts.json"
+    )
+    if raw_pool_path.is_symlink() or raw_pool_path.parent.is_symlink():
+        raise RuntimeError(
+            f"Refusing symlink Codex pool recovery path: {raw_pool_path}"
+        )
+    pool_path = raw_pool_path.resolve()
+    transaction_dir = pool_path.parent / LOGIN_TRANSACTION_DIR
+    recovered: list[str] = []
+    quarantined: list[str] = []
+    if not transaction_dir.exists():
+        return {"recovered": recovered, "quarantined": quarantined}
+    if transaction_dir.is_symlink() or not transaction_dir.is_dir():
+        raise RuntimeError(f"Unsafe Codex login transaction directory: {transaction_dir}")
+    os.chmod(transaction_dir, 0o700)
+    # A quarantined transaction can coexist with a later journal only after a
+    # bug/manual intervention. Roll newest to oldest so snapshots unwind like
+    # a stack and converge on the earliest pre-transaction state.
+    journal_paths = sorted(
+        transaction_dir.glob("*.json"),
+        key=lambda path: (path.lstat().st_mtime_ns, path.name),
+        reverse=True,
+    )
+    for journal_path in journal_paths:
+        try:
+            journal = _rollback_login_transaction(
+                journal_path, expected_pool_path=pool_path,
+            )
+            recovered.append(str(journal.get("attempt_id") or journal_path.stem))
+        except Exception as exc:
+            logger.exception("Failed to rollback Codex login transaction %s", journal_path)
+            if _quarantine_login_transaction(
+                journal_path, str(exc), expected_pool_path=pool_path,
+            ):
+                quarantined.append(journal_path.stem)
+            else:
+                raise RuntimeError(
+                    f"Unable to isolate Codex login transaction {journal_path}"
+                ) from exc
+    return {"recovered": recovered, "quarantined": quarantined}
 
 
 async def _stop_unfinished_login_process(
@@ -87,67 +502,314 @@ async def _stop_unfinished_login_process(
     *,
     operation: str,
 ) -> bool:
-    """Prevent a failed/cancelled watcher from releasing a live login process."""
+    """Prevent a failed/cancelled watcher from releasing a live login process.
+
+    The return value records whether the process was live when cleanup began,
+    not merely whether ``kill()`` happened to succeed.  A process can disappear
+    between the returncode check and ``killpg``; its auth transaction still
+    needs reconciliation before home maintenance is released.
+    """
 
     if proc.returncode is not None:
         return False
-    kill_sent = False
+    was_unfinished = True
     try:
         pid = getattr(proc, "pid", None)
         if isinstance(pid, int) and pid > 0 and hasattr(os, "killpg"):
             os.killpg(pid, signal.SIGKILL)
         else:
             proc.kill()
-        kill_sent = True
     except ProcessLookupError:
         pass
     except Exception:
         logger.exception("Failed to stop Codex %s process group", operation)
         try:
             proc.kill()
-            kill_sent = True
         except (ProcessLookupError, Exception):
             logger.exception("Failed to stop Codex %s wrapper process", operation)
-    try:
-        await proc.wait()
-    except BaseException:
-        logger.exception("Failed to reap unfinished Codex %s process", operation)
-    return kill_sent
+    waiter = asyncio.create_task(proc.wait())
+    deadline = asyncio.get_running_loop().time() + LOGIN_REAP_TIMEOUT_SECONDS
+    while not waiter.done():
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            waiter.cancel()
+            try:
+                await waiter
+            except asyncio.CancelledError:
+                pass
+            raise LoginProcessNotTerminal(
+                f"Codex {operation} wrapper did not terminate after SIGKILL"
+            )
+        try:
+            done, _pending = await asyncio.wait({waiter}, timeout=remaining)
+        except asyncio.CancelledError:
+            # Cleanup itself may be targeted during application shutdown. Keep
+            # waiting; the persistent journal is the fallback for hard kill.
+            continue
+        if not done:
+            waiter.cancel()
+            try:
+                await waiter
+            except asyncio.CancelledError:
+                pass
+            raise LoginProcessNotTerminal(
+                f"Codex {operation} wrapper termination timed out"
+            )
+    if waiter.cancelled():
+        raise LoginProcessNotTerminal(
+            f"Codex {operation} wrapper waiter was cancelled"
+        )
+    wait_error = waiter.exception()
+    if wait_error is not None and proc.returncode is None:
+        raise LoginProcessNotTerminal(
+            f"Codex {operation} wrapper wait failed: {wait_error}"
+        ) from wait_error
+    if proc.returncode is None:
+        raise LoginProcessNotTerminal(
+            f"Codex {operation} wrapper wait returned without a terminal status"
+        )
+    return was_unfinished
 
 
-def _login_auth_snapshot(codex_home: str) -> tuple[bool, set[str]]:
-    home = Path(codex_home)
-    return (
-        (home / "auth.json").exists(),
-        {path.name for path in home.glob(".auth.json.login-backup-*")},
-    )
+async def _await_login_cleanup(coro):
+    """Delay caller cancellation until the isolated cleanup task is complete."""
+
+    cleanup_task = asyncio.create_task(coro)
+    cancelled = False
+    while not cleanup_task.done():
+        try:
+            await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError:
+            # Do not let HTTP disconnect/app shutdown cancel process reaping or
+            # credential rollback. Repeated cancellation is handled by looping.
+            cancelled = True
+    result = cleanup_task.result()
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
 
 
-def _restore_auth_after_forced_login_stop(
-    codex_home: str,
+async def _finalize_login_transaction(
     *,
-    had_auth: bool,
-    previous_backups: set[str],
-) -> None:
-    """Restore the pre-login auth state after SIGKILL bypassed wrapper cleanup."""
+    proc: asyncio.subprocess.Process,
+    operation: str,
+    journal_path: Path,
+    commit_requested: bool,
+    instance_manager,
+    codex_home: str,
+    login_lock: asyncio.Lock,
+    attempt_id: str,
+    state_store: dict[str, dict],
+    state_key: str,
+    expected_pool_path: Path | None = None,
+) -> dict:
+    """Reap wrapper and atomically commit, rollback, or quarantine its files."""
 
-    home = Path(codex_home)
-    auth_path = home / "auth.json"
-    new_backups = [
-        path for path in home.glob(".auth.json.login-backup-*")
-        if path.name not in previous_backups
-    ]
-    if had_auth and new_backups:
-        newest = max(new_backups, key=lambda path: (path.stat().st_mtime_ns, path.name))
-        os.replace(newest, auth_path)
-        for backup in new_backups:
-            if backup != newest:
-                backup.unlink(missing_ok=True)
-        os.chmod(auth_path, 0o600)
-    elif not had_auth:
-        auth_path.unlink(missing_ok=True)
-        for backup in new_backups:
-            backup.unlink(missing_ok=True)
+    committed = False
+    cleanup_safe = False
+    detail = ""
+    recovery_failed = False
+    try:
+        interrupted_live_process = await _stop_unfinished_login_process(
+            proc, operation=operation,
+        )
+        if (
+            commit_requested
+            and not interrupted_live_process
+            and proc.returncode == 0
+        ):
+            try:
+                commit_pool_path = expected_pool_path
+                if commit_pool_path is None:
+                    journal = _read_login_transaction(journal_path)
+                    commit_pool_path = Path(
+                        str(journal["pool_config"]["path"])
+                    )
+                _durably_prepare_login_commit(
+                    journal_path,
+                    expected_pool_path=commit_pool_path,
+                )
+                _remove_login_transaction(journal_path)
+                committed = True
+            except BaseException as exc:
+                detail = (
+                    "Login commit validation failed and was rolled back: "
+                    f"{exc}"
+                )
+                logger.exception("Failed to commit Codex %s", operation)
+                _rollback_login_transaction(
+                    journal_path,
+                    expected_pool_path=expected_pool_path,
+                )
+        else:
+            _rollback_login_transaction(
+                journal_path,
+                expected_pool_path=expected_pool_path,
+            )
+        cleanup_safe = True
+    except LoginProcessNotTerminal as exc:
+        # Never touch auth while the wrapper could still write it. Retaining
+        # home maintenance is the isolation mechanism; startup journal replay
+        # completes rollback after systemd has killed the orphan.
+        detail = f"Login wrapper termination is unconfirmed: {exc}"
+        logger.exception("Could not prove Codex %s wrapper termination", operation)
+        cleanup_safe = False
+    except BaseException as exc:
+        # This coroutine runs in its own shielded task, so CancelledError here
+        # means the cleanup primitive itself failed rather than caller
+        # cancellation. Fail closed and keep a persistent journal for startup.
+        detail = (
+            f"{detail}; " if detail else ""
+        ) + f"Login transaction recovery failed: {exc}"
+        logger.exception("Failed to finalize Codex %s", operation)
+        recovery_failed = True
+        try:
+            cleanup_safe = _quarantine_login_transaction(
+                journal_path,
+                detail,
+                expected_pool_path=expected_pool_path,
+            )
+        except Exception as quarantine_exc:
+            detail = (
+                f"{detail}; credential quarantine failed: {quarantine_exc}"
+            )
+            logger.exception("Failed to quarantine Codex %s", operation)
+            cleanup_safe = False
+
+    _login_attempts.pop(attempt_id, None)
+    if committed:
+        state_store[state_key] = {
+            "status": "success",
+            "finished_at": time.time(),
+            "attempt_id": attempt_id,
+        }
+    elif cleanup_safe and recovery_failed:
+        state_store[state_key] = {
+            "status": "recovery_failed",
+            "detail": detail,
+            "finished_at": time.time(),
+            "attempt_id": attempt_id,
+        }
+    elif cleanup_safe and state_store.get(state_key, {}).get("status") in ACTIVE_LOGIN_STATUSES:
+        state_store[state_key] = {
+            "status": "failed",
+            "detail": (
+                detail
+                or "Login attempt was interrupted and rolled back safely"
+            ),
+            "finished_at": time.time(),
+            "attempt_id": attempt_id,
+        }
+    elif not cleanup_safe:
+        state_store[state_key] = {
+            "status": "recovery_failed",
+            "detail": (
+                detail
+                or "Login wrapper could not be stopped and credentials remain isolated by maintenance"
+            ),
+            "finished_at": time.time(),
+            "attempt_id": attempt_id,
+        }
+
+    if cleanup_safe:
+        try:
+            await instance_manager.end_codex_app_server_home_maintenance(
+                codex_home
+            )
+        except Exception as exc:
+            logger.exception("Failed to release Codex maintenance after %s", operation)
+            state_store[state_key] = {
+                "status": "recovery_failed",
+                "detail": f"Credentials are safe but maintenance release failed: {exc}",
+                "finished_at": time.time(),
+                "attempt_id": attempt_id,
+            }
+        finally:
+            if login_lock.locked():
+                login_lock.release()
+    else:
+        # Keep the per-home maintenance reservation: it is the final isolation
+        # barrier when neither rollback nor filesystem quarantine succeeded.
+        # Release only the global lock so other accounts remain operable; the
+        # explicit recovery_failed state makes the affected home visible.
+        if login_lock.locked():
+            login_lock.release()
+
+    try:
+        pool = _get_pool()
+        pool.reload()
+        pool._quota_cache = None
+    except Exception:
+        logger.exception("Failed to reload Codex pool after %s", operation)
+    return {
+        "committed": committed,
+        "cleanup_safe": cleanup_safe,
+        "detail": detail,
+    }
+
+
+async def _rollback_unspawned_login_transaction(
+    *,
+    journal_path: Path,
+    instance_manager,
+    codex_home: str,
+    login_lock: asyncio.Lock,
+    attempt_id: str,
+    state_store: dict[str, dict],
+    state_key: str,
+    expected_pool_path: Path | None = None,
+) -> None:
+    """Close a prepared transaction when subprocess creation never returned."""
+
+    cleanup_safe = False
+    detail = ""
+    try:
+        _rollback_login_transaction(
+            journal_path, expected_pool_path=expected_pool_path,
+        )
+        cleanup_safe = True
+    except Exception as exc:
+        detail = f"Prepared login transaction rollback failed: {exc}"
+        logger.exception("Failed to rollback unspawned login %s", attempt_id)
+        try:
+            cleanup_safe = _quarantine_login_transaction(
+                journal_path,
+                detail,
+                expected_pool_path=expected_pool_path,
+            )
+        except Exception as quarantine_exc:
+            detail = f"{detail}; credential quarantine failed: {quarantine_exc}"
+            logger.exception("Failed to quarantine unspawned login %s", attempt_id)
+
+    if detail:
+        state_store[state_key] = {
+            "status": "recovery_failed",
+            "detail": detail,
+            "finished_at": time.time(),
+            "attempt_id": attempt_id,
+        }
+    if not cleanup_safe:
+        # Keep per-home maintenance as the final isolation barrier.
+        if login_lock.locked():
+            login_lock.release()
+        return
+
+    try:
+        await instance_manager.end_codex_app_server_home_maintenance(codex_home)
+    except Exception as exc:
+        logger.exception(
+            "Failed to release Codex maintenance for unspawned login %s",
+            attempt_id,
+        )
+        state_store[state_key] = {
+            "status": "recovery_failed",
+            "detail": f"Credentials are safe but maintenance release failed: {exc}",
+            "finished_at": time.time(),
+            "attempt_id": attempt_id,
+        }
+    finally:
+        if login_lock.locked():
+            login_lock.release()
 
 
 def _failed_login_home_is_reusable(codex_home: Path) -> bool:
@@ -212,7 +874,15 @@ def _credential_store_path(pool=None) -> Path:
 
 def _pool_config_path(pool=None) -> Path:
     configured = getattr(pool, "_config_path", None)
-    return Path(configured) if configured else Path.home() / ".codex-pool" / "accounts.json"
+    if configured:
+        raw = Path(
+            os.path.expandvars(os.path.expanduser(os.fspath(configured)))
+        )
+    else:
+        raw = Path.home() / ".codex-pool" / "accounts.json"
+    if raw.is_symlink() or raw.parent.is_symlink():
+        raise RuntimeError(f"Refusing symlink Codex pool config path: {raw}")
+    return raw.resolve()
 
 
 def _sanitize_login_detail(text: str) -> str:
@@ -429,27 +1099,25 @@ async def _watch_relogin(
     instance_manager,
     codex_home: str,
     login_lock: asyncio.Lock,
-    auth_snapshot: tuple[bool, set[str]],
+    journal_path: Path,
+    expected_pool_path: Path | None = None,
 ):
+    watch_completed = False
     try:
         tail = await _collect_login_output(proc, attempt_id)
+        watch_completed = True
         previous_status = _relogin_state.get(account_id, {}).get("status")
         _relogin_state[account_id] = {
             "status": (
-                "success" if proc.returncode == 0
+                "finalizing" if proc.returncode == 0
                 else "expired" if previous_status == "expired"
                 else "failed"
             ),
             "detail": tail,
-            "finished_at": time.time(),
             "attempt_id": attempt_id,
         }
-        if proc.returncode == 0:
-            try:
-                _get_pool().reload()
-                _get_pool()._quota_cache = None
-            except Exception:
-                pass
+        if proc.returncode != 0:
+            _relogin_state[account_id]["finished_at"] = time.time()
     except Exception as exc:
         logger.exception("Codex relogin watcher failed for %s", account_id)
         _relogin_state[account_id] = {
@@ -458,27 +1126,19 @@ async def _watch_relogin(
             "finished_at": time.time(),
         }
     finally:
-        try:
-            forced_stop = await _stop_unfinished_login_process(
-                proc, operation=f"relogin for {account_id}",
-            )
-            if forced_stop:
-                _restore_auth_after_forced_login_stop(
-                    codex_home,
-                    had_auth=auth_snapshot[0],
-                    previous_backups=auth_snapshot[1],
-                )
-        except BaseException:
-            logger.exception("Failed to clean interrupted relogin for %s", account_id)
-        finally:
-            _login_attempts.pop(attempt_id, None)
-            try:
-                await instance_manager.end_codex_app_server_home_maintenance(codex_home)
-            except Exception:
-                logger.exception("Failed to end Codex maintenance after relogin for %s", account_id)
-            finally:
-                if login_lock.locked():
-                    login_lock.release()
+        await _await_login_cleanup(_finalize_login_transaction(
+            proc=proc,
+            operation=f"relogin for {account_id}",
+            journal_path=journal_path,
+            commit_requested=watch_completed and proc.returncode == 0,
+            instance_manager=instance_manager,
+            codex_home=codex_home,
+            login_lock=login_lock,
+            attempt_id=attempt_id,
+            state_store=_relogin_state,
+            state_key=account_id,
+            expected_pool_path=expected_pool_path,
+        ))
 
 
 @router.post("/accounts/{account_id}/relogin")
@@ -496,13 +1156,13 @@ async def codex_relogin(request: Request, account_id: str):
             "status": state["status"],
             "attempt_id": state.get("attempt_id"),
         }
-
     if _login_lock.locked():
         running = [
             k for k, v in _relogin_state.items()
             if v.get("status") in ACTIVE_LOGIN_STATUSES
         ]
         raise HTTPException(status_code=409, detail=f"另一个账号正在登录中（{', '.join(running)}）")
+    _reject_unresolved_login_transactions(pool)
 
     receiver_token, mail_provider, openai_password = _read_saved_mailbox_credential(
         acc.email,
@@ -523,11 +1183,12 @@ async def codex_relogin(request: Request, account_id: str):
 
     instance_manager = _get_instance_manager()
     login_lock = _login_lock
+    pool_path = _pool_config_path(pool)
     await login_lock.acquire()
     maintenance_started = False
     watcher_started = False
     proc: asyncio.subprocess.Process | None = None
-    auth_snapshot: tuple[bool, set[str]] | None = None
+    journal_path: Path | None = None
     try:
         # Starting Xvfb does not touch CODEX_HOME, so reserve the account only
         # after the shared browser runtime is ready.
@@ -539,10 +1200,16 @@ async def codex_relogin(request: Request, account_id: str):
         except CodexAppServerBusyError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         maintenance_started = True
-        auth_snapshot = _login_auth_snapshot(acc.codex_home)
 
         script = root / "scripts" / "codex_login.py"
         attempt_id = uuid.uuid4().hex
+        journal_path = _begin_login_transaction(
+            attempt_id=attempt_id,
+            kind="relogin",
+            account_id=account_id,
+            codex_home=acc.codex_home,
+            pool=pool,
+        )
         cmd = [
             str(login_py), str(script),
             "--email", acc.email,
@@ -585,7 +1252,8 @@ async def codex_relogin(request: Request, account_id: str):
                 instance_manager,
                 acc.codex_home,
                 login_lock,
-                auth_snapshot,
+                journal_path,
+                pool_path,
             )
         )
         watcher_started = True
@@ -594,29 +1262,43 @@ async def codex_relogin(request: Request, account_id: str):
         if not watcher_started:
             if "attempt_id" in locals():
                 _login_attempts.pop(attempt_id, None)
-            try:
-                if proc is not None and proc.returncode is None:
-                    try:
-                        forced_stop = await _stop_unfinished_login_process(
-                            proc, operation=f"relogin startup for {account_id}",
+            if proc is not None and journal_path is not None:
+                await _await_login_cleanup(_finalize_login_transaction(
+                    proc=proc,
+                    operation=f"relogin startup for {account_id}",
+                    journal_path=journal_path,
+                    commit_requested=False,
+                    instance_manager=instance_manager,
+                    codex_home=acc.codex_home,
+                    login_lock=login_lock,
+                    attempt_id=attempt_id,
+                    state_store=_relogin_state,
+                    state_key=account_id,
+                    expected_pool_path=pool_path,
+                ))
+            else:
+                if journal_path is not None:
+                    await _await_login_cleanup(
+                        _rollback_unspawned_login_transaction(
+                            journal_path=journal_path,
+                            instance_manager=instance_manager,
+                            codex_home=acc.codex_home,
+                            login_lock=login_lock,
+                            attempt_id=attempt_id,
+                            state_store=_relogin_state,
+                            state_key=account_id,
+                            expected_pool_path=pool_path,
                         )
-                        if forced_stop and auth_snapshot is not None:
-                            _restore_auth_after_forced_login_stop(
-                                acc.codex_home,
-                                had_auth=auth_snapshot[0],
-                                previous_backups=auth_snapshot[1],
+                    )
+                else:
+                    try:
+                        if maintenance_started:
+                            await instance_manager.end_codex_app_server_home_maintenance(
+                                acc.codex_home
                             )
-                    except Exception:
-                        logger.exception("Failed to stop orphaned Codex relogin process for %s", account_id)
-            finally:
-                try:
-                    if maintenance_started:
-                        await instance_manager.end_codex_app_server_home_maintenance(acc.codex_home)
-                except Exception:
-                    logger.exception("Failed to end Codex maintenance for %s", account_id)
-                finally:
-                    if login_lock.locked():
-                        login_lock.release()
+                    finally:
+                        if login_lock.locked():
+                            login_lock.release()
 
 
 @router.get("/accounts/{account_id}/relogin")
@@ -689,32 +1371,31 @@ async def _ensure_xvfb():
 
 async def _watch_add(
     email: str,
+    account_id: str,
     attempt_id: str,
     proc: asyncio.subprocess.Process,
     instance_manager,
     codex_home: str,
     login_lock: asyncio.Lock,
-    auth_snapshot: tuple[bool, set[str]],
+    journal_path: Path,
+    expected_pool_path: Path | None = None,
 ):
+    watch_completed = False
     try:
         tail = await _collect_login_output(proc, attempt_id)
+        watch_completed = True
         previous_status = _add_state.get(email, {}).get("status")
         _add_state[email] = {
             "status": (
-                "success" if proc.returncode == 0
+                "finalizing" if proc.returncode == 0
                 else "expired" if previous_status == "expired"
                 else "failed"
             ),
             "detail": tail,
-            "finished_at": time.time(),
             "attempt_id": attempt_id,
         }
-        if proc.returncode == 0:
-            try:
-                _get_pool().reload()
-                _get_pool()._quota_cache = None
-            except Exception:
-                logger.exception("Failed to reload Codex pool after adding %s", email)
+        if proc.returncode != 0:
+            _add_state[email]["finished_at"] = time.time()
     except Exception as exc:
         logger.exception("Codex add-account watcher failed for %s", email)
         _add_state[email] = {
@@ -723,27 +1404,19 @@ async def _watch_add(
             "finished_at": time.time(),
         }
     finally:
-        try:
-            forced_stop = await _stop_unfinished_login_process(
-                proc, operation=f"add-account for {email}",
-            )
-            if forced_stop:
-                _restore_auth_after_forced_login_stop(
-                    codex_home,
-                    had_auth=auth_snapshot[0],
-                    previous_backups=auth_snapshot[1],
-                )
-        except BaseException:
-            logger.exception("Failed to clean interrupted add-account for %s", email)
-        finally:
-            _login_attempts.pop(attempt_id, None)
-            try:
-                await instance_manager.end_codex_app_server_home_maintenance(codex_home)
-            except Exception:
-                logger.exception("Failed to end Codex maintenance after adding %s", email)
-            finally:
-                if login_lock.locked():
-                    login_lock.release()
+        await _await_login_cleanup(_finalize_login_transaction(
+            proc=proc,
+            operation=f"add-account for {email}",
+            journal_path=journal_path,
+            commit_requested=watch_completed and proc.returncode == 0,
+            instance_manager=instance_manager,
+            codex_home=codex_home,
+            login_lock=login_lock,
+            attempt_id=attempt_id,
+            state_store=_add_state,
+            state_key=email,
+            expected_pool_path=expected_pool_path,
+        ))
 
 
 def _allocate_codex_account_home(pool) -> tuple[str, str]:
@@ -803,6 +1476,7 @@ async def codex_add_account(request: Request, body: AddCodexAccountRequest):
         )
 
     pool = _get_pool()
+    _reject_unresolved_login_transactions(pool)
     account_id, codex_home = _allocate_codex_account_home(pool)
 
     root = Path(__file__).resolve().parents[2]
@@ -812,6 +1486,7 @@ async def codex_add_account(request: Request, body: AddCodexAccountRequest):
 
     script = root / "scripts" / "codex_login.py"
     attempt_id = uuid.uuid4().hex
+    pool_path = _pool_config_path(pool)
     cmd = [
         str(login_py), str(script),
         "--email", email,
@@ -820,7 +1495,7 @@ async def codex_add_account(request: Request, body: AddCodexAccountRequest):
         "--save-token",
         "--attempt-id", attempt_id,
         "--credentials-stdin",
-        "--pool-config", str(_pool_config_path(pool)),
+        "--pool-config", str(pool_path),
         "--credential-store", str(_credential_store_path(pool)),
     ]
     if login_method:
@@ -832,7 +1507,7 @@ async def codex_add_account(request: Request, body: AddCodexAccountRequest):
     maintenance_started = False
     watcher_started = False
     proc: asyncio.subprocess.Process | None = None
-    auth_snapshot: tuple[bool, set[str]] | None = None
+    journal_path: Path | None = None
     try:
         # The browser/Xvfb runtime and account-id allocation are process-wide;
         # serialize the full login and reserve the destination CODEX_HOME so
@@ -845,7 +1520,13 @@ async def codex_add_account(request: Request, body: AddCodexAccountRequest):
         except CodexAppServerBusyError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         maintenance_started = True
-        auth_snapshot = _login_auth_snapshot(codex_home)
+        journal_path = _begin_login_transaction(
+            attempt_id=attempt_id,
+            kind="add",
+            account_id=account_id,
+            codex_home=codex_home,
+            pool=pool,
+        )
 
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -876,12 +1557,14 @@ async def codex_add_account(request: Request, body: AddCodexAccountRequest):
         asyncio.get_running_loop().create_task(
             _watch_add(
                 email,
+                account_id,
                 attempt_id,
                 proc,
                 instance_manager,
                 codex_home,
                 login_lock,
-                auth_snapshot,
+                journal_path,
+                pool_path,
             )
         )
         watcher_started = True
@@ -894,34 +1577,43 @@ async def codex_add_account(request: Request, body: AddCodexAccountRequest):
     finally:
         if not watcher_started:
             _login_attempts.pop(attempt_id, None)
-            try:
-                if proc is not None and proc.returncode is None:
+            if proc is not None and journal_path is not None:
+                await _await_login_cleanup(_finalize_login_transaction(
+                    proc=proc,
+                    operation=f"add-account startup for {email}",
+                    journal_path=journal_path,
+                    commit_requested=False,
+                    instance_manager=instance_manager,
+                    codex_home=codex_home,
+                    login_lock=login_lock,
+                    attempt_id=attempt_id,
+                    state_store=_add_state,
+                    state_key=email,
+                    expected_pool_path=pool_path,
+                ))
+            else:
+                if journal_path is not None:
+                    await _await_login_cleanup(
+                        _rollback_unspawned_login_transaction(
+                            journal_path=journal_path,
+                            instance_manager=instance_manager,
+                            codex_home=codex_home,
+                            login_lock=login_lock,
+                            attempt_id=attempt_id,
+                            state_store=_add_state,
+                            state_key=email,
+                            expected_pool_path=pool_path,
+                        )
+                    )
+                else:
                     try:
-                        forced_stop = await _stop_unfinished_login_process(
-                            proc, operation=f"add-account startup for {email}",
-                        )
-                        if forced_stop and auth_snapshot is not None:
-                            _restore_auth_after_forced_login_stop(
+                        if maintenance_started:
+                            await instance_manager.end_codex_app_server_home_maintenance(
                                 codex_home,
-                                had_auth=auth_snapshot[0],
-                                previous_backups=auth_snapshot[1],
                             )
-                    except Exception:
-                        logger.exception(
-                            "Failed to stop orphaned Codex add-account process for %s",
-                            email,
-                        )
-            finally:
-                try:
-                    if maintenance_started:
-                        await instance_manager.end_codex_app_server_home_maintenance(
-                            codex_home,
-                        )
-                except Exception:
-                    logger.exception("Failed to end Codex maintenance for %s", email)
-                finally:
-                    if login_lock.locked():
-                        login_lock.release()
+                    finally:
+                        if login_lock.locked():
+                            login_lock.release()
 
 
 @router.get("/add/{email}")
@@ -1007,6 +1699,7 @@ async def codex_delete_account(request: Request, account_id: str):
             status_code=409,
             detail="另一个 Codex 账号登录或删除操作正在进行中",
         )
+    _reject_unresolved_login_transactions(pool)
 
     instance_manager = _get_instance_manager()
     await _login_lock.acquire()

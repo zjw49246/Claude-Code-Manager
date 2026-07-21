@@ -8,7 +8,10 @@ import pytest
 from sqlalchemy import select
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
-from backend.services.instance_manager import InstanceManager
+from backend.services.instance_manager import (
+    InstanceAlreadyRunningError,
+    InstanceManager,
+)
 from backend.services.claude_pool import ClaudePool
 from backend.services.codex_pool import CodexPool
 from backend.services.codex_app_server import (
@@ -1689,13 +1692,366 @@ async def test_stop_kills_on_timeout(db_factory):
     im = InstanceManager(db_factory, broadcaster)
     im.processes[inst_id] = mock_proc
 
-    # wait_for raises TimeoutError (simulating process not responding to SIGTERM)
-    with patch("backend.services.instance_manager.asyncio.wait_for", side_effect=asyncio.TimeoutError):
+    # wait_for raises TimeoutError (simulating process not responding to
+    # SIGTERM). Close the synthetic wait coroutine just as real wait_for would
+    # cancel/consume it, so the regression test itself does not leak awaitables.
+    async def timeout_and_close(awaitable, *args, **kwargs):
+        awaitable.close()
+        raise asyncio.TimeoutError
+
+    with patch(
+        "backend.services.instance_manager.asyncio.wait_for",
+        side_effect=timeout_and_close,
+    ):
         result = await im.stop(inst_id)
 
     assert result is True
     mock_proc.terminate.assert_called_once()
     mock_proc.kill.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_launches_cannot_spawn_twice_for_one_instance():
+    im = InstanceManager(MagicMock(), MagicMock())
+    first_entered = asyncio.Event()
+    release_first = asyncio.Event()
+    calls = 0
+    active_process = MagicMock(returncode=None, pid=101)
+
+    async def fake_launch_locked(**kwargs):
+        nonlocal calls
+        calls += 1
+        first_entered.set()
+        await release_first.wait()
+        im.processes[kwargs["instance_id"]] = active_process
+        return active_process.pid
+
+    im._launch_locked = fake_launch_locked
+    first = asyncio.create_task(im.launch(1, "first"))
+    await first_entered.wait()
+    second = asyncio.create_task(im.launch(1, "second"))
+    await asyncio.sleep(0)
+
+    assert calls == 1
+    release_first.set()
+    assert await first == 101
+    with pytest.raises(RuntimeError, match="already running"):
+        await second
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_external_launch_does_not_deadlock_consumer_self_retry():
+    im = InstanceManager(MagicMock(), MagicMock())
+    instance_id = 8
+    old_process = MagicMock(returncode=1, pid=301)
+    new_process = MagicMock(returncode=None, pid=302)
+    allow_retry = asyncio.Event()
+    retry_launched = asyncio.Event()
+
+    async def fake_launch_locked(**kwargs):
+        assert kwargs["prompt"] == "consumer retry"
+        im.processes[instance_id] = new_process
+        retry_launched.set()
+        return new_process.pid
+
+    im._launch_locked = fake_launch_locked
+    im.processes[instance_id] = old_process
+
+    async def consumer_retry():
+        await allow_retry.wait()
+        return await im.launch(instance_id, "consumer retry")
+
+    consumer = asyncio.create_task(consumer_retry())
+    im._tasks[instance_id] = consumer
+    external = asyncio.create_task(im.launch(instance_id, "external"))
+    await asyncio.sleep(0)
+    allow_retry.set()
+
+    assert await asyncio.wait_for(consumer, timeout=1) == new_process.pid
+    await asyncio.wait_for(retry_launched.wait(), timeout=1)
+    with pytest.raises(InstanceAlreadyRunningError):
+        await asyncio.wait_for(external, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_stop_serializes_relaunch_and_preserves_new_process(db_factory):
+    async with db_factory() as db:
+        inst = Instance(name="stop-relaunch", status="running")
+        db.add(inst)
+        await db.commit()
+        await db.refresh(inst)
+        instance_id = inst.id
+
+    wait_entered = asyncio.Event()
+    allow_old_exit = asyncio.Event()
+    old_process = MagicMock(returncode=None, pid=201)
+    old_process.send_signal = MagicMock()
+
+    async def wait_old():
+        wait_entered.set()
+        await allow_old_exit.wait()
+        old_process.returncode = 0
+        return 0
+
+    old_process.wait = wait_old
+    new_process = MagicMock(returncode=None, pid=202)
+    launch_entered = asyncio.Event()
+    broadcaster = MagicMock(broadcast=AsyncMock())
+    im = InstanceManager(db_factory, broadcaster)
+    im.processes[instance_id] = old_process
+
+    async def fake_launch_locked(**kwargs):
+        launch_entered.set()
+        im.processes[kwargs["instance_id"]] = new_process
+        return new_process.pid
+
+    im._launch_locked = fake_launch_locked
+    stopping = asyncio.create_task(im.stop(instance_id))
+    await wait_entered.wait()
+    relaunch = asyncio.create_task(im.launch(instance_id, "next"))
+    await asyncio.sleep(0)
+    assert not launch_entered.is_set()
+
+    allow_old_exit.set()
+    assert await stopping is True
+    assert await relaunch == new_process.pid
+    assert im.processes[instance_id] is new_process
+
+
+@pytest.mark.asyncio
+async def test_stop_awaits_codex_consumer_after_process_already_exited(db_factory):
+    async with db_factory() as db:
+        inst = Instance(name="terminal-consumer", status="running")
+        db.add(inst)
+        await db.commit()
+        await db.refresh(inst)
+        instance_id = inst.id
+
+    process = MagicMock(returncode=1, pid=401)
+    process.send_signal = MagicMock()
+    consumer_started = asyncio.Event()
+    finish_bookkeeping = asyncio.Event()
+
+    async def finish_rollout_binding():
+        consumer_started.set()
+        await finish_bookkeeping.wait()
+
+    consumer = asyncio.create_task(finish_rollout_binding())
+    await consumer_started.wait()
+    broadcaster = MagicMock(broadcast=AsyncMock())
+    im = InstanceManager(db_factory, broadcaster)
+    im.processes[instance_id] = process
+    im._track_output_consumer(
+        instance_id,
+        process,
+        consumer,
+        provider="codex",
+    )
+
+    assert im.is_running(instance_id)
+    stopping = asyncio.create_task(im.stop(instance_id))
+    await asyncio.sleep(0)
+    assert not stopping.done()
+    assert not consumer.cancelled()
+
+    finish_bookkeeping.set()
+    assert await stopping is True
+    assert consumer.done() and not consumer.cancelled()
+    process.send_signal.assert_not_called()
+    assert instance_id not in im.processes
+    assert instance_id not in im._tasks
+
+
+@pytest.mark.asyncio
+async def test_cancelled_stop_finishes_reaping_before_propagating(db_factory):
+    async with db_factory() as db:
+        inst = Instance(name="cancel-safe-stop", status="running")
+        db.add(inst)
+        await db.commit()
+        await db.refresh(inst)
+        instance_id = inst.id
+
+    wait_started = asyncio.Event()
+    allow_exit = asyncio.Event()
+    process = MagicMock(returncode=None, pid=402)
+    process.send_signal = MagicMock()
+
+    async def wait_process():
+        wait_started.set()
+        await allow_exit.wait()
+        process.returncode = 130
+        return 130
+
+    process.wait = wait_process
+    im = InstanceManager(db_factory, MagicMock(broadcast=AsyncMock()))
+    im.processes[instance_id] = process
+    stopping = asyncio.create_task(im.stop(instance_id))
+    await wait_started.wait()
+
+    stopping.cancel()
+    await asyncio.sleep(0)
+    assert not stopping.done()
+    assert im.processes[instance_id] is process
+
+    allow_exit.set()
+    with pytest.raises(asyncio.CancelledError):
+        await stopping
+    assert instance_id not in im.processes
+    async with db_factory() as db:
+        refreshed = await db.get(Instance, instance_id)
+        assert refreshed.status == "idle"
+
+
+@pytest.mark.asyncio
+async def test_crashed_output_consumer_cannot_latch_instance_maps(caplog):
+    im = InstanceManager(MagicMock(), MagicMock())
+    process = MagicMock(returncode=1)
+
+    async def crash():
+        raise RuntimeError("post-process bookkeeping failed")
+
+    consumer = asyncio.create_task(crash())
+    im.processes[7] = process
+    im._codex_exec_homes[7] = "/tmp/codex-7"
+    im._launch_params[7] = {"provider": "codex"}
+    im._track_output_consumer(7, process, consumer)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert 7 not in im._tasks
+    assert 7 not in im.processes
+    assert 7 not in im._codex_exec_homes
+    assert 7 not in im._launch_params
+    assert "Output consumer crashed for instance 7" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_consumer_failure_is_scoped_to_exact_process_generation():
+    im = InstanceManager(MagicMock(), MagicMock())
+    old_process = MagicMock(returncode=1)
+
+    async def crash():
+        raise RuntimeError("old generation failed")
+
+    old_consumer = asyncio.create_task(crash())
+    im.processes[7] = old_process
+    im._track_output_consumer(7, old_process, old_consumer)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    new_process = MagicMock(returncode=None)
+    new_consumer = asyncio.create_task(asyncio.Event().wait())
+    im.processes[7] = new_process
+    im._track_output_consumer(
+        7, new_process, new_consumer, chat_initiated=True
+    )
+
+    with pytest.raises(RuntimeError, match="Output consumer failed") as caught:
+        await im.wait_for_output_consumer(
+            7, provider="codex", expected_process=old_process
+        )
+    assert isinstance(caught.value.__cause__, RuntimeError)
+    assert str(caught.value.__cause__) == "old generation failed"
+    assert im.processes[7] is new_process
+    assert im._tasks[7] is new_consumer
+
+    new_consumer.cancel()
+    await asyncio.gather(new_consumer, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_new_launch_does_not_consume_previous_generation_failure():
+    im = InstanceManager(MagicMock(), MagicMock())
+    old_process = MagicMock(returncode=1)
+    old_error = RuntimeError("old bookkeeping")
+    im._consumer_errors[(7, old_process)] = old_error
+    new_process = MagicMock(returncode=None, pid=702)
+
+    async def fake_launch_locked(**kwargs):
+        im.processes[kwargs["instance_id"]] = new_process
+        return new_process.pid
+
+    im._launch_locked = fake_launch_locked
+
+    assert await im.launch(7, "new turn") == 702
+    assert im._consumer_errors[(7, old_process)] is old_error
+
+
+@pytest.mark.asyncio
+async def test_waiting_admission_preserves_managed_failure_for_owning_lifecycle():
+    im = InstanceManager(MagicMock(), MagicMock())
+    old_process = MagicMock(returncode=1)
+    release_crash = asyncio.Event()
+
+    async def crash():
+        await release_crash.wait()
+        raise RuntimeError("managed bookkeeping")
+
+    old_consumer = asyncio.create_task(crash())
+    im.processes[7] = old_process
+    im._track_output_consumer(7, old_process, old_consumer)
+    admission = asyncio.create_task(im.launch(7, "new turn"))
+    await asyncio.sleep(0)
+    release_crash.set()
+
+    with pytest.raises(RuntimeError, match="managed bookkeeping"):
+        await admission
+    with pytest.raises(RuntimeError, match="Output consumer failed") as caught:
+        await im.wait_for_output_consumer(
+            7, expected_process=old_process
+        )
+    assert str(caught.value.__cause__) == "managed bookkeeping"
+
+
+@pytest.mark.asyncio
+async def test_two_waiting_launches_admit_only_one_next_generation():
+    im = InstanceManager(MagicMock(), MagicMock())
+    old_process = MagicMock(returncode=0)
+    release_old = asyncio.Event()
+
+    async def settle_old():
+        await release_old.wait()
+
+    old_consumer = asyncio.create_task(settle_old())
+    im.processes[7] = old_process
+    im._track_output_consumer(7, old_process, old_consumer)
+    launched = []
+
+    async def fake_launch_locked(**kwargs):
+        launched.append(kwargs["prompt"])
+        im.processes[7] = MagicMock(returncode=None, pid=700 + len(launched))
+        return im.processes[7].pid
+
+    im._launch_locked = fake_launch_locked
+    first = asyncio.create_task(im.launch(7, "first contender", provider="codex"))
+    second = asyncio.create_task(im.launch(7, "second contender", provider="codex"))
+    await asyncio.sleep(0)
+    release_old.set()
+    results = await asyncio.gather(first, second, return_exceptions=True)
+
+    assert len(launched) == 1
+    assert sum(isinstance(result, int) for result in results) == 1
+    assert sum(
+        isinstance(result, InstanceAlreadyRunningError) for result in results
+    ) == 1
+
+
+@pytest.mark.asyncio
+async def test_chat_consumer_failure_does_not_leave_unowned_error_latch():
+    im = InstanceManager(MagicMock(), MagicMock())
+    process = MagicMock(returncode=1)
+
+    async def crash():
+        raise RuntimeError("chat bookkeeping")
+
+    consumer = asyncio.create_task(crash())
+    im.processes[7] = process
+    im._track_output_consumer(7, process, consumer, chat_initiated=True)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert not im._consumer_errors
 
 
 @pytest.mark.asyncio
@@ -2562,6 +2918,144 @@ async def test_launch_delegates_to_pty_backend_for_claude():
     assert calls["prompt"] == "do it"
     assert calls["model"] is None  # "default" normalized away
     assert calls["cwd"] == "/w"
+
+
+@pytest.mark.asyncio
+async def test_pty_container_binary_override_is_isolated_across_instances():
+    im = InstanceManager(_FakeDBFactory(), MagicMock())
+    first_entered = asyncio.Event()
+    release_first = asyncio.Event()
+    observed = {}
+
+    class Config:
+        claude_binary = "default-claude"
+
+    class FakeBackend:
+        def build_config(self, **kwargs):
+            return Config()
+
+        async def launch_for_ccm(self, **kwargs):
+            config = self.build_config()
+            observed[kwargs["instance_id"]] = config.claude_binary
+            if kwargs["instance_id"] == 1:
+                first_entered.set()
+                await release_first.wait()
+            im.processes[kwargs["instance_id"]] = MagicMock(
+                pid=4200 + kwargs["instance_id"], returncode=None
+            )
+            return f"session-{kwargs['instance_id']}"
+
+    im._pty_backend = FakeBackend()
+
+    async def launch(instance_id, override=None):
+        return await im._launch_pty(
+            instance_id=instance_id,
+            prompt="run",
+            task_id=None,
+            cwd="/tmp",
+            model=None,
+            resume_session_id=None,
+            loop_iteration=None,
+            git_env=None,
+            thinking_budget=None,
+            effort_level=None,
+            chat_initiated=False,
+            config_dir=None,
+            enable_workflows=False,
+            enabled_skills=None,
+            mcp_config_path=None,
+            claude_binary_override=override,
+        )
+
+    first = asyncio.create_task(launch(1, "/container/claude"))
+    await first_entered.wait()
+    second = asyncio.create_task(launch(2))
+    await asyncio.sleep(0)
+    assert 2 not in observed
+
+    release_first.set()
+    await asyncio.gather(first, second)
+    assert observed == {1: "/container/claude", 2: "default-claude"}
+
+
+@pytest.mark.asyncio
+async def test_cancelled_pty_metadata_commit_cleans_exact_live_generation():
+    commit_entered = asyncio.Event()
+
+    class BlockingDB(_FakeDB):
+        def __init__(self):
+            super().__init__()
+            self.commit_count = 0
+
+        async def commit(self):
+            self.commit_count += 1
+            if self.commit_count == 1:
+                commit_entered.set()
+                await asyncio.Event().wait()
+
+    class BlockingDBFactory(_FakeDBFactory):
+        def __init__(self):
+            self.db = BlockingDB()
+
+    class Process:
+        def __init__(self):
+            self.pid = 4242
+            self.returncode = None
+            self.done = asyncio.Event()
+
+        def kill(self):
+            self.returncode = -9
+            self.done.set()
+
+        async def wait(self):
+            await self.done.wait()
+            return self.returncode
+
+    im = InstanceManager(BlockingDBFactory(), MagicMock())
+    process = Process()
+    consumer = None
+    stopped = []
+
+    class FakeBackend:
+        async def launch_for_ccm(self, **kwargs):
+            nonlocal consumer
+            consumer = asyncio.create_task(asyncio.Event().wait())
+            im.processes[kwargs["instance_id"]] = process
+            im._tasks[kwargs["instance_id"]] = consumer
+            return "session-cancelled"
+
+        async def stop(self, instance_id):
+            stopped.append(instance_id)
+            process.kill()
+
+    im._pty_backend = FakeBackend()
+    launching = asyncio.create_task(im._launch_pty(
+        instance_id=7,
+        prompt="run",
+        task_id=3,
+        cwd="/tmp",
+        model=None,
+        resume_session_id=None,
+        loop_iteration=None,
+        git_env=None,
+        thinking_budget=None,
+        effort_level=None,
+        chat_initiated=False,
+        config_dir=None,
+        enable_workflows=False,
+        enabled_skills=None,
+        mcp_config_path=None,
+    ))
+    await commit_entered.wait()
+    launching.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await launching
+
+    assert stopped == [7]
+    assert consumer is not None and consumer.cancelled()
+    assert 7 not in im.processes
+    assert 7 not in im._tasks
+    assert 7 not in im._consumer_records
 
 
 @pytest.mark.asyncio

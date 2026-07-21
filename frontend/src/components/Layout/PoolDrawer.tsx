@@ -4,7 +4,9 @@ import { Plus, RefreshCw, X, Users, Settings } from '../icons';
 import { api } from '../../api/client';
 import type { CodexLoginMethod, CodexLoginStatus, CodexPoolAccountUsage, CodexPoolUsageStatus, PoolAccountUsage, PoolUsageStatus, PoolUsageWindow } from '../../api/client';
 
-const ACTIVE_CODEX_LOGIN_STATUSES = new Set(['running', 'awaiting_otp', 'verifying_otp']);
+const ACTIVE_CODEX_LOGIN_STATUSES = new Set([
+  'running', 'awaiting_otp', 'verifying_otp', 'finalizing',
+]);
 
 function barColor(utilization: number): string {
   if (utilization >= 90) return 'bg-red-500';
@@ -386,6 +388,9 @@ function CodexAccountCard({ account, preferred, onClearCooldown, onSetPreferred,
       {reloginState?.status === 'verifying_otp' && (
         <div className="text-xs text-blue-400">验证码已提交，正在继续登录…</div>
       )}
+      {reloginState?.status === 'finalizing' && (
+        <div className="text-xs text-blue-400">登录已完成，正在安全提交登录结果…</div>
+      )}
       {reloginState && ACTIVE_CODEX_LOGIN_STATUSES.has(reloginState.status) && reloginState.detail && (
         <div className="text-[10px] text-amber-400 break-all">{reloginState.detail}</div>
       )}
@@ -623,6 +628,7 @@ function AddCodexAccountModal({ onClose, onAdded }: { onClose: () => void; onAdd
           {loginState?.status === 'running' && <p className="text-xs text-blue-400">登录中… 请等待（可能需要 1-3 分钟）</p>}
           {loginState?.status === 'awaiting_otp' && <CodexOtpPrompt state={loginState} onSubmit={submitOtp} />}
           {loginState?.status === 'verifying_otp' && <p className="text-xs text-blue-400">验证码已提交，正在继续登录…</p>}
+          {loginState?.status === 'finalizing' && <p className="text-xs text-blue-400">登录已完成，正在安全提交登录结果…</p>}
           {loginActive && loginState?.detail && <p className="text-xs text-amber-400 break-all">{loginState.detail}</p>}
           {(loginState?.status === 'failed' || loginState?.status === 'expired') && <p className="text-xs text-red-400 break-all">{loginState.detail || '登录失败'}</p>}
           <div className="flex justify-end gap-2 pt-1">

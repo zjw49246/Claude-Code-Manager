@@ -1,7 +1,11 @@
 """Tests for TaskQueue — priority ordering, dequeue, status transitions."""
+import asyncio
+
 import pytest
 import pytest_asyncio
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from backend.database import Base
 from backend.models.task import Task
 from backend.services.task_queue import TaskQueue
 
@@ -58,6 +62,40 @@ async def test_dequeue_fifo_within_same_priority(queue):
     assert first.title == "First"
     second = await queue.dequeue()
     assert second.title == "Second"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_dequeue_claims_each_task_once(tmp_path):
+    """Independent Ralph/dispatcher sessions cannot claim the same row."""
+
+    db_path = tmp_path / "atomic-dequeue.db"
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+    try:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        factory = async_sessionmaker(
+            engine, class_=AsyncSession, expire_on_commit=False,
+        )
+        async with factory() as db:
+            first = Task(title="first", description="d", priority=0)
+            second = Task(title="second", description="d", priority=1)
+            db.add_all([first, second])
+            await db.commit()
+            first_id, second_id = first.id, second.id
+
+        async with factory() as db1, factory() as db2:
+            claimed = await asyncio.gather(
+                TaskQueue(db1).dequeue(),
+                TaskQueue(db2).dequeue(),
+            )
+
+        assert {task.id for task in claimed if task is not None} == {
+            first_id,
+            second_id,
+        }
+        assert len([task for task in claimed if task is not None]) == 2
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio

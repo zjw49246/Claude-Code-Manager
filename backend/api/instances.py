@@ -129,18 +129,24 @@ async def run_task_on_instance(
         if (task_provider or "claude").lower() == "codex":
             resume_session_id = task.session_id
 
-    pid = await instance_manager.launch(
-        instance_id=instance_id,
-        prompt=actual_prompt,
-        task_id=task_id,
-        cwd=cwd,
-        model=task_model,
-        provider=task_provider,
-        thinking_budget=task_thinking,
-        effort_level=task_effort,
-        resume_session_id=resume_session_id,
-        config_dir=config_dir,
-    )
+    from backend.services.instance_manager import InstanceAlreadyRunningError
+    try:
+        pid = await instance_manager.launch(
+            instance_id=instance_id,
+            prompt=actual_prompt,
+            task_id=task_id,
+            cwd=cwd,
+            model=task_model,
+            provider=task_provider,
+            thinking_budget=task_thinking,
+            effort_level=task_effort,
+            resume_session_id=resume_session_id,
+            config_dir=config_dir,
+        )
+    except InstanceAlreadyRunningError as exc:
+        # The earlier is_running check is only a fast path.  launch performs
+        # the atomic admission check after all route/session awaits.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {"ok": True, "pid": pid}
 
 

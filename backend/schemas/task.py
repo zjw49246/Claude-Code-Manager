@@ -57,6 +57,16 @@ class TaskCreate(BaseModel):
         return self
 
 
+class TaskMigrationImport(TaskCreate):
+    """Manager -> Worker migration payload.
+
+    Unlike the public create endpoint, this path requires the Manager-assigned
+    global ID and is persisted as an inert task on the destination Worker.
+    """
+
+    id: int
+
+
 class TaskUpdate(BaseModel):
     # 执行位置切换：传 worker_id 触发 TaskMigrator（-1 表示切回本机，
     # 因为 None 在 exclude_unset 语义下无法与「未传」区分）

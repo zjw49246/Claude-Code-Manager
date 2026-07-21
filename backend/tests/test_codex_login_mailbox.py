@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import subprocess
 import sys
 from collections.abc import Iterable
+from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -73,6 +75,21 @@ def test_detect_mail_provider():
     assert codex_login.detect_mail_provider("user@onet.pl") == "onet"
     assert codex_login.detect_mail_provider("user@GAZETA.PL") == "gazeta"
     assert codex_login.detect_mail_provider("user@israelmail.com") == "171mail"
+
+
+def test_codex_login_output_redacts_complete_oauth_authorize_url(caplog):
+    authorize_url = (
+        "https://auth.openai.com/oauth/authorize?client_id=public-client"
+        "&state=sensitive-state&code_challenge=sensitive-pkce"
+    )
+
+    with caplog.at_level(logging.INFO, logger=codex_login.logger.name):
+        codex_login._log_codex_login_output(f"Open this URL: {authorize_url}")
+
+    assert "Open this URL: <OAuth authorize URL redacted>" in caplog.text
+    assert authorize_url not in caplog.text
+    assert "sensitive-state" not in caplog.text
+    assert "sensitive-pkce" not in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -709,6 +726,42 @@ async def test_add_account_busy_home_returns_409_and_releases_login_lock(
     assert not codex_pool_api._login_lock.locked()
 
 
+async def test_add_spawn_failure_rolls_back_journal_without_creating_home(
+    monkeypatch, tmp_path,
+):
+    pool = SimpleNamespace(_accounts=[], reload=Mock(), _quota_cache=None)
+    manager = _maintenance_manager()
+    monkeypatch.setattr(codex_pool_api.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(codex_pool_api, "_get_pool", lambda: pool)
+    monkeypatch.setattr(codex_pool_api, "_get_instance_manager", lambda: manager)
+    monkeypatch.setattr(codex_pool_api, "_ensure_xvfb", AsyncMock())
+    monkeypatch.setattr(codex_pool_api, "_login_lock", asyncio.Lock())
+    monkeypatch.setattr(
+        codex_pool_api.asyncio,
+        "create_subprocess_exec",
+        AsyncMock(side_effect=OSError("could not spawn login")),
+    )
+    codex_pool_api._add_state.clear()
+
+    with pytest.raises(OSError, match="could not spawn login"):
+        await codex_pool_api.codex_add_account(
+            _admin_request(),
+            codex_pool_api.AddCodexAccountRequest(
+                email="spawn-failed@mail.com",
+                password="openai-password",
+                login_method="mailcom",
+            ),
+        )
+
+    assert not (tmp_path / ".codex").exists()
+    transaction_dir = tmp_path / ".codex-pool" / codex_pool_api.LOGIN_TRANSACTION_DIR
+    assert not list(transaction_dir.glob("*.json"))
+    manager.end_codex_app_server_home_maintenance.assert_awaited_once_with(
+        str(tmp_path / ".codex")
+    )
+    assert not codex_pool_api._login_lock.locked()
+
+
 def test_add_account_home_allocator_never_reuses_retained_rollout_directory(
     monkeypatch, tmp_path,
 ):
@@ -761,7 +814,13 @@ def test_add_account_home_allocator_rejects_unknown_failed_home_data(
 async def test_login_watcher_kills_live_process_before_releasing_home(
     monkeypatch, tmp_path, watcher_kind,
 ):
-    proc = SimpleNamespace(returncode=None, kill=Mock(), wait=AsyncMock())
+    proc = SimpleNamespace(returncode=None, kill=Mock())
+
+    async def finish_killed_process():
+        proc.returncode = -9
+        return -9
+
+    proc.wait = AsyncMock(side_effect=finish_killed_process)
     manager = _maintenance_manager()
     login_lock = asyncio.Lock()
     await login_lock.acquire()
@@ -769,7 +828,22 @@ async def test_login_watcher_kills_live_process_before_releasing_home(
     home.mkdir()
     auth_path = home / "auth.json"
     auth_path.write_text("old-auth")
-    auth_snapshot = codex_pool_api._login_auth_snapshot(str(home))
+    pool_path = tmp_path / ".codex-pool" / "accounts.json"
+    pool_path.parent.mkdir()
+    pool_path.write_text(json.dumps({"accounts": []}))
+    pool = SimpleNamespace(
+        _config_path=pool_path,
+        reload=Mock(),
+        _quota_cache=None,
+    )
+    monkeypatch.setattr(codex_pool_api, "_get_pool", lambda: pool)
+    journal_path = codex_pool_api._begin_login_transaction(
+        attempt_id="attempt-watch",
+        kind=watcher_kind,
+        account_id="codex-watch",
+        codex_home=str(home),
+        pool=pool,
+    )
     backup = home / ".auth.json.login-backup-current"
     os.replace(auth_path, backup)
     auth_path.write_text("partial-new-auth")
@@ -782,14 +856,14 @@ async def test_login_watcher_kills_live_process_before_releasing_home(
     if watcher_kind == "add":
         codex_pool_api._add_state.clear()
         await codex_pool_api._watch_add(
-            "watch@example.com", "attempt-watch", proc, manager,
-            str(home), login_lock, auth_snapshot,
+            "watch@example.com", "codex-watch", "attempt-watch", proc,
+            manager, str(home), login_lock, journal_path,
         )
     else:
         codex_pool_api._relogin_state.clear()
         await codex_pool_api._watch_relogin(
             "codex-watch", "attempt-watch", proc, manager,
-            str(home), login_lock, auth_snapshot,
+            str(home), login_lock, journal_path,
         )
 
     proc.kill.assert_called_once_with()
@@ -799,17 +873,852 @@ async def test_login_watcher_kills_live_process_before_releasing_home(
     )
     assert auth_path.read_text() == "old-auth"
     assert not backup.exists()
+    assert not journal_path.exists()
     assert not login_lock.locked()
 
 
-def test_private_json_writer_never_exposes_group_read_permissions(tmp_path):
+@pytest.mark.parametrize("watcher_kind", ["add", "relogin"])
+@pytest.mark.parametrize("returncode", [-15, -9])
+async def test_login_watcher_restores_auth_when_wrapper_already_signaled(
+    monkeypatch, tmp_path, watcher_kind, returncode,
+):
+    """SIGTERM/SIGKILL may land before the watcher enters its finalizer."""
+
+    proc = SimpleNamespace(
+        returncode=returncode,
+        communicate=AsyncMock(return_value=(b"terminated", b"")),
+        kill=Mock(),
+        wait=AsyncMock(),
+    )
+    manager = _maintenance_manager()
+    login_lock = asyncio.Lock()
+    await login_lock.acquire()
+    home = tmp_path / "codex-signaled-watch"
+    home.mkdir()
+    auth_path = home / "auth.json"
+    auth_path.write_text("old-auth")
+    pool_path = tmp_path / ".codex-pool" / "accounts.json"
+    pool_path.parent.mkdir()
+    pool_path.write_text(json.dumps({"accounts": []}))
+    pool = SimpleNamespace(
+        _config_path=pool_path,
+        reload=Mock(),
+        _quota_cache=None,
+    )
+    monkeypatch.setattr(codex_pool_api, "_get_pool", lambda: pool)
+    journal_path = codex_pool_api._begin_login_transaction(
+        attempt_id="attempt-signaled",
+        kind=watcher_kind,
+        account_id="codex-watch",
+        codex_home=str(home),
+        pool=pool,
+    )
+    backup = home / ".auth.json.login-backup-current"
+    os.replace(auth_path, backup)
+    auth_path.write_text("partial-new-auth")
+
+    if watcher_kind == "add":
+        codex_pool_api._add_state.clear()
+        await codex_pool_api._watch_add(
+            "watch@example.com", "codex-watch", "attempt-signaled", proc,
+            manager, str(home), login_lock, journal_path,
+        )
+    else:
+        codex_pool_api._relogin_state.clear()
+        await codex_pool_api._watch_relogin(
+            "codex-watch", "attempt-signaled", proc, manager,
+            str(home), login_lock, journal_path,
+        )
+
+    proc.kill.assert_not_called()
+    proc.wait.assert_not_awaited()
+    assert auth_path.read_text() == "old-auth"
+    assert not backup.exists()
+    assert auth_path.stat().st_mode & 0o777 == 0o600
+    assert not journal_path.exists()
+    manager.end_codex_app_server_home_maintenance.assert_awaited_once_with(
+        str(home)
+    )
+    assert not login_lock.locked()
+
+
+async def test_relogin_startup_failure_restores_auth_after_preexited_sigterm(
+    monkeypatch, tmp_path,
+):
+    manager = _maintenance_manager()
+    account, _pool = _prepare_relogin_account(monkeypatch, tmp_path, manager)
+    home = Path(account.codex_home)
+    home.mkdir()
+    auth_path = home / "auth.json"
+    auth_path.write_text("old-auth")
+    proc = _FinishedProcess()
+
+    async def reject_credentials(*_args, **_kwargs):
+        backup = home / ".auth.json.login-backup-startup"
+        os.replace(auth_path, backup)
+        auth_path.write_text("partial-new-auth")
+        proc.returncode = -15
+        raise RuntimeError("wrapper exited while accepting credentials")
+
+    monkeypatch.setattr(
+        codex_pool_api.asyncio,
+        "create_subprocess_exec",
+        AsyncMock(return_value=proc),
+    )
+    monkeypatch.setattr(
+        codex_pool_api, "_send_login_credentials", reject_credentials,
+    )
+
+    with pytest.raises(RuntimeError, match="wrapper exited"):
+        await codex_pool_api.codex_relogin(_admin_request(), account.id)
+
+    assert auth_path.read_text() == "old-auth"
+    assert not list(home.glob(".auth.json.login-backup-*"))
+    manager.end_codex_app_server_home_maintenance.assert_awaited_once_with(
+        account.codex_home
+    )
+    assert not codex_pool_api._login_lock.locked()
+
+
+async def test_add_startup_failure_restores_no_auth_after_preexited_sigkill(
+    monkeypatch, tmp_path,
+):
+    pool = SimpleNamespace(_accounts=[], reload=lambda: None, _quota_cache=None)
+    manager = _maintenance_manager()
+    proc = _FinishedProcess()
+    monkeypatch.setattr(codex_pool_api.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(codex_pool_api, "_get_pool", lambda: pool)
+    monkeypatch.setattr(codex_pool_api, "_get_instance_manager", lambda: manager)
+    monkeypatch.setattr(codex_pool_api, "_ensure_xvfb", AsyncMock())
+    monkeypatch.setattr(codex_pool_api, "_login_lock", asyncio.Lock())
+    monkeypatch.setattr(
+        codex_pool_api.asyncio,
+        "create_subprocess_exec",
+        AsyncMock(return_value=proc),
+    )
+    codex_pool_api._add_state.clear()
+    codex_home = tmp_path / ".codex"
+
+    async def reject_credentials(*_args, **_kwargs):
+        codex_home.mkdir(exist_ok=True)
+        (codex_home / "auth.json").write_text("partial-new-auth")
+        proc.returncode = -9
+        raise RuntimeError("wrapper exited while accepting credentials")
+
+    monkeypatch.setattr(
+        codex_pool_api, "_send_login_credentials", reject_credentials,
+    )
+
+    with pytest.raises(RuntimeError, match="wrapper exited"):
+        await codex_pool_api.codex_add_account(
+            _admin_request(),
+            codex_pool_api.AddCodexAccountRequest(
+                email="failed@mail.com",
+                password="openai-password",
+                login_method="mailcom",
+            ),
+        )
+
+    assert not (codex_home / "auth.json").exists()
+    manager.end_codex_app_server_home_maintenance.assert_awaited_once_with(
+        str(codex_home)
+    )
+    assert not codex_pool_api._login_lock.locked()
+
+
+@pytest.mark.parametrize("watcher_kind", ["add", "relogin"])
+async def test_login_watcher_delays_cancellation_until_reap_and_rollback(
+    monkeypatch, tmp_path, watcher_kind,
+):
+    manager = _maintenance_manager()
+    login_lock = asyncio.Lock()
+    await login_lock.acquire()
+    home = tmp_path / "codex-cancelled-watch"
+    home.mkdir()
+    auth_path = home / "auth.json"
+    auth_path.write_text("old-auth")
+    pool_path = tmp_path / ".codex-pool" / "accounts.json"
+    pool_path.parent.mkdir()
+    pool_path.write_text(json.dumps({"accounts": []}))
+    pool = SimpleNamespace(
+        _config_path=pool_path,
+        reload=Mock(),
+        _quota_cache=None,
+    )
+    monkeypatch.setattr(codex_pool_api, "_get_pool", lambda: pool)
+    attempt_id = f"cancel-{watcher_kind}"
+    journal_path = codex_pool_api._begin_login_transaction(
+        attempt_id=attempt_id,
+        kind=watcher_kind,
+        account_id="codex-cancel",
+        codex_home=str(home),
+        pool=pool,
+    )
+    backup = home / ".auth.json.login-backup-cancel"
+    os.replace(auth_path, backup)
+    auth_path.write_text("partial-new-auth")
+    wait_started = asyncio.Event()
+    allow_exit = asyncio.Event()
+    proc = SimpleNamespace(returncode=None, kill=Mock())
+
+    async def wait_for_terminal():
+        wait_started.set()
+        await allow_exit.wait()
+        proc.returncode = -9
+        return -9
+
+    proc.wait = wait_for_terminal
+    monkeypatch.setattr(
+        codex_pool_api,
+        "_collect_login_output",
+        AsyncMock(side_effect=RuntimeError("collector failed")),
+    )
+
+    if watcher_kind == "add":
+        watcher = asyncio.create_task(codex_pool_api._watch_add(
+            "cancel@example.com", "codex-cancel", attempt_id, proc, manager,
+            str(home), login_lock, journal_path,
+        ))
+    else:
+        watcher = asyncio.create_task(codex_pool_api._watch_relogin(
+            "codex-cancel", attempt_id, proc, manager, str(home), login_lock,
+            journal_path,
+        ))
+
+    await asyncio.wait_for(wait_started.wait(), timeout=1)
+    watcher.cancel()
+    await asyncio.sleep(0)
+    assert login_lock.locked()
+    manager.end_codex_app_server_home_maintenance.assert_not_awaited()
+    assert auth_path.read_text() == "partial-new-auth"
+
+    allow_exit.set()
+    with pytest.raises(asyncio.CancelledError):
+        await watcher
+
+    assert auth_path.read_text() == "old-auth"
+    assert not backup.exists()
+    assert not journal_path.exists()
+    manager.end_codex_app_server_home_maintenance.assert_awaited_once_with(
+        str(home)
+    )
+    assert not login_lock.locked()
+
+
+async def test_login_rollback_failure_quarantines_and_disables_account(
+    monkeypatch, tmp_path,
+):
+    home = tmp_path / ".codex-codex-quarantine"
+    home.mkdir()
+    auth_path = home / "auth.json"
+    auth_path.write_text("old-auth")
+    pool_path = tmp_path / ".codex-pool" / "accounts.json"
+    pool_path.parent.mkdir()
+    pool_path.write_text(json.dumps({"accounts": [{
+        "id": "codex-quarantine",
+        "codex_home": str(home),
+        "enabled": True,
+    }]}))
+    pool = SimpleNamespace(
+        _config_path=pool_path,
+        reload=Mock(),
+        _quota_cache=None,
+    )
+    monkeypatch.setattr(codex_pool_api, "_get_pool", lambda: pool)
+    journal_path = codex_pool_api._begin_login_transaction(
+        attempt_id="quarantine-attempt",
+        kind="relogin",
+        account_id="codex-quarantine",
+        codex_home=str(home),
+        pool=pool,
+    )
+    auth_path.write_text("partial-new-auth")
+    monkeypatch.setattr(
+        codex_pool_api,
+        "_rollback_login_transaction",
+        Mock(side_effect=OSError("snapshot storage unavailable")),
+    )
+    manager = _maintenance_manager()
+    login_lock = asyncio.Lock()
+    await login_lock.acquire()
+    state: dict[str, dict] = {}
+    proc = SimpleNamespace(returncode=-15)
+
+    result = await codex_pool_api._finalize_login_transaction(
+        proc=proc,
+        operation="quarantine test",
+        journal_path=journal_path,
+        commit_requested=False,
+        instance_manager=manager,
+        codex_home=str(home),
+        login_lock=login_lock,
+        attempt_id="quarantine-attempt",
+        state_store=state,
+        state_key="codex-quarantine",
+    )
+
+    assert result["cleanup_safe"] is True
+    assert result["committed"] is False
+    assert state["codex-quarantine"]["status"] == "recovery_failed"
+    assert not auth_path.exists()
+    assert (
+        home / ".auth.json.ccm-quarantine-quarantine-attempt"
+    ).read_text() == "partial-new-auth"
+    assert (home / ".ccm-login-recovery-failed").exists()
+    account = json.loads(pool_path.read_text())["accounts"][0]
+    assert account["enabled"] is False
+    assert account["login_recovery_failed"] is True
+    assert journal_path.exists()
+    manager.end_codex_app_server_home_maintenance.assert_awaited_once_with(
+        str(home)
+    )
+    assert not login_lock.locked()
+
+
+async def test_unconfirmed_wrapper_keeps_home_maintenance_and_journal(
+    monkeypatch, tmp_path,
+):
+    home = tmp_path / ".codex-codex-unconfirmed"
+    home.mkdir()
+    auth_path = home / "auth.json"
+    auth_path.write_text("old-auth")
+    pool_path = tmp_path / ".codex-pool" / "accounts.json"
+    pool_path.parent.mkdir()
+    pool_path.write_text('{"accounts": []}\n')
+    pool = SimpleNamespace(
+        _config_path=pool_path,
+        reload=Mock(),
+        _quota_cache=None,
+    )
+    monkeypatch.setattr(codex_pool_api, "_get_pool", lambda: pool)
+    monkeypatch.setattr(codex_pool_api, "LOGIN_REAP_TIMEOUT_SECONDS", 0)
+    journal_path = codex_pool_api._begin_login_transaction(
+        attempt_id="unconfirmed-wrapper",
+        kind="relogin",
+        account_id="codex-unconfirmed",
+        codex_home=str(home),
+        pool=pool,
+    )
+    auth_path.write_text("partial-new-auth")
+    proc = SimpleNamespace(
+        returncode=None,
+        kill=Mock(),
+        wait=AsyncMock(side_effect=asyncio.Event().wait),
+    )
+    manager = _maintenance_manager()
+    login_lock = asyncio.Lock()
+    await login_lock.acquire()
+    state: dict[str, dict] = {"codex-unconfirmed": {"status": "running"}}
+
+    result = await codex_pool_api._finalize_login_transaction(
+        proc=proc,
+        operation="unconfirmed test",
+        journal_path=journal_path,
+        commit_requested=False,
+        instance_manager=manager,
+        codex_home=str(home),
+        login_lock=login_lock,
+        attempt_id="unconfirmed-wrapper",
+        state_store=state,
+        state_key="codex-unconfirmed",
+    )
+
+    assert result["cleanup_safe"] is False
+    assert state["codex-unconfirmed"]["status"] == "recovery_failed"
+    assert auth_path.read_text() == "partial-new-auth"
+    assert journal_path.exists()
+    manager.end_codex_app_server_home_maintenance.assert_not_awaited()
+    assert not login_lock.locked()
+
+
+def test_startup_recovery_rolls_back_add_half_commit(monkeypatch, tmp_path):
+    home = tmp_path / ".codex-codex-restart"
+    home.mkdir()
+    auth_path = home / "auth.json"
+    auth_path.write_bytes(b"old-auth")
+    pool_path = tmp_path / ".codex-pool" / "accounts.json"
+    tokens_path = pool_path.parent / "email_tokens.json"
+    pool_path.parent.mkdir()
+    old_pool = b'{"accounts": []}\n'
+    old_tokens = b'{"old@example.com": {"password": "old"}}\n'
+    pool_path.write_bytes(old_pool)
+    tokens_path.write_bytes(old_tokens)
+    pool = SimpleNamespace(_config_path=pool_path)
+    journal_path = codex_pool_api._begin_login_transaction(
+        attempt_id="restart-add",
+        kind="add",
+        account_id="codex-restart",
+        codex_home=str(home),
+        pool=pool,
+    )
+    assert journal_path.stat().st_mode & 0o777 == 0o600
+    assert journal_path.parent.stat().st_mode & 0o777 == 0o700
+
+    # Simulate SIGKILL after wrapper wrote auth + credential store but before
+    # its second accounts.json write and before the parent watcher could commit.
+    auth_path.write_bytes(b"new-auth")
+    tokens_path.write_bytes(b'{"new@example.com": {"password": "orphan"}}\n')
+    assert journal_path.exists()
+
+    recovered = codex_pool_api.recover_pending_codex_login_transactions(pool_path)
+
+    assert recovered == {"recovered": ["restart-add"], "quarantined": []}
+    assert auth_path.read_bytes() == b"old-auth"
+    assert pool_path.read_bytes() == old_pool
+    assert tokens_path.read_bytes() == old_tokens
+    assert not journal_path.exists()
+
+
+def test_startup_recovery_restores_relogin_after_wrapper_deleted_backup(
+    tmp_path,
+):
+    home = tmp_path / ".codex-codex-relogin-restart"
+    home.mkdir()
+    auth_path = home / "auth.json"
+    auth_path.write_bytes(b"old-auth")
+    pool_path = tmp_path / ".codex-pool" / "accounts.json"
+    pool_path.parent.mkdir()
+    pool_path.write_text(json.dumps({"accounts": [{
+        "id": "codex-restart",
+        "codex_home": str(home),
+        "enabled": True,
+    }]}))
+    pool = SimpleNamespace(_config_path=pool_path)
+    journal_path = codex_pool_api._begin_login_transaction(
+        attempt_id="restart-relogin",
+        kind="relogin",
+        account_id="codex-restart",
+        codex_home=str(home),
+        pool=pool,
+    )
+
+    # The wrapper has already installed new auth and removed its short-lived
+    # backup, then systemd kills both wrapper and watcher before parent commit.
+    auth_path.write_bytes(b"new-auth")
+    assert not list(home.glob(".auth.json.login-backup-*"))
+
+    recovered = codex_pool_api.recover_pending_codex_login_transactions(pool_path)
+
+    assert recovered == {
+        "recovered": ["restart-relogin"],
+        "quarantined": [],
+    }
+    assert auth_path.read_bytes() == b"old-auth"
+    assert not journal_path.exists()
+
+
+def test_main_startup_recovers_journal_even_when_pool_is_disabled(tmp_path):
+    home = tmp_path / ".codex"
+    home.mkdir()
+    auth_path = home / "auth.json"
+    auth_path.write_bytes(b"old-auth")
+    pool_path = tmp_path / ".codex-pool" / "accounts.json"
+    pool_path.parent.mkdir()
+    pool_path.write_text('{"accounts": []}\n')
+    pool = SimpleNamespace(_config_path=pool_path)
+    journal_path = codex_pool_api._begin_login_transaction(
+        attempt_id="disabled-pool-restart",
+        kind="relogin",
+        account_id="codex-1",
+        codex_home=str(home),
+        pool=pool,
+    )
+    auth_path.write_bytes(b"partial-new-auth")
+    env = os.environ.copy()
+    env.update({
+        "CODEX_POOL_ENABLED": "false",
+        "CODEX_POOL_CONFIG_PATH": str(pool_path),
+    })
+
+    result = subprocess.run(
+        [sys.executable, "-c", "import backend.main"],
+        cwd=Path(__file__).resolve().parents[2],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert auth_path.read_bytes() == b"old-auth"
+    assert not journal_path.exists()
+
+
+def test_login_transaction_rejects_symlink_pool_config(tmp_path):
+    home = tmp_path / ".codex"
+    home.mkdir()
+    (home / "auth.json").write_text("old-auth")
+    real_pool = tmp_path / "real-accounts.json"
+    real_pool.write_text('{"accounts": []}\n')
+    linked_pool = tmp_path / "linked-accounts.json"
+    linked_pool.symlink_to(real_pool)
+    pool = SimpleNamespace(_config_path=linked_pool)
+
+    with pytest.raises(RuntimeError, match="symlink Codex pool config"):
+        codex_pool_api._begin_login_transaction(
+            attempt_id="symlink-pool",
+            kind="relogin",
+            account_id="codex-1",
+            codex_home=str(home),
+            pool=pool,
+        )
+
+    assert (home / "auth.json").read_text() == "old-auth"
+    assert not (tmp_path / codex_pool_api.LOGIN_TRANSACTION_DIR).exists()
+
+
+def test_startup_recovery_rejects_tampered_snapshot_path(tmp_path):
+    home = tmp_path / ".codex"
+    home.mkdir()
+    (home / "auth.json").write_text("old-auth")
+    outside = tmp_path / "outside-secret"
+    outside.write_text("must-not-change")
+    pool_path = tmp_path / ".codex-pool" / "accounts.json"
+    pool_path.parent.mkdir()
+    pool_path.write_text('{"accounts": []}\n')
+    pool = SimpleNamespace(_config_path=pool_path)
+    journal_path = codex_pool_api._begin_login_transaction(
+        attempt_id="tampered-path",
+        kind="relogin",
+        account_id="codex-1",
+        codex_home=str(home),
+        pool=pool,
+    )
+    journal = json.loads(journal_path.read_text())
+    journal["auth"]["path"] = str(outside)
+    codex_pool_api._write_private_json(journal_path, journal)
+    (home / "auth.json").write_text("partial-auth")
+
+    with pytest.raises(RuntimeError, match="Invalid auth snapshot"):
+        codex_pool_api.recover_pending_codex_login_transactions(pool_path)
+
+    assert outside.read_text() == "must-not-change"
+    assert journal_path.exists()
+
+
+def test_startup_recovery_rejects_different_pool_file_in_same_directory(tmp_path):
+    home = tmp_path / ".codex"
+    home.mkdir()
+    auth_path = home / "auth.json"
+    auth_path.write_text("old-auth")
+    pool_dir = tmp_path / ".codex-pool"
+    pool_dir.mkdir()
+    original_pool = pool_dir / "accounts-a.json"
+    configured_pool = pool_dir / "accounts-b.json"
+    original_pool.write_text('{"accounts": []}\n')
+    configured_pool.write_text('{"accounts": [{"id": "must-stay"}]}\n')
+    pool = SimpleNamespace(_config_path=original_pool)
+    journal_path = codex_pool_api._begin_login_transaction(
+        attempt_id="pool-path-mismatch",
+        kind="relogin",
+        account_id="codex-1",
+        codex_home=str(home),
+        pool=pool,
+    )
+    auth_path.write_text("partial-auth")
+
+    with pytest.raises(RuntimeError, match="Mismatched pool snapshot path"):
+        codex_pool_api.recover_pending_codex_login_transactions(configured_pool)
+
+    assert auth_path.read_text() == "partial-auth"
+    assert original_pool.read_text() == '{"accounts": []}\n'
+    assert configured_pool.read_text() == '{"accounts": [{"id": "must-stay"}]}\n'
+    assert journal_path.exists()
+
+
+@pytest.mark.parametrize("dangling", [False, True])
+def test_login_quarantine_unlinks_auth_symlink_without_touching_target(
+    tmp_path, dangling,
+):
+    home = tmp_path / ".codex"
+    home.mkdir()
+    auth_path = home / "auth.json"
+    auth_path.write_text("old-auth")
+    pool_path = tmp_path / ".codex-pool" / "accounts.json"
+    pool_path.parent.mkdir()
+    pool_path.write_text(json.dumps({"accounts": [{
+        "id": "codex-1",
+        "codex_home": str(home),
+        "enabled": True,
+    }]}))
+    pool = SimpleNamespace(_config_path=pool_path)
+    journal_path = codex_pool_api._begin_login_transaction(
+        attempt_id=f"symlink-quarantine-{dangling}",
+        kind="relogin",
+        account_id="codex-1",
+        codex_home=str(home),
+        pool=pool,
+    )
+    auth_path.unlink()
+    target = tmp_path / "external-auth-target"
+    if not dangling:
+        target.write_text("external-secret")
+        target.chmod(0o640)
+    auth_path.symlink_to(target)
+
+    assert codex_pool_api._quarantine_login_transaction(
+        journal_path,
+        "forced rollback failure",
+        expected_pool_path=pool_path.resolve(),
+    ) is True
+
+    assert not auth_path.exists()
+    assert not auth_path.is_symlink()
+    if dangling:
+        assert not target.exists()
+    else:
+        assert target.read_text() == "external-secret"
+        assert target.stat().st_mode & 0o777 == 0o640
+    account = json.loads(pool_path.read_text())["accounts"][0]
+    assert account["enabled"] is False
+    assert account["login_recovery_failed"] is True
+    assert journal_path.exists()
+
+
+def test_login_rollback_fsyncs_removed_home_artifacts_before_journal_delete(
+    monkeypatch, tmp_path,
+):
+    home = tmp_path / ".codex"
+    home.mkdir()
+    auth_path = home / "auth.json"
+    auth_path.write_text("old-auth")
+    pool_path = tmp_path / ".codex-pool" / "accounts.json"
+    pool_path.parent.mkdir()
+    pool_path.write_text('{"accounts": []}\n')
+    pool = SimpleNamespace(_config_path=pool_path)
+    journal_path = codex_pool_api._begin_login_transaction(
+        attempt_id="artifact-fsync",
+        kind="relogin",
+        account_id="codex-1",
+        codex_home=str(home),
+        pool=pool,
+    )
+    backup = home / ".auth.json.login-backup-new"
+    os.replace(auth_path, backup)
+    auth_path.write_text("partial-auth")
+    marker = home / ".ccm-login-recovery-failed"
+    marker.write_text("partial")
+    artifact_sync_seen = False
+    original_fsync_directory = codex_pool_api._fsync_directory
+    original_remove = codex_pool_api._remove_login_transaction
+
+    def observe_fsync(path):
+        nonlocal artifact_sync_seen
+        original_fsync_directory(path)
+        if path == home and not backup.exists() and not marker.exists():
+            artifact_sync_seen = True
+
+    def observe_remove(path):
+        assert artifact_sync_seen is True
+        original_remove(path)
+
+    monkeypatch.setattr(codex_pool_api, "_fsync_directory", observe_fsync)
+    monkeypatch.setattr(codex_pool_api, "_remove_login_transaction", observe_remove)
+
+    codex_pool_api._rollback_login_transaction(
+        journal_path, expected_pool_path=pool_path.resolve(),
+    )
+
+    assert auth_path.read_text() == "old-auth"
+    assert not backup.exists()
+    assert not marker.exists()
+    assert not journal_path.exists()
+
+
+async def test_successful_watcher_commit_preserves_new_files_and_removes_journal(
+    monkeypatch, tmp_path,
+):
+    home = tmp_path / ".codex-codex-commit"
+    home.mkdir()
+    auth_path = home / "auth.json"
+    auth_path.write_bytes(b"old-auth")
+    pool_path = tmp_path / ".codex-pool" / "accounts.json"
+    tokens_path = pool_path.parent / "email_tokens.json"
+    pool_path.parent.mkdir()
+    pool_path.write_bytes(b'{"accounts": []}\n')
+    tokens_path.write_bytes(b'{}\n')
+    pool = SimpleNamespace(
+        _config_path=pool_path,
+        reload=Mock(),
+        _quota_cache=None,
+    )
+    monkeypatch.setattr(codex_pool_api, "_get_pool", lambda: pool)
+    journal_path = codex_pool_api._begin_login_transaction(
+        attempt_id="commit-add",
+        kind="add",
+        account_id="codex-commit",
+        codex_home=str(home),
+        pool=pool,
+    )
+    auth_path.write_bytes(b"new-auth")
+    pool_path.write_bytes(b'{"accounts": [{"id": "codex-commit"}]}\n')
+    tokens_path.write_bytes(b'{"new@example.com": {"password": "new"}}\n')
+    manager = _maintenance_manager()
+    login_lock = asyncio.Lock()
+    await login_lock.acquire()
+    state: dict[str, dict] = {"new@example.com": {"status": "running"}}
+    proc = SimpleNamespace(returncode=0)
+
+    result = await codex_pool_api._finalize_login_transaction(
+        proc=proc,
+        operation="commit test",
+        journal_path=journal_path,
+        commit_requested=True,
+        instance_manager=manager,
+        codex_home=str(home),
+        login_lock=login_lock,
+        attempt_id="commit-add",
+        state_store=state,
+        state_key="new@example.com",
+    )
+
+    assert result["committed"] is True
+    assert auth_path.read_bytes() == b"new-auth"
+    assert b"codex-commit" in pool_path.read_bytes()
+    assert b"new@example.com" in tokens_path.read_bytes()
+    assert not journal_path.exists()
+    assert state["new@example.com"]["status"] == "success"
+    manager.end_codex_app_server_home_maintenance.assert_awaited_once()
+    assert not login_lock.locked()
+
+
+async def test_successful_exit_does_not_publish_success_until_commit_barrier(
+    monkeypatch, tmp_path,
+):
+    home = tmp_path / ".codex"
+    home.mkdir()
+    auth_path = home / "auth.json"
+    auth_path.write_text("old-auth")
+    pool_path = tmp_path / ".codex-pool" / "accounts.json"
+    pool_path.parent.mkdir()
+    pool_path.write_text('{"accounts": []}\n')
+    pool = SimpleNamespace(
+        _config_path=pool_path,
+        reload=Mock(),
+        _quota_cache=None,
+    )
+    monkeypatch.setattr(codex_pool_api, "_get_pool", lambda: pool)
+    journal_path = codex_pool_api._begin_login_transaction(
+        attempt_id="barrier-failure",
+        kind="relogin",
+        account_id="codex-1",
+        codex_home=str(home),
+        pool=pool,
+    )
+    auth_path.unlink()
+    external = tmp_path / "external-auth"
+    external.write_text("do-not-touch")
+    external.chmod(0o640)
+    auth_path.symlink_to(external)
+    manager = _maintenance_manager()
+    login_lock = asyncio.Lock()
+    await login_lock.acquire()
+    state = {"codex-1": {"status": "finalizing"}}
+
+    result = await codex_pool_api._finalize_login_transaction(
+        proc=SimpleNamespace(returncode=0),
+        operation="commit barrier failure",
+        journal_path=journal_path,
+        commit_requested=True,
+        instance_manager=manager,
+        codex_home=str(home),
+        login_lock=login_lock,
+        attempt_id="barrier-failure",
+        state_store=state,
+        state_key="codex-1",
+        expected_pool_path=pool_path.resolve(),
+    )
+
+    assert result["committed"] is False
+    assert result["cleanup_safe"] is True
+    assert state["codex-1"]["status"] == "failed"
+    assert "commit validation failed" in state["codex-1"]["detail"].lower()
+    assert auth_path.read_text() == "old-auth"
+    assert not auth_path.is_symlink()
+    assert external.read_text() == "do-not-touch"
+    assert external.stat().st_mode & 0o777 == 0o640
+    assert not journal_path.exists()
+    assert not login_lock.locked()
+
+
+async def test_add_commit_fsyncs_all_files_before_journal_removal(
+    monkeypatch, tmp_path,
+):
+    home = tmp_path / ".codex"
+    home.mkdir()
+    auth_path = home / "auth.json"
+    auth_path.write_text("old-auth")
+    pool_path = tmp_path / ".codex-pool" / "accounts.json"
+    tokens_path = pool_path.parent / "email_tokens.json"
+    pool_path.parent.mkdir()
+    pool_path.write_text('{"accounts": []}\n')
+    tokens_path.write_text('{}\n')
+    pool = SimpleNamespace(
+        _config_path=pool_path,
+        reload=Mock(),
+        _quota_cache=None,
+    )
+    monkeypatch.setattr(codex_pool_api, "_get_pool", lambda: pool)
+    journal_path = codex_pool_api._begin_login_transaction(
+        attempt_id="commit-order",
+        kind="add",
+        account_id="codex-1",
+        codex_home=str(home),
+        pool=pool,
+    )
+    events = []
+    original_remove = codex_pool_api._remove_login_transaction
+
+    monkeypatch.setattr(
+        codex_pool_api,
+        "_fsync_regular_file_and_parent",
+        lambda path: events.append(("fsync", path)),
+    )
+
+    def observe_remove(path):
+        events.append(("remove", path))
+        original_remove(path)
+
+    monkeypatch.setattr(codex_pool_api, "_remove_login_transaction", observe_remove)
+    login_lock = asyncio.Lock()
+    await login_lock.acquire()
+
+    result = await codex_pool_api._finalize_login_transaction(
+        proc=SimpleNamespace(returncode=0),
+        operation="commit ordering",
+        journal_path=journal_path,
+        commit_requested=True,
+        instance_manager=_maintenance_manager(),
+        codex_home=str(home),
+        login_lock=login_lock,
+        attempt_id="commit-order",
+        state_store={"new@example.com": {"status": "finalizing"}},
+        state_key="new@example.com",
+        expected_pool_path=pool_path.resolve(),
+    )
+
+    assert result["committed"] is True
+    assert events == [
+        ("fsync", auth_path),
+        ("fsync", tokens_path),
+        ("fsync", pool_path),
+        ("remove", journal_path),
+    ]
+
+
+def test_private_json_writer_never_exposes_group_read_permissions(
+    monkeypatch, tmp_path,
+):
     destination = tmp_path / "private" / "email_tokens.json"
+    fsync_directory = Mock(wraps=codex_login._fsync_directory)
+    monkeypatch.setattr(codex_login, "_fsync_directory", fsync_directory)
 
     codex_login._write_private_json(destination, {"user@example.com": {"password": "p"}})
 
     assert destination.stat().st_mode & 0o777 == 0o600
     assert destination.parent.stat().st_mode & 0o777 == 0o700
     assert not list(destination.parent.glob(".email_tokens.json.*.tmp"))
+    fsync_directory.assert_called_once_with(destination.parent)
 
 
 def test_pool_login_registration_rolls_back_credentials_when_pool_write_fails(

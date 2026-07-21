@@ -378,7 +378,12 @@ echo deploy-ok
             "POOL_ENABLED=true",
             f"USE_PTY_MODE={'true' if settings.use_pty_mode else 'false'}",
         ])
-        code, out = await ssh.run(f"cat > {remote_dir}/.env << 'EOF'\n{env}\nEOF")
+        # The command embeds AUTH_TOKEN in the heredoc.  Keep the complete
+        # command out of SSH debug logs just like account-login payloads.
+        code, out = await ssh.run(
+            f"cat > {remote_dir}/.env << 'EOF'\n{env}\nEOF",
+            sensitive=True,
+        )
         if code != 0:
             raise BootstrapError("ccm-config", out[-1000:])
 

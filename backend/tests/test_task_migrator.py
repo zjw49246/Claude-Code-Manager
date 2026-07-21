@@ -3,8 +3,10 @@ from pathlib import PurePosixPath
 from unittest.mock import AsyncMock
 
 import pytest
+from sqlalchemy import update
 
 import backend.main as main_module
+import backend.services.task_migrator as task_migrator_module
 from backend.models.task import Task
 from backend.models.worker import Worker
 from backend.services.task_migrator import MigrationError, TaskMigrator
@@ -99,6 +101,46 @@ async def test_migrate_rejects_executing(db_factory, session_factory):
         await m.migrate(t.id, w.id)
 
 
+async def test_migrate_rejects_in_progress(db_factory, session_factory):
+    w = await _mk_worker(session_factory)
+    t = await _mk_task(session_factory, status="in_progress")
+    m = _migrator(db_factory)
+    with pytest.raises(MigrationError, match="先停止"):
+        await m.migrate(t.id, w.id)
+
+
+async def test_migration_claim_cas_preserves_concurrent_dispatcher_claim(
+    db_factory, session_factory, monkeypatch,
+):
+    """A state change during Worker validation must beat migration's CAS."""
+    w = await _mk_worker(session_factory)
+    t = await _mk_task(session_factory, status="pending")
+    m = _migrator(db_factory)
+    real_get_worker = m._get_worker
+
+    async def claim_while_validating(worker_id):
+        worker = await real_get_worker(worker_id)
+        async with session_factory() as db:
+            await db.execute(
+                update(Task)
+                .where(Task.id == t.id, Task.status == "pending")
+                .values(status="in_progress")
+            )
+            await db.commit()
+        return worker
+
+    monkeypatch.setattr(m, "_get_worker", claim_while_validating)
+
+    with pytest.raises(MigrationError, match="并发修改"):
+        await m.migrate(t.id, w.id)
+
+    async with session_factory() as db:
+        task = await db.get(Task, t.id)
+    assert task.status == "in_progress"
+    assert task.worker_id is None
+    m._sync_workspace.assert_not_called()
+
+
 async def test_migrate_noop_when_already_there(db_factory, session_factory):
     t = await _mk_task(session_factory)  # 本机
     m = _migrator(db_factory)
@@ -136,6 +178,82 @@ async def test_migrate_failure_restores_status(db_factory, session_factory, monk
         task = await db.get(Task, t.id)
     assert task.status == "failed"      # 复原
     assert task.worker_id is None       # 指针没切
+
+
+async def test_migration_failure_does_not_overwrite_concurrent_status(
+    db_factory, session_factory, monkeypatch,
+):
+    """Rollback is a CAS too: a concurrent cancellation must remain final."""
+    w = await _mk_worker(session_factory)
+    t = await _mk_task(session_factory, session_id="s", status="failed")
+    m = _migrator(db_factory)
+
+    async def cancel_then_fail(*_args):
+        async with session_factory() as db:
+            await db.execute(
+                update(Task)
+                .where(Task.id == t.id, Task.status == "migrating")
+                .values(status="cancelled")
+            )
+            await db.commit()
+        raise RuntimeError("rsync down")
+
+    m._move_session = AsyncMock(side_effect=cancel_then_fail)
+    monkeypatch.setattr(main_module, "worker_proxy", AsyncMock())
+
+    with pytest.raises(RuntimeError, match="rsync down"):
+        await m.migrate(t.id, w.id)
+
+    async with session_factory() as db:
+        task = await db.get(Task, t.id)
+    assert task.status == "cancelled"
+    assert task.worker_id is None
+
+
+async def test_worker_task_import_is_one_inert_request(
+    session_factory, monkeypatch,
+):
+    w = await _mk_worker(session_factory)
+    t = await _mk_task(session_factory, session_id="s", status="completed")
+    requests = []
+
+    class Response:
+        status_code = 201
+        text = ""
+
+        @staticmethod
+        def json():
+            return {"status": "cancelled"}
+
+        @staticmethod
+        def raise_for_status():
+            return None
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def post(self, url, *, headers, json):
+            requests.append((url, headers, json))
+            return Response()
+
+    monkeypatch.setattr(
+        task_migrator_module.httpx,
+        "AsyncClient",
+        lambda **_kwargs: Client(),
+    )
+    migrator = TaskMigrator(db_factory=None, relay=FakeRelay())
+
+    await migrator._ensure_worker_task(w, t, worker_project_id=17)
+
+    assert len(requests) == 1
+    url, _headers, payload = requests[0]
+    assert url.endswith("/api/tasks/migration-import")
+    assert payload["id"] == t.id
+    assert payload["project_id"] == 17
 
 
 async def test_put_worker_id_triggers_migration(client, session_factory, monkeypatch):

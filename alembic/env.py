@@ -6,7 +6,12 @@ from alembic import context
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # Alembic can run in-process (startup migrations and migration tests).
+    # The logging.config default disables every already-created application
+    # logger that is not named in alembic.ini.  That silently turns off CCM
+    # service diagnostics for the rest of the process, including deliberately
+    # redacted SSH audit messages.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # Import all models so Alembic can detect the full target schema.
 # New models must be imported here for autogenerate to work.

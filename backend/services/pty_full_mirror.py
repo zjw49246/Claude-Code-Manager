@@ -34,6 +34,10 @@ class FullMirrorCCMBackend(CCMBackend):
     """
 
     async def on_exit(self, key: Any, exit_code: int | None, **context) -> None:
+        # claude_pty starts its consumer before InstanceManager persists the
+        # initial running metadata. A short turn must not write idle first and
+        # then be overwritten by that late running commit.
+        await self._im.wait_for_pty_launch_metadata(key)
         await super().on_exit(key, exit_code, **context)
         try:
             session = context.get("session") or self._sessions.get(key)

@@ -92,6 +92,13 @@ CONTINUE_BUTTON_TEXTS = (
 )
 
 
+def _log_codex_login_output(output: str) -> None:
+    """Log CLI output without exposing OAuth state or PKCE parameters."""
+
+    safe_output = AUTHORIZE_URL_RE.sub("<OAuth authorize URL redacted>", output.strip())
+    logger.info("codex login: %s", safe_output)
+
+
 # --- OTP polling (171mail API) ---
 
 
@@ -304,6 +311,17 @@ def _emit_login_event(event: dict) -> None:
     print(f"{LOGIN_EVENT_PREFIX}{json.dumps(event, separators=(',', ':'))}", flush=True)
 
 
+def _fsync_directory(path: Path) -> None:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _write_private_json(path: Path, data: dict) -> None:
     """Atomically persist JSON with owner-only permissions from first byte."""
 
@@ -324,6 +342,7 @@ def _write_private_json(path: Path, data: dict) -> None:
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, path)
+        _fsync_directory(path.parent)
     finally:
         if descriptor >= 0:
             os.close(descriptor)
@@ -621,7 +640,7 @@ async def codex_login(
                 await asyncio.sleep(0.2)
                 continue
             clean = ANSI_RE.sub("", raw.decode(errors="replace"))
-            logger.info("codex login: %s", clean.strip())
+            _log_codex_login_output(clean)
             m = AUTHORIZE_URL_RE.search(clean)
             if m:
                 auth_url = m.group(1)

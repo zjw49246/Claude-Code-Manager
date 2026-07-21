@@ -35,6 +35,24 @@ class CodexThreadHomeMismatchError(CodexAppServerError):
     """A thread was routed to a different account without an explicit rebind."""
 
 
+class _UnconfirmedTurnCancellation(asyncio.CancelledError):
+    """A cancelled turn/start whose interrupt was not acknowledged."""
+
+    def __init__(self, process: "CodexTurnProcess", reason: str) -> None:
+        super().__init__(reason)
+        self.process = process
+        self.reason = reason
+
+
+class _UnconfirmedTurnStartFailure(CodexAppServerError):
+    """A timed-out turn/start that may still be executing server-side."""
+
+    def __init__(self, process: "CodexTurnProcess", reason: str) -> None:
+        super().__init__(reason)
+        self.process = process
+        self.reason = reason
+
+
 def normalize_codex_home(codex_home: str | os.PathLike[str] | None = None) -> str:
     """Return the canonical, absolute CODEX_HOME used as the process key."""
 
@@ -216,7 +234,7 @@ class CodexAppServer:
                 },
             )
             await self._notify("initialized", {})
-        except Exception:
+        except BaseException:
             await self.shutdown()
             raise
         logger.info(
@@ -305,9 +323,34 @@ class CodexAppServer:
             "model": model if model and model != "default" else None,
             "effort": effort,
         }
+        turn_request = asyncio.create_task(self._request("turn/start", turn_params))
+        turn_cancelled = False
+        while not turn_request.done():
+            try:
+                await asyncio.shield(turn_request)
+            except asyncio.CancelledError:
+                # Once turn/start is on the wire, abandoning the response can
+                # leave real model work with no process adapter/consumer. Wait
+                # for the bounded RPC to resolve, then interrupt it explicitly.
+                turn_cancelled = True
+            except BaseException:
+                # Retrieve and classify the completed request below. In
+                # particular, a timeout is an indeterminate server-side turn,
+                # not an ordinary rejected admission.
+                break
         try:
-            turn_response = await self._request("turn/start", turn_params)
-        except Exception:
+            turn_response = turn_request.result()
+        except asyncio.TimeoutError as exc:
+            # The RPC was written but no response arrived. It is impossible to
+            # distinguish a rejected request from real model work that started
+            # just before the timeout, and no turn id exists for an interrupt.
+            # Preserve the adapter/context so the registry can fail closed by
+            # stopping this account transport.
+            reason = "Codex app-server turn/start timed out with unknown server state"
+            if turn_cancelled:
+                raise _UnconfirmedTurnCancellation(turn_process, reason) from exc
+            raise _UnconfirmedTurnStartFailure(turn_process, reason) from exc
+        except BaseException:
             self._contexts_by_thread.pop(thread_id, None)
             turn_process.finish(1, "Codex app-server rejected turn/start")
             raise
@@ -320,6 +363,24 @@ class CodexAppServer:
             raise CodexAppServerError("turn/start returned no turn id")
         context.turn_id = turn_id
         self._contexts_by_turn[turn_id] = context
+        if turn_cancelled:
+            cleanup = asyncio.create_task(self.abandon_turn(
+                turn_process,
+                "Codex turn admission was cancelled",
+            ))
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    continue
+            interrupt_confirmed = cleanup.result()
+            if not interrupt_confirmed:
+                raise _UnconfirmedTurnCancellation(
+                    turn_process,
+                    "Codex turn admission was cancelled and its interrupt "
+                    "could not be confirmed",
+                )
+            raise asyncio.CancelledError
         logger.info(
             "Codex latency task=%s thread=%s stage=turn_started elapsed_ms=%.1f",
             task_id,
@@ -327,6 +388,50 @@ class CodexAppServer:
             (time.perf_counter() - launch_started) * 1000,
         )
         return turn_process, thread_id
+
+    async def abandon_turn(
+        self,
+        process: CodexTurnProcess,
+        reason: str,
+    ) -> bool:
+        """Interrupt and detach a turn that no caller can consume.
+
+        Returns whether the interrupt RPC was confirmed.  The registry uses a
+        false result to escalate to shutting down the account transport, which
+        is the only safe way to rule out untracked model work.
+        """
+
+        context = next(
+            (
+                candidate
+                for candidate in self._contexts_by_thread.values()
+                if candidate.process is process
+            ),
+            None,
+        )
+        interrupt_confirmed = False
+        try:
+            if context is not None and context.turn_id:
+                await self._request(
+                    "turn/interrupt",
+                    {
+                        "threadId": context.thread_id,
+                        "turnId": context.turn_id,
+                    },
+                )
+                interrupt_confirmed = True
+        except BaseException:
+            logger.exception(
+                "Failed to interrupt unclaimed Codex turn in %s",
+                self.codex_home,
+            )
+        finally:
+            if context is not None:
+                self._contexts_by_thread.pop(context.thread_id, None)
+                if context.turn_id:
+                    self._contexts_by_turn.pop(context.turn_id, None)
+            process.finish(130, reason)
+        return interrupt_confirmed
 
     async def steer_turn(self, thread_id: str, content: str) -> bool:
         """Append user input to the currently active regular turn.
@@ -374,12 +479,14 @@ class CodexAppServer:
         request_id = self._request_id
         future = asyncio.get_running_loop().create_future()
         self._pending[request_id] = future
-        await self._write({"id": request_id, "method": method, "params": params})
         try:
+            await self._write({"id": request_id, "method": method, "params": params})
             response = await asyncio.wait_for(future, timeout=self.request_timeout)
-        except Exception:
+        finally:
+            # Cancellation can happen while waiting for the shared write lock
+            # or draining stdin, before the response wait is entered. Never
+            # leave that future permanently registered.
             self._pending.pop(request_id, None)
-            raise
         if "error" in response:
             error = response.get("error") or {}
             raise CodexAppServerError(
@@ -696,6 +803,11 @@ class CodexAppServerRegistry:
         # yet returned to the caller.  Maintenance checks this under the same
         # lock so relogin cannot race between server lookup and context setup.
         self._starting: dict[str, int] = {}
+        # A home-level count protects maintenance; this per-thread token also
+        # prevents two concurrent resumes of the same native thread. Without
+        # it, a failed first request could remove the successful second
+        # request's owner because both routes contain the same home value.
+        self._starting_threads: dict[str, object] = {}
         self._lock = asyncio.Lock()
 
     async def start_turn(
@@ -707,6 +819,7 @@ class CodexAppServerRegistry:
         home = normalize_codex_home(codex_home)
         resume_session_id = kwargs.get("resume_session_id")
         reserved_owner = False
+        start_token: object | None = None
 
         async with self._lock:
             if home in self._draining:
@@ -714,6 +827,10 @@ class CodexAppServerRegistry:
                     f"Codex account app-server is draining: {home}"
                 )
             if resume_session_id:
+                if resume_session_id in self._starting_threads:
+                    raise CodexAppServerBusyError(
+                        f"Codex thread {resume_session_id} already has a resume request in flight"
+                    )
                 if resume_session_id in self._rebindings:
                     raise CodexAppServerBusyError(
                         f"Codex thread {resume_session_id} is being rebound"
@@ -729,6 +846,8 @@ class CodexAppServerRegistry:
                     # concurrent resumes cannot load one rollout in two homes.
                     self._thread_owners[resume_session_id] = home
                     reserved_owner = True
+                start_token = object()
+                self._starting_threads[resume_session_id] = start_token
             server = self._servers.get(home)
             if server is None:
                 server = CodexAppServer(
@@ -739,37 +858,151 @@ class CodexAppServerRegistry:
                 self._servers[home] = server
             self._starting[home] = self._starting.get(home, 0) + 1
 
+        process: CodexTurnProcess | None = None
+        thread_id: str | None = None
+        admitted = False
+        starting_released = False
         try:
-            process, thread_id = await server.start_turn(**kwargs)
-        except BaseException:
-            async with self._lock:
-                starting = self._starting.get(home, 0) - 1
-                if starting > 0:
-                    self._starting[home] = starting
-                else:
-                    self._starting.pop(home, None)
-                if reserved_owner:
-                    if self._thread_owners.get(resume_session_id) == home:
-                        self._thread_owners.pop(resume_session_id, None)
-            raise
+            try:
+                process, thread_id = await server.start_turn(**kwargs)
+            except (
+                _UnconfirmedTurnCancellation,
+                _UnconfirmedTurnStartFailure,
+            ) as exc:
+                # The local adapter is terminal, but the real server-side turn
+                # may still be executing. Preserve it for registry escalation.
+                process = exc.process
+                raise
 
+            async with self._lock:
+                assert process is not None and thread_id is not None
+                owner = self._thread_owners.get(thread_id)
+                if owner is not None and owner != home:
+                    raise CodexThreadHomeMismatchError(
+                        f"Codex thread {thread_id} is already owned by {owner}, not {home}"
+                    )
+                self._decrement_starting_locked(home)
+                starting_released = True
+                self._thread_owners[thread_id] = home
+                admitted = True
+            return process, thread_id
+        except BaseException:
+            if process is not None and not admitted:
+                async def _abort_cancelled_admission() -> None:
+                    await self.abort_unclaimed_turn(
+                        home,
+                        process,
+                        reason="Codex registry admission did not complete",
+                    )
+
+                cleanup = asyncio.create_task(_abort_cancelled_admission())
+                while not cleanup.done():
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError:
+                        continue
+                cleanup.result()
+            raise
+        finally:
+            # Release counters/tokens even when abort or transport shutdown
+            # fails. Such failures keep the home draining but must not poison
+            # unrelated lifecycle accounting. Identity-check the thread token
+            # so one request can never erase another generation's reservation.
+            async def _release_start_reservations() -> None:
+                async with self._lock:
+                    if not starting_released:
+                        self._decrement_starting_locked(home)
+                    if (
+                        resume_session_id
+                        and self._starting_threads.get(resume_session_id) is start_token
+                    ):
+                        self._starting_threads.pop(resume_session_id, None)
+                    if (
+                        not admitted
+                        and reserved_owner
+                        and self._thread_owners.get(resume_session_id) == home
+                    ):
+                        self._thread_owners.pop(resume_session_id, None)
+
+            cleanup = asyncio.create_task(_release_start_reservations())
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    continue
+            cleanup.result()
+
+    def _decrement_starting_locked(self, home: str) -> None:
+        """Release one start reservation while ``self._lock`` is held."""
+
+        starting = self._starting.get(home, 0)
+        if starting > 1:
+            self._starting[home] = starting - 1
+        else:
+            self._starting.pop(home, None)
+
+    async def abort_unclaimed_turn(
+        self,
+        codex_home: str | os.PathLike[str],
+        process: CodexTurnProcess,
+        *,
+        reason: str,
+    ) -> None:
+        """Ensure a successfully-started turn cannot outlive its cancelled caller."""
+
+        home = normalize_codex_home(codex_home)
         async with self._lock:
-            starting = self._starting.get(home, 0) - 1
-            if starting > 0:
-                self._starting[home] = starting
+            server = self._servers.get(home)
+            if server is not None:
+                # No new turn may enter while the interrupt outcome is unknown.
+                # Otherwise a required transport shutdown could strand or kill
+                # a second, newly admitted turn.
+                self._draining.add(home)
+        if server is None:
+            process.finish(130, reason)
+            return
+
+        abandon = getattr(server, "abandon_turn", None)
+        interrupt_confirmed = False
+        try:
+            if abandon is not None:
+                interrupt_confirmed = await abandon(process, reason)
             else:
-                self._starting.pop(home, None)
-            owner = self._thread_owners.get(thread_id)
-            if owner is not None and owner != home:
-                # This should only be reachable for a broken/malicious server
-                # returning another active thread id.  Interrupt this turn
-                # instead of letting account ownership silently change.
                 process.terminate()
-                raise CodexThreadHomeMismatchError(
-                    f"Codex thread {thread_id} is already owned by {owner}, not {home}"
-                )
-            self._thread_owners[thread_id] = home
-        return process, thread_id
+                process.finish(130, reason)
+        except BaseException:
+            logger.exception(
+                "Failed to interrupt unclaimed Codex turn before transport shutdown: %s",
+                home,
+            )
+        if interrupt_confirmed:
+            async with self._lock:
+                self._draining.discard(home)
+            return
+
+        # If the interrupt was not acknowledged, stopping this account's
+        # transport is the only way to rule out real model work continuing
+        # without an InstanceManager consumer. A shutdown failure deliberately
+        # leaves the account draining (fail-closed).
+        shutdown_completed = False
+        try:
+            await server.shutdown()
+            shutdown_completed = True
+        except BaseException:
+            logger.exception(
+                "Failed to shut down Codex transport after unclaimed turn: %s",
+                home,
+            )
+            raise
+        finally:
+            if shutdown_completed:
+                async with self._lock:
+                    if self._servers.get(home) is server:
+                        self._servers.pop(home, None)
+                    for owned_thread, owner in list(self._thread_owners.items()):
+                        if owner == home:
+                            self._thread_owners.pop(owned_thread, None)
+                    self._draining.discard(home)
 
     async def steer_turn(self, thread_id: str, content: str) -> bool:
         async with self._lock:
@@ -933,20 +1166,53 @@ class CodexAppServerRegistry:
                 )
             self._draining.add(home)
 
-        if server is not None:
-            try:
+        shutdown_completed = server is None
+        try:
+            if server is not None:
                 await server.shutdown()
-            except BaseException:
-                async with self._lock:
-                    self._draining.discard(home)
-                raise
+                shutdown_completed = True
+            # Cancellation can land after shutdown has completed but while the
+            # registry lock below is contended.  Keep that await inside the
+            # reservation guard so a half-finished begin never strands the
+            # home in ``_draining`` forever.
+            async with self._lock:
+                if server is not None and self._servers.get(home) is server:
+                    self._servers.pop(home, None)
+                for thread_id, owner in list(self._thread_owners.items()):
+                    if owner == home:
+                        self._thread_owners.pop(thread_id, None)
+        except asyncio.CancelledError:
+            if shutdown_completed:
+                # The caller never observes a successful reservation and thus
+                # cannot call end_home_maintenance.  Finish detaching the now
+                # dead server before reopening the home; merely clearing
+                # _draining would make start_turn reuse a closed transport.
+                async def _detach_and_reopen() -> None:
+                    async with self._lock:
+                        if server is not None and self._servers.get(home) is server:
+                            self._servers.pop(home, None)
+                        for thread_id, owner in list(self._thread_owners.items()):
+                            if owner == home:
+                                self._thread_owners.pop(thread_id, None)
+                        self._draining.discard(home)
 
-        async with self._lock:
-            if server is not None and self._servers.get(home) is server:
-                self._servers.pop(home, None)
-            for thread_id, owner in list(self._thread_owners.items()):
-                if owner == home:
-                    self._thread_owners.pop(thread_id, None)
+                cleanup = asyncio.create_task(_detach_and_reopen())
+                while not cleanup.done():
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError:
+                        # Repeated caller cancellation must not reopen the home
+                        # before the closed server has been removed.
+                        continue
+                cleanup.result()
+            # If shutdown itself was cancelled, retain _draining fail-closed;
+            # the server may be only partially terminated and must not be reused.
+            raise
+        except BaseException:
+            # A shutdown failure has unknown process state.  Keep the home
+            # reserved rather than reopening it onto a possibly half-dead or
+            # still-running transport; restart recovery clears in-memory state.
+            raise
         return server is not None
 
     async def end_home_maintenance(

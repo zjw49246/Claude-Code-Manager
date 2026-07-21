@@ -512,7 +512,7 @@ class GlobalDispatcher:
             await process.wait()
 
     async def _wait_output_consumer(
-        self, instance_id: int, task: Task, label: str
+        self, instance_id: int, task: Task, label: str, process=None
     ) -> None:
         """Wait for post-process output/account bookkeeping.
 
@@ -526,6 +526,7 @@ class GlobalDispatcher:
                 instance_id,
                 provider=task.provider,
                 timeout=30,
+                expected_process=process,
             )
         except asyncio.TimeoutError:
             logger.warning(
@@ -1366,7 +1367,7 @@ class GlobalDispatcher:
         process = self.instance_manager.processes.get(instance_id)
         if process:
             await self._wait_process(process, task, label)
-        await self._wait_output_consumer(instance_id, task, label)
+        await self._wait_output_consumer(instance_id, task, label, process)
         return process.returncode if process else -1
 
     async def _launch_mode_turn_with_rotation(
@@ -1416,7 +1417,7 @@ class GlobalDispatcher:
             process = self.instance_manager.processes.get(instance_id)
             if process:
                 await self._wait_process(process, task, label)
-            await self._wait_output_consumer(instance_id, task, label)
+            await self._wait_output_consumer(instance_id, task, label, process)
             exit_code = process.returncode if process else -1
             if exit_code in (0, -2, 130):
                 # _consume_output may have completed a proactive quota switch
@@ -1741,7 +1742,9 @@ class GlobalDispatcher:
             # buffered output before judging the result. Without this the
             # task can be marked completed while the last chunk of Claude's
             # reply is still being parsed/broadcast.
-            await self._wait_output_consumer(instance_id, task, "Task run")
+            await self._wait_output_consumer(
+                instance_id, task, "Task run", process
+            )
 
             exit_code = process.returncode if process else -1
 

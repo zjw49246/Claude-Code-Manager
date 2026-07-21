@@ -73,6 +73,58 @@ async def test_stop_cancels():
 
 
 @pytest.mark.asyncio
+async def test_stop_returns_claimed_task_to_pending_before_it_returns(db_factory):
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    instance_manager = MagicMock()
+    instance_manager.is_running.return_value = False
+    instance_manager.stop = AsyncMock()
+    instance_manager.wait_for_output_consumer = AsyncMock()
+    rl = RalphLoop(
+        db_factory=db_factory,
+        instance_manager=instance_manager,
+        broadcaster=broadcaster,
+    )
+
+    async with db_factory() as db:
+        instance = Instance(name="ralph-cancel-worker")
+        task = Task(title="claimed", description="work")
+        db.add_all([instance, task])
+        await db.commit()
+        await db.refresh(instance)
+        await db.refresh(task)
+        instance_id, task_id = instance.id, task.id
+
+    launch_entered = asyncio.Event()
+    never_finish = asyncio.Event()
+
+    async def blocked_launch(*_args, **_kwargs):
+        launch_entered.set()
+        await never_finish.wait()
+
+    rl._launch_task_on_bound_account = blocked_launch
+    await rl.start(instance_id)
+    await asyncio.wait_for(launch_entered.wait(), timeout=1)
+
+    async with db_factory() as db:
+        claimed = await db.get(Task, task_id)
+        assert claimed.status == "in_progress"
+        assert claimed.instance_id == instance_id
+
+    loop_task = rl._loops[instance_id]
+    await rl.stop(instance_id)
+
+    assert loop_task.cancelled()
+    assert instance_id not in rl._loops
+    async with db_factory() as db:
+        released = await db.get(Task, task_id)
+        assert released.status == "pending"
+        assert released.instance_id is None
+        assert "Ralph loop stopped" in released.error_message
+    instance_manager.stop.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_is_running_true():
     rl = _make_ralph_loop()
 
