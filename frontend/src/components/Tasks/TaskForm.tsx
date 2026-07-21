@@ -67,6 +67,7 @@ export function TaskForm({ onCreated }: TaskFormProps) {
   const [contextTasks, setContextTasks] = useState<Task[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
+  const STORAGE_KEY = 'cc_default_task_config';
 
   const loadProjects = () => {
     api.listProjects().then(setProjects).catch(() => {});
@@ -79,7 +80,6 @@ export function TaskForm({ onCreated }: TaskFormProps) {
     api.config().then((c) => {
       const configuredProvider = c.default_provider || 'codex';
       setDefaultProvider(configuredProvider);
-      setProvider(configuredProvider);
       setProviderOptions(c.provider_options.length ? c.provider_options : ['claude', 'codex']);
       setDefaultModel(c.default_model);
       setModelOptions(c.model_options.filter((m) => m !== 'default'));
@@ -89,6 +89,23 @@ export function TaskForm({ onCreated }: TaskFormProps) {
       setEffortOptions(c.effort_options);
       setCodexEffortOptions(c.codex_effort_options || ['low', 'medium', 'high', 'xhigh']);
       setCodexModelEfforts(c.codex_model_efforts || {});
+      // Apply localStorage defaults AFTER server config so user overrides win
+      let userProvider = configuredProvider;
+      try {
+        const saved = localStorage.getItem(STORAGE_KEY);
+        if (saved) {
+          const cfg = JSON.parse(saved);
+          if (cfg.provider) userProvider = cfg.provider;
+          if (cfg.priority != null) setPriority(cfg.priority);
+          if (cfg.mode) setMode(cfg.mode);
+          if (cfg.model) setModel(cfg.model);
+          if (cfg.effort) setEffort(cfg.effort);
+          if (cfg.thinkingBudget) setThinkingBudget(cfg.thinkingBudget);
+          if (cfg.timeoutHours) setTimeoutHours(cfg.timeoutHours);
+          if (cfg.systemPromptMode) setSystemPromptMode(cfg.systemPromptMode);
+        }
+      } catch {}
+      setProvider(userProvider);
     }).catch(() => {});
   }, []);
 
@@ -168,25 +185,6 @@ export function TaskForm({ onCreated }: TaskFormProps) {
     if (showPluginsDropdown || showConfigPanel || showSkillsDropdown) document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [showPluginsDropdown, showConfigPanel, showSkillsDropdown]);
-
-  const STORAGE_KEY = 'cc_default_task_config';
-
-  // Load saved defaults on mount
-  useEffect(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY);
-      if (!saved) return;
-      const cfg = JSON.parse(saved);
-      if (cfg.priority != null) setPriority(cfg.priority);
-      if (cfg.mode) setMode(cfg.mode);
-      if (cfg.provider) setProvider(cfg.provider);
-      if (cfg.model) setModel(cfg.model);
-      if (cfg.effort) setEffort(cfg.effort);
-      if (cfg.thinkingBudget) setThinkingBudget(cfg.thinkingBudget);
-      if (cfg.timeoutHours) setTimeoutHours(cfg.timeoutHours);
-      if (cfg.systemPromptMode) setSystemPromptMode(cfg.systemPromptMode);
-    } catch {}
-  }, []);
 
   const saveAsDefault = () => {
     const cfg = { priority, mode, provider, model, effort, thinkingBudget, timeoutHours, systemPromptMode };
@@ -346,15 +344,38 @@ export function TaskForm({ onCreated }: TaskFormProps) {
         ...(cloneFromTaskId ? { clone_from_task_id: cloneFromTaskId as number } : {}),
       });
       setDescription('');
-      setPriority(0);
       fileUpload.clear();
       setSelectedSecretIds([]);
-      setModel('');
-      setEffort('');
-      setThinkingBudget('');
-      setSystemPromptMode('');
-      setTimeoutHours('');
       setCloneFromTaskId('');
+      // Restore localStorage defaults (or fall back to server defaults)
+      try {
+        const saved = localStorage.getItem(STORAGE_KEY);
+        if (saved) {
+          const cfg = JSON.parse(saved);
+          setPriority(cfg.priority ?? 0);
+          setMode(cfg.mode || 'auto');
+          setProvider(cfg.provider || defaultProvider);
+          setModel(cfg.model || '');
+          setEffort(cfg.effort || '');
+          setThinkingBudget(cfg.thinkingBudget || '');
+          setTimeoutHours(cfg.timeoutHours || '');
+          setSystemPromptMode(cfg.systemPromptMode || '');
+        } else {
+          setPriority(0);
+          setModel('');
+          setEffort('');
+          setThinkingBudget('');
+          setSystemPromptMode('');
+          setTimeoutHours('');
+        }
+      } catch {
+        setPriority(0);
+        setModel('');
+        setEffort('');
+        setThinkingBudget('');
+        setSystemPromptMode('');
+        setTimeoutHours('');
+      }
       onCreated();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to create task');
