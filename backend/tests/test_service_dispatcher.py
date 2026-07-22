@@ -3260,6 +3260,33 @@ async def test_codex_routing_failure_requeues_exact_message(db_factory, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_instance_contention_requeues_exact_message(db_factory, monkeypatch):
+    """A last-line launch collision must never acknowledge and lose chat."""
+    import backend.services.dispatcher as disp_mod
+    from backend.services.instance_manager import InstanceAlreadyRunningError
+
+    monkeypatch.setattr(disp_mod, "CODEX_ROUTING_RETRY_DELAY", 0.01)
+    d = _make_dispatcher(db_factory)
+    processed = asyncio.Event()
+    seen = []
+
+    async def fake_process(task_id, msg):
+        seen.append(msg)
+        if len(seen) == 1:
+            raise InstanceAlreadyRunningError("instance already running")
+        processed.set()
+
+    d._process_queued_message = fake_process
+    await d.enqueue_message(1, "must also survive contention")
+    await asyncio.wait_for(processed.wait(), 1)
+
+    assert len(seen) == 2
+    assert seen[0] is seen[1]
+    assert seen[1].prompt == "must also survive contention"
+    d._task_queue_workers[1].cancel()
+
+
+@pytest.mark.asyncio
 async def test_long_turn_does_not_respawn_consumer(db_factory, monkeypatch):
     """A turn longer than the stuck-threshold must NOT trip the watchdog into
     respawning the consumer.
@@ -3480,6 +3507,91 @@ async def test_queued_message_skips_launching_instance(db_factory, monkeypatch):
     # The pre-existing claim on id1 is untouched; id2's transient claim is freed.
     assert id1 in d._launching_instances
     assert id2 not in d._launching_instances
+
+
+@pytest.mark.asyncio
+async def test_concurrent_task_consumers_reserve_distinct_idle_instances(
+    db_factory, monkeypatch,
+):
+    """Two task queues must atomically claim different idle instances.
+
+    Regression for the 2026-07-22 test-environment incident: both consumers
+    selected the lowest DB-idle row, then yielded during account resolution
+    before either published `_launching_instances`. One launch succeeded; the
+    other raised InstanceAlreadyRunningError and its user message was dropped.
+    """
+    import time
+    import backend.api.tasks as tasks_mod
+    from backend.services.dispatcher import QueuedMessage, PRIORITY_USER
+
+    monkeypatch.setattr(
+        tasks_mod,
+        "_find_session_jsonl",
+        lambda sid, provider="claude": "/tmp/fake.jsonl",
+    )
+    d = _make_dispatcher(db_factory)
+
+    async with db_factory() as db:
+        inst1 = Instance(name="worker-1", status="idle")
+        inst2 = Instance(name="worker-2", status="idle")
+        db.add_all([inst1, inst2])
+        task1 = Task(
+            title="t1", description="d", target_repo="/repo",
+            status="completed", session_id="sess-1",
+        )
+        task2 = Task(
+            title="t2", description="d", target_repo="/repo",
+            status="completed", session_id="sess-2",
+        )
+        db.add_all([task1, task2])
+        await db.commit()
+        await db.refresh(inst1)
+        await db.refresh(inst2)
+        await db.refresh(task1)
+        await db.refresh(task2)
+        idle_ids = {inst1.id, inst2.id}
+        task_ids = (task1.id, task2.id)
+
+    # Force both old-code consumers to pause after SELECT and before its late
+    # set.add(). With atomic reservation, the second SELECT already excludes
+    # the first consumer's instance, so the launch IDs stay distinct.
+    both_resolving = asyncio.Event()
+    resolve_count = 0
+
+    async def resolve_config(*_args, **_kwargs):
+        nonlocal resolve_count
+        resolve_count += 1
+        if resolve_count == 2:
+            both_resolving.set()
+        await both_resolving.wait()
+        return None
+
+    d._resolve_resume_config_dir = AsyncMock(side_effect=resolve_config)
+    msgs = [
+        QueuedMessage(
+            priority=PRIORITY_USER,
+            timestamp=time.monotonic(),
+            prompt=f"message-{index}",
+            source="user",
+        )
+        for index in (1, 2)
+    ]
+
+    await asyncio.wait_for(
+        asyncio.gather(
+            d._process_queued_message(task_ids[0], msgs[0]),
+            d._process_queued_message(task_ids[1], msgs[1]),
+        ),
+        1,
+    )
+
+    launch_ids = {
+        call.kwargs["instance_id"]
+        for call in d.instance_manager.launch.await_args_list
+    }
+    assert launch_ids == idle_ids
+    assert not d._launching_instances
+    assert not d._instance_claim_owners
 
 
 @pytest.mark.asyncio

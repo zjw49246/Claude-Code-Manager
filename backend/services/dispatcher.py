@@ -119,6 +119,12 @@ class QueuedMessage:
     # A routing retry reuses this same object. Monitor/sub-agent source bubbles
     # are persisted/broadcast once, not once per account-maintenance retry.
     source_logged: bool = field(compare=False, default=False)
+    # Transient in-process reservation held between idle-instance selection and
+    # launch().  The queue consumer releases it in its outer finally as a
+    # fail-safe for any pre-launch exception.
+    instance_claim: tuple[int, object] | None = field(
+        compare=False, default=None, repr=False
+    )
 
 
 def _binary_available(binary: str) -> bool:
@@ -294,6 +300,13 @@ class GlobalDispatcher:
         # could grab the same instance and clobber the half-started PTY session
         # (prod task #676).
         self._launching_instances: set[int] = set()
+        # Selection and reservation must be one atomic in-process operation.
+        # Otherwise two per-task queue consumers can both SELECT the same idle
+        # row before either reaches `_launching_instances.add()`.
+        self._instance_claim_lock = asyncio.Lock()
+        self._instance_claim_owners: dict[
+            int, tuple[object, asyncio.Task | None]
+        ] = {}
         self._running = False
         self._monitor_tasks: dict[int, asyncio.Task] = {}           # monitor_session_id -> asyncio task
         self._monitor_processes: dict[int, asyncio.subprocess.Process] = {}  # monitor_session_id -> subprocess
@@ -350,6 +363,71 @@ class GlobalDispatcher:
     def wake(self) -> None:
         """Wake the task dispatcher after a pending task is committed."""
         self._dispatch_wakeup.set()
+
+    async def _reserve_idle_instance(
+        self,
+        db,
+        *,
+        instance_id: int | None = None,
+    ) -> tuple[Instance | None, object | None]:
+        """Atomically select and reserve one DB-idle local instance.
+
+        The DB status remains ``idle`` until ``InstanceManager.launch`` has
+        created the process/turn, so the reservation lives in memory.  All
+        dispatcher paths use the same lock and publish the reservation before
+        releasing it; this closes the SELECT -> claim race between concurrent
+        per-task consumers and the fresh-task dispatch loop.
+        """
+        async with self._instance_claim_lock:
+            busy_iids = {
+                iid for iid, task in self._running_tasks.items() if not task.done()
+            } | self._launching_instances
+            stmt = select(Instance).where(Instance.status == "idle")
+            if instance_id is not None:
+                stmt = stmt.where(Instance.id == instance_id)
+            if busy_iids:
+                stmt = stmt.where(Instance.id.notin_(busy_iids))
+            result = await db.execute(stmt.order_by(Instance.id).limit(1))
+            instance = result.scalar_one_or_none()
+            if instance is None:
+                return None, None
+
+            token = object()
+            self._launching_instances.add(instance.id)
+            self._instance_claim_owners[instance.id] = (
+                token,
+                asyncio.current_task(),
+            )
+            return instance, token
+
+    async def _release_instance_reservation(
+        self,
+        instance_id: int,
+        token: object,
+    ) -> None:
+        """Release a reservation only when ``token`` still owns it."""
+        async with self._instance_claim_lock:
+            claim = self._instance_claim_owners.get(instance_id)
+            if claim is None or claim[0] is not token:
+                return
+            self._instance_claim_owners.pop(instance_id, None)
+            self._launching_instances.discard(instance_id)
+
+    async def _release_owned_instance_reservations(
+        self,
+        owner: asyncio.Task | None,
+    ) -> None:
+        """Fail-safe cleanup when the dispatch loop errors or is cancelled."""
+        async with self._instance_claim_lock:
+            owned = [
+                instance_id
+                for instance_id, (_token, claim_owner)
+                in self._instance_claim_owners.items()
+                if claim_owner is owner
+            ]
+            for instance_id in owned:
+                self._instance_claim_owners.pop(instance_id, None)
+                self._launching_instances.discard(instance_id)
 
     async def _cleanup_stale_state(self):
         """Reset instances and tasks stuck in active states after a crash/restart."""
@@ -618,13 +696,15 @@ class GlobalDispatcher:
                     )
                     idle_instances = list(result.scalars().all())
 
-                for instance in idle_instances:
-                    # Skip if already running a lifecycle
-                    if instance.id in self._running_tasks and not self._running_tasks[instance.id].done():
-                        continue
-                    # Skip if the queued-message path is mid-launching on it
-                    # (DB status not yet flipped to "running" — prod task #676)
-                    if instance.id in self._launching_instances:
+                for idle_candidate in idle_instances:
+                    # Re-check and reserve under the same lock used by queued
+                    # messages. The earlier DB query is only a capacity hint;
+                    # another consumer may have claimed this row since then.
+                    async with self.db_factory() as db:
+                        instance, claim_token = await self._reserve_idle_instance(
+                            db, instance_id=idle_candidate.id
+                        )
+                    if instance is None or claim_token is None:
                         continue
 
                     async with self.db_factory() as db:
@@ -640,6 +720,9 @@ class GlobalDispatcher:
                         )
 
                     if not task:
+                        await self._release_instance_reservation(
+                            instance.id, claim_token
+                        )
                         continue  # No matching task for this instance, try next
 
                     # Resolve project -> target_repo + git config
@@ -661,9 +744,16 @@ class GlobalDispatcher:
                     git_env = _build_git_env(merged)
 
                     logger.info(f"Dispatching task {task.id} ({task.title}) to instance {instance.id} ({instance.name})")
-                    self._running_tasks[instance.id] = asyncio.create_task(
-                        self._run_task_lifecycle(instance.id, task, git_env)
-                    )
+                    # Publish the lifecycle claim before dropping the transient
+                    # launch reservation, atomically under the selection lock.
+                    async with self._instance_claim_lock:
+                        self._running_tasks[instance.id] = asyncio.create_task(
+                            self._run_task_lifecycle(instance.id, task, git_env)
+                        )
+                        claim = self._instance_claim_owners.get(instance.id)
+                        if claim is not None and claim[0] is claim_token:
+                            self._instance_claim_owners.pop(instance.id, None)
+                            self._launching_instances.discard(instance.id)
 
                 try:
                     await asyncio.wait_for(self._dispatch_wakeup.wait(), timeout=2)
@@ -671,8 +761,14 @@ class GlobalDispatcher:
                     pass
 
             except asyncio.CancelledError:
+                await self._release_owned_instance_reservations(
+                    asyncio.current_task()
+                )
                 break
             except Exception as e:
+                await self._release_owned_instance_reservations(
+                    asyncio.current_task()
+                )
                 logger.error(f"Dispatch loop error: {e}", exc_info=True)
                 await asyncio.sleep(5)
 
@@ -3537,6 +3633,9 @@ class GlobalDispatcher:
                         CodexAppServerBusyError,
                         CodexThreadHomeMismatchError,
                     )
+                    from backend.services.instance_manager import (
+                        InstanceAlreadyRunningError,
+                    )
 
                     if isinstance(
                         exc,
@@ -3544,14 +3643,15 @@ class GlobalDispatcher:
                             CodexAccountRoutingError,
                             CodexAppServerBusyError,
                             CodexThreadHomeMismatchError,
+                            InstanceAlreadyRunningError,
                         ),
                     ):
-                        # Account cooldown/maintenance/rebind conflicts are
+                        # Routing/rebind/instance-contention conflicts are
                         # temporary. Preserve the exact user message instead
                         # of acknowledging q.task_done() and dropping it.
                         logger.warning(
-                            "Deferring queued message for task %s until Codex "
-                            "account routing is available: %s",
+                            "Deferring queued message for task %s until a "
+                            "launch slot is available: %s",
                             task_id, exc,
                         )
                         await q.put(msg)
@@ -3561,6 +3661,16 @@ class GlobalDispatcher:
                             f"Error processing queued message for task {task_id}"
                         )
                 finally:
+                    # `_process_queued_message` normally releases immediately
+                    # after launch. This outer guard also covers exceptions in
+                    # config resolution, compaction, logging, or DB commits
+                    # after the atomic reservation was acquired.
+                    if msg.instance_claim is not None:
+                        claimed_id, claim_token = msg.instance_claim
+                        await self._release_instance_reservation(
+                            claimed_id, claim_token
+                        )
+                        msg.instance_claim = None
                     q.task_done()
         finally:
             hb_task.cancel()
@@ -3669,26 +3779,17 @@ class GlobalDispatcher:
                 await asyncio.sleep(5)
                 return
 
-            # Find idle instance — exclude instances the dispatch loop has
-            # claimed for an in-flight lifecycle, or that another queued-message
-            # launch is mid-launching. Their DB status is still "idle" until
-            # launch() flips it, so selecting one here would let two paths grab
-            # the same instance and the second launch would kill the first's
-            # half-started PTY session (prod task #676).
-            busy_iids = {
-                iid for iid, t in self._running_tasks.items() if not t.done()
-            } | self._launching_instances
-            stmt = select(Instance).where(Instance.status == "idle")
-            if busy_iids:
-                stmt = stmt.where(Instance.id.notin_(busy_iids))
-            result = await db.execute(stmt.order_by(Instance.id).limit(1))
-            inst = result.scalar_one_or_none()
-            if not inst:
+            # Select + reserve atomically across all local dispatch paths. A
+            # plain SELECT followed by a later set.add() lets two different
+            # task consumers both choose the same DB-idle instance.
+            inst, claim_token = await self._reserve_idle_instance(db)
+            if inst is None or claim_token is None:
                 logger.warning(f"No idle instance for task {task_id}, re-queueing message")
                 q = self._get_task_queue(task_id)
                 await q.put(msg)
                 await asyncio.sleep(5)
                 return
+            msg.instance_claim = (inst.id, claim_token)
 
             # Build git env
             merged: dict = {}
@@ -3855,13 +3956,6 @@ class GlobalDispatcher:
             ):
                 msg.source_logged = True
 
-            # Claim the instance across the launch window: launch() only flips
-            # its DB status to "running" once the PTY session is fully spawned,
-            # so until then both the dispatch loop and other queued-message
-            # launches must treat it as taken (prod task #676). Released in
-            # finally so a failed launch can't leak the claim and wedge the
-            # instance out of the dispatch pool forever.
-            self._launching_instances.add(inst_id)
             try:
                 await self.instance_manager.launch(**launch_kwargs)
             except Exception:
@@ -3877,7 +3971,10 @@ class GlobalDispatcher:
                 await db.commit()
                 raise
             finally:
-                self._launching_instances.discard(inst_id)
+                await self._release_instance_reservation(
+                    inst_id, claim_token
+                )
+                msg.instance_claim = None
 
             await self.broadcaster.broadcast("tasks", {
                 "event": "status_change",
