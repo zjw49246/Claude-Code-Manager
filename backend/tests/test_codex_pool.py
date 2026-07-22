@@ -1,5 +1,7 @@
+import asyncio
 import json
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -425,6 +427,93 @@ async def test_rollout_quota_falls_back_to_mtime_for_legacy_event_timestamp(
 
 
 @pytest.mark.asyncio
+async def test_rollout_quota_ignores_events_before_account_activation_cutoff(
+    tmp_path: Path,
+):
+    home = tmp_path / "codex-1"
+    home.mkdir()
+    config = tmp_path / "accounts.json"
+    config.write_text(json.dumps({"accounts": [{
+        "id": "codex-1",
+        "codex_home": str(home),
+        "email": "replacement@example.com",
+        "enabled": True,
+        "quota_valid_after": 200.0,
+    }]}))
+    _quota_rollout(
+        home, "previous-identity", 100,
+        event_timestamp=100.0,
+        mtime=1_000.0,
+    )
+    _quota_rollout(
+        home, "legacy-with-fresh-mtime", 99,
+        event_timestamp="not-a-timestamp",
+        mtime=2_000.0,
+    )
+    pool = CodexPool(config_path=config)
+
+    before_new_turn = {
+        item["id"]: item for item in await pool.fetch_quota(force=True)
+    }
+
+    assert before_new_turn["codex-1"]["quota"] is None
+    assert before_new_turn["codex-1"]["error"] == "no_rollout_data"
+
+    _quota_rollout(
+        home, "replacement-identity", 12,
+        event_timestamp=201.0,
+        mtime=50.0,
+    )
+    after_new_turn = {
+        item["id"]: item for item in await pool.fetch_quota(force=True)
+    }
+
+    assert after_new_turn["codex-1"]["quota"]["primary_used_percent"] == 12
+
+
+@pytest.mark.parametrize("event_timestamp", [None, float("nan"), float("inf"), 200.0])
+def test_rollout_quota_cutoff_rejects_missing_nonfinite_and_equal_timestamp(
+    tmp_path: Path, event_timestamp,
+):
+    home = tmp_path / "codex-1"
+    _quota_rollout(
+        home, "not-strictly-after", 100,
+        event_timestamp=event_timestamp,
+        mtime=10_000.0,
+    )
+
+    quota = codex_pool_module._read_quota_from_rollout(
+        str(home), min_event_timestamp=200.0,
+    )
+
+    assert quota is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "invalid_cutoff",
+    [None, "bad", True, 0, float("nan"), float("inf"), 10**1000],
+)
+async def test_explicit_invalid_quota_cutoff_fails_closed(
+    tmp_path: Path, invalid_cutoff,
+):
+    home = tmp_path / "codex-1"
+    _quota_rollout(home, "old-identity", 100, event_timestamp=300.0)
+    config = tmp_path / "accounts.json"
+    config.write_text(json.dumps({"accounts": [{
+        "id": "codex-1", "codex_home": str(home),
+        "email": "replacement@example.com", "enabled": True,
+        "quota_valid_after": invalid_cutoff,
+    }]}))
+    pool = CodexPool(config_path=config)
+
+    result = {item["id"]: item for item in await pool.fetch_quota(force=True)}
+
+    assert result["codex-1"]["quota"] is None
+    assert result["codex-1"]["error"] == "invalid_quota_cutoff"
+
+
+@pytest.mark.asyncio
 async def test_rollout_scan_skips_newer_snapshot_without_usage_data(
     pool: CodexPool, tmp_path: Path,
 ):
@@ -512,6 +601,115 @@ async def test_live_quota_refresh_prefers_account_rpc_and_maps_camel_case(
         str((tmp_path / "codex-1").resolve()),
         str((tmp_path / "codex-2").resolve()),
     }
+
+
+@pytest.mark.asyncio
+async def test_quota_fetch_discards_result_started_before_pool_reload(
+    tmp_path: Path,
+):
+    home = tmp_path / "codex-1"
+    home.mkdir()
+    config_path = tmp_path / "accounts.json"
+    config_path.write_text(json.dumps({"accounts": [{
+        "id": "codex-1", "codex_home": str(home),
+        "email": "old@example.com", "enabled": True,
+    }]}))
+    first_read_started = asyncio.Event()
+    release_first_read = asyncio.Event()
+    calls = 0
+
+    async def live_reader(_codex_home: str) -> dict:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            first_read_started.set()
+            await release_first_read.wait()
+            used = 100
+        else:
+            used = 7
+        return {"rateLimits": {
+            "primary": {
+                "usedPercent": used,
+                "windowDurationMins": 300,
+                "resetsAt": 1_800_000_100,
+            },
+            "planType": "pro",
+        }}
+
+    pool = CodexPool(config_path=config_path, quota_reader=live_reader)
+    fetch_task = asyncio.create_task(
+        pool.fetch_quota(force=True, live=True)
+    )
+    await first_read_started.wait()
+    config_path.write_text(json.dumps({"accounts": [{
+        "id": "codex-1", "codex_home": str(home),
+        "email": "replacement@example.com", "enabled": True,
+        "quota_valid_after": time.time(),
+    }]}))
+    pool.reload()
+    release_first_read.set()
+
+    result = await fetch_task
+
+    assert calls == 2
+    assert result[0]["email"] == "replacement@example.com"
+    assert result[0]["quota"]["primary_used_percent"] == 7
+    assert pool._quota_cache["codex-1"]["quota"]["primary_used_percent"] == 7
+
+
+@pytest.mark.asyncio
+async def test_background_quota_fetch_restarts_after_pool_reload(
+    monkeypatch, tmp_path: Path,
+):
+    home = tmp_path / "codex-1"
+    home.mkdir()
+    config_path = tmp_path / "accounts.json"
+    config_path.write_text(json.dumps({"accounts": [{
+        "id": "codex-1", "codex_home": str(home),
+        "email": "old@example.com", "enabled": True,
+    }]}))
+    first_read_started = threading.Event()
+    release_first_read = threading.Event()
+    cutoffs: list[float | None] = []
+
+    def rollout_reader(
+        _codex_home: str, *, min_event_timestamp: float | None = None,
+    ) -> dict:
+        cutoffs.append(min_event_timestamp)
+        if len(cutoffs) == 1:
+            first_read_started.set()
+            assert release_first_read.wait(timeout=5)
+            used = 100
+        else:
+            used = 8
+        return {
+            "primary_used_percent": used,
+            "primary_window_minutes": 300,
+            "plan_type": "pro",
+            "is_rate_limited": used >= 100,
+        }
+
+    monkeypatch.setattr(
+        codex_pool_module, "_read_quota_from_rollout", rollout_reader,
+    )
+    pool = CodexPool(config_path=config_path)
+    fetch_task = asyncio.create_task(pool.fetch_quota(force=True))
+    assert await asyncio.to_thread(first_read_started.wait, 2)
+    replacement_cutoff = time.time()
+    config_path.write_text(json.dumps({"accounts": [{
+        "id": "codex-1", "codex_home": str(home),
+        "email": "replacement@example.com", "enabled": True,
+        "quota_valid_after": replacement_cutoff,
+    }]}))
+    pool.reload()
+    release_first_read.set()
+
+    result = await fetch_task
+
+    assert cutoffs == [None, replacement_cutoff]
+    assert result[0]["email"] == "replacement@example.com"
+    assert result[0]["quota"]["primary_used_percent"] == 8
+    assert pool._quota_cache["codex-1"]["quota"]["primary_used_percent"] == 8
 
 
 @pytest.mark.asyncio

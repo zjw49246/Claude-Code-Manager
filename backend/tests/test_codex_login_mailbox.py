@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -810,6 +811,134 @@ def test_add_account_home_allocator_rejects_unknown_failed_home_data(
     assert codex_home == str(tmp_path / ".codex-codex-3")
 
 
+def test_add_account_home_allocator_reuses_lowest_clean_retired_slot(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(codex_pool_api.Path, "home", lambda: tmp_path)
+    first_home = tmp_path / ".codex"
+    third_home = tmp_path / ".codex-codex-3"
+    for account_id, home in (("codex-1", first_home), ("codex-3", third_home)):
+        (home / "sessions" / "2026" / "07" / "21").mkdir(parents=True)
+        codex_pool_api._purge_retired_codex_home(home, account_id)
+
+    pool = SimpleNamespace(_accounts=[
+        SimpleNamespace(
+            id="codex-3", codex_home=str(third_home.resolve()),
+            retired=True, cleanup_pending=False, login_recovery_failed=False,
+        ),
+        SimpleNamespace(
+            id="codex-1", codex_home=str(first_home.resolve()),
+            retired=True, cleanup_pending=False, login_recovery_failed=False,
+        ),
+        SimpleNamespace(
+            id="codex-2", codex_home=str((tmp_path / ".codex-codex-2").resolve()),
+            retired=False, cleanup_pending=False, login_recovery_failed=False,
+        ),
+    ])
+
+    account_id, codex_home = codex_pool_api._allocate_codex_account_home(pool)
+
+    assert account_id == "codex-1"
+    assert codex_home == str(first_home.resolve())
+
+
+def test_add_account_home_allocator_preserves_retired_slot_canonical_home(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(codex_pool_api.Path, "home", lambda: tmp_path)
+    custom_home = tmp_path / ".codex-recycled-primary"
+    codex_pool_api._purge_retired_codex_home(custom_home, "codex-2")
+    pool = SimpleNamespace(_accounts=[
+        SimpleNamespace(
+            id="codex-1", codex_home=str((tmp_path / ".codex").resolve()),
+            retired=False, cleanup_pending=False, login_recovery_failed=False,
+        ),
+        SimpleNamespace(
+            id="codex-2", codex_home=str(custom_home.resolve()),
+            retired=True, cleanup_pending=False, login_recovery_failed=False,
+        ),
+    ])
+
+    account_id, codex_home = codex_pool_api._allocate_codex_account_home(pool)
+
+    assert account_id == "codex-2"
+    assert codex_home == str(custom_home.resolve())
+
+
+def test_add_account_home_allocator_prefers_lower_empty_gap_over_retired_slot(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(codex_pool_api.Path, "home", lambda: tmp_path)
+    fifth_home = tmp_path / ".codex-codex-5"
+    codex_pool_api._purge_retired_codex_home(fifth_home, "codex-5")
+    pool = SimpleNamespace(_accounts=[
+        SimpleNamespace(
+            id="codex-1", codex_home=str((tmp_path / ".codex").resolve()),
+            retired=False, cleanup_pending=False, login_recovery_failed=False,
+        ),
+        SimpleNamespace(
+            id="codex-5", codex_home=str(fifth_home.resolve()),
+            retired=True, cleanup_pending=False, login_recovery_failed=False,
+        ),
+    ])
+
+    account_id, codex_home = codex_pool_api._allocate_codex_account_home(pool)
+
+    assert account_id == "codex-2"
+    assert codex_home == str(tmp_path / ".codex-codex-2")
+
+
+@pytest.mark.parametrize(
+    ("cleanup_pending", "recovery_failed", "extra_name", "email"),
+    [
+        (True, False, None, ""),
+        (False, True, None, ""),
+        (False, False, "auth.json", ""),
+        (False, False, None, "stale@example.com"),
+    ],
+)
+def test_add_account_home_allocator_rejects_unsafe_retired_slot(
+    monkeypatch, tmp_path, cleanup_pending, recovery_failed, extra_name, email,
+):
+    monkeypatch.setattr(codex_pool_api.Path, "home", lambda: tmp_path)
+    retired_home = tmp_path / ".codex-codex-2"
+    codex_pool_api._purge_retired_codex_home(retired_home, "codex-2")
+    if extra_name:
+        (retired_home / extra_name).write_text("stale identity\n")
+    pool = SimpleNamespace(_accounts=[
+        SimpleNamespace(
+            id="codex-1", codex_home=str((tmp_path / ".codex").resolve()),
+            retired=False, cleanup_pending=False, login_recovery_failed=False,
+        ),
+        SimpleNamespace(
+            id="codex-2", codex_home=str(retired_home.resolve()),
+            retired=True, cleanup_pending=cleanup_pending,
+            login_recovery_failed=recovery_failed, email=email,
+        ),
+    ])
+
+    account_id, codex_home = codex_pool_api._allocate_codex_account_home(pool)
+
+    assert account_id == "codex-3"
+    assert codex_home == str(tmp_path / ".codex-codex-3")
+
+
+def test_add_account_home_allocator_blocks_pending_login_transaction(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(codex_pool_api.Path, "home", lambda: tmp_path)
+    pool_path = tmp_path / ".codex-pool" / "accounts.json"
+    transaction_dir = pool_path.parent / codex_pool_api.LOGIN_TRANSACTION_DIR
+    transaction_dir.mkdir(parents=True)
+    (transaction_dir / "pending.json").write_text("{}\n")
+    pool = SimpleNamespace(_accounts=[], _config_path=pool_path)
+
+    with pytest.raises(HTTPException) as exc_info:
+        codex_pool_api._allocate_codex_account_home(pool)
+
+    assert exc_info.value.status_code == 409
+
+
 @pytest.mark.parametrize("watcher_kind", ["add", "relogin"])
 async def test_login_watcher_kills_live_process_before_releasing_home(
     monkeypatch, tmp_path, watcher_kind,
@@ -1582,6 +1711,255 @@ async def test_successful_watcher_commit_preserves_new_files_and_removes_journal
     assert not login_lock.locked()
 
 
+async def test_reused_retired_slot_commit_removes_marker_after_commit(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(codex_pool_api.Path, "home", lambda: tmp_path)
+    home = tmp_path / ".codex-codex-2"
+    codex_pool_api._purge_retired_codex_home(home, "codex-2")
+    marker = home / ".ccm-retired-account"
+    pool_path = tmp_path / ".codex-pool" / "accounts.json"
+    tokens_path = pool_path.parent / "email_tokens.json"
+    pool_path.parent.mkdir()
+    pool_path.write_text(json.dumps({"accounts": [{
+        "id": "codex-2",
+        "codex_home": str(home),
+        "retired": True,
+        "enabled": False,
+    }]}))
+    tokens_path.write_text("{}\n")
+    pool = SimpleNamespace(
+        _config_path=pool_path,
+        reload=Mock(),
+        _quota_cache=None,
+    )
+    monkeypatch.setattr(codex_pool_api, "_get_pool", lambda: pool)
+    journal_path = codex_pool_api._begin_login_transaction(
+        attempt_id="reuse-commit",
+        kind="add",
+        account_id="codex-2",
+        codex_home=str(home),
+        pool=pool,
+        reused_retired_slot=True,
+        expected_email="replacement@example.com",
+    )
+    (home / "auth.json").write_text("new-auth\n")
+    pool_path.write_text(json.dumps({"accounts": [{
+        "id": "codex-2",
+        "codex_home": str(home),
+        "email": "replacement@example.com",
+        "enabled": True,
+        "quota_valid_after": codex_pool_api.time.time() + 1,
+    }]}))
+    tokens_path.write_text(json.dumps({
+        "replacement@example.com": {"password": "new-password"},
+    }))
+    login_lock = asyncio.Lock()
+    await login_lock.acquire()
+
+    result = await codex_pool_api._finalize_login_transaction(
+        proc=SimpleNamespace(returncode=0),
+        operation="retired slot commit",
+        journal_path=journal_path,
+        commit_requested=True,
+        instance_manager=_maintenance_manager(),
+        codex_home=str(home),
+        login_lock=login_lock,
+        attempt_id="reuse-commit",
+        state_store={"replacement@example.com": {"status": "finalizing"}},
+        state_key="replacement@example.com",
+        expected_pool_path=pool_path.resolve(),
+    )
+
+    assert result["committed"] is True
+    assert not journal_path.exists()
+    assert not marker.exists()
+    assert (home / "auth.json").read_text() == "new-auth\n"
+
+
+def test_reused_retired_slot_rollback_restores_reusable_home(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(codex_pool_api.Path, "home", lambda: tmp_path)
+    home = tmp_path / ".codex-codex-2"
+    rollout = home / "sessions" / "2026" / "07" / "21" / "rollout.jsonl"
+    rollout.parent.mkdir(parents=True)
+    rollout.write_text("old session\n")
+    codex_pool_api._purge_retired_codex_home(home, "codex-2")
+    pool_path = tmp_path / ".codex-pool" / "accounts.json"
+    tokens_path = pool_path.parent / "email_tokens.json"
+    pool_path.parent.mkdir()
+    retired_pool = {"accounts": [{
+        "id": "codex-2",
+        "codex_home": str(home),
+        "email": "",
+        "enabled": False,
+        "retired": True,
+    }]}
+    pool_path.write_text(json.dumps(retired_pool))
+    tokens_path.write_text("{}\n")
+    pool = SimpleNamespace(_config_path=pool_path)
+    journal_path = codex_pool_api._begin_login_transaction(
+        attempt_id="reuse-rollback",
+        kind="add",
+        account_id="codex-2",
+        codex_home=str(home),
+        pool=pool,
+        reused_retired_slot=True,
+        expected_email="partial@example.com",
+    )
+
+    # Simulate a failed wrapper leaving all the identity-specific files that
+    # made the old allocator permanently skip this number.
+    (home / "auth.json").write_text("partial-auth\n")
+    (home / "models_cache.json").write_text("{}\n")
+    (home / "config.toml").write_text("new identity\n")
+    (home / "log").mkdir()
+    (home / "log" / "codex.log").write_text("partial login\n")
+    (home / ".ccm-retired-account").unlink()
+    pool_path.write_text(json.dumps({"accounts": [{
+        "id": "codex-2", "codex_home": str(home), "enabled": True,
+    }]}))
+    tokens_path.write_text(json.dumps({
+        "partial@example.com": {"password": "partial"},
+    }))
+
+    recovery = codex_pool_api.recover_pending_codex_login_transactions(
+        pool_path,
+    )
+
+    assert recovery == {"recovered": ["reuse-rollback"], "quarantined": []}
+    assert not journal_path.exists()
+    assert json.loads(pool_path.read_text()) == retired_pool
+    assert json.loads(tokens_path.read_text()) == {}
+    assert rollout.read_text() == "old session\n"
+    assert {path.name for path in home.iterdir()} == {
+        "sessions", ".ccm-retired-account",
+    }
+    assert (home / ".ccm-retired-account").read_text().strip() == "codex-2"
+
+    reusable = SimpleNamespace(
+        id="codex-2",
+        codex_home=str(home.resolve()),
+        retired=True,
+        cleanup_pending=False,
+        login_recovery_failed=False,
+    )
+    assert codex_pool_api._clean_retired_home_is_reusable(reusable) is True
+
+
+def test_reused_retired_slot_rollback_rejects_tampered_active_snapshot(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(codex_pool_api.Path, "home", lambda: tmp_path)
+    home = tmp_path / ".codex-codex-2"
+    codex_pool_api._purge_retired_codex_home(home, "codex-2")
+    pool_path = tmp_path / ".codex-pool" / "accounts.json"
+    pool_path.parent.mkdir()
+    pool_path.write_text(json.dumps({"accounts": [{
+        "id": "codex-2", "codex_home": str(home),
+        "email": "", "enabled": False, "retired": True,
+    }]}))
+    (pool_path.parent / "email_tokens.json").write_text("{}\n")
+    pool = SimpleNamespace(_config_path=pool_path)
+    journal_path = codex_pool_api._begin_login_transaction(
+        attempt_id="reuse-tampered",
+        kind="add",
+        account_id="codex-2",
+        codex_home=str(home),
+        pool=pool,
+        reused_retired_slot=True,
+        expected_email="replacement@example.com",
+    )
+    journal = json.loads(journal_path.read_text())
+    active_snapshot = json.dumps({"accounts": [{
+        "id": "codex-2", "codex_home": str(home),
+        "email": "old@example.com", "enabled": True,
+    }]}).encode()
+    journal["pool_config"]["content_b64"] = base64.b64encode(
+        active_snapshot
+    ).decode()
+    codex_pool_api._write_private_json(journal_path, journal)
+    sentinel = home / "must-not-purge"
+    sentinel.write_text("keep\n")
+
+    with pytest.raises(RuntimeError, match="not a finalized retired account"):
+        codex_pool_api._rollback_login_transaction(
+            journal_path,
+            expected_pool_path=pool_path.resolve(),
+        )
+
+    assert journal_path.exists()
+    assert sentinel.read_text() == "keep\n"
+
+
+async def test_reused_retired_slot_commit_rejects_duplicate_registration(
+    monkeypatch, tmp_path,
+):
+    monkeypatch.setattr(codex_pool_api.Path, "home", lambda: tmp_path)
+    home = tmp_path / ".codex-codex-2"
+    rollout = home / "sessions" / "2026" / "07" / "21" / "rollout.jsonl"
+    rollout.parent.mkdir(parents=True)
+    rollout.write_text("session\n")
+    codex_pool_api._purge_retired_codex_home(home, "codex-2")
+    pool_path = tmp_path / ".codex-pool" / "accounts.json"
+    pool_path.parent.mkdir()
+    retired_pool = {"accounts": [{
+        "id": "codex-2", "codex_home": str(home),
+        "email": "", "enabled": False, "retired": True,
+    }]}
+    pool_path.write_text(json.dumps(retired_pool))
+    tokens_path = pool_path.parent / "email_tokens.json"
+    tokens_path.write_text("{}\n")
+    pool = SimpleNamespace(
+        _config_path=pool_path, reload=Mock(), _quota_cache=None,
+    )
+    monkeypatch.setattr(codex_pool_api, "_get_pool", lambda: pool)
+    journal_path = codex_pool_api._begin_login_transaction(
+        attempt_id="reuse-duplicate",
+        kind="add",
+        account_id="codex-2",
+        codex_home=str(home),
+        pool=pool,
+        reused_retired_slot=True,
+        expected_email="replacement@example.com",
+    )
+    (home / "auth.json").write_text("new auth\n")
+    active_record = {
+        "id": "codex-2", "codex_home": str(home),
+        "email": "replacement@example.com", "enabled": True,
+        "quota_valid_after": codex_pool_api.time.time() + 1,
+    }
+    pool_path.write_text(json.dumps({"accounts": [active_record, active_record]}))
+    tokens_path.write_text(json.dumps({
+        "replacement@example.com": {"password": "new"},
+    }))
+    login_lock = asyncio.Lock()
+    await login_lock.acquire()
+
+    result = await codex_pool_api._finalize_login_transaction(
+        proc=SimpleNamespace(returncode=0),
+        operation="duplicate reused registration",
+        journal_path=journal_path,
+        commit_requested=True,
+        instance_manager=_maintenance_manager(),
+        codex_home=str(home),
+        login_lock=login_lock,
+        attempt_id="reuse-duplicate",
+        state_store={"replacement@example.com": {"status": "finalizing"}},
+        state_key="replacement@example.com",
+        expected_pool_path=pool_path.resolve(),
+    )
+
+    assert result["committed"] is False
+    assert not journal_path.exists()
+    assert json.loads(pool_path.read_text()) == retired_pool
+    assert rollout.read_text() == "session\n"
+    assert {path.name for path in home.iterdir()} == {
+        "sessions", ".ccm-retired-account",
+    }
+
+
 async def test_successful_exit_does_not_publish_success_until_commit_barrier(
     monkeypatch, tmp_path,
 ):
@@ -1760,6 +2138,44 @@ def test_pool_login_registration_rolls_back_credentials_when_pool_write_fails(
 
     assert json.loads(tokens_path.read_text()) == original_tokens
     assert json.loads(pool_path.read_text()) == original_pool
+
+
+def test_pool_login_registration_reactivates_tombstone_with_quota_cutoff(
+    monkeypatch, tmp_path,
+):
+    pool_path = tmp_path / "accounts.json"
+    tokens_path = tmp_path / "email_tokens.json"
+    pool_path.write_text(json.dumps({"accounts": [{
+        "id": "codex-2",
+        "codex_home": "/tmp/.codex-codex-2",
+        "email": "",
+        "enabled": False,
+        "retired": True,
+        "cleanup_pending": False,
+        "login_recovery_failed": False,
+    }]}))
+    tokens_path.write_text("{}\n")
+    monkeypatch.setattr(codex_login.time, "time", lambda: 1234.5)
+
+    codex_login._persist_new_pool_login(
+        account_id="codex-2",
+        email="replacement@example.com",
+        codex_home="/tmp/.codex-codex-2",
+        token="mail-token",
+        password="openai-password",
+        provider="mailcatcher",
+        pool_path=pool_path,
+        tokens_path=tokens_path,
+    )
+
+    record = json.loads(pool_path.read_text())["accounts"][0]
+    assert record == {
+        "id": "codex-2",
+        "codex_home": "/tmp/.codex-codex-2",
+        "email": "replacement@example.com",
+        "enabled": True,
+        "quota_valid_after": 1234.5,
+    }
 
 
 async def test_delete_account_scrubs_credentials_but_keeps_routable_sessions(
