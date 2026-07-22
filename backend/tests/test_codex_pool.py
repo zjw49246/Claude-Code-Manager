@@ -73,10 +73,12 @@ def _quota_rollout(
     session_id: str,
     used_percent: int,
     *,
+    event_timestamp: str | None = "2026-07-21T00:00:00Z",
     mtime: float | None = None,
 ) -> Path:
     path = _rollout(home, session_id)
     path.write_text(json.dumps({
+        "timestamp": event_timestamp,
         "payload": {
             "type": "token_count",
             "rate_limits": {
@@ -266,6 +268,7 @@ class TestReload:
         pool._quota_cache = {"codex-2": {"quota": "stale"}}
         pool._quota_cache_at = time.time()
         pool._quota_cache_live_until = time.time() + 60
+        pool._selection_quota_cache = {"codex-2": {"quota": "stale"}}
 
         existing = json.loads(pool_config.read_text(encoding="utf-8"))["accounts"]
         pool_config.write_text(
@@ -280,6 +283,7 @@ class TestReload:
         assert pool._quota_cache is None
         assert pool._quota_cache_at == 0.0
         assert pool._quota_cache_live_until == 0.0
+        assert pool._selection_quota_cache is None
 
     def test_keeps_valid_preferred_but_still_invalidates_quota_cache(
         self, pool: CodexPool
@@ -287,12 +291,14 @@ class TestReload:
         pool.set_preferred("codex-1")
         pool._quota_cache = {"codex-1": {"quota": "stale"}}
         pool._quota_cache_at = time.time()
+        pool._selection_quota_cache = {"codex-1": {"quota": "stale"}}
 
         pool.reload()
 
         assert pool.preferred_account_id == "codex-1"
         assert pool._quota_cache is None
         assert pool._quota_cache_at == 0.0
+        assert pool._selection_quota_cache is None
 
 
 def test_duplicate_canonical_homes_are_rejected(tmp_path: Path):
@@ -315,6 +321,11 @@ async def test_fetch_quota_tracks_each_account_from_its_own_latest_rollout(
     for account_id, used in (("codex-1", 37), ("codex-2", 82)):
         rollout = _rollout(tmp_path / account_id, f"quota-{account_id}")
         rollout.write_text(json.dumps({
+            "timestamp": (
+                "2026-07-21T00:00:01Z"
+                if account_id == "codex-1"
+                else "2026-07-21T00:00:02Z"
+            ),
             "payload": {
                 "type": "token_count",
                 "rate_limits": {
@@ -360,6 +371,82 @@ async def test_fetch_quota_falls_back_to_older_rollout_with_rate_limits(
     assert result["codex-1"]["quota"]["primary_used_percent"] == 100
     assert result["codex-1"]["quota"]["is_rate_limited"] is True
     assert result["codex-1"]["error"] is None
+
+
+@pytest.mark.asyncio
+async def test_rollout_quota_uses_event_timestamp_instead_of_file_mtime(
+    pool: CodexPool, tmp_path: Path,
+):
+    _quota_rollout(
+        tmp_path / "codex-1",
+        "actual-latest-event",
+        100,
+        event_timestamp="2026-07-22T07:15:00Z",
+        mtime=100,
+    )
+    # A migrated session copy can have a fresh mtime but carry an older event.
+    _quota_rollout(
+        tmp_path / "codex-1",
+        "newer-migrated-file",
+        3,
+        event_timestamp="2026-07-22T06:00:00Z",
+        mtime=200,
+    )
+
+    result = {item["id"]: item for item in await pool.fetch_quota(force=True)}
+
+    assert result["codex-1"]["quota"]["primary_used_percent"] == 100
+    assert result["codex-1"]["quota"]["is_rate_limited"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event_timestamp", [None, "not-a-timestamp"])
+async def test_rollout_quota_falls_back_to_mtime_for_legacy_event_timestamp(
+    pool: CodexPool, tmp_path: Path, event_timestamp: str | None,
+):
+    _quota_rollout(
+        tmp_path / "codex-1",
+        "legacy-older-file",
+        20,
+        event_timestamp=event_timestamp,
+        mtime=100,
+    )
+    _quota_rollout(
+        tmp_path / "codex-1",
+        "legacy-newer-file",
+        40,
+        event_timestamp=event_timestamp,
+        mtime=200,
+    )
+
+    result = {item["id"]: item for item in await pool.fetch_quota(force=True)}
+
+    assert result["codex-1"]["quota"]["primary_used_percent"] == 40
+
+
+@pytest.mark.asyncio
+async def test_rollout_scan_skips_newer_snapshot_without_usage_data(
+    pool: CodexPool, tmp_path: Path,
+):
+    rollout = _quota_rollout(
+        tmp_path / "codex-1", "empty-tail", 64,
+        event_timestamp="2026-07-22T06:00:00Z",
+    )
+    with rollout.open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps({
+            "timestamp": "2026-07-22T07:00:00Z",
+            "payload": {
+                "type": "token_count",
+                "rate_limits": {
+                    "primary": {"window_minutes": 300},
+                    "plan_type": "pro",
+                },
+            },
+        }) + "\n")
+
+    result = {item["id"]: item for item in await pool.fetch_quota(force=True)}
+
+    assert result["codex-1"]["quota"]["primary_used_percent"] == 64
 
 
 @pytest.mark.asyncio
@@ -428,15 +515,16 @@ async def test_live_quota_refresh_prefers_account_rpc_and_maps_camel_case(
 
 
 @pytest.mark.asyncio
-async def test_live_quota_failure_falls_back_per_account_to_rollout(
+async def test_live_quota_failure_never_uses_migrated_rollout_history(
     pool_config: Path, tmp_path: Path,
 ):
     _quota_rollout(tmp_path / "codex-1", "fallback", 77)
+    _quota_rollout(tmp_path / "codex-2", "copied-history", 88)
 
     async def live_reader(codex_home: str) -> dict:
         if codex_home.endswith("codex-1"):
             raise RuntimeError("live RPC unavailable")
-        return {"rateLimits": {"primary": {"usedPercent": 12}}}
+        return {"rateLimits": {}}
 
     live_pool = CodexPool(
         config_path=pool_config,
@@ -447,9 +535,10 @@ async def test_live_quota_failure_falls_back_per_account_to_rollout(
         for item in await live_pool.fetch_quota(live=True)
     }
 
-    assert result["codex-1"]["quota"]["primary_used_percent"] == 77
-    assert result["codex-1"]["error"] is None
-    assert result["codex-2"]["quota"]["primary_used_percent"] == 12
+    assert result["codex-1"]["quota"] is None
+    assert result["codex-1"]["error"] == "live_unavailable"
+    assert result["codex-2"]["quota"] is None
+    assert result["codex-2"]["error"] == "live_unavailable"
 
 
 @pytest.mark.asyncio
@@ -488,6 +577,41 @@ async def test_background_scan_cannot_overwrite_recent_live_quota_cache(
     assert live["codex-1"]["quota"]["primary_used_percent"] == 100
     assert background["codex-1"]["quota"]["primary_used_percent"] == 20
     assert cached["codex-1"]["quota"]["primary_used_percent"] == 100
+
+
+@pytest.mark.asyncio
+async def test_selection_snapshot_survives_failed_live_ui_cache(
+    pool_config: Path, tmp_path: Path,
+):
+    async def live_reader(codex_home: str) -> dict:
+        if codex_home.endswith("codex-1"):
+            return {"rateLimits": {}}
+        return {"rateLimits": {"primary": {"usedPercent": 12}}}
+
+    live_pool = CodexPool(config_path=pool_config, quota_reader=live_reader)
+    live = {
+        item["id"]: item for item in await live_pool.fetch_quota(live=True)
+    }
+    assert live["codex-1"]["quota"] is None
+
+    _quota_rollout(tmp_path / "codex-1", "current-high", 95)
+    _quota_rollout(tmp_path / "codex-2", "alternative-low", 20)
+
+    selected = await live_pool.select_quota_alternative(
+        str(tmp_path / "codex-1")
+    )
+    selection_quota = live_pool.cached_quota_for_home(
+        str(tmp_path / "codex-1")
+    )
+    still_live = {
+        item["id"]: item for item in await live_pool.fetch_quota()
+    }
+
+    assert selected == str((tmp_path / "codex-2").resolve())
+    assert selection_quota["primary_used_percent"] == 95
+    assert selection_quota["primary_resets_at"] == 1_800_000_000
+    assert still_live["codex-1"]["quota"] is None
+    assert still_live["codex-1"]["error"] == "live_unavailable"
 
 
 @pytest.mark.asyncio

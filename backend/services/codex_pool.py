@@ -5,8 +5,9 @@ Config: ~/.codex-pool/accounts.json
 Each account has its own CODEX_HOME directory with auth.json.
 
 Manual quota refresh uses Codex app-server's account/rateLimits/read RPC for
-the account's own CODEX_HOME. Session rollout rate_limits payloads remain the
-cached/background source and the fallback when live account reads fail.
+the account's own CODEX_HOME. Session rollout rate_limits payloads remain a
+cached/background source, but never substitute for a failed live account read:
+migrated sessions can carry another account's historical quota snapshot.
 """
 
 import asyncio
@@ -15,8 +16,9 @@ import logging
 import os
 import re
 import time
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Iterator
 
 from backend.services.claude_pool import (
     is_codex_auth_failure,
@@ -187,6 +189,7 @@ class CodexPool:
         self._quota_cache: dict[str, dict] | None = None
         self._quota_cache_at: float = 0.0
         self._quota_cache_live_until: float = 0.0
+        self._selection_quota_cache: dict[str, dict] | None = None
         self._quota_reader = quota_reader
         self._load()
 
@@ -262,6 +265,7 @@ class CodexPool:
         self._quota_cache = None
         self._quota_cache_at = 0.0
         self._quota_cache_live_until = 0.0
+        self._selection_quota_cache = None
 
     def account(self, account_id: str) -> CodexPoolAccount | None:
         return next((a for a in self._accounts if a.id == account_id), None)
@@ -523,7 +527,7 @@ class CodexPool:
             raise AmbiguousCodexSessionHomeError(session_id, homes)
         return homes[0] if homes else None
 
-    # --- Quota tracking (live account RPC with rollout fallback) ---
+    # --- Quota tracking (live account RPC and rollout-backed rotation) ---
 
     async def fetch_quota(
         self, force: bool = False, *, live: bool = False,
@@ -546,30 +550,37 @@ class CodexPool:
         async def _read_account_quota(
             acc: CodexPoolAccount,
         ) -> tuple[dict | None, str | None]:
-            live_failed = False
-            if live and self._quota_reader is not None:
+            if live:
+                if self._quota_reader is None:
+                    logger.warning(
+                        "Codex live quota reader is unavailable for %s",
+                        acc.id,
+                    )
+                    return None, "live_unavailable"
                 try:
                     response = await self._quota_reader(acc.codex_home)
                     quota = _quota_from_app_server_response(response)
                     if quota is not None:
                         return quota, None
-                    live_failed = True
                     logger.warning(
                         "Codex live quota response had no rate-limit snapshot: %s",
                         acc.id,
                     )
                 except Exception as exc:
-                    live_failed = True
                     logger.warning(
-                        "Codex live quota read failed for %s; falling back to rollout: %s",
+                        "Codex live quota read failed for %s: %s",
                         acc.id,
                         exc,
                     )
+                # A rollout belongs to a session, not to credentials. Session
+                # migration preserves its old rate_limits events, so it cannot
+                # safely substitute for an unavailable live account response.
+                return None, "live_unavailable"
+
             quota = await asyncio.to_thread(
                 _read_quota_from_rollout, acc.codex_home
             )
-            error = "live_unavailable" if live_failed and quota is None else None
-            return quota, error
+            return quota, None
 
         quota_results = await asyncio.gather(*(
             _read_account_quota(acc) for acc in enabled_accounts
@@ -589,12 +600,16 @@ class CodexPool:
             self._quota_cache = results
             self._quota_cache_at = completed_at
             self._quota_cache_live_until = completed_at + QUOTA_CACHE_TTL
-        elif completed_at >= self._quota_cache_live_until:
-            # A background rollout scan may overlap a manual live refresh.
-            # Return its fresh data to quota-aware switching, but do not let it
-            # replace a newer authoritative UI snapshot during the short TTL.
-            self._quota_cache = results
-            self._quota_cache_at = completed_at
+        else:
+            # Quota-aware rotation needs the exact rollout snapshot it just
+            # selected on, even while a live UI result is protected by TTL.
+            self._selection_quota_cache = results
+            if completed_at >= self._quota_cache_live_until:
+                # A background rollout scan may overlap a manual live refresh.
+                # Return its fresh data to quota-aware switching, but do not let
+                # it replace a newer authoritative UI snapshot during the TTL.
+                self._quota_cache = results
+                self._quota_cache_at = completed_at
         return list(results.values())
 
     async def select_quota_alternative(
@@ -650,14 +665,19 @@ class CodexPool:
         return self.select(exclude=excluded)
 
     def cached_quota_for_home(self, codex_home: str) -> dict | None:
-        """Return the latest quota snapshot populated by ``fetch_quota``."""
+        """Return the latest selection snapshot for one account home."""
 
         account_id = self.account_id_for_home(codex_home)
-        if not account_id or not isinstance(self._quota_cache, dict):
+        if not account_id:
             return None
-        row = self._quota_cache.get(account_id)
-        quota = row.get("quota") if isinstance(row, dict) else None
-        return quota if isinstance(quota, dict) else None
+        for cache in (self._selection_quota_cache, self._quota_cache):
+            if not isinstance(cache, dict):
+                continue
+            row = cache.get(account_id)
+            quota = row.get("quota") if isinstance(row, dict) else None
+            if isinstance(quota, dict):
+                return quota
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -665,47 +685,104 @@ class CodexPool:
 # ---------------------------------------------------------------------------
 
 def _read_quota_from_rollout(codex_home: str) -> dict | None:
-    """Parse the newest available rate_limits snapshot across rollouts."""
+    """Parse the newest rate_limits event across an account's rollouts.
+
+    Session migration changes the destination file's mtime without changing
+    the embedded events. Read only the last valid quota event in each JSONL,
+    then compare those events by their own timestamps. Missing or malformed
+    event timestamps fall back to mtime for compatibility with older files.
+    """
     sessions_dir = Path(codex_home) / "sessions"
     if not sessions_dir.is_dir():
         return None
 
-    candidates: list[tuple[float, Path]] = []
+    latest_key: tuple[float, str] | None = None
+    latest_quota: dict | None = None
     for path in sessions_dir.glob("*/*/*/rollout-*.jsonl"):
         try:
-            candidates.append((path.stat().st_mtime, path))
+            fallback_mtime = path.stat().st_mtime
         except OSError:
             continue
-    if not candidates:
-        return None
-
-    for _mtime, path in sorted(
-        candidates, key=lambda candidate: candidate[0], reverse=True,
-    ):
-        found = None
         try:
-            with path.open() as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or '"rate_limits"' not in line:
-                        continue
-                    try:
-                        event = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    payload = event.get("payload") or {}
-                    if payload.get("type") != "token_count":
-                        continue
-                    rate_limits = payload.get("rate_limits")
-                    if isinstance(rate_limits, dict):
-                        found = rate_limits
+            candidate = _latest_quota_event_in_rollout(path, fallback_mtime)
         except OSError:
             continue
+        if candidate is None:
+            continue
+        event_timestamp, quota = candidate
+        candidate_key = (event_timestamp, str(path))
+        if latest_key is None or candidate_key > latest_key:
+            latest_key = candidate_key
+            latest_quota = quota
+    return latest_quota
 
-        quota = _normalize_rate_limits(found)
-        if quota is not None:
-            return quota
+
+def _latest_quota_event_in_rollout(
+    path: Path, fallback_mtime: float,
+) -> tuple[float, dict] | None:
+    """Read one rollout from its tail and return its last usable snapshot."""
+
+    for raw_line in _iter_rollout_lines_reverse(path):
+        if not raw_line or b'"rate_limits"' not in raw_line:
+            continue
+        try:
+            event = json.loads(raw_line)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if not isinstance(event, dict):
+            continue
+        payload = event.get("payload") or {}
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("type") != "token_count":
+            continue
+        quota = _normalize_rate_limits(payload.get("rate_limits"))
+        if quota is None:
+            continue
+        event_timestamp = _rollout_event_timestamp(event)
+        return (
+            fallback_mtime if event_timestamp is None else event_timestamp,
+            quota,
+        )
     return None
+
+
+def _iter_rollout_lines_reverse(
+    path: Path, *, chunk_size: int = 64 * 1024,
+) -> Iterator[bytes]:
+    """Yield JSONL lines newest-first without loading a rollout into memory."""
+
+    with path.open("rb") as stream:
+        stream.seek(0, os.SEEK_END)
+        position = stream.tell()
+        remainder = b""
+        while position > 0:
+            read_size = min(chunk_size, position)
+            position -= read_size
+            stream.seek(position)
+            parts = (stream.read(read_size) + remainder).split(b"\n")
+            remainder = parts[0]
+            yield from reversed(parts[1:])
+        if remainder:
+            yield remainder
+
+
+def _rollout_event_timestamp(event: dict) -> float | None:
+    """Convert a native rollout event timestamp to Unix seconds."""
+
+    value = event.get("timestamp")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        timestamp = float(value)
+        return timestamp / 1000 if timestamp > 10_000_000_000 else timestamp
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
 
 
 def _value(data: dict, camel: str, snake: str):
@@ -729,17 +806,21 @@ def _normalize_rate_limits(snapshot: dict | None) -> dict | None:
     reached_type = _value(
         snapshot, "rateLimitReachedType", "rate_limit_reached_type"
     )
-    if not (primary or secondary or plan_type is not None or reached_type is not None):
+    primary_used = _value(primary, "usedPercent", "used_percent")
+    secondary_used = _value(secondary, "usedPercent", "used_percent")
+    if (
+        primary_used is None
+        and secondary_used is None
+        and reached_type is None
+    ):
         return None
     return {
-        "primary_used_percent": _value(primary, "usedPercent", "used_percent"),
+        "primary_used_percent": primary_used,
         "primary_window_minutes": _value(
             primary, "windowDurationMins", "window_minutes"
         ),
         "primary_resets_at": _value(primary, "resetsAt", "resets_at"),
-        "secondary_used_percent": _value(
-            secondary, "usedPercent", "used_percent"
-        ),
+        "secondary_used_percent": secondary_used,
         "secondary_window_minutes": _value(
             secondary, "windowDurationMins", "window_minutes"
         ),
