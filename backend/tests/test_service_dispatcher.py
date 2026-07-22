@@ -47,6 +47,20 @@ async def test_status_not_running(db_factory):
 
 
 @pytest.mark.asyncio
+async def test_pause_dispatching_does_not_stop_dispatcher(db_factory):
+    d = _make_dispatcher(db_factory)
+    d._running = True
+
+    await d.pause_dispatching()
+
+    assert d.status()["running"] is True
+    assert d.status()["paused"] is True
+
+    d.resume_dispatching()
+    assert d.status()["paused"] is False
+
+
+@pytest.mark.asyncio
 async def test_start_sets_running(db_factory):
     """start() sets _running=True and creates dispatch task."""
     d = _make_dispatcher(db_factory)

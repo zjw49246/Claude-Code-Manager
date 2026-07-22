@@ -120,6 +120,8 @@ update_service = UpdateService(
     broadcaster=broadcaster,
     port=settings.port,
     project_dir=str(Path(__file__).resolve().parent.parent),
+    db_factory=async_session,
+    dispatcher=dispatcher,
 )
 
 # 分布式 Worker（可选，WORKER_ENABLED=true 且装了 boto3 才启用）

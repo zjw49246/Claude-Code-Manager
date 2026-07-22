@@ -4,6 +4,7 @@ Regression tests for the 2026-07-16 ccm-xiaoyu incident: the migration-path
 script lived in the service's own cgroup, so its `systemctl stop` killed the
 script itself and the service was never started again (502 until manual fix).
 """
+import asyncio
 import json
 import os
 import signal
@@ -21,14 +22,27 @@ from backend.services.update_service import (
     UpdateService,
     UpdateState,
 )
+from backend.models.task import Task
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "update_migrate.sh"
 
 
-def _make_service(tmp_path: Path) -> UpdateService:
+def _make_service(
+    tmp_path: Path,
+    db_factory=None,
+    dispatcher=None,
+    running_commit: str = "",
+) -> UpdateService:
     broadcaster = MagicMock()
     broadcaster.broadcast = AsyncMock()
-    svc = UpdateService(broadcaster, port=8999, project_dir=str(tmp_path))
+    svc = UpdateService(
+        broadcaster,
+        port=8999,
+        project_dir=str(tmp_path),
+        db_factory=db_factory,
+        dispatcher=dispatcher,
+        running_commit=running_commit,
+    )
     svc._status_file = tmp_path / "status.json"
     return svc
 
@@ -41,6 +55,294 @@ def _make_state() -> UpdateState:
         old_commit="old" * 10,
         backup_file="/tmp/backup.db",
     )
+
+
+# ---- update safety and version detection ----
+
+
+@pytest.mark.asyncio
+async def test_get_active_tasks_only_returns_running_states(tmp_path, db_factory):
+    async with db_factory() as db:
+        db.add_all([
+            Task(title="queued", description="d", status="pending"),
+            Task(title="claimed", description="d", status="in_progress"),
+            Task(title="running", description="d", status="executing"),
+            Task(title="done", description="d", status="completed"),
+        ])
+        await db.commit()
+
+    svc = _make_service(tmp_path, db_factory=db_factory)
+    active = await svc._get_active_tasks()
+
+    assert [task["title"] for task in active] == ["claimed", "running"]
+    assert [task["status"] for task in active] == ["in_progress", "executing"]
+
+
+@pytest.mark.asyncio
+async def test_start_update_pauses_and_refuses_active_tasks(tmp_path):
+    dispatcher = MagicMock()
+    dispatcher.pause_dispatching = AsyncMock()
+    dispatcher.resume_dispatching = MagicMock()
+    svc = _make_service(tmp_path, dispatcher=dispatcher)
+    svc._get_active_tasks = AsyncMock(return_value=[
+        {"id": 7, "title": "still running", "status": "executing"}
+    ])
+
+    with patch("backend.services.update_service.asyncio.create_task") as create_task:
+        result = await svc.start_update(force=True)
+
+    assert result["update_blocked"] is True
+    assert result["active_task_count"] == 1
+    assert "1 个任务" in result["error"]
+    dispatcher.pause_dispatching.assert_awaited_once()
+    dispatcher.resume_dispatching.assert_called_once()
+    create_task.assert_not_called()
+    assert svc._current is None
+
+
+@pytest.mark.asyncio
+async def test_start_update_fails_closed_when_task_check_errors(tmp_path):
+    dispatcher = MagicMock()
+    dispatcher.pause_dispatching = AsyncMock()
+    dispatcher.resume_dispatching = MagicMock()
+    svc = _make_service(tmp_path, dispatcher=dispatcher)
+    svc._get_active_tasks = AsyncMock(side_effect=RuntimeError("database offline"))
+
+    with patch("backend.services.update_service.asyncio.create_task") as create_task:
+        result = await svc.start_update()
+
+    assert "无法确认当前任务状态" in result["error"]
+    dispatcher.pause_dispatching.assert_awaited_once()
+    dispatcher.resume_dispatching.assert_called_once()
+    create_task.assert_not_called()
+    assert svc._current is None
+
+
+@pytest.mark.asyncio
+async def test_rollback_pauses_and_refuses_active_tasks(tmp_path):
+    dispatcher = MagicMock()
+    dispatcher.pause_dispatching = AsyncMock()
+    dispatcher.resume_dispatching = MagicMock()
+    svc = _make_service(tmp_path, dispatcher=dispatcher)
+    svc._current = _make_state()
+    svc._get_active_tasks = AsyncMock(return_value=[
+        {"id": 8, "title": "still running", "status": "in_progress"}
+    ])
+    svc._spawn_update_script = MagicMock()
+
+    result = await svc.rollback()
+
+    assert result["update_blocked"] is True
+    assert result["active_task_count"] == 1
+    assert "1 个任务" in result["error"]
+    dispatcher.pause_dispatching.assert_awaited_once()
+    dispatcher.resume_dispatching.assert_called_once()
+    svc._spawn_update_script.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_needs_restart_compares_running_and_disk_sha_without_systemd(tmp_path):
+    svc = _make_service(tmp_path, running_commit="a" * 40)
+    svc._disk_commit = AsyncMock(return_value="b" * 40)
+    assert await svc._needs_restart() is True
+
+    svc._disk_commit = AsyncMock(return_value="a" * 40)
+    assert await svc._needs_restart() is False
+
+
+@pytest.mark.asyncio
+async def test_concurrent_dry_runs_share_one_remote_check(tmp_path):
+    svc = _make_service(tmp_path)
+    calls = 0
+
+    async def remote_check(branch):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.01)
+        return {
+            "has_updates": True,
+            "branch": branch,
+            "latest_commit": "b" * 7,
+        }
+
+    svc._check_remote_updates = AsyncMock(side_effect=remote_check)
+
+    results = await asyncio.gather(
+        svc.dry_run(),
+        svc.dry_run(),
+        svc.dry_run(),
+    )
+
+    assert calls == 1
+    assert all(result["has_updates"] is True for result in results)
+    assert all(result["active_task_count"] == 0 for result in results)
+
+
+@pytest.mark.asyncio
+async def test_dry_run_cache_keeps_blockers_fresh_and_force_bypasses_cache(tmp_path):
+    svc = _make_service(tmp_path)
+    svc._check_remote_updates = AsyncMock(return_value={
+        "has_updates": True,
+        "latest_commit": "b" * 7,
+    })
+    svc._get_active_tasks = AsyncMock(side_effect=[
+        [],
+        [{"id": 11, "title": "now running", "status": "executing"}],
+        [],
+    ])
+
+    first = await svc.dry_run()
+    second = await svc.dry_run()
+    forced = await svc.dry_run(force=True)
+
+    assert first["update_blocked"] is False
+    assert second["update_blocked"] is True
+    assert second["active_task_count"] == 1
+    assert forced["update_blocked"] is False
+    assert svc._check_remote_updates.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_resolve_remote_uses_tracking_remote_then_origin_fallback(tmp_path):
+    svc = _make_service(tmp_path)
+    svc._run_cmd = AsyncMock(return_value={
+        "returncode": 0, "stdout": "upstream\n", "stderr": "",
+    })
+    assert await svc._resolve_remote("main") == "upstream"
+
+    svc._run_cmd = AsyncMock(return_value={
+        "returncode": 1, "stdout": "", "stderr": "not configured",
+    })
+    assert await svc._resolve_remote("feature") == "origin"
+
+
+@pytest.mark.asyncio
+async def test_manual_pull_uses_running_commit_as_deployment_base(tmp_path):
+    running = "a" * 40
+    disk = "b" * 40
+    svc = _make_service(tmp_path, running_commit=running)
+    svc._run_cmd = AsyncMock(return_value={
+        "returncode": 0, "stdout": "", "stderr": "",
+    })
+
+    assert await svc._deployment_base_commit(disk) == running
+    svc._run_cmd.assert_awaited_once_with(
+        ["git", "merge-base", "--is-ancestor", running, disk]
+    )
+
+
+@pytest.mark.asyncio
+async def test_dry_run_detects_manual_update_and_returns_blockers(tmp_path):
+    running = "a" * 40
+    disk = "b" * 40
+    svc = _make_service(tmp_path, running_commit=running)
+    svc._get_active_tasks = AsyncMock(return_value=[
+        {"id": 9, "title": "busy", "status": "in_progress"}
+    ])
+    svc._resolve_remote = AsyncMock(return_value="upstream")
+
+    async def run_cmd(cmd, **_kwargs):
+        if cmd[:2] == ["git", "fetch"]:
+            return {"returncode": 0, "stdout": "", "stderr": ""}
+        if cmd == ["git", "rev-parse", "HEAD"]:
+            return {"returncode": 0, "stdout": disk, "stderr": ""}
+        if cmd == ["git", "rev-parse", "upstream/main"]:
+            return {"returncode": 0, "stdout": disk, "stderr": ""}
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    svc._run_cmd = AsyncMock(side_effect=run_cmd)
+    result = await svc.dry_run()
+
+    assert result["has_updates"] is False
+    assert result["needs_restart"] is True
+    assert result["manual_update_detected"] is True
+    assert result["remote"] == "upstream"
+    assert result["running_commit"] == running[:7]
+    assert result["active_task_count"] == 1
+    assert result["update_blocked"] is True
+
+
+@pytest.mark.asyncio
+async def test_dry_run_keeps_manual_restart_signal_when_fetch_fails(tmp_path):
+    running = "a" * 40
+    disk = "b" * 40
+    svc = _make_service(tmp_path, running_commit=running)
+    svc._resolve_remote = AsyncMock(return_value="upstream")
+    svc._disk_commit = AsyncMock(return_value=disk)
+    svc._run_cmd = AsyncMock(return_value={
+        "returncode": 1,
+        "stdout": "",
+        "stderr": "network unavailable",
+    })
+
+    result = await svc.dry_run()
+
+    assert result["has_updates"] is False
+    assert result["needs_restart"] is True
+    assert result["manual_update_detected"] is True
+    assert result["current_commit"] == disk[:7]
+    assert result["running_commit"] == running[:7]
+    assert result["error"] == "network unavailable"
+
+
+@pytest.mark.asyncio
+async def test_dry_run_does_not_report_local_ahead_as_update(tmp_path):
+    head = "c" * 40
+    remote_head = "b" * 40
+    svc = _make_service(tmp_path, running_commit=head)
+    svc._resolve_remote = AsyncMock(return_value="upstream")
+
+    async def run_cmd(cmd, **_kwargs):
+        if cmd[:2] == ["git", "fetch"]:
+            return {"returncode": 0, "stdout": "", "stderr": ""}
+        if cmd == ["git", "rev-parse", "HEAD"]:
+            return {"returncode": 0, "stdout": head, "stderr": ""}
+        if cmd == ["git", "rev-parse", "upstream/main"]:
+            return {"returncode": 0, "stdout": remote_head, "stderr": ""}
+        if cmd[:3] == ["git", "log", "--oneline"]:
+            return {"returncode": 0, "stdout": "", "stderr": ""}
+        if cmd[:3] == ["git", "diff", "--name-only"]:
+            return {"returncode": 0, "stdout": "", "stderr": ""}
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    svc._run_cmd = AsyncMock(side_effect=run_cmd)
+    result = await svc.dry_run()
+
+    assert result["has_updates"] is False
+    assert result["commits_behind"] == 0
+
+
+@pytest.mark.asyncio
+async def test_pipeline_rechecks_tasks_before_restart_and_resumes_dispatcher(tmp_path):
+    dispatcher = MagicMock()
+    dispatcher.resume_dispatching = MagicMock()
+    svc = _make_service(tmp_path, dispatcher=dispatcher)
+    state = _make_state()
+    commit = "a" * 40
+
+    async def run_cmd(cmd, **_kwargs):
+        if cmd == ["git", "rev-parse", "HEAD"]:
+            return {"returncode": 0, "stdout": commit, "stderr": ""}
+        if cmd == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
+            return {"returncode": 0, "stdout": "main", "stderr": ""}
+        return {"returncode": 0, "stdout": "", "stderr": ""}
+
+    svc._run_cmd = AsyncMock(side_effect=run_cmd)
+    svc._backup_database = AsyncMock(return_value=str(tmp_path / "backup.db"))
+    svc._get_active_tasks = AsyncMock(return_value=[
+        {"id": 12, "title": "started during update", "status": "executing"}
+    ])
+    svc._migration_path = AsyncMock()
+    svc._fast_restart_path = AsyncMock()
+
+    await svc._run_pipeline(state, force=True)
+
+    assert state.status == "failed"
+    assert "已取消重启" in state.error
+    assert state.steps[7].status == "failed"
+    svc._migration_path.assert_not_awaited()
+    svc._fast_restart_path.assert_not_awaited()
+    dispatcher.resume_dispatching.assert_called_once()
 
 
 # ---- _migration_path escapes the service cgroup ----

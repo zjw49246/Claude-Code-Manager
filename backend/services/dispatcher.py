@@ -288,6 +288,10 @@ class GlobalDispatcher:
         # New tasks wake the loop immediately.  The 2s timeout remains as a
         # safety poll for tasks inserted by legacy/direct DB paths.
         self._dispatch_wakeup = asyncio.Event()
+        # Self-update maintenance gate: pause new claims without cancelling any
+        # lifecycle that is already running.
+        self._dispatch_claim_lock = asyncio.Lock()
+        self._dispatch_paused = False
         self._running_tasks: dict[int, asyncio.Task] = {}  # instance_id -> lifecycle task
         # Instances mid-launch by the queued-message path. Their DB status is
         # still "idle" until launch() flips it to "running", so without an
@@ -350,6 +354,17 @@ class GlobalDispatcher:
 
     def wake(self) -> None:
         """Wake the task dispatcher after a pending task is committed."""
+        self._dispatch_wakeup.set()
+
+    async def pause_dispatching(self) -> None:
+        """Stop claiming new tasks while allowing active tasks to finish."""
+        async with self._dispatch_claim_lock:
+            self._dispatch_paused = True
+        self._dispatch_wakeup.set()
+
+    def resume_dispatching(self) -> None:
+        """Resume task claims after a cancelled or completed maintenance run."""
+        self._dispatch_paused = False
         self._dispatch_wakeup.set()
 
     async def _cleanup_stale_state(self):
@@ -431,6 +446,7 @@ class GlobalDispatcher:
     def status(self) -> dict:
         return {
             "running": self._running,
+            "paused": self._dispatch_paused,
             "active_tasks": {
                 iid: not t.done() for iid, t in self._running_tasks.items()
             },
@@ -618,11 +634,19 @@ class GlobalDispatcher:
         while self._running:
             try:
                 self._dispatch_wakeup.clear()
+                if self._dispatch_paused:
+                    try:
+                        await asyncio.wait_for(self._dispatch_wakeup.wait(), timeout=2)
+                    except asyncio.TimeoutError:
+                        pass
+                    continue
                 # Top up idle workers before looking for capacity
                 await self._ensure_min_idle_instances()
 
                 # 路径 1：分布式 Worker task —— 不消耗本地 instance，直接转发
-                await self._dispatch_worker_tasks()
+                async with self._dispatch_claim_lock:
+                    if not self._dispatch_paused:
+                        await self._dispatch_worker_tasks()
 
                 # Find idle instances
                 async with self.db_factory() as db:
@@ -640,17 +664,20 @@ class GlobalDispatcher:
                     if instance.id in self._launching_instances:
                         continue
 
-                    async with self.db_factory() as db:
-                        queue = TaskQueue(db)
-                        now = time.monotonic()
-                        self._codex_routing_not_before = {
-                            task_id: deadline
-                            for task_id, deadline in self._codex_routing_not_before.items()
-                            if deadline > now
-                        }
-                        task = await queue.dequeue(
-                            exclude_ids=set(self._codex_routing_not_before)
-                        )
+                    async with self._dispatch_claim_lock:
+                        if self._dispatch_paused:
+                            break
+                        async with self.db_factory() as db:
+                            queue = TaskQueue(db)
+                            now = time.monotonic()
+                            self._codex_routing_not_before = {
+                                task_id: deadline
+                                for task_id, deadline in self._codex_routing_not_before.items()
+                                if deadline > now
+                            }
+                            task = await queue.dequeue(
+                                exclude_ids=set(self._codex_routing_not_before)
+                            )
 
                     if not task:
                         continue  # No matching task for this instance, try next
