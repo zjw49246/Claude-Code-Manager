@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -275,6 +276,47 @@ class UpdateService:
             for row in rows
         ]
 
+    async def _get_blocking_tasks(
+        self,
+        pending_task_ids: set[int] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Combine running DB tasks with queued/in-flight resume work."""
+        active_tasks = await self._get_active_tasks()
+        active_ids = {task["id"] for task in active_tasks}
+        if pending_task_ids is None:
+            if self.dispatcher is None or not hasattr(
+                self.dispatcher, "pending_task_start_ids"
+            ):
+                pending_task_ids = set()
+            else:
+                pending_task_ids = await self.dispatcher.pending_task_start_ids()
+        queued_ids = set(pending_task_ids) - active_ids
+        if not queued_ids:
+            return active_tasks
+
+        if self.db_factory is None:
+            queued_tasks = [
+                {"id": task_id, "title": f"Task {task_id}", "status": "queued_resume"}
+                for task_id in sorted(queued_ids)
+            ]
+        else:
+            async with self.db_factory() as db:
+                rows = (await db.execute(
+                    select(Task.id, Task.title)
+                    .where(Task.id.in_(queued_ids))
+                    .order_by(Task.id.asc())
+                )).all()
+            found = {row.id for row in rows}
+            queued_tasks = [
+                {"id": row.id, "title": row.title, "status": "queued_resume"}
+                for row in rows
+            ]
+            queued_tasks.extend(
+                {"id": task_id, "title": f"Task {task_id}", "status": "queued_resume"}
+                for task_id in sorted(queued_ids - found)
+            )
+        return active_tasks + queued_tasks
+
     @staticmethod
     def _blocker_payload(active_tasks: list[dict[str, Any]]) -> dict[str, Any]:
         return {
@@ -290,6 +332,34 @@ class UpdateService:
     def _resume_dispatching(self) -> None:
         if self.dispatcher is not None:
             self.dispatcher.resume_dispatching()
+
+    @asynccontextmanager
+    async def _maintenance_shutdown_guard(self):
+        if self.dispatcher is not None and hasattr(
+            self.dispatcher, "maintenance_shutdown_guard"
+        ):
+            async with self.dispatcher.maintenance_shutdown_guard() as pending_ids:
+                yield pending_ids
+        else:
+            yield set()
+
+    async def _commit_shutdown_if_idle(self, action) -> list[dict[str, Any]]:
+        """Atomically recheck blockers and synchronously schedule shutdown.
+
+        All user-visible broadcasts and grace sleeps must happen before this
+        helper. There is intentionally no await between the successful blocker
+        query and ``action()`` while task-start admission is held closed.
+        """
+        async with self._maintenance_shutdown_guard() as pending_ids:
+            blockers = await self._get_blocking_tasks(set(pending_ids))
+            if blockers:
+                return blockers
+            if self.dispatcher is not None and hasattr(
+                self.dispatcher, "commit_maintenance_shutdown"
+            ):
+                self.dispatcher.commit_maintenance_shutdown()
+            action()
+            return []
 
     async def _resolve_remote(self, branch: str) -> str:
         """Use the branch's configured tracking remote, falling back to origin."""
@@ -369,7 +439,7 @@ class UpdateService:
         """Check for available updates without applying them."""
         target_branch = branch or "main"
         version_result = await self._cached_version_check(target_branch, force=force)
-        active_tasks = await self._get_active_tasks()
+        active_tasks = await self._get_blocking_tasks()
         return {**version_result, **self._blocker_payload(active_tasks)}
 
     async def _check_remote_updates(self, target_branch: str) -> dict[str, Any]:
@@ -455,7 +525,7 @@ class UpdateService:
             # never cancelled; callers retry after they finish.
             await self._pause_dispatching()
             try:
-                active_tasks = await self._get_active_tasks()
+                active_tasks = await self._get_blocking_tasks()
             except Exception as exc:
                 self._resume_dispatching()
                 logger.exception("Unable to verify active tasks before update")
@@ -490,7 +560,7 @@ class UpdateService:
 
         await self._pause_dispatching()
         try:
-            active_tasks = await self._get_active_tasks()
+            active_tasks = await self._get_blocking_tasks()
         except Exception as exc:
             self._resume_dispatching()
             logger.exception("Unable to verify active tasks before rollback")
@@ -514,11 +584,26 @@ class UpdateService:
                 # corrupts the restored DB (2026-07-16 test-env rollback incident).
                 # The script stops the service (systemctl or kill, per deployment)
                 # BEFORE touching the DB, then resets code and starts it again.
-                self._current.status = "restarting"
-                self._write_status_file("restarting", "正在停服回滚...", old_commit=old_commit)
                 await self._broadcast("restarting", message="服务即将停止进行回滚，请等待自动重连...")
                 await asyncio.sleep(1)
-                self._spawn_update_script("rollback", old_commit, backup_file or "")
+
+                def spawn_rollback() -> None:
+                    self._current.status = "restarting"
+                    self._write_status_file(
+                        "restarting", "正在停服回滚...", old_commit=old_commit
+                    )
+                    self._spawn_update_script("rollback", old_commit, backup_file or "")
+
+                blockers = await self._commit_shutdown_if_idle(spawn_rollback)
+                if blockers:
+                    self._resume_dispatching()
+                    return {
+                        "error": (
+                            f"回滚期间出现了 {len(blockers)} 个待处理任务，"
+                            "已取消停服；请等待任务完成后重试"
+                        ),
+                        **self._blocker_payload(blockers),
+                    }
                 return {"status": "rolling_back", "old_commit": old_commit}
         except Exception:
             self._resume_dispatching()
@@ -737,7 +822,7 @@ class UpdateService:
             await self._complete_step(step)
 
         # Steps 8-10: migration path vs fast path
-        active_tasks = await self._get_active_tasks()
+        active_tasks = await self._get_blocking_tasks()
         if active_tasks:
             step = state.steps[7]
             await self._start_step(step)
@@ -752,7 +837,7 @@ class UpdateService:
         else:
             await self._fast_restart_path(state)
 
-    async def _migration_path(self, state: UpdateState):
+    async def _migration_path(self, state: UpdateState) -> bool:
         """Has new migrations: launch external script that survives our own stop (steps 8-10)."""
         step8 = state.steps[7]
         step9 = state.steps[8]
@@ -765,12 +850,22 @@ class UpdateService:
 
         await self._broadcast("step_update", step="stop_service", status="running",
                               message="即将停服进行数据库迁移...")
+        await self._broadcast("restarting", message="服务即将停止进行迁移，请等待自动重连...")
         await asyncio.sleep(1)
 
-        self._spawn_update_script("migrate", state.old_commit, state.backup_file)
+        def spawn_migration() -> None:
+            state.status = "restarting"
+            self._spawn_update_script("migrate", state.old_commit, state.backup_file)
 
-        state.status = "restarting"
-        await self._broadcast("restarting", message="服务即将停止进行迁移，请等待自动重连...")
+        blockers = await self._commit_shutdown_if_idle(spawn_migration)
+        if blockers:
+            await self._fail_step(
+                step8,
+                state,
+                f"停服前出现了 {len(blockers)} 个待处理任务，已取消重启；请等待任务完成后重试",
+            )
+            return False
+        return True
 
     def _spawn_update_script(self, mode: str, old_commit: str, backup_file: str):
         """Launch update_migrate.sh so it survives this service being stopped."""
@@ -827,7 +922,7 @@ class UpdateService:
                 env=env,
             )
 
-    async def _fast_restart_path(self, state: UpdateState):
+    async def _fast_restart_path(self, state: UpdateState) -> bool:
         """No migration: skip steps 8-9, do nohup restart for step 10."""
         state.steps[7].status = "skipped"
         state.steps[7].message = "无新迁移"
@@ -839,19 +934,29 @@ class UpdateService:
         step10 = state.steps[9]
         step10.status = "running"
         step10.started_at = datetime.now(timezone.utc).isoformat()
-        state.status = "restarting"
-
-        self._write_status_file(
-            "restarting", "正在重启服务...",
-            old_commit=state.old_commit,
-            new_commit=state.new_commit,
-            backup_file=state.backup_file,
-        )
 
         await self._broadcast("restarting", message="服务即将重启，请等待自动重连...")
         await asyncio.sleep(1)
 
-        self._restart_service()
+        def restart_service() -> None:
+            state.status = "restarting"
+            self._write_status_file(
+                "restarting", "正在重启服务...",
+                old_commit=state.old_commit,
+                new_commit=state.new_commit,
+                backup_file=state.backup_file,
+            )
+            self._restart_service()
+
+        blockers = await self._commit_shutdown_if_idle(restart_service)
+        if blockers:
+            await self._fail_step(
+                step10,
+                state,
+                f"重启前出现了 {len(blockers)} 个待处理任务，已取消重启；请等待任务完成后重试",
+            )
+            return False
+        return True
 
     # ---- Helpers ----
 

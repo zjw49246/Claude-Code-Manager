@@ -3440,6 +3440,102 @@ async def _setup_queued_msg_two_idle(db_factory, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_queued_resume_waits_at_maintenance_gate_and_stays_blocking(
+    db_factory, monkeypatch,
+):
+    d, _id1, _id2, task_id, _msg = await _setup_queued_msg_two_idle(
+        db_factory, monkeypatch
+    )
+    launched = asyncio.Event()
+
+    async def launch(**_kwargs):
+        launched.set()
+        return 12345
+
+    d.instance_manager.launch = AsyncMock(side_effect=launch)
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+        task.status = "completed"
+        await db.commit()
+    await d.pause_dispatching()
+    await d.enqueue_message(task_id, "continue", source="monitor:complete")
+
+    await asyncio.sleep(0.05)
+    assert not launched.is_set()
+    assert await d.pending_task_start_ids() == {task_id}
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+        assert task.status == "completed"
+
+    d.resume_dispatching()
+    await asyncio.wait_for(launched.wait(), timeout=1)
+
+    for _ in range(20):
+        if not await d.pending_task_start_ids():
+            break
+        await asyncio.sleep(0.01)
+    assert await d.pending_task_start_ids() == set()
+
+    worker = d._task_queue_workers.get(task_id)
+    if worker and not worker.done():
+        worker.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker
+
+
+@pytest.mark.asyncio
+async def test_pause_wins_after_queued_resume_preparation_before_launch(
+    db_factory, monkeypatch,
+):
+    """Late admission closes the exact preparation -> executing race."""
+    d, _id1, _id2, task_id, _msg = await _setup_queued_msg_two_idle(
+        db_factory, monkeypatch
+    )
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+        task.status = "completed"
+        await db.commit()
+
+    preparation_reached = asyncio.Event()
+    release_preparation = asyncio.Event()
+    launched = asyncio.Event()
+
+    async def resolve(*_args, **_kwargs):
+        preparation_reached.set()
+        await release_preparation.wait()
+        return None
+
+    async def launch(**_kwargs):
+        launched.set()
+        return 12345
+
+    d._resolve_resume_config_dir = AsyncMock(side_effect=resolve)
+    d.instance_manager.launch = AsyncMock(side_effect=launch)
+    await d.enqueue_message(task_id, "continue")
+    await asyncio.wait_for(preparation_reached.wait(), timeout=1)
+
+    await d.pause_dispatching()
+    release_preparation.set()
+    await asyncio.sleep(0.05)
+
+    assert not launched.is_set()
+    assert await d.pending_task_start_ids() == {task_id}
+    async with d.maintenance_shutdown_guard() as pending_ids:
+        assert pending_ids == {task_id}
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+        assert task.status == "completed"
+
+    d.resume_dispatching()
+    await asyncio.wait_for(launched.wait(), timeout=1)
+    worker = d._task_queue_workers.get(task_id)
+    if worker and not worker.done():
+        worker.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker
+
+
+@pytest.mark.asyncio
 async def test_queued_codex_busy_launch_rolls_back_status_and_temp_skills(
     db_factory, monkeypatch,
 ):

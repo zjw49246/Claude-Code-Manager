@@ -57,6 +57,18 @@ def _make_state() -> UpdateState:
     )
 
 
+def _make_gate_dispatcher(db_factory):
+    from backend.services.dispatcher import GlobalDispatcher
+
+    manager = MagicMock()
+    manager.launch = AsyncMock(return_value=123)
+    manager.processes = {}
+    manager._tasks = {}
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    return GlobalDispatcher(db_factory, manager, broadcaster)
+
+
 # ---- update safety and version detection ----
 
 
@@ -79,10 +91,36 @@ async def test_get_active_tasks_only_returns_running_states(tmp_path, db_factory
 
 
 @pytest.mark.asyncio
+async def test_get_blocking_tasks_includes_queued_resumes(tmp_path, db_factory):
+    async with db_factory() as db:
+        queued = Task(title="queued resume", description="d", status="completed")
+        running = Task(title="running", description="d", status="executing")
+        db.add_all([queued, running])
+        await db.commit()
+        await db.refresh(queued)
+
+    dispatcher = MagicMock()
+    dispatcher.pending_task_start_ids = AsyncMock(return_value={queued.id})
+    svc = _make_service(
+        tmp_path,
+        db_factory=db_factory,
+        dispatcher=dispatcher,
+    )
+
+    blockers = await svc._get_blocking_tasks()
+
+    assert [(task["title"], task["status"]) for task in blockers] == [
+        ("running", "executing"),
+        ("queued resume", "queued_resume"),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_start_update_pauses_and_refuses_active_tasks(tmp_path):
     dispatcher = MagicMock()
     dispatcher.pause_dispatching = AsyncMock()
     dispatcher.resume_dispatching = MagicMock()
+    dispatcher.pending_task_start_ids = AsyncMock(return_value=set())
     svc = _make_service(tmp_path, dispatcher=dispatcher)
     svc._get_active_tasks = AsyncMock(return_value=[
         {"id": 7, "title": "still running", "status": "executing"}
@@ -105,6 +143,7 @@ async def test_start_update_fails_closed_when_task_check_errors(tmp_path):
     dispatcher = MagicMock()
     dispatcher.pause_dispatching = AsyncMock()
     dispatcher.resume_dispatching = MagicMock()
+    dispatcher.pending_task_start_ids = AsyncMock(return_value=set())
     svc = _make_service(tmp_path, dispatcher=dispatcher)
     svc._get_active_tasks = AsyncMock(side_effect=RuntimeError("database offline"))
 
@@ -123,6 +162,7 @@ async def test_rollback_pauses_and_refuses_active_tasks(tmp_path):
     dispatcher = MagicMock()
     dispatcher.pause_dispatching = AsyncMock()
     dispatcher.resume_dispatching = MagicMock()
+    dispatcher.pending_task_start_ids = AsyncMock(return_value=set())
     svc = _make_service(tmp_path, dispatcher=dispatcher)
     svc._current = _make_state()
     svc._get_active_tasks = AsyncMock(return_value=[
@@ -316,6 +356,7 @@ async def test_dry_run_does_not_report_local_ahead_as_update(tmp_path):
 async def test_pipeline_rechecks_tasks_before_restart_and_resumes_dispatcher(tmp_path):
     dispatcher = MagicMock()
     dispatcher.resume_dispatching = MagicMock()
+    dispatcher.pending_task_start_ids = AsyncMock(return_value=set())
     svc = _make_service(tmp_path, dispatcher=dispatcher)
     state = _make_state()
     commit = "a" * 40
@@ -343,6 +384,194 @@ async def test_pipeline_rechecks_tasks_before_restart_and_resumes_dispatcher(tmp
     svc._migration_path.assert_not_awaited()
     svc._fast_restart_path.assert_not_awaited()
     dispatcher.resume_dispatching.assert_called_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("path_name", "source"),
+    [("fast", "user"), ("migration", "monitor:complete")],
+)
+async def test_restart_paths_block_queued_resume_from_pre_restart_window(
+    tmp_path, db_factory, path_name, source,
+):
+    """A resume accepted during the warning await must cancel shutdown."""
+    dispatcher = _make_gate_dispatcher(db_factory)
+    dispatcher._ensure_queue_worker = MagicMock()
+    await dispatcher.pause_dispatching()
+    async with db_factory() as db:
+        task = Task(
+            title="resume during update",
+            description="d",
+            status="completed",
+            session_id="session-1",
+        )
+        db.add(task)
+        await db.commit()
+        await db.refresh(task)
+        task_id = task.id
+
+    svc = _make_service(tmp_path, db_factory=db_factory, dispatcher=dispatcher)
+    state = _make_state()
+    state.new_commit = "new" * 10
+    svc._restart_service = MagicMock()
+    svc._spawn_update_script = MagicMock()
+
+    async def broadcast(event, **_kwargs):
+        if event == "restarting" and not dispatcher._pending_task_starts:
+            await dispatcher.enqueue_message(
+                task_id=task_id,
+                prompt="continue",
+                source=source,
+            )
+
+    svc._broadcast = AsyncMock(side_effect=broadcast)
+    with patch(
+        "backend.services.update_service.asyncio.sleep", new=AsyncMock()
+    ):
+        if path_name == "fast":
+            result = await svc._fast_restart_path(state)
+        else:
+            result = await svc._migration_path(state)
+
+    assert result is False
+    assert state.status == "failed"
+    assert "待处理任务" in state.error
+    svc._restart_service.assert_not_called()
+    svc._spawn_update_script.assert_not_called()
+    assert await dispatcher.pending_task_start_ids() == {task_id}
+    dispatcher.resume_dispatching()
+
+
+@pytest.mark.asyncio
+async def test_manual_pull_fast_restart_branch_uses_final_gate(
+    tmp_path, db_factory,
+):
+    dispatcher = _make_gate_dispatcher(db_factory)
+    dispatcher._ensure_queue_worker = MagicMock()
+    await dispatcher.pause_dispatching()
+    async with db_factory() as db:
+        task = Task(
+            title="queued manual-pull resume",
+            description="d",
+            status="completed",
+            session_id="session-1",
+        )
+        db.add(task)
+        await db.commit()
+        await db.refresh(task)
+        task_id = task.id
+    await dispatcher.enqueue_message(task_id, "continue")
+
+    commit = "a" * 40
+    svc = _make_service(
+        tmp_path,
+        db_factory=db_factory,
+        dispatcher=dispatcher,
+        running_commit=commit,
+    )
+    state = _make_state()
+    svc._needs_restart = AsyncMock(return_value=True)
+    svc._restart_service = MagicMock()
+
+    async def run_cmd(cmd, **_kwargs):
+        if cmd == ["git", "rev-parse", "HEAD"]:
+            return {"returncode": 0, "stdout": commit, "stderr": ""}
+        if cmd == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
+            return {"returncode": 0, "stdout": "main", "stderr": ""}
+        return {"returncode": 0, "stdout": "", "stderr": ""}
+
+    svc._run_cmd = AsyncMock(side_effect=run_cmd)
+    with patch(
+        "backend.services.update_service.asyncio.sleep", new=AsyncMock()
+    ):
+        await svc._pipeline_inner(state, False, False, branch="main")
+
+    assert state.status == "failed"
+    assert "待处理任务" in state.error
+    svc._restart_service.assert_not_called()
+    dispatcher.resume_dispatching()
+
+
+@pytest.mark.asyncio
+async def test_rollback_rechecks_queued_resume_after_warning(
+    tmp_path, db_factory,
+):
+    dispatcher = _make_gate_dispatcher(db_factory)
+    dispatcher._ensure_queue_worker = MagicMock()
+    async with db_factory() as db:
+        task = Task(
+            title="rollback race",
+            description="d",
+            status="completed",
+            session_id="session-1",
+        )
+        db.add(task)
+        await db.commit()
+        await db.refresh(task)
+        task_id = task.id
+
+    svc = _make_service(tmp_path, db_factory=db_factory, dispatcher=dispatcher)
+    svc._current = _make_state()
+    svc._spawn_update_script = MagicMock()
+
+    async def broadcast(event, **_kwargs):
+        if event == "restarting":
+            await dispatcher.enqueue_message(task_id, "continue", source="user")
+
+    svc._broadcast = AsyncMock(side_effect=broadcast)
+    with patch(
+        "backend.services.update_service.asyncio.sleep", new=AsyncMock()
+    ):
+        result = await svc.rollback()
+
+    assert result["update_blocked"] is True
+    assert result["active_tasks"][0]["status"] == "queued_resume"
+    svc._spawn_update_script.assert_not_called()
+    assert dispatcher.status()["paused"] is False
+
+
+@pytest.mark.asyncio
+async def test_shutdown_commit_is_atomic_and_seals_new_enqueues(
+    tmp_path, db_factory,
+):
+    from backend.services.dispatcher import TaskStartPausedError
+
+    dispatcher = _make_gate_dispatcher(db_factory)
+    await dispatcher.pause_dispatching()
+    svc = _make_service(tmp_path, db_factory=db_factory, dispatcher=dispatcher)
+    observed = []
+
+    def action():
+        observed.append(
+            (
+                dispatcher._dispatch_claim_lock.locked(),
+                dispatcher._maintenance_shutdown_committed,
+            )
+        )
+
+    blockers = await svc._commit_shutdown_if_idle(action)
+
+    assert blockers == []
+    assert observed == [(True, True)]
+    with pytest.raises(TaskStartPausedError):
+        await dispatcher.enqueue_message(999, "too late")
+
+
+@pytest.mark.asyncio
+async def test_final_shutdown_check_fails_closed_on_query_error(
+    tmp_path, db_factory,
+):
+    dispatcher = _make_gate_dispatcher(db_factory)
+    await dispatcher.pause_dispatching()
+    svc = _make_service(tmp_path, db_factory=db_factory, dispatcher=dispatcher)
+    svc._get_blocking_tasks = AsyncMock(side_effect=RuntimeError("database offline"))
+    action = MagicMock()
+
+    with pytest.raises(RuntimeError, match="database offline"):
+        await svc._commit_shutdown_if_idle(action)
+
+    action.assert_not_called()
+    assert dispatcher._maintenance_shutdown_committed is False
 
 
 # ---- _migration_path escapes the service cgroup ----
