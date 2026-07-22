@@ -452,6 +452,8 @@ cd frontend && npx tsc --noEmit
 |------|---------|
 | `test_status_not_running` | 初始状态 running=False |
 | `test_pause_dispatching_does_not_stop_dispatcher` | 维护 pause 只停止领取新任务，不停止 Dispatcher/活动 lifecycle；resume 后恢复 |
+| `test_queued_resume_waits_at_maintenance_gate_and_stays_blocking` | chat/monitor 续跑在维护期间不 launch、保持 blocker，恢复后只执行一次 |
+| `test_pause_wins_after_queued_resume_preparation_before_launch` | 续跑已完成准备但尚未写 `executing` 时，维护门禁仍能赢得竞态并阻止 launch |
 | `test_start_sets_running` / `test_start_idempotent` | 启动/幂等性 |
 | `test_stop` | 停止并取消所有任务 |
 | `test_ensure_instances_creates_workers` | 自动创建 worker 实例 |
@@ -466,6 +468,7 @@ cd frontend && npx tsc --noEmit
 | 测试 | 验证内容 |
 |------|---------|
 | `test_get_active_tasks_only_returns_running_states` | 更新阻塞器只识别 `in_progress/executing` task |
+| `test_get_blocking_tasks_includes_queued_resumes` | 已入队但尚未启动的续跑消息也属于停服 blocker |
 | `test_start_update_pauses_and_refuses_active_tasks` | 更新前暂停领取任务；活动 task 存在时即使 force 也拒绝并恢复调度 |
 | `test_start_update_fails_closed_when_task_check_errors` | 活动任务查询失败时按“有风险”处理，恢复调度且绝不启动更新 |
 | `test_rollback_pauses_and_refuses_active_tasks` | 回滚使用同一安全门；活动 task 存在时不启动停服脚本 |
@@ -478,6 +481,14 @@ cd frontend && npx tsc --noEmit
 | `test_concurrent_dry_runs_share_one_remote_check` | 多个页面并发自动检查时，30 秒缓存和 async lock 只执行一次远端检查 |
 | `test_dry_run_cache_keeps_blockers_fresh_and_force_bypasses_cache` | 缓存只复用版本结果，活动任务 blocker 实时刷新；手动 force 检查绕过缓存 |
 | `test_pipeline_rechecks_tasks_before_restart_and_resumes_dispatcher` | 停服前二次检查捕获更新期间出现的活动 task，取消重启并恢复调度 |
+| `test_restart_paths_block_queued_resume_from_pre_restart_window` | 无迁移/迁移两条停服路径在提示等待窗口收到 user/monitor 续跑时取消重启，绝不启动停服脚本 |
+| `test_manual_pull_fast_restart_branch_uses_final_gate` | “代码未变但进程需重启”的早期快速分支也执行最终原子门禁 |
+| `test_rollback_rechecks_queued_resume_after_warning` | rollback 在提示等待后重新检查排队续跑，出现新工作即恢复调度并取消停服 |
+| `test_shutdown_commit_is_atomic_and_seals_new_enqueues` | 最终 blocker 查询与同步停服提交共用锁；提交后新入队明确拒绝 |
+| `test_final_shutdown_check_fails_closed_on_query_error` | 最终 blocker 查询异常时 fail closed，绝不调用 restart/spawn |
+| `test_ralph_dequeue_waits_for_shared_maintenance_gate` | 旧 RalphLoop dequeue 同样服从统一任务启动门禁 |
+| `test_run_with_task_id_rejected_during_maintenance` | 手动 Instance task 启动在维护窗口返回 409，进程不启动 |
+| `test_chat_send_returns_conflict_after_shutdown_commit` | 最终停服已提交后新聊天返回 409，明确要求重连重试而不是静默入队 |
 | `test_update_dry_run_forwards_force_and_branch` | System API 将手动 dry-run 的 branch/force 原样透传给服务层 |
 | `test_update_returns_conflict_when_active_tasks_block_start` | 正式更新被活动任务门禁拒绝时 API 返回 409，`force` 不得绕过 |
 | `automatic update reminder` | 页面打开约 1 秒后仅 dry-run 检查；最新版静默；更新以顶部非阻塞通知展示，点击查看才开弹窗；同页同 commit 只提醒一次；远端失败但本地需重启仍提醒 |

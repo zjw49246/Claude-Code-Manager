@@ -309,7 +309,7 @@ curl -X POST http://localhost:8000/api/system/update \
 
 真正更新时自动执行：git pull → 刷新 PTY 依赖 → 数据库迁移 → 重建前端 → 智能重启（自动检测 systemd 服务名 `SERVICE_NAME`）。更新源优先使用目标分支配置的 tracking remote（例如本仓库的 `upstream/main`），没有 tracking remote 时回退 `origin`。
 
-为避免中断任务，更新开始前会暂停 Dispatcher 领取新任务，并检查 `in_progress/executing` task；存在活动任务时更新按钮会禁用，后端也会拒绝更新。任务完成后点击「重新检查」即可继续。手动 `git pull` 后触发更新时，系统会以服务实际加载的旧 commit 为基线补齐部署步骤，而不是只做一次盲目重启。
+为避免中断任务，更新开始前会关闭统一的任务启动门禁：普通 Dispatcher、Worker 转发、聊天/Monitor 续跑、RalphLoop 和手动 Instance 运行都不能越过维护窗口。`in_progress/executing` task 或已经进入队列、尚未启动的续跑消息都会阻止停服；若更新期间收到新的续跑消息，本次重启会取消并恢复调度，消息不会因进程重启而从内存队列丢失。所有更新、迁移、手动拉取后的快速重启和回滚都在同一门禁内完成最后一次 blocker 查询，并在查询成功后不再经过异步等待，直接提交停服操作。任务完成后点击「重新检查」即可继续。手动 `git pull` 后触发更新时，系统会以服务实际加载的旧 commit 为基线补齐部署步骤，而不是只做一次盲目重启。
 
 ### 方式二：手动更新
 
