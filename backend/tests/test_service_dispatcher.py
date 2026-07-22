@@ -2,6 +2,7 @@
 import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+from sqlalchemy import select
 
 from backend.services.dispatcher import GlobalDispatcher
 from backend.models.instance import Instance
@@ -110,7 +111,6 @@ async def test_ensure_instances_creates_workers(db_factory):
         await d._ensure_instances()
 
     async with db_factory() as db:
-        from sqlalchemy import select
         result = await db.execute(select(Instance))
         instances = list(result.scalars().all())
     assert len(instances) == 3
@@ -138,6 +138,28 @@ async def test_ensure_instances_skips_if_enough(db_factory):
         result = await db.execute(select(Instance))
         instances = list(result.scalars().all())
     assert len(instances) == 2
+
+
+@pytest.mark.asyncio
+async def test_ensure_instances_ignores_terminal_workers(db_factory):
+    """Startup replenishes workers even when terminal rows exceed the cap."""
+    d = _make_dispatcher(db_factory)
+
+    async with db_factory() as db:
+        for i in range(9):
+            status = "error" if i < 8 else "stopped"
+            db.add(Instance(name=f"old-worker-{i + 1}", status=status))
+        await db.commit()
+
+    with patch("backend.services.dispatcher.settings") as mock_settings:
+        mock_settings.max_concurrent_instances = 8
+        await d._ensure_instances()
+
+    async with db_factory() as db:
+        result = await db.execute(select(Instance))
+        instances = list(result.scalars().all())
+    assert sum(1 for i in instances if i.status == "idle") == 8
+    assert sum(1 for i in instances if i.status in ("idle", "running")) == 8
 
 
 @pytest.mark.asyncio

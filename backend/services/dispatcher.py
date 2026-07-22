@@ -93,6 +93,7 @@ QUEUE_CONSUMER_IDLE_TIMEOUT = 300
 QUEUE_HEARTBEAT_INTERVAL = 30
 QUEUE_STUCK_THRESHOLD = 120
 CODEX_ROUTING_RETRY_DELAY = 5
+LIVE_INSTANCE_STATUSES = frozenset({"idle", "running"})
 
 
 class CodexAccountRoutingError(RuntimeError):
@@ -436,12 +437,20 @@ class GlobalDispatcher:
         }
 
     async def _ensure_instances(self):
-        """Create worker instances in DB if fewer than max_concurrent_instances exist."""
+        """Create workers until live capacity reaches max_concurrent_instances.
+
+        Error/stopped rows are terminal history and do not own a process, so
+        they must not consume the concurrency cap.  They remain available for
+        inspection until the instance cleanup endpoint removes them.
+        """
         async with self.db_factory() as db:
             result = await db.execute(select(Instance))
             existing = list(result.scalars().all())
 
-        needed = settings.max_concurrent_instances - len(existing)
+        live_count = sum(
+            1 for instance in existing if instance.status in LIVE_INSTANCE_STATUSES
+        )
+        needed = settings.max_concurrent_instances - live_count
         if needed > 0:
             async with self.db_factory() as db:
                 for i in range(needed):
@@ -462,15 +471,19 @@ class GlobalDispatcher:
         async with self.db_factory() as db:
             result = await db.execute(select(Instance))
             existing = list(result.scalars().all())
-            total_count = len(existing)
+            live_count = sum(
+                1 for instance in existing
+                if instance.status in LIVE_INSTANCE_STATUSES
+            )
             idle_count = sum(1 for i in existing if i.status == "idle")
             needed = settings.min_idle_instances - idle_count
             if needed <= 0:
                 return
-            # Hard cap: total instances (idle + running) must not exceed max_concurrent_instances
+            # Terminal error/stopped rows hold no process and must not consume
+            # the live concurrency cap.
             cap = settings.max_concurrent_instances
-            if cap > 0 and total_count + needed > cap:
-                needed = max(0, cap - total_count)
+            if cap > 0 and live_count + needed > cap:
+                needed = max(0, cap - live_count)
             if needed <= 0:
                 return
             base = 0
