@@ -112,6 +112,7 @@ claude-manager/
 
 - **优先级**: 数字越小优先级越高 (P0 > P1 > P2)，排序用 `.asc()`
 - **Session 绑定**: `session_id` 和 `last_cwd` 在 **Task** 上（不是 Instance），因为 instance 是轮换执行不同 task 的 worker
+- **Instance 并发容量**: `max_concurrent_instances` 只约束会占用调度容量的 `idle/running` 实例；`error/stopped` 是不持有进程的终态历史，不得计入 cap，否则僵尸行会让 `_ensure_instances` / `_ensure_min_idle_instances` 永远补不出 worker。物理删除仍走 `DELETE /api/instances/cleanup`
 - **Claude Code 调用**: `claude -p [prompt] --dangerously-skip-permissions --output-format stream-json --verbose`
 - **Resume**: `claude -p [follow-up] --resume [session_id]` — 必须使用和原始 session 相同的 cwd
 - **默认 Provider**: 新任务默认使用 `codex`，Codex 默认模型为 `gpt-5.6-sol`；均可通过 `DEFAULT_PROVIDER` / `DEFAULT_CODEX_MODEL` 覆盖
