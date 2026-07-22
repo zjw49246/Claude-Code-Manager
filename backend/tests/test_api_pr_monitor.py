@@ -1,11 +1,17 @@
 """Tests for PR Monitor API endpoints (CRUD + GitHub webhook)."""
+import asyncio
 import hashlib
 import hmac
 import json
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from backend.database import Base, get_db
 from backend.models.pr_monitor import MonitoredRepo, PRReview
 from backend.models.task import Task
 
@@ -38,8 +44,9 @@ def _pr_payload(
     author="alice",
     base="main",
     draft=False,
+    head_sha="head-sha-1",
 ):
-    return {
+    payload = {
         "action": action,
         "repository": {"full_name": repo_full_name},
         "pull_request": {
@@ -51,15 +58,27 @@ def _pr_payload(
             "user": {"login": author},
         },
     }
+    if head_sha is not None:
+        payload["pull_request"]["head"] = {"sha": head_sha}
+    return payload
 
 
-async def _post_webhook(client, secret, payload, event="pull_request", signature=None):
+async def _post_webhook(
+    client,
+    secret,
+    payload,
+    event="pull_request",
+    signature=None,
+    delivery_id=None,
+):
     body = json.dumps(payload).encode()
     headers = {
         "X-Hub-Signature-256": signature if signature is not None else _sign(secret, body),
         "X-GitHub-Event": event,
         "Content-Type": "application/json",
     }
+    if delivery_id:
+        headers["X-GitHub-Delivery"] = delivery_id
     return await client.post("/api/github/webhook", content=body, headers=headers)
 
 
@@ -211,6 +230,7 @@ async def test_webhook_valid_signature_creates_review_and_task(client, session_f
         review = await db.get(PRReview, review_id)
         assert review is not None
         assert review.pr_number == 42
+        assert review.head_sha == "head-sha-1"
         assert review.status == "reviewing"
         assert review.task_id is not None
         task = await db.get(Task, review.task_id)
@@ -294,23 +314,31 @@ async def test_webhook_author_not_allowed_ignored(client):
 
 
 @pytest.mark.asyncio
-async def test_webhook_duplicate_opened_ignored_while_in_progress(client):
+async def test_webhook_duplicate_opened_same_head_ignored(client):
     repo = await _create_repo(client, "owner/repo")
     resp = await _post_webhook(client, repo["webhook_secret"], _pr_payload())
     assert resp.json()["status"] == "accepted"
     resp = await _post_webhook(client, repo["webhook_secret"], _pr_payload())
     data = resp.json()
     assert data["status"] == "ignored"
-    assert "in progress" in data["reason"]
+    assert data["reason"] == "PR commit already reviewed"
 
 
 @pytest.mark.asyncio
 async def test_webhook_synchronize_supersedes_old_review(client, session_factory):
     repo = await _create_repo(client, "owner/repo")
-    resp = await _post_webhook(client, repo["webhook_secret"], _pr_payload(action="opened"))
+    resp = await _post_webhook(
+        client,
+        repo["webhook_secret"],
+        _pr_payload(action="opened", head_sha="head-sha-1"),
+    )
     first_review_id = resp.json()["review_id"]
 
-    resp = await _post_webhook(client, repo["webhook_secret"], _pr_payload(action="synchronize"))
+    resp = await _post_webhook(
+        client,
+        repo["webhook_secret"],
+        _pr_payload(action="synchronize", head_sha="head-sha-2"),
+    )
     assert resp.json()["status"] == "accepted"
     second_review_id = resp.json()["review_id"]
     assert second_review_id != first_review_id
@@ -319,7 +347,208 @@ async def test_webhook_synchronize_supersedes_old_review(client, session_factory
         old = await db.get(PRReview, first_review_id)
         new = await db.get(PRReview, second_review_id)
         assert old.status == "superseded"
+        assert old.head_sha == "head-sha-1"
         assert new.status == "reviewing"
+        assert new.head_sha == "head-sha-2"
+
+
+@pytest.mark.asyncio
+async def test_webhook_duplicate_synchronize_same_head_ignored(
+    client, session_factory
+):
+    """A redelivery with a new delivery ID must not review the same commit twice."""
+    repo = await _create_repo(client, "owner/repo")
+    payload = _pr_payload(action="synchronize", head_sha="same-head-sha")
+
+    first = await _post_webhook(
+        client,
+        repo["webhook_secret"],
+        payload,
+        delivery_id="delivery-1",
+    )
+    second = await _post_webhook(
+        client,
+        repo["webhook_secret"],
+        payload,
+        delivery_id="delivery-2",
+    )
+
+    assert first.json()["status"] == "accepted"
+    assert second.json() == {
+        "status": "ignored",
+        "reason": "PR commit already reviewed",
+        "review_id": first.json()["review_id"],
+    }
+
+    async with session_factory() as db:
+        reviews = (await db.execute(select(PRReview))).scalars().all()
+        tasks = (await db.execute(
+            select(Task).where(Task.title == "PR Review: owner/repo#42")
+        )).scalars().all()
+        assert len(reviews) == 1
+        assert len(tasks) == 1
+        assert reviews[0].delivery_id == "delivery-1"
+
+
+@pytest.mark.asyncio
+async def test_webhook_duplicate_delivery_id_ignored(client):
+    repo = await _create_repo(client, "owner/repo")
+    payload = _pr_payload(action="opened", head_sha="same-head-sha")
+
+    first = await _post_webhook(
+        client,
+        repo["webhook_secret"],
+        payload,
+        delivery_id="same-delivery",
+    )
+    second = await _post_webhook(
+        client,
+        repo["webhook_secret"],
+        payload,
+        delivery_id="same-delivery",
+    )
+
+    assert first.json()["status"] == "accepted"
+    assert second.json()["status"] == "ignored"
+    assert second.json()["reason"] == "webhook delivery already processed"
+
+
+@pytest.mark.asyncio
+async def test_webhook_missing_head_sha_ignored(client, session_factory):
+    repo = await _create_repo(client, "owner/repo")
+    resp = await _post_webhook(
+        client,
+        repo["webhook_secret"],
+        _pr_payload(head_sha=None),
+    )
+
+    assert resp.json() == {"status": "ignored", "reason": "missing PR head SHA"}
+    async with session_factory() as db:
+        assert (await db.execute(select(PRReview))).scalars().all() == []
+
+
+@pytest.mark.asyncio
+async def test_webhook_concurrent_unique_conflict_returns_winner(client):
+    """The database constraint winner is returned instead of an HTTP 500."""
+    import backend.api.pr_monitor as prm
+
+    repo = await _create_repo(client, "owner/repo")
+    winner = MagicMock(id=77, delivery_id="delivery-1")
+    duplicate_lookup = AsyncMock(side_effect=[None, winner])
+    create_review = AsyncMock(
+        side_effect=IntegrityError("INSERT", {}, Exception("unique constraint"))
+    )
+
+    with patch.object(prm, "_find_processed_review", duplicate_lookup), patch(
+        "backend.services.pr_review_service.create_pr_review_task",
+        create_review,
+    ):
+        resp = await _post_webhook(
+            client,
+            repo["webhook_secret"],
+            _pr_payload(head_sha="same-head-sha"),
+            delivery_id="delivery-1",
+        )
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "status": "ignored",
+        "reason": "webhook delivery already processed",
+        "review_id": 77,
+    }
+    assert duplicate_lookup.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_webhook_concurrent_same_head_creates_one_task(
+    app, tmp_path
+):
+    from backend.models.project import Project
+    from backend.services.pr_review_service import PR_MONITOR_PROJECT_NAME
+
+    db_path = tmp_path / "concurrent-webhooks.db"
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{db_path}",
+        connect_args={"timeout": 30},
+    )
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    file_session_factory = async_sessionmaker(
+        engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+    )
+
+    real_app, _ = app
+
+    async def override_get_db():
+        async with file_session_factory() as db:
+            yield db
+
+    real_app.dependency_overrides[get_db] = override_get_db
+    try:
+        async with file_session_factory() as db:
+            db.add(Project(name=PR_MONITOR_PROJECT_NAME))
+            await db.commit()
+
+        async with AsyncClient(
+            transport=ASGITransport(app=real_app),
+            base_url="http://test",
+        ) as client:
+            repo = await _create_repo(client, "owner/repo")
+            payload = _pr_payload(action="synchronize", head_sha="same-head-sha")
+            responses = await asyncio.gather(
+                _post_webhook(
+                    client,
+                    repo["webhook_secret"],
+                    payload,
+                    delivery_id="concurrent-delivery-1",
+                ),
+                _post_webhook(
+                    client,
+                    repo["webhook_secret"],
+                    payload,
+                    delivery_id="concurrent-delivery-2",
+                ),
+            )
+
+        assert sorted(resp.json()["status"] for resp in responses) == [
+            "accepted",
+            "ignored",
+        ]
+        async with file_session_factory() as db:
+            reviews = (await db.execute(select(PRReview))).scalars().all()
+            tasks = (await db.execute(
+                select(Task).where(Task.title == "PR Review: owner/repo#42")
+            )).scalars().all()
+            assert len(reviews) == 1
+            assert len(tasks) == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_pr_review_head_sha_unique_constraint(db_session):
+    repo = MonitoredRepo(repo_full_name="owner/repo", webhook_secret="secret")
+    db_session.add(repo)
+    await db_session.commit()
+
+    common = {
+        "repo_id": repo.id,
+        "pr_number": 42,
+        "head_sha": "same-head-sha",
+        "pr_title": "Title",
+        "pr_author": "alice",
+        "pr_url": "https://github.com/owner/repo/pull/42",
+        "status": "reviewing",
+    }
+    db_session.add(PRReview(**common, delivery_id="delivery-1"))
+    await db_session.commit()
+
+    db_session.add(PRReview(**common, delivery_id="delivery-2"))
+    with pytest.raises(IntegrityError):
+        await db_session.commit()
+    await db_session.rollback()
 
 
 @pytest.mark.asyncio

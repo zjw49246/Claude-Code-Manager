@@ -387,6 +387,8 @@ export interface PRReview {
   id: number;
   repo_id: number;
   pr_number: number;
+  head_sha: string | null;
+  delivery_id: string | null;
   pr_title: string;
   pr_author: string;
   pr_url: string;
