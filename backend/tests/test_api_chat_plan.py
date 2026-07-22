@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.task import Task
 from backend.models.instance import Instance
+from backend.models.task_share import TaskShare
 
 
 # === Chat tests ===
@@ -290,6 +291,125 @@ async def test_chat_send_enqueues_message(client, session_factory):
 
 
 @pytest.mark.asyncio
+async def test_chat_sender_prefix_is_display_only(session_factory):
+    """Authenticated sender names stay in the UI copy, never the model prompt."""
+    import json
+    from types import SimpleNamespace
+    from sqlalchemy import select
+
+    from backend.api.chat import ChatMessage, get_chat_history, send_chat_message
+    from backend.models.log_entry import LogEntry
+    from backend.models.user import User
+
+    async with session_factory() as db:
+        sender = User(
+            email="alice-prefix@test.local",
+            name="Alice",
+            password_hash="unused",
+            role="super_admin",
+        )
+        task = Task(
+            title="Prefix test",
+            description="d",
+            target_repo="/tmp",
+            session_id="prefix-session",
+        )
+        db.add_all([sender, task])
+        await db.commit()
+        await db.refresh(sender)
+        await db.refresh(task)
+
+        mock_d = _mock_dispatcher()
+        mock_broadcaster = MagicMock()
+        mock_broadcaster.broadcast = AsyncMock()
+        request = SimpleNamespace(
+            state=SimpleNamespace(user_id=sender.id, user_role="super_admin")
+        )
+
+        with patch("backend.main.dispatcher", mock_d), \
+             patch("backend.main.broadcaster", mock_broadcaster):
+            result = await send_chat_message(
+                task.id,
+                ChatMessage(message="[BUG] preserve this tag"),
+                request,
+                db,
+            )
+
+        stored = (await db.execute(
+            select(LogEntry).where(
+                LogEntry.task_id == task.id,
+                LogEntry.event_type == "user_message",
+            )
+        )).scalar_one()
+        history = await get_chat_history(
+            task.id,
+            request=request,
+            limit=0,
+            compact=True,
+            db=db,
+        )
+
+    assert result["queued"] is True
+    assert mock_d.enqueue_message.call_args.kwargs["prompt"] == "[BUG] preserve this tag"
+    assert stored.content == "[Alice] [BUG] preserve this tag"
+    assert json.loads(stored.raw_json)["raw_content"] == "[BUG] preserve this tag"
+    assert history[-1]["raw_content"] == "[BUG] preserve this tag"
+    display_event = mock_broadcaster.broadcast.call_args.args[1]
+    assert display_event["content"] == "[Alice] [BUG] preserve this tag"
+    assert display_event["sender_name"] == "Alice"
+
+
+@pytest.mark.asyncio
+async def test_shared_chat_sender_prefix_is_display_only(client, session_factory):
+    """Shared-task sender names are shown in chat but excluded from enqueue."""
+    import json
+    from sqlalchemy import select
+    from backend.api.shared_access import SharedChatMessage, shared_chat
+    from backend.models.log_entry import LogEntry
+
+    task_id = await _create_task_with_session(client, session_factory)
+    async with session_factory() as db:
+        db.add(TaskShare(
+            task_id=task_id,
+            shared_to_open_id="ou-prefix-test",
+            shared_to_name="Remote Alice",
+            shared_to_ccm_url="https://receiver.test",
+            share_token="prefix-share-token",
+            status="active",
+        ))
+        await db.commit()
+
+    mock_d = _mock_dispatcher()
+    mock_broadcaster = MagicMock()
+    mock_broadcaster.broadcast = AsyncMock()
+    async with session_factory() as db:
+        with patch("backend.main.dispatcher", mock_d), \
+             patch("backend.main.broadcaster", mock_broadcaster):
+            response = await shared_chat(
+                task_id,
+                SharedChatMessage(
+                    message="[TODO] keep the tag",
+                    sender_name="Remote Alice",
+                ),
+                token="prefix-share-token",
+                db=db,
+            )
+
+    assert response["queued"] is True
+    assert mock_d.enqueue_message.call_args.kwargs["prompt"] == "[TODO] keep the tag"
+    async with session_factory() as db:
+        stored = (await db.execute(
+            select(LogEntry).where(
+                LogEntry.task_id == task_id,
+                LogEntry.event_type == "user_message",
+            )
+        )).scalar_one()
+    assert stored.content == "[Remote Alice] [TODO] keep the tag"
+    assert json.loads(stored.raw_json)["raw_content"] == "[TODO] keep the tag"
+    assert mock_broadcaster.broadcast.call_args.args[1]["content"] == stored.content
+
+
+@pytest.mark.asyncio
 async def test_chat_send_queues_even_when_task_busy(client, session_factory):
     """Busy/no-idle-instance states no longer 4xx at the endpoint — the
     message is queued and the dispatcher serializes processing."""
@@ -426,6 +546,76 @@ def _queued(prompt="hi"):
         priority=PRIORITY_USER, timestamp=time.monotonic(),
         prompt=prompt, source="user",
     )
+
+
+@pytest.mark.asyncio
+async def test_model_history_rebuild_uses_raw_user_content(db_factory):
+    """Compaction and Distill exclude UI sender names without stripping real tags."""
+    import json
+
+    from backend.api.chat import _collect_conversation_for_distill
+    from backend.models.log_entry import LogEntry
+
+    async with db_factory() as db:
+        task = Task(
+            title="History sender test",
+            description="d",
+            status="completed",
+            target_repo="/tmp",
+            session_id="history-session",
+        )
+        db.add(task)
+        await db.flush()
+        db.add_all([
+            LogEntry(
+                instance_id=None,
+                task_id=task.id,
+                event_type="user_message",
+                role="user",
+                content="[Alice] [BUG] preserve this tag",
+                raw_json=json.dumps({
+                    "sender_name": "Alice",
+                    "raw_content": "[BUG] preserve this tag",
+                }),
+                is_error=False,
+            ),
+            LogEntry(
+                instance_id=None,
+                task_id=task.id,
+                event_type="message",
+                role="assistant",
+                content="First reply",
+                is_error=False,
+            ),
+            LogEntry(
+                instance_id=None,
+                task_id=task.id,
+                event_type="user_message",
+                role="user",
+                content="[Monitor #7] keep this operational label",
+                raw_json=json.dumps({"source": "monitor"}),
+                is_error=False,
+            ),
+            LogEntry(
+                instance_id=None,
+                task_id=task.id,
+                event_type="message",
+                role="assistant",
+                content="Second reply",
+                is_error=False,
+            ),
+        ])
+        await db.commit()
+
+        dispatcher = _make_dispatcher(db_factory)
+        compacted = await dispatcher._compact_session(task.id, task.session_id, db)
+        distilled = await _collect_conversation_for_distill(task.id, db)
+
+    for model_input in (compacted, distilled):
+        assert model_input is not None
+        assert "[Alice]" not in model_input
+        assert "[BUG] preserve this tag" in model_input
+        assert "[Monitor #7] keep this operational label" in model_input
 
 
 @pytest.fixture
@@ -589,6 +779,7 @@ async def test_inject_delivers_to_pty_session(client, session_factory):
     casts = [c for c in mock_broadcaster.broadcast.call_args_list
              if c[0][1].get("source") == "inject"]
     assert len(casts) == 1
+    assert casts[0][0][1]["raw_content"] == "focus on tests"
 
 
 @pytest.mark.asyncio

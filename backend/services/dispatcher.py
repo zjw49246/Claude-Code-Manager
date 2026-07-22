@@ -1,5 +1,6 @@
 import asyncio
 import glob
+import json
 import logging
 import os
 import re
@@ -4047,7 +4048,15 @@ class GlobalDispatcher:
             current_user = None
             for e in entries:
                 if e.event_type == "user_message":
-                    current_user = (e.content or "")[:500]
+                    user_content = e.content or ""
+                    if e.raw_json:
+                        try:
+                            raw = json.loads(e.raw_json)
+                            if isinstance(raw, dict) and isinstance(raw.get("raw_content"), str):
+                                user_content = raw["raw_content"]
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+                    current_user = user_content[:500]
                 elif e.event_type in ("message", "result") and e.role == "assistant":
                     content = (e.content or "")[:1000]
                     if current_user:

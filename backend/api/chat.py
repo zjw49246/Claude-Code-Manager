@@ -58,17 +58,21 @@ async def send_chat_message(
         unknown_cmd = stripped.split(None, 1)[0]
         raise HTTPException(400, f"未知命令 {unknown_cmd}，输入 $help 查看可用命令")
 
-    # Add user identifier prefix to all messages
+    # Keep sender identity presentation-only.  The raw text is what the model
+    # receives; the prefixed form is only stored/broadcast for the chat UI.
     user_id = getattr(request.state, "user_id", None)
-    message_text = body.message
+    model_message = body.message
+    display_content = model_message
+    sender_display_name = None
     if user_id:
         from backend.models.user import User
         sender = await db.get(User, user_id)
         if sender:
-            message_text = f"[{sender.name}] {body.message}"
+            sender_display_name = sender.name
+            display_content = f"[{sender.name}] {model_message}"
 
     # Build prompt — append secrets, skill instructions, and image paths
-    prompt_parts = [message_text]
+    prompt_parts = [model_message]
     if command:
         # $command detected: inject command prompt and set temporary skills
         prompt_parts.append(command.prompt_template)
@@ -107,24 +111,21 @@ async def send_chat_message(
             "is_image": ext in _IMAGE_EXTS,
         })
 
-    # Always show sender name in display for multi-user context
-    display_content = message_text  # message_text already has [username] prefix for non-creators
-    user_id_for_display = getattr(request.state, "user_id", None)
-    sender_display_name = None
-    if user_id_for_display:
-        from backend.models.user import User as _User
-        _sender = await db.get(_User, user_id_for_display)
-        if _sender:
-            sender_display_name = _sender.name
-
     # Store user message as a log entry (use instance_id=1 as placeholder)
+    log_metadata: dict = {"raw_content": model_message}
+    if attachments:
+        log_metadata["attachments"] = attachments
+    if sender_display_name:
+        # Model-facing history rebuilds must use this exact original text,
+        # never guess by regex (the user's real message may start with [BUG]).
+        log_metadata["sender_name"] = sender_display_name
     user_log = LogEntry(
         instance_id=1,
         task_id=task_id,
         event_type="user_message",
         role="user",
         content=display_content,
-        raw_json=json.dumps({"attachments": attachments}) if attachments else None,
+        raw_json=json.dumps(log_metadata) if log_metadata else None,
         is_error=False,
     )
     db.add(user_log)
@@ -137,6 +138,7 @@ async def send_chat_message(
         "event_type": "user_message",
         "role": "user",
         "content": display_content,
+        "raw_content": model_message,
         "image_urls": image_urls,
         "attachments": attachments,
     }
@@ -180,6 +182,10 @@ async def _send_shared_chat(task: Task, body: ChatMessage, db: AsyncSession):
     sender_name = binding.feishu_name if binding else None
     prefixed = f"[{sender_name}] {body.message}" if sender_name else body.message
 
+    log_metadata: dict = {"raw_content": body.message}
+    if sender_name:
+        log_metadata["sender_name"] = sender_name
+
     # Store user message locally WITH prefix (same as what sharer sees)
     user_log = LogEntry(
         instance_id=None,
@@ -187,6 +193,7 @@ async def _send_shared_chat(task: Task, body: ChatMessage, db: AsyncSession):
         event_type="user_message",
         role="user",
         content=prefixed,
+        raw_json=json.dumps(log_metadata),
         is_error=False,
     )
     db.add(user_log)
@@ -197,6 +204,8 @@ async def _send_shared_chat(task: Task, body: ChatMessage, db: AsyncSession):
         "event_type": "user_message",
         "role": "user",
         "content": prefixed,
+        "raw_content": body.message,
+        "sender_name": sender_name,
     })
 
     # Proxy to sharer
@@ -219,14 +228,19 @@ async def _send_worker_chat(task: Task, body: ChatMessage, db: AsyncSession, req
     if body.secret_ids:
         raise HTTPException(400, "Worker task 暂不支持引用 Secrets（Phase 3）")
 
-    # Add user prefix to all messages
+    # Preserve the sender prefix for the Manager UI, but forward only the raw
+    # user text to the Worker so it never becomes part of the model prompt.
+    model_message = body.message
+    display_content = model_message
+    sender_display_name = None
     if request:
         uid = getattr(request.state, "user_id", None)
         if uid:
             from backend.models.user import User
             sender = await db.get(User, uid)
             if sender:
-                body.message = f"[{sender.name}] {body.message}"
+                sender_display_name = sender.name
+                display_content = f"[{sender.name}] {model_message}"
 
     worker = await worker_proxy.require_ready_worker(task.worker_id)
 
@@ -243,24 +257,33 @@ async def _send_worker_chat(task: Task, body: ChatMessage, db: AsyncSession, req
     ]
 
     # 1. Manager DB 存 user_message（日志完整性；relay 会跳过 worker 回传的同条）
+    log_metadata: dict = {"raw_content": model_message}
+    if attachments:
+        log_metadata["attachments"] = attachments
+    if sender_display_name:
+        log_metadata["sender_name"] = sender_display_name
     db.add(LogEntry(
         instance_id=None,
         task_id=task.id,
         event_type="user_message",
         role="user",
-        content=body.message,
-        raw_json=json.dumps({"attachments": attachments}) if attachments else None,
+        content=display_content,
+        raw_json=json.dumps(log_metadata) if log_metadata else None,
         is_error=False,
     ))
     await db.commit()
 
     # 2. 广播到 Manager 前端
-    await broadcaster.broadcast(f"task:{task.id}", {
+    broadcast_data = {
         "event_type": "user_message",
         "role": "user",
-        "content": body.message,
+        "content": display_content,
+        "raw_content": model_message,
         "image_paths": body.image_paths or [],
-    })
+    }
+    if sender_display_name:
+        broadcast_data["sender_name"] = sender_display_name
+    await broadcaster.broadcast(f"task:{task.id}", broadcast_data)
 
     # 3. 附件推到 worker 同一路径（worker 上 Claude 用 Read 读）
     if all_paths:
@@ -277,7 +300,7 @@ async def _send_worker_chat(task: Task, body: ChatMessage, db: AsyncSession, req
     result = await worker_proxy.proxy_to_worker(
         task, "POST", f"/api/tasks/{task.id}/chat",
         body={
-            "message": body.message,
+            "message": model_message,
             "image_paths": body.image_paths,
             "file_paths": body.file_paths,
             "model": body.model,
@@ -413,6 +436,7 @@ async def get_chat_history(
         attachments = None
         image_urls = None
         source = None
+        raw_content = None
         if row.raw_json:
             try:
                 raw = json.loads(row.raw_json)
@@ -425,6 +449,8 @@ async def get_chat_history(
                         attachments = [{"url": u, "name": u.split("/")[-1], "is_image": True} for u in image_urls]
                     if raw.get("source"):
                         source = raw["source"]
+                    if isinstance(raw.get("raw_content"), str):
+                        raw_content = raw["raw_content"]
             except (json.JSONDecodeError, TypeError):
                 pass
 
@@ -454,6 +480,7 @@ async def get_chat_history(
             "image_urls": image_urls or None,
             "attachments": attachments,
             "source": msg_source,
+            "raw_content": raw_content,
         })
 
     # Trim back to requested limit (we over-fetched to compensate for
@@ -565,7 +592,7 @@ async def inject_message(
         event_type="user_message",
         role="user",
         content=body.message,
-        raw_json=json.dumps({"source": "inject"}),
+        raw_json=json.dumps({"source": "inject", "raw_content": body.message}),
         is_error=False,
     ))
     await db.commit()
@@ -574,6 +601,7 @@ async def inject_message(
         "role": "user",
         "content": body.message,
         "source": "inject",
+        "raw_content": body.message,
     })
     return {"ok": True, "injected": True}
 
@@ -617,7 +645,14 @@ _DISTILL_MODEL = "claude-opus-4-6"
 async def _collect_conversation_for_distill(task_id: int, db: AsyncSession) -> str:
     """Collect conversation history for distillation, capped at _DISTILL_MAX_CHARS."""
     result = await db.execute(
-        select(LogEntry.event_type, LogEntry.role, LogEntry.content, LogEntry.tool_name, LogEntry.is_error)
+        select(
+            LogEntry.event_type,
+            LogEntry.role,
+            LogEntry.content,
+            LogEntry.tool_name,
+            LogEntry.is_error,
+            LogEntry.raw_json,
+        )
         .where(
             LogEntry.task_id == task_id,
             LogEntry.event_type.in_(["user_message", "message", "tool_use", "tool_result"]),
@@ -629,12 +664,20 @@ async def _collect_conversation_for_distill(task_id: int, db: AsyncSession) -> s
     parts: list[str] = []
     total = 0
     for row in rows:
-        event_type, role, content, tool_name, is_error = row
+        event_type, role, content, tool_name, is_error, raw_json = row
         if not content:
             continue
 
         if event_type == "user_message":
-            line = f"[User]: {content[:2000]}"
+            model_content = content
+            if raw_json:
+                try:
+                    raw = json.loads(raw_json)
+                    if isinstance(raw, dict) and isinstance(raw.get("raw_content"), str):
+                        model_content = raw["raw_content"]
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            line = f"[User]: {model_content[:2000]}"
         elif event_type == "message" and role == "assistant":
             line = f"[Assistant]: {content[:2000]}"
         elif event_type == "tool_use" and tool_name:

@@ -607,6 +607,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
     if (eventType === 'user_message') {
       const content = (msg.data.content as string) || '';
       const source = (msg.data.source as string) || null;
+      const rawContent = typeof msg.data.raw_content === 'string' ? msg.data.raw_content : null;
       const imageUrls = (msg.data.image_urls as string[]) || null;
       const attachments = (msg.data.attachments as { url: string; name: string; is_image: boolean }[]) || null;
       setSending(true);
@@ -625,7 +626,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
           id: Date.now() + Math.random(), role: 'user', event_type: 'user_message',
           content, tool_name: null, tool_input: null, tool_output: null,
           is_error: false, loop_iteration: null, timestamp: new Date().toISOString(),
-          image_urls: imageUrls, attachments: attachments, source,
+          image_urls: imageUrls, attachments: attachments, source, raw_content: rawContent,
         }];
       });
       return;
@@ -973,6 +974,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
           is_error: false, loop_iteration: null, timestamp: new Date().toISOString(),
           image_urls: optimisticAttachments?.filter((a) => a.is_image).map((a) => a.url) || null,
           attachments: optimisticAttachments,
+          raw_content: text,
         }]);
         setSending(true);
       }
@@ -2356,7 +2358,7 @@ const MessageBubble = memo(function MessageBubble({ message, taskId }: { message
         </div>
         <div className={`flex items-center gap-1 mt-0.5 ${isUser ? 'justify-end pr-1' : 'pl-1'}`}>
           {message.timestamp && <MessageTimestamp timestamp={message.timestamp} />}
-          {message.content && <MessageCopyButton text={isUser ? stripSenderPrefix(message.content) : message.content} />}
+          {message.content && <MessageCopyButton text={isUser ? (message.raw_content ?? stripSenderPrefix(message.content)) : message.content} />}
         </div>
       </div>
     </div>

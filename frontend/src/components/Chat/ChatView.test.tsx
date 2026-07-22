@@ -373,6 +373,33 @@ describe('ChatView', () => {
 
       expect(writeText).toHaveBeenCalledWith('现在进度怎么样了');
     });
+
+    it('preserves a real bracket tag when raw user content is available', async () => {
+      const writeText = vi.fn().mockResolvedValue(undefined);
+      Object.assign(navigator, { clipboard: { writeText } });
+      const msgs: ChatMessage[] = [{
+        id: 1,
+        role: 'user',
+        event_type: 'user_message',
+        content: '[Admin] [BUG] preserve this tag',
+        raw_content: '[BUG] preserve this tag',
+        tool_name: null,
+        tool_input: null,
+        tool_output: null,
+        is_error: false,
+        loop_iteration: null,
+        timestamp: '2024-01-01T00:00:00Z',
+        image_urls: null,
+        attachments: null,
+      }];
+      (api.getTaskChatHistory as ReturnType<typeof vi.fn>).mockResolvedValue(msgs);
+
+      render(<ChatView task={makeTask({ description: null })} projects={projects} onBack={onBack} />);
+
+      await userEvent.click(await screen.findByTitle('Copy message'));
+
+      expect(writeText).toHaveBeenCalledWith('[BUG] preserve this tag');
+    });
   });
 
   describe('User message navigation', () => {

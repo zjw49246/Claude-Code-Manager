@@ -210,11 +210,13 @@ class SharedRelay:
         # Write chat events to local log_entries
         if event_type in CHAT_EVENT_TYPES:
             raw_json = data.get("raw_json")
-            if not raw_json and (data.get("attachments") or data.get("image_urls")):
+            metadata_keys = (
+                "attachments", "image_urls", "source", "raw_content", "sender_name",
+            )
+            if not raw_json and any(data.get(k) is not None for k in metadata_keys):
                 import json
                 raw_json = json.dumps({
-                    k: data[k] for k in ("attachments", "image_urls", "source")
-                    if data.get(k)
+                    k: data[k] for k in metadata_keys if data.get(k) is not None
                 })
             async with self.db_factory() as db:
                 db.add(LogEntry(
@@ -275,6 +277,11 @@ class SharedRelay:
                     return  # already backfilled
 
                 for msg in messages:
+                    metadata = {
+                        k: msg[k]
+                        for k in ("attachments", "image_urls", "source", "raw_content", "sender_name")
+                        if msg.get(k) is not None
+                    }
                     db.add(LogEntry(
                         instance_id=None,
                         task_id=shared.local_task_id,
@@ -284,6 +291,7 @@ class SharedRelay:
                         tool_name=msg.get("tool_name"),
                         tool_input=msg.get("tool_input"),
                         tool_output=msg.get("tool_output"),
+                        raw_json=json.dumps(metadata) if metadata else None,
                         is_error=msg.get("is_error", False),
                     ))
                 await db.commit()

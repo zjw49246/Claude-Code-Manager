@@ -292,6 +292,63 @@ async def test_chat_proxy_for_worker_task(client, session_factory, monkeypatch):
     proxy.proxy_to_worker.assert_called_once()
 
 
+async def test_worker_chat_sender_prefix_is_display_only(session_factory, monkeypatch):
+    """Manager displays the sender, while the Worker receives raw model text."""
+    import json
+    from types import SimpleNamespace
+
+    from backend.api.chat import ChatMessage, _send_worker_chat
+    from backend.models.user import User
+
+    w = await _mk_worker(session_factory)
+    t = await _mk_task(session_factory, worker_id=w.id)
+    async with session_factory() as db:
+        sender = User(
+            email="worker-prefix@test.local",
+            name="Worker Alice",
+            password_hash="unused",
+            role="super_admin",
+        )
+        db.add(sender)
+        await db.commit()
+        await db.refresh(sender)
+
+    proxy = AsyncMock()
+    proxy.require_ready_worker.return_value = w
+    proxy.relay = AsyncMock()
+    proxy.proxy_to_worker.return_value = {
+        "ok": True, "queued": True, "session_id": "worker-prefix-session",
+    }
+    broadcaster = FakeBroadcaster()
+    monkeypatch.setattr(main_module, "worker_proxy", proxy)
+    monkeypatch.setattr(main_module, "broadcaster", broadcaster)
+
+    request = SimpleNamespace(
+        state=SimpleNamespace(user_id=sender.id, user_role="super_admin")
+    )
+    async with session_factory() as db:
+        task = await db.get(Task, t.id)
+        await _send_worker_chat(
+            task,
+            ChatMessage(message="[FIX] preserve this tag"),
+            db,
+            request,
+        )
+
+    forwarded = proxy.proxy_to_worker.call_args.kwargs["body"]
+    assert forwarded["message"] == "[FIX] preserve this tag"
+    async with session_factory() as db:
+        stored = (await db.execute(
+            select(LogEntry).where(
+                LogEntry.task_id == t.id,
+                LogEntry.event_type == "user_message",
+            )
+        )).scalar_one()
+    assert stored.content == "[Worker Alice] [FIX] preserve this tag"
+    assert json.loads(stored.raw_json)["raw_content"] == "[FIX] preserve this tag"
+    assert broadcaster.sent[0][1]["content"] == stored.content
+
+
 async def test_chat_proxy_rejects_secrets(client, session_factory, monkeypatch):
     w = await _mk_worker(session_factory)
     t = await _mk_task(session_factory, worker_id=w.id)

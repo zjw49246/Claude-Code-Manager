@@ -123,6 +123,10 @@ async def shared_history(
                 raw = json.loads(row.raw_json)
                 if raw.get("attachments"):
                     msg["attachments"] = raw["attachments"]
+                if isinstance(raw.get("raw_content"), str):
+                    msg["raw_content"] = raw["raw_content"]
+                if isinstance(raw.get("sender_name"), str):
+                    msg["sender_name"] = raw["sender_name"]
             except (json.JSONDecodeError, TypeError):
                 pass
         messages.append(msg)
@@ -151,7 +155,8 @@ async def shared_chat(
     if not task.session_id:
         raise HTTPException(400, "Task has no active session")
 
-    # Prefix message with sender name
+    # Sender identity is display metadata only.  Keep it in the persisted/UI
+    # copy, while the model receives the caller's original message verbatim.
     sender = body.sender_name or share.shared_to_name or "Anonymous"
     prefixed = f"[{sender}] {body.message}"
 
@@ -162,6 +167,10 @@ async def shared_chat(
         event_type="user_message",
         role="user",
         content=prefixed,
+        raw_json=json.dumps({
+            "sender_name": sender,
+            "raw_content": body.message,
+        }),
         is_error=False,
     )
     db.add(user_log)
@@ -173,6 +182,8 @@ async def shared_chat(
         "event_type": "user_message",
         "role": "user",
         "content": prefixed,
+        "sender_name": sender,
+        "raw_content": body.message,
     })
 
     # Enqueue
@@ -180,7 +191,7 @@ async def shared_chat(
     from backend.services.dispatcher import PRIORITY_USER
     await dispatcher.enqueue_message(
         task_id=task_id,
-        prompt=prefixed,
+        prompt=body.message,
         priority=PRIORITY_USER,
         source="shared",
     )
