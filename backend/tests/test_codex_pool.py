@@ -6,6 +6,8 @@ import time
 from pathlib import Path
 
 import pytest
+from fastapi import HTTPException
+from starlette.requests import Request
 
 from backend.services import claude_pool
 from backend.services import codex_pool as codex_pool_module
@@ -61,6 +63,49 @@ def pool_config(tmp_path: Path) -> Path:
 @pytest.fixture
 def pool(pool_config: Path) -> CodexPool:
     return CodexPool(config_path=pool_config, cooldown_seconds=60)
+
+
+@pytest.mark.asyncio
+async def test_live_account_verification_detects_revoked_credentials(pool_config: Path):
+    async def rejected(_codex_home: str):
+        raise RuntimeError(
+            "Your access token could not be refreshed because your refresh token was revoked"
+        )
+
+    pool = CodexPool(config_path=pool_config, quota_reader=rejected)
+
+    result = await pool.verify_account_live("codex-1")
+
+    assert result["logged_in"] is False
+    assert result["live_verified"] is True
+    assert "rejected" in result["detail"]
+
+
+@pytest.mark.asyncio
+async def test_live_account_verification_keeps_transport_failure_unknown(pool_config: Path):
+    async def unavailable(_codex_home: str):
+        raise RuntimeError("stream disconnected before response")
+
+    pool = CodexPool(config_path=pool_config, quota_reader=unavailable)
+
+    result = await pool.verify_account_live("codex-1")
+
+    assert result["logged_in"] is None
+    assert result["live_verified"] is False
+
+
+@pytest.mark.asyncio
+async def test_codex_verify_endpoint_rejects_non_admin_before_pool_access():
+    from backend.api.codex_pool import codex_verify_account
+
+    request = Request({"type": "http", "method": "GET", "path": "/"})
+    request.state.user_id = 42
+    request.state.user_role = "member"
+
+    with pytest.raises(HTTPException) as exc_info:
+        await codex_verify_account(request, "codex-1", live=True)
+
+    assert exc_info.value.status_code == 403
 
 
 def _rollout(home: Path, session_id: str, timestamp: str = "2026-07-21T00-00-00") -> Path:

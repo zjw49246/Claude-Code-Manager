@@ -914,11 +914,20 @@ async def _finalize_login_transaction(
             cleanup_safe = False
 
     _login_attempts.pop(attempt_id, None)
+    # Add-account state carries the allocated slot id.  Keep it through the
+    # watcher/finalizer hand-off so a Manager that joins an already-running
+    # attempt can persist the exact slot and retry idempotently.
+    previous_state = state_store.get(state_key, {})
+    account_identity = (
+        {"account_id": previous_state["account_id"]}
+        if previous_state.get("account_id") else {}
+    )
     if committed:
         state_store[state_key] = {
             "status": "success",
             "finished_at": time.time(),
             "attempt_id": attempt_id,
+            **account_identity,
         }
     elif cleanup_safe and recovery_failed:
         state_store[state_key] = {
@@ -926,6 +935,7 @@ async def _finalize_login_transaction(
             "detail": detail,
             "finished_at": time.time(),
             "attempt_id": attempt_id,
+            **account_identity,
         }
     elif cleanup_safe and state_store.get(state_key, {}).get("status") in ACTIVE_LOGIN_STATUSES:
         state_store[state_key] = {
@@ -936,6 +946,7 @@ async def _finalize_login_transaction(
             ),
             "finished_at": time.time(),
             "attempt_id": attempt_id,
+            **account_identity,
         }
     elif not cleanup_safe:
         state_store[state_key] = {
@@ -946,6 +957,7 @@ async def _finalize_login_transaction(
             ),
             "finished_at": time.time(),
             "attempt_id": attempt_id,
+            **account_identity,
         }
 
     if cleanup_safe:
@@ -960,6 +972,7 @@ async def _finalize_login_transaction(
                 "detail": f"Credentials are safe but maintenance release failed: {exc}",
                 "finished_at": time.time(),
                 "attempt_id": attempt_id,
+                **account_identity,
             }
         finally:
             if login_lock.locked():
@@ -1378,12 +1391,19 @@ async def codex_clear_cooldown(request: Request, account_id: str):
 
 
 @router.get("/accounts/{account_id}/verify")
-async def codex_verify_account(account_id: str):
-    """Check login status of an account by reading its auth.json."""
+async def codex_verify_account(
+    request: Request,
+    account_id: str,
+    live: bool = False,
+):
+    """Check local credentials and optionally prove them with a live RPC."""
+    require_admin(request)
     pool = _get_pool()
     acc = pool.account(account_id)
     if not acc or getattr(acc, "retired", False):
         raise HTTPException(status_code=404, detail=f"Unknown account: {account_id}")
+    if live:
+        return await pool.verify_account_live(account_id)
     from backend.services.codex_pool import verify_login
     return verify_login(acc.codex_home)
 
@@ -1410,7 +1430,8 @@ async def _watch_relogin(
         _relogin_state[account_id] = {
             "status": (
                 "finalizing" if proc.returncode == 0
-                else "expired" if previous_status == "expired"
+                else previous_status
+                if previous_status in {"expired", "cancelled"}
                 else "failed"
             ),
             "detail": tail,
@@ -1684,24 +1705,36 @@ async def _watch_add(
     try:
         tail = await _collect_login_output(proc, attempt_id)
         watch_completed = True
-        previous_status = _add_state.get(email, {}).get("status")
+        previous_state = _add_state.get(email, {})
+        previous_status = previous_state.get("status")
         _add_state[email] = {
             "status": (
                 "finalizing" if proc.returncode == 0
-                else "expired" if previous_status == "expired"
+                else previous_status
+                if previous_status in {"expired", "cancelled"}
                 else "failed"
             ),
             "detail": tail,
             "attempt_id": attempt_id,
+            **(
+                {"account_id": previous_state["account_id"]}
+                if previous_state.get("account_id") else {}
+            ),
         }
         if proc.returncode != 0:
             _add_state[email]["finished_at"] = time.time()
     except Exception as exc:
         logger.exception("Codex add-account watcher failed for %s", email)
+        previous_state = _add_state.get(email, {})
         _add_state[email] = {
             "status": "failed",
             "detail": str(exc),
             "finished_at": time.time(),
+            "attempt_id": attempt_id,
+            **(
+                {"account_id": previous_state["account_id"]}
+                if previous_state.get("account_id") else {}
+            ),
         }
     finally:
         await _await_login_cleanup(_finalize_login_transaction(
@@ -1772,6 +1805,7 @@ async def codex_add_account(request: Request, body: AddCodexAccountRequest):
             "ok": True,
             "status": state["status"],
             "attempt_id": state.get("attempt_id"),
+            "account_id": state.get("account_id"),
         }
 
     if _login_lock.locked():
@@ -2016,6 +2050,51 @@ async def codex_submit_login_otp(
     return {"ok": True, "status": "verifying_otp"}
 
 
+@router.delete("/login-attempts/{attempt_id}")
+async def codex_cancel_login(request: Request, attempt_id: str):
+    """Abort an interactive login and wait until its rollback releases locks."""
+    require_admin(request)
+    attempt = _login_attempts.get(attempt_id)
+    if not attempt:
+        raise HTTPException(status_code=404, detail="登录流程已结束或不存在")
+
+    state = _attempt_state(attempt)
+    if state.get("status") not in ACTIVE_LOGIN_STATUSES:
+        raise HTTPException(status_code=409, detail="当前登录流程无法取消")
+    proc = attempt.get("proc")
+    if proc is None or proc.returncode is not None:
+        raise HTTPException(status_code=409, detail="登录进程已经结束")
+
+    state.update({
+        "status": "cancelled",
+        "detail": "登录已取消，凭据变更已回滚",
+        "attempt_id": attempt_id,
+    })
+    try:
+        await _stop_unfinished_login_process(
+            proc,
+            operation=f"cancelled {attempt.get('kind', 'login')}",
+        )
+    except LoginProcessNotTerminal as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"登录进程取消状态无法确认，请重启 CCM 完成恢复：{exc}",
+        ) from exc
+
+    # The watcher owns journal rollback and home-maintenance release.  Do not
+    # report cancellation complete while a following account would still hit
+    # the process-wide login lock.
+    deadline = asyncio.get_running_loop().time() + LOGIN_REAP_TIMEOUT_SECONDS
+    while attempt_id in _login_attempts and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.05)
+    if attempt_id in _login_attempts:
+        raise HTTPException(
+            status_code=503,
+            detail="登录进程已停止，但凭据回滚尚未完成，请稍后重试",
+        )
+    return {"ok": True, "status": "cancelled"}
+
+
 # ---------------------------------------------------------------------------
 # Delete account
 # ---------------------------------------------------------------------------
@@ -2189,6 +2268,13 @@ async def codex_delete_account(request: Request, account_id: str):
                 status_code=500,
                 detail="Private data was removed, but deletion finalization failed",
             )
+        _relogin_state.pop(account_id, None)
+        for state_email, state in list(_add_state.items()):
+            if (
+                str(state_email).casefold() == account_email.casefold()
+                or state.get("account_id") == account_id
+            ):
+                _add_state.pop(state_email, None)
         return {
             "ok": True,
             "deleted": account_id,

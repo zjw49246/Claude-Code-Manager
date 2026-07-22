@@ -655,6 +655,51 @@ class CodexPool:
                 self._quota_cache_at = completed_at
         return list(results.values())
 
+    async def verify_account_live(self, account_id: str) -> dict:
+        """Classify one account with an authenticated app-server RPC.
+
+        Reading auth.json alone cannot detect a revoked refresh token.  A live
+        rate-limit RPC proves the credential is accepted; transient transport
+        failures remain ``logged_in=None`` so callers fail closed instead of
+        unnecessarily launching a destructive relogin.
+        """
+        account = self.account(account_id)
+        if account is None or account.retired:
+            return {"logged_in": False, "detail": "account missing"}
+        local = await asyncio.to_thread(verify_login, account.codex_home)
+        if local.get("logged_in") is not True:
+            return local
+        if self._quota_reader is None:
+            return {
+                **local,
+                "logged_in": None,
+                "live_verified": False,
+                "detail": "live account verification unavailable",
+            }
+        try:
+            await self._quota_reader(account.codex_home)
+        except Exception as exc:
+            detail = str(exc)
+            if is_auth_failure(detail):
+                return {
+                    **local,
+                    "logged_in": False,
+                    "live_verified": True,
+                    "detail": "live account authentication was rejected",
+                }
+            return {
+                **local,
+                "logged_in": None,
+                "live_verified": False,
+                "detail": "live account verification temporarily unavailable",
+            }
+        return {
+            **local,
+            "logged_in": True,
+            "live_verified": True,
+            "detail": "ok",
+        }
+
     async def select_quota_alternative(
         self,
         current_home: str,

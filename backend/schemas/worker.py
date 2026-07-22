@@ -1,15 +1,17 @@
 from datetime import datetime
-from pydantic import BaseModel, ConfigDict, field_serializer
+from pydantic import BaseModel, ConfigDict, Field, field_serializer
 
 
 class WorkerAccountIn(BaseModel):
     email: str
+    provider: str = "codex"
     token: str | None = None
+    password: str | None = None
     login_method: str = ""  # 171mail | mailcom | onet | gazeta | "" (auto-detect)
 
 
 class WorkerCreate(BaseModel):
-    accounts: list[WorkerAccountIn] = []
+    accounts: list[WorkerAccountIn] = Field(default_factory=list)
     # 覆盖自动命名
     name: str | None = None
 
@@ -36,7 +38,16 @@ class WorkerResponse(BaseModel):
     def strip_tokens(cls, v: list | None) -> list | None:
         if not v:
             return v
-        return [{"email": a.get("email", ""), "status": a.get("status", "")} for a in v]
+        return [
+            {
+                "email": account.get("email", ""),
+                # Records created before provider-aware Worker login are Claude
+                # accounts. Keep that compatibility rule in API responses too.
+                "provider": account.get("provider") or "claude",
+                "status": account.get("status", ""),
+            }
+            for account in v
+        ]
 
     last_heartbeat: datetime | None
     bootstrap_step: str | None

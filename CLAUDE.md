@@ -330,11 +330,12 @@ uv run alembic history         # 查看历史
 ## 分布式 Worker（Phase 1，设计见 docs/plans/elastic-worker-design.md）
 
 - **形态**：Worker = 一台跑完整 CCM 的 EC2，Manager 全生命周期管理（创建/收养/关机/开机/销毁），前端 Workers 一级页面操作
-- **配置自举**：新 EC2 的机型/AMI/子网/密钥从 Manager 自身实例元数据继承（IMDSv2 + boto3，凭证走 IAM instance profile）；通信全走 VPC 内网 private IP
+- **配置自举与 SSH 闭环**：新 EC2 的机型/AMI/子网可从 Manager 实例元数据继承（IMDSv2 + boto3，凭证走 IAM instance profile）；创建前必须对 `WORKER_SSH_KEY_PATH` 做普通文件/属主/0600/未加密格式预检，再从私钥派生公钥用 cloud-init 注入 Worker，不能假设本地私钥与继承的 AWS KeyName 匹配。CCM 创建/校验专属 Worker SG，只允许 Manager SG → TCP 22 + `ccm_port`，绝不开放公网；通信全走 VPC private IP。host key 信任库按 `cloud_instance_id` 隔离（防 AWS 回收 private IP 后旧 known_hosts 误伤新机，同时同一实例换 key 仍 fail closed）；SSH 探针保留 `authentication_failed`/`host_key_mismatch`/`connection_timeout`/`network_unreachable` 等结构化原因，旧实例密钥错配不能靠 retry 修复，需重建或手工修 key。RunInstances 前先持久化非敏感 `Worker.provision_spec`，ClientToken 由 Worker generation 稳定派生；retry 先按 token 查回响应丢失的实例，0 个才用冻结参数重发，外部终止后换 generation/token，绝不能因 rename/配置漂移产生 billable orphan
 - **部署 = rsync**（不走 git clone）：Manager 本地仓库 → worker `/home/ubuntu/ccm`，`--filter ':- .gitignore'` + 排除 `.git`（worktree 的 .git 是悬空指针）；版本锁定靠 `.deploy_commit` 文件（`git_info.git_head_commit` 的回退路径），health 端点带 commit 供校验
 - **auth 探针**：`/api/system/health` 在 PUBLIC_PATHS 不校验 token，bootstrap 健康检查必须再打需认证端点（`/api/system/stats`）验证 worker 的 AUTH_TOKEN 真可用
-- **error 语义**：`bootstrap_step` 非 None 的 error 是 bootstrap 失败（不自动恢复，UI 给 retry）；为 None 的是健康降级（健康检查恢复后自动回 ready）
-- **开关**：`WORKER_ENABLED=true` + `WORKER_SSH_KEY_PATH`（默认关，不装 boto3 也能跑）
+- **Worker 账号默认 Codex**：创建表账号 `provider` 默认 codex（历史无 provider 记录按 claude）；Worker 创建/动态添加/重试的无人值守 Codex 登录必须有邮箱 token，OpenAI 密码可选。bootstrap 安装与 Manager 协议实证一致的固定 `@openai/codex@0.144.6`（禁止 `latest` 在 retry 时漂移）+ Chrome/Xvfb/xauth，先启动本机 CCM，再由 Manager 通过 SSH stdin 调 Worker localhost `/api/codex-pool/add`，复用登录事务/目录分配/回滚且凭据不进 argv/VPC 明文；自动取码失败时透传同一登录进程的 OTP challenge 给 Manager 前端，允许提交/取消。retry/开机恢复对已有 `account_id` 必须查 status + live verify，健康就跳过、失效走 `/relogin`，绝不能再次 `/add` 复制槽位；动态添加先持久化 intent，按 Worker/provider/email 幂等，远端成功后 Manager 落库才对外发布 success。只有 Claude 账号才跑兼容登录与 warmup。Worker 号池 status/usage/add/delete 必须携带 provider；删除先清 Manager 重试凭据，远端 404 视为幂等成功，前端默认展示 Codex quota 并保留 Claude 切换
+- **error / lifecycle 语义**：`bootstrap_step` 非 None 的 error 是 bootstrap 失败（不自动恢复，UI 给 retry）；为 None 的是健康降级（健康检查恢复后自动回 ready）。stop/start/destroy/retry/rename 与 health 恢复/降级都必须 SQL CAS，异步探针的旧 ORM snapshot 绝不能覆盖 `starting/stopping/destroying`；进程重启把遗留 busy 状态转成可恢复 error，destroy intent 单独保留。账号 JSON 的读改写须串行，登录 terminal 状态必须表示没有晚到 DB write，destroying/terminated 永远拒绝凭据回写
+- **开关**：`WORKER_ENABLED=true` + `WORKER_SSH_KEY_PATH`；缺 boto3 时 provisioner 会禁用，创建前必须通过密钥 preflight
 - Phase 2（任务转发 + WorkerRelay）、Phase 3（TaskMigrator 实时切换执行位置）见设计文档 §20
 
 ### Phase 2（任务转发 + 中继，已实测）

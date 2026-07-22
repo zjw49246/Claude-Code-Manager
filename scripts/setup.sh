@@ -8,7 +8,7 @@ echo "=== CCM 环境初始化 ==="
 
 # ── 1. 系统依赖（Xvfb 虚拟显示 + xdotool 模拟点击，CDP 登录需要）──
 echo "[1/5] 安装系统依赖..."
-PACKAGES=(xvfb xdotool)
+PACKAGES=(xvfb xauth xdotool)
 MISSING=()
 for pkg in "${PACKAGES[@]}"; do
     if ! dpkg -s "$pkg" &>/dev/null; then
@@ -35,8 +35,8 @@ if [ "$INSTALLED_CHROME" != "149.0.7827.53" ]; then
 fi
 echo "  Chrome: $(google-chrome --version)"
 
-# ── 3. Node.js + Claude CLI ────────────────────────────────────────
-echo "[3/5] 安装 Node.js 和 Claude CLI..."
+# ── 3. Node.js + Agent CLIs ────────────────────────────────────────
+echo "[3/5] 安装 Node.js、Codex CLI 和 Claude CLI..."
 if ! command -v node &>/dev/null; then
     curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
     sudo apt-get install -y nodejs
@@ -44,7 +44,11 @@ fi
 if ! command -v claude &>/dev/null; then
     sudo npm install -g @anthropic-ai/claude-code
 fi
-echo "  Node: $(node --version)  Claude CLI: $(claude --version 2>&1 | head -1)"
+CODEX_CLI_VERSION="0.144.6"
+if [ "$(codex --version 2>/dev/null | head -1)" != "codex-cli ${CODEX_CLI_VERSION}" ]; then
+    sudo npm install -g "@openai/codex@${CODEX_CLI_VERSION}"
+fi
+echo "  Node: $(node --version)  Codex CLI: $(codex --version 2>&1 | head -1)  Claude CLI: $(claude --version 2>&1 | head -1)"
 
 # ── 4. Python 后端依赖 ─────────────────────────────────────────────
 echo "[4/5] 安装 Python 依赖..."
@@ -63,6 +67,8 @@ cd ..
 
 # ── 6. SSH 密钥（Worker 功能需要，用于 Manager→Worker SSH 连接）────────
 echo "[6/8] 配置 SSH 密钥..."
+mkdir -p "$HOME/.ssh"
+chmod 700 "$HOME/.ssh"
 CCM_KEY="$HOME/.ssh/ccm_worker_key"
 if [ ! -f "$CCM_KEY" ]; then
     ssh-keygen -t ed25519 -f "$CCM_KEY" -N "" -C "ccm-worker-$(hostname)" >/dev/null 2>&1
@@ -70,11 +76,11 @@ if [ ! -f "$CCM_KEY" ]; then
 else
     echo "  密钥已存在: $CCM_KEY"
 fi
-# 把公钥加到 authorized_keys（允许 Worker 反向连接本机，或本机作为 Worker 被连接）
-if ! grep -qf "${CCM_KEY}.pub" "$HOME/.ssh/authorized_keys" 2>/dev/null; then
-    cat "${CCM_KEY}.pub" >> "$HOME/.ssh/authorized_keys"
-    echo "  公钥已添加到 authorized_keys"
-fi
+chmod 600 "$CCM_KEY"
+# WorkerProvisioner 会在创建 EC2 时通过 cloud-init 把对应公钥注入 Worker。
+# Manager 不接受 Worker 反向 SSH，因此不要把这把公钥写进 Manager 自己的
+# authorized_keys（旧逻辑既无助于 Manager→Worker，也扩大了入口）。
+echo "  Worker 创建时将自动注入对应公钥"
 
 # ── 7. Claude CLI warmup（完成 onboarding 对话框，否则 PTY 模式 MCP 不初始化）
 echo "[7/8] Claude CLI warmup..."
@@ -124,6 +130,7 @@ WORKSPACE_DIR=~/Projects
 AUTO_START_DISPATCHER=true
 PORT=8002
 POOL_ENABLED=true
+CODEX_POOL_ENABLED=true
 WORKER_SSH_KEY_PATH=${CCM_KEY}
 ENVEOF
     echo "  .env 已生成（AUTH_TOKEN=${TOKEN}）"
