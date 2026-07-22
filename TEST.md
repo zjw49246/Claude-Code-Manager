@@ -451,6 +451,7 @@ cd frontend && npx tsc --noEmit
 | 测试 | 验证内容 |
 |------|---------|
 | `test_status_not_running` | 初始状态 running=False |
+| `test_pause_dispatching_does_not_stop_dispatcher` | 维护 pause 只停止领取新任务，不停止 Dispatcher/活动 lifecycle；resume 后恢复 |
 | `test_start_sets_running` / `test_start_idempotent` | 启动/幂等性 |
 | `test_stop` | 停止并取消所有任务 |
 | `test_ensure_instances_creates_workers` | 自动创建 worker 实例 |
@@ -459,6 +460,29 @@ cd frontend && npx tsc --noEmit
 | `test_lifecycle_failure_retry` / `test_lifecycle_failure_max_retries` | 失败重试/达到上限 |
 | `test_lifecycle_exception` | 异常标记 task failed |
 | `test_plan_phase` | plan 模式进入 plan_review |
+
+##### `test_service_update.py` / `UpdateButton.test.tsx` — 安全更新与自动提醒
+
+| 测试 | 验证内容 |
+|------|---------|
+| `test_get_active_tasks_only_returns_running_states` | 更新阻塞器只识别 `in_progress/executing` task |
+| `test_start_update_pauses_and_refuses_active_tasks` | 更新前暂停领取任务；活动 task 存在时即使 force 也拒绝并恢复调度 |
+| `test_start_update_fails_closed_when_task_check_errors` | 活动任务查询失败时按“有风险”处理，恢复调度且绝不启动更新 |
+| `test_rollback_pauses_and_refuses_active_tasks` | 回滚使用同一安全门；活动 task 存在时不启动停服脚本 |
+| `test_needs_restart_compares_running_and_disk_sha_without_systemd` | 运行 SHA 与磁盘 SHA 精确比较，非 systemd 部署也能识别手动更新 |
+| `test_resolve_remote_uses_tracking_remote_then_origin_fallback` | 使用分支 tracking remote，无配置时回退 `origin` |
+| `test_manual_pull_uses_running_commit_as_deployment_base` | 手动 pull 后以进程实际运行 commit 为部署差异与回滚基线 |
+| `test_dry_run_detects_manual_update_and_returns_blockers` | dry-run 返回手动更新状态、tracking remote 与活动任务详情 |
+| `test_dry_run_keeps_manual_restart_signal_when_fetch_fails` | 远端 fetch 失败不能掩盖本地代码已经更新、服务仍需重启的信号 |
+| `test_dry_run_does_not_report_local_ahead_as_update` | 本地领先远端不误报“有新提交” |
+| `test_concurrent_dry_runs_share_one_remote_check` | 多个页面并发自动检查时，30 秒缓存和 async lock 只执行一次远端检查 |
+| `test_dry_run_cache_keeps_blockers_fresh_and_force_bypasses_cache` | 缓存只复用版本结果，活动任务 blocker 实时刷新；手动 force 检查绕过缓存 |
+| `test_pipeline_rechecks_tasks_before_restart_and_resumes_dispatcher` | 停服前二次检查捕获更新期间出现的活动 task，取消重启并恢复调度 |
+| `test_update_dry_run_forwards_force_and_branch` | System API 将手动 dry-run 的 branch/force 原样透传给服务层 |
+| `test_update_returns_conflict_when_active_tasks_block_start` | 正式更新被活动任务门禁拒绝时 API 返回 409，`force` 不得绕过 |
+| `automatic update reminder` | 页面打开约 1 秒后仅 dry-run 检查；最新版静默；更新以顶部非阻塞通知展示，点击查看才开弹窗；同页同 commit 只提醒一次；远端失败但本地需重启仍提醒 |
+| `forces a fresh dry-run when the user checks manually` | 手动检查携带 `force=true` 绕过后端短缓存 |
+| `blocks confirmation while tasks are active` | 弹窗展示活动 task 并禁用正式更新按钮 |
 
 ##### `test_service_pr_review.py` — PR 审核服务
 

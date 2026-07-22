@@ -44,7 +44,7 @@ Web 端调度和管理多个 Claude Code 实例并行工作。灵感来自胡渊
 
 ### 分布式
 - **分布式 Worker** — 将任务分发到远程 EC2 实例执行，突破单机并发瓶颈。Phase 1（创建/部署/管理）+ Phase 2（任务转发+事件中继）+ Phase 3（任务实时迁移）全部可用。详见 [Worker 部署指南](docs/worker-deployment-guide.md)
-- **一键更新重启** — `POST /api/system/update` 拉取最新代码 + 刷新 PTY 依赖 + 数据库迁移 + 重建前端 + 智能重启（自动检测 systemd 服务名）
+- **安全的一键更新重启** — 后台定时检查并弹窗提醒；更新时暂停领取新任务，运行中 task 未清零则拒绝重启；支持识别手动拉取但尚未加载的代码，再完成依赖、迁移、前端构建和智能重启
 
 ### 项目与协作
 - **项目管理** — 支持 clone 已有仓库（有 remote）和本地 git init（无 remote），创建任务时可直接新建项目
@@ -305,7 +305,11 @@ curl -X POST http://localhost:8000/api/system/update \
   -H "Authorization: Bearer $AUTH_TOKEN"
 ```
 
-自动执行：git pull → 刷新 PTY 依赖 → 数据库迁移 → 重建前端 → 智能重启（自动检测 systemd 服务名 `SERVICE_NAME`）。
+每次新开、刷新或重新登录 CCM 页面后约 1 秒会自动检查一次，之后每小时检查；后台检查只执行 `fetch/dry_run`，**不会自动拉取或重启**。发现远端新提交，或检测到有人手动拉取了代码但当前服务仍运行旧版本时，会在页面顶部显示非阻塞通知，不遮挡页面，也不影响正常操作；只有点击“查看详情”才打开更新弹窗。同一页面生命周期内同一版本只提醒一次，下次重新打开页面仍会再次提醒。远端检查失败通常保持静默，但不会掩盖本地已经拉取、仍需重启加载的代码。
+
+真正更新时自动执行：git pull → 刷新 PTY 依赖 → 数据库迁移 → 重建前端 → 智能重启（自动检测 systemd 服务名 `SERVICE_NAME`）。更新源优先使用目标分支配置的 tracking remote（例如本仓库的 `upstream/main`），没有 tracking remote 时回退 `origin`。
+
+为避免中断任务，更新开始前会暂停 Dispatcher 领取新任务，并检查 `in_progress/executing` task；存在活动任务时更新按钮会禁用，后端也会拒绝更新。任务完成后点击「重新检查」即可继续。手动 `git pull` 后触发更新时，系统会以服务实际加载的旧 commit 为基线补齐部署步骤，而不是只做一次盲目重启。
 
 ### 方式二：手动更新
 
