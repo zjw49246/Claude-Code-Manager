@@ -474,6 +474,8 @@ cd frontend && npx tsc --noEmit
 | `test_start_update_pauses_and_refuses_active_tasks` | 更新前暂停领取任务；活动 task 存在时即使 force 也拒绝并恢复调度 |
 | `test_start_update_fails_closed_when_task_check_errors` | 活动任务查询失败时按“有风险”处理，恢复调度且绝不启动更新 |
 | `test_rollback_pauses_and_refuses_active_tasks` | 回滚使用同一安全门；活动 task 存在时不启动停服脚本 |
+| `test_rollback_and_update_share_operation_admission_lock` | 回滚初检后暂停时，并发更新必须等待同一操作准入锁；回滚只能使用锁内固定的原 commit/备份，不能被新状态替换 |
+| `test_concurrent_rollbacks_admit_only_one_operation` | 两个并发回滚只能放行一个，后到请求在首个操作完成准入后明确拒绝且不重复启动脚本 |
 | `test_needs_restart_compares_running_and_disk_sha_without_systemd` | 运行 SHA 与磁盘 SHA 精确比较，非 systemd 部署也能识别手动更新 |
 | `test_resolve_remote_uses_tracking_remote_then_origin_fallback` | 使用分支 tracking remote，无配置时回退 `origin` |
 | `test_manual_pull_uses_running_commit_as_deployment_base` | 手动 pull 后以进程实际运行 commit 为部署差异与回滚基线 |
