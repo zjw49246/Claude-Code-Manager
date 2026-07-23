@@ -175,7 +175,10 @@ class UpdateService:
         )
         self.db_path = _resolve_db_path(project_dir)
         self._lock = asyncio.Lock()
-        self._start_lock = asyncio.Lock()
+        # Serialize admission of update and rollback operations. ``_lock``
+        # protects the long-running pipeline itself, but a newly scheduled
+        # pipeline has not necessarily acquired it when start_update returns.
+        self._operation_lock = asyncio.Lock()
         self._dry_run_lock = asyncio.Lock()
         self._dry_run_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._current: UpdateState | None = None
@@ -545,7 +548,7 @@ class UpdateService:
         force: bool = False,
         branch: str | None = None,
     ) -> dict[str, Any]:
-        async with self._start_lock:
+        async with self._operation_lock:
             if self._lock.locked() or (
                 self._current and self._current.status in ("running", "restarting")
             ):
@@ -585,61 +588,74 @@ class UpdateService:
 
     async def rollback(self) -> dict[str, Any]:
         """Manual rollback to previous version."""
-        if not self._current or not self._current.old_commit:
-            return {"error": "没有可回滚的更新记录"}
-        if self._lock.locked():
-            return {"error": "有操作正在进行中"}
+        async with self._operation_lock:
+            rollback_state = self._current
+            if not rollback_state or not rollback_state.old_commit:
+                return {"error": "没有可回滚的更新记录"}
+            if self._lock.locked() or rollback_state.status in (
+                "running",
+                "restarting",
+            ):
+                return {"error": "有操作正在进行中"}
 
-        await self._pause_dispatching()
-        try:
-            active_tasks = await self._get_blocking_tasks()
-        except Exception as exc:
-            self._resume_dispatching()
-            logger.exception("Unable to verify active tasks before rollback")
-            return {"error": f"无法确认当前任务状态，已取消回滚: {exc}"}
-        if active_tasks:
-            self._resume_dispatching()
-            return {
-                "error": f"当前有 {len(active_tasks)} 个任务正在运行，请等待任务完成后再回滚",
-                **self._blocker_payload(active_tasks),
-            }
+            # Capture the exact rollback record while operation admission is
+            # reserved. No concurrent start_update/rollback may replace
+            # self._current between this validation and the shutdown decision.
+            old_commit = rollback_state.old_commit
+            backup_file = rollback_state.backup_file
 
-        old_commit = self._current.old_commit
-        backup_file = self._current.backup_file
+            await self._pause_dispatching()
+            try:
+                active_tasks = await self._get_blocking_tasks()
+            except Exception as exc:
+                self._resume_dispatching()
+                logger.exception("Unable to verify active tasks before rollback")
+                return {"error": f"无法确认当前任务状态，已取消回滚: {exc}"}
+            if active_tasks:
+                self._resume_dispatching()
+                return {
+                    "error": f"当前有 {len(active_tasks)} 个任务正在运行，请等待任务完成后再回滚",
+                    **self._blocker_payload(active_tasks),
+                }
 
-        try:
-            async with self._lock:
-                await self._broadcast("step_update", step="rollback", status="running", message="正在回滚...")
+            try:
+                async with self._lock:
+                    await self._broadcast("step_update", step="rollback", status="running", message="正在回滚...")
 
-                # Never restore the SQLite file while this process still holds open
-                # connections — a later write/checkpoint through the live connection
-                # corrupts the restored DB (2026-07-16 test-env rollback incident).
-                # The script stops the service (systemctl or kill, per deployment)
-                # BEFORE touching the DB, then resets code and starts it again.
-                await self._broadcast("restarting", message="服务即将停止进行回滚，请等待自动重连...")
-                await asyncio.sleep(1)
+                    # Never restore the SQLite file while this process still holds open
+                    # connections — a later write/checkpoint through the live connection
+                    # corrupts the restored DB (2026-07-16 test-env rollback incident).
+                    # The script stops the service (systemctl or kill, per deployment)
+                    # BEFORE touching the DB, then resets code and starts it again.
+                    await self._broadcast("restarting", message="服务即将停止进行回滚，请等待自动重连...")
+                    await asyncio.sleep(1)
 
-                def spawn_rollback() -> None:
-                    self._current.status = "restarting"
-                    self._write_status_file(
-                        "restarting", "正在停服回滚...", old_commit=old_commit
-                    )
-                    self._spawn_update_script("rollback", old_commit, backup_file or "")
+                    def spawn_rollback() -> None:
+                        # Identity validation documents the invariant even for
+                        # future writers that might mutate _current outside the
+                        # operation admission API.
+                        if self._current is not rollback_state:
+                            raise RuntimeError("rollback state changed during admission")
+                        rollback_state.status = "restarting"
+                        self._write_status_file(
+                            "restarting", "正在停服回滚...", old_commit=old_commit
+                        )
+                        self._spawn_update_script("rollback", old_commit, backup_file or "")
 
-                blockers = await self._commit_shutdown_if_idle(spawn_rollback)
-                if blockers:
-                    self._resume_dispatching()
-                    return {
-                        "error": (
-                            f"回滚期间出现了 {len(blockers)} 个待处理任务，"
-                            "已取消停服；请等待任务完成后重试"
-                        ),
-                        **self._blocker_payload(blockers),
-                    }
-                return {"status": "rolling_back", "old_commit": old_commit}
-        except Exception:
-            self._resume_dispatching()
-            raise
+                    blockers = await self._commit_shutdown_if_idle(spawn_rollback)
+                    if blockers:
+                        self._resume_dispatching()
+                        return {
+                            "error": (
+                                f"回滚期间出现了 {len(blockers)} 个待处理任务，"
+                                "已取消停服；请等待任务完成后重试"
+                            ),
+                            **self._blocker_payload(blockers),
+                        }
+                    return {"status": "rolling_back", "old_commit": old_commit}
+            except Exception:
+                self._resume_dispatching()
+                raise
 
     # ---- Pipeline implementation ----
 

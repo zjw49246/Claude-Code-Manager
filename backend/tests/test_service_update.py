@@ -249,6 +249,7 @@ async def test_rollback_pauses_and_refuses_active_tasks(tmp_path):
     dispatcher.pending_task_start_ids = AsyncMock(return_value=set())
     svc = _make_service(tmp_path, dispatcher=dispatcher)
     svc._current = _make_state()
+    svc._current.status = "completed"
     svc._get_active_tasks = AsyncMock(return_value=[
         {"id": 8, "title": "still running", "status": "in_progress"}
     ])
@@ -262,6 +263,112 @@ async def test_rollback_pauses_and_refuses_active_tasks(tmp_path):
     dispatcher.pause_dispatching.assert_awaited_once()
     dispatcher.resume_dispatching.assert_called_once()
     svc._spawn_update_script.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_rollback_and_update_share_operation_admission_lock(tmp_path):
+    """A paused rollback cannot have its captured state replaced by update."""
+    svc = _make_service(tmp_path)
+    rollback_state = _make_state()
+    rollback_state.status = "completed"
+    rollback_state.old_commit = "rollback-source-commit"
+    rollback_state.backup_file = "rollback-source-backup.db"
+    svc._current = rollback_state
+
+    rollback_paused = asyncio.Event()
+    release_rollback = asyncio.Event()
+    pause_calls = 0
+
+    async def pause_after_initial_check():
+        nonlocal pause_calls
+        pause_calls += 1
+        if pause_calls == 1:
+            rollback_paused.set()
+            await release_rollback.wait()
+
+    svc._pause_dispatching = AsyncMock(side_effect=pause_after_initial_check)
+    svc._get_blocking_tasks = AsyncMock(return_value=[])
+    svc._broadcast = AsyncMock()
+    svc._write_status_file = MagicMock()
+    svc._spawn_update_script = MagicMock()
+    svc._run_pipeline = AsyncMock()
+    real_sleep = asyncio.sleep
+
+    with patch(
+        "backend.services.update_service.asyncio.sleep", new=AsyncMock()
+    ):
+        rollback_task = asyncio.create_task(svc.rollback())
+        await asyncio.wait_for(rollback_paused.wait(), timeout=1)
+
+        update_task = asyncio.create_task(svc.start_update(force=True))
+        await real_sleep(0)
+        update_waited_for_admission = not update_task.done()
+
+        release_rollback.set()
+        rollback_result = await asyncio.wait_for(rollback_task, timeout=1)
+        update_result = await asyncio.wait_for(update_task, timeout=1)
+
+    assert rollback_result == {
+        "status": "rolling_back",
+        "old_commit": "rollback-source-commit",
+    }
+    assert update_waited_for_admission is True
+    assert "正在进行中" in update_result["error"]
+    assert svc._current is rollback_state
+    svc._pause_dispatching.assert_awaited_once()
+    svc._spawn_update_script.assert_called_once_with(
+        "rollback",
+        "rollback-source-commit",
+        "rollback-source-backup.db",
+    )
+    svc._run_pipeline.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_rollbacks_admit_only_one_operation(tmp_path):
+    """A second rollback waits for admission, then sees the reservation."""
+    svc = _make_service(tmp_path)
+    rollback_state = _make_state()
+    rollback_state.status = "completed"
+    svc._current = rollback_state
+
+    first_paused = asyncio.Event()
+    release_first = asyncio.Event()
+    pause_calls = 0
+
+    async def pause_first_rollback():
+        nonlocal pause_calls
+        pause_calls += 1
+        if pause_calls == 1:
+            first_paused.set()
+            await release_first.wait()
+
+    svc._pause_dispatching = AsyncMock(side_effect=pause_first_rollback)
+    svc._get_blocking_tasks = AsyncMock(return_value=[])
+    svc._broadcast = AsyncMock()
+    svc._write_status_file = MagicMock()
+    svc._spawn_update_script = MagicMock()
+    real_sleep = asyncio.sleep
+
+    with patch(
+        "backend.services.update_service.asyncio.sleep", new=AsyncMock()
+    ):
+        first_task = asyncio.create_task(svc.rollback())
+        await asyncio.wait_for(first_paused.wait(), timeout=1)
+
+        second_task = asyncio.create_task(svc.rollback())
+        await real_sleep(0)
+        second_waited_for_admission = not second_task.done()
+
+        release_first.set()
+        first_result = await asyncio.wait_for(first_task, timeout=1)
+        second_result = await asyncio.wait_for(second_task, timeout=1)
+
+    assert first_result["status"] == "rolling_back"
+    assert second_waited_for_admission is True
+    assert second_result == {"error": "有操作正在进行中"}
+    svc._pause_dispatching.assert_awaited_once()
+    svc._spawn_update_script.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -596,6 +703,7 @@ async def test_rollback_rechecks_queued_resume_after_warning(
 
     svc = _make_service(tmp_path, db_factory=db_factory, dispatcher=dispatcher)
     svc._current = _make_state()
+    svc._current.status = "completed"
     svc._spawn_update_script = MagicMock()
 
     async def broadcast(event, **_kwargs):
@@ -760,6 +868,7 @@ def test_recover_marks_restart_completed(tmp_path, status):
 async def test_rollback_delegates_to_script_when_managed(tmp_path):
     svc = _make_service(tmp_path)
     svc._current = _make_state()
+    svc._current.status = "completed"
     backup = tmp_path / "backup.db"
     backup.write_text("db")
     svc._current.backup_file = str(backup)
@@ -779,6 +888,7 @@ async def test_rollback_delegates_to_script_when_managed(tmp_path):
 async def test_rollback_non_systemd_delegates_to_script_kill_mode(tmp_path):
     svc = _make_service(tmp_path)
     svc._current = _make_state()
+    svc._current.status = "completed"
     backup = tmp_path / "backup.db"
     backup.write_text("db")
     svc._current.backup_file = str(backup)
