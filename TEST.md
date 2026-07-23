@@ -469,6 +469,8 @@ cd frontend && npx tsc --noEmit
 |------|---------|
 | `test_get_active_tasks_only_returns_running_states` | 更新阻塞器只识别 `in_progress/executing` task |
 | `test_get_blocking_tasks_includes_queued_resumes` | 已入队但尚未启动的续跑消息也属于停服 blocker |
+| `test_start_update_blocks_running_prompt_only_instance` | prompt-only 手动实例 launch 后即使没有 Task 行，更新仍识别 `running` Instance 并拒绝停服 |
+| `test_enqueue_then_clear_before_dequeue_removes_resume_blocker` | enqueue 后、consumer dequeue 前执行 stop-session 清队列，会同步清除 pending 标记，后续 blocker 查询不出现幽灵 `queued_resume` |
 | `test_start_update_pauses_and_refuses_active_tasks` | 更新前暂停领取任务；活动 task 存在时即使 force 也拒绝并恢复调度 |
 | `test_start_update_fails_closed_when_task_check_errors` | 活动任务查询失败时按“有风险”处理，恢复调度且绝不启动更新 |
 | `test_rollback_pauses_and_refuses_active_tasks` | 回滚使用同一安全门；活动 task 存在时不启动停服脚本 |
