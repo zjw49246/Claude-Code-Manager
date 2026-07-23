@@ -1,4 +1,3 @@
-import asyncio
 import logging
 import os
 import json
@@ -638,12 +637,10 @@ async def resolve_permission(
 # Task Distill — extract reusable skill from conversation history
 # ---------------------------------------------------------------------------
 
-_DISTILL_MAX_CHARS = 30_000
-_DISTILL_MODEL = "claude-opus-4-6"
-
-
 async def _collect_conversation_for_distill(task_id: int, db: AsyncSession) -> str:
-    """Collect conversation history for distillation, capped at _DISTILL_MAX_CHARS."""
+    """Collect conversation history for task skill distillation."""
+    from backend.services.skill_distill import TASK_DISTILL_MAX_CHARS
+
     result = await db.execute(
         select(
             LogEntry.event_type,
@@ -689,7 +686,7 @@ async def _collect_conversation_for_distill(task_id: int, db: AsyncSession) -> s
             continue
 
         total += len(line)
-        if total > _DISTILL_MAX_CHARS:
+        if total > TASK_DISTILL_MAX_CHARS:
             parts.append("... (conversation truncated)")
             break
         parts.append(line)
@@ -714,120 +711,65 @@ async def distill_task(
     body: DistillRequest = DistillRequest(),
     db: AsyncSession = Depends(get_db),
 ):
-    _t = await db.get(Task, task_id)
-    if _t:
-        await require_task_access(request, _t, db)
     """Distill a task's conversation into a reusable skill (markdown).
 
-    Reads the full conversation history, sends it to Opus for extraction,
-    returns the generated skill card for user preview/editing.
+    Uses the task's provider and returns a card for user preview/editing.
     """
     task = await db.get(Task, task_id)
     if not task:
         raise HTTPException(404, "Task not found")
+    await require_task_access(request, task, db)
 
     conversation = await _collect_conversation_for_distill(task_id, db)
     if not conversation.strip():
         raise HTTPException(400, "No conversation history to distill")
 
-    custom = ""
-    if body.custom_instruction:
-        custom = f"\n\n用户补充说明：{body.custom_instruction}"
-
-    prompt = (
-        "你是一个经验提取专家。下面是一个编程任务的完整对话记录。\n"
-        "请从中提取可复用的经验，生成一份结构化的 Skill 卡片（Markdown 格式）。\n\n"
-        "Skill 卡片应包含：\n"
-        "1. **意图**：这类任务要解决什么问题\n"
-        "2. **关键步骤**：做这类任务的推荐流程\n"
-        "3. **踩坑点**：容易犯的错误和注意事项\n"
-        "4. **验证方法**：怎么确认做对了\n"
-        "5. **适用场景**：什么情况下这个 skill 有用\n\n"
-        "要求：\n"
-        "- 只保留可迁移的过程性知识，去掉具体的文件路径、变量名等细节\n"
-        "- 用中文输出\n"
-        "- 简洁实用，不要废话\n"
-        f"{custom}\n\n"
-        f"--- 任务标题 ---\n{task.title or task.description[:100] if task.description else 'Untitled'}\n\n"
-        f"--- 对话记录 ---\n{conversation}"
+    from backend.main import codex_pool
+    from backend.services.skill_distill import (
+        CodexDistillAccountUnavailableError,
+        TaskDistillError,
+        TaskDistillTimeoutError,
+        distill_task_conversation,
     )
-
-    import tempfile
-    from backend.config import settings
-    env = {
-        k: v for k, v in os.environ.items()
-        if k.upper() not in ("CLAUDECODE", "CLAUDE_CODE")
-    }
-    if "CLAUDE_CONFIG_DIR" not in env:
-        try:
-            from backend.services.claude_pool import pool
-            if pool:
-                acct = pool.select(validate=False)
-                if acct:
-                    env["CLAUDE_CONFIG_DIR"] = acct.config_dir
-        except Exception:
-            pass
-        if "CLAUDE_CONFIG_DIR" not in env:
-            for candidate in ["/home/ubuntu/.claude-account-2", "/home/ubuntu/.claude"]:
-                if os.path.isdir(candidate):
-                    env["CLAUDE_CONFIG_DIR"] = candidate
-                    break
-
-    cmd = [
-        settings.claude_binary,
-        "-p", "-",
-        "--dangerously-skip-permissions",
-        "--output-format", "json",
-        "--model", _DISTILL_MODEL,
-        "--max-turns", "1",
-    ]
-
+    title = (
+        task.title
+        or (task.description[:100] if task.description else "")
+        or "Untitled"
+    )
     try:
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
+        result = await distill_task_conversation(
+            title=title,
+            conversation=conversation,
+            provider=task.provider or "claude",
+            custom_instruction=body.custom_instruction,
+            codex_pool=codex_pool,
+            codex_account_id=(task.metadata_ or {}).get("codex_account_id"),
         )
-        stdout, stderr = await asyncio.wait_for(
-            process.communicate(input=prompt.encode("utf-8")),
-            timeout=300,
+    except TaskDistillTimeoutError as exc:
+        raise HTTPException(504, str(exc)) from exc
+    except CodexDistillAccountUnavailableError as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except TaskDistillError as exc:
+        detail = (exc.stderr or exc.stdout).strip()[:500]
+        logger.error(
+            "distill: %s failed. stdout=%s stderr=%s",
+            exc.provider,
+            exc.stdout[:500],
+            exc.stderr[:500],
         )
-    except asyncio.TimeoutError:
-        raise HTTPException(504, "Distillation timed out (5min)")
-    except Exception as e:
-        logger.exception("distill: subprocess failed")
-        raise HTTPException(500, f"Distillation failed: {e}")
-
-    raw = stdout.decode("utf-8", errors="replace")
-    if process.returncode != 0:
-        err = stderr.decode("utf-8", errors="replace")[:500]
-        logger.error("distill: claude failed. stdout=%s stderr=%s", raw[:500], err)
-        raise HTTPException(502, f"Claude process failed (exit {process.returncode}): {err}")
-
-    skill_content = ""
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-            if obj.get("type") == "result":
-                skill_content = obj.get("result", "")
-                break
-        except json.JSONDecodeError:
-            continue
-
-    if not skill_content:
-        skill_content = raw.strip()
+        message = str(exc)
+        if detail:
+            message = f"{message}: {detail}"
+        raise HTTPException(502, message) from exc
 
     suggested_name = (task.title or task.description or "untitled")[:50].strip()
 
     return {
         "task_id": task_id,
         "suggested_name": suggested_name,
-        "content": skill_content,
+        "content": result["content"],
+        "provider": result["provider"],
+        "model": result["model"],
     }
 
 
