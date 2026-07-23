@@ -114,6 +114,10 @@ class QueuedMessage:
     priority: int
     timestamp: float = field(compare=True)
     prompt: str = field(compare=False)
+    # Queue clears advance a per-task generation. A consumer that has already
+    # dequeued this object but has not registered it as in-flight can then
+    # recognize that stop-session cancelled the handoff.
+    queue_generation: int = field(compare=False, default=0)
     source: str = field(compare=False, default="user")
     user_message_text: str | None = field(compare=False, default=None)
     command_skills: dict | None = field(compare=False, default=None)
@@ -331,6 +335,10 @@ class GlobalDispatcher:
         # dequeues it. Track consumers separately so clearing the remaining
         # queue cannot erase the blocker for work already in preparation.
         self._task_queue_inflight: dict[int, int] = {}
+        # Cancellation generation for the dequeue -> in-flight handoff window.
+        # Entries intentionally outlive empty queues: deleting one could make a
+        # stale dequeued message's old generation look current again.
+        self._task_queue_generations: dict[int, int] = {}
         # Fresh lifecycle tasks waiting for a Codex account cooldown or
         # maintenance window. TaskQueue excludes them without consuming retry
         # budget, while unrelated pending tasks can still use idle instances.
@@ -3570,6 +3578,7 @@ class GlobalDispatcher:
         async with self._dispatch_claim_lock:
             if self._maintenance_shutdown_committed:
                 raise TaskStartPausedError("service shutdown has already been committed")
+            msg.queue_generation = self._task_queue_generations.get(task_id, 0)
             q = self._get_task_queue(task_id)
             await q.put(msg)
             self._pending_task_starts.add(task_id)
@@ -3586,10 +3595,23 @@ class GlobalDispatcher:
         processed (if any) is not affected — callers stop the process separately.
         """
         async with self._dispatch_claim_lock:
+            self._task_queue_generations[task_id] = (
+                self._task_queue_generations.get(task_id, 0) + 1
+            )
             q = self._task_queues.get(task_id)
-            if not q:
+            if q is None:
                 self._pending_task_starts.discard(task_id)
                 return 0
+            # q.get() removes an item before the consumer can acquire the
+            # admission lock to register it as in-flight. In that state the
+            # queue is empty but pending still records the accepted message.
+            # Advancing the generation above cancels that handoff; count it so
+            # stop-session reports a successful clear instead of a false 400.
+            cancelled_handoff = (
+                q.empty()
+                and task_id in self._pending_task_starts
+                and not self._task_queue_inflight.get(task_id, 0)
+            )
             cleared = 0
             while True:
                 try:
@@ -3600,9 +3622,26 @@ class GlobalDispatcher:
                 cleared += 1
             if q.empty() and not self._task_queue_inflight.get(task_id, 0):
                 self._pending_task_starts.discard(task_id)
+            if cancelled_handoff:
+                cleared += 1
         if cleared:
             logger.info(f"Cleared {cleared} pending queued message(s) for task {task_id} on interrupt")
         return cleared
+
+    async def _claim_dequeued_message(
+        self,
+        task_id: int,
+        msg: QueuedMessage,
+    ) -> bool:
+        """Register a dequeued message unless a queue clear invalidated it."""
+        async with self._dispatch_claim_lock:
+            if msg.queue_generation != self._task_queue_generations.get(task_id, 0):
+                return False
+            self._task_queue_inflight[task_id] = (
+                self._task_queue_inflight.get(task_id, 0) + 1
+            )
+            self._pending_task_starts.add(task_id)
+            return True
 
     async def _queue_heartbeat(self, task_id: int):
         """Continuously mark a task's queue consumer as alive.
@@ -3642,11 +3681,18 @@ class GlobalDispatcher:
                     )
                     break
 
-                async with self._dispatch_claim_lock:
-                    self._task_queue_inflight[task_id] = (
-                        self._task_queue_inflight.get(task_id, 0) + 1
+                try:
+                    claimed = await self._claim_dequeued_message(task_id, msg)
+                except BaseException:
+                    q.task_done()
+                    raise
+                if not claimed:
+                    q.task_done()
+                    logger.info(
+                        "Discarded cancelled queued-message handoff for task %s",
+                        task_id,
                     )
-                    self._pending_task_starts.add(task_id)
+                    continue
                 try:
                     while True:
                         await self.wait_until_resumed()
