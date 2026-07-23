@@ -509,7 +509,7 @@ async def stop_task_session(task_id: int, request: Request, db: AsyncSession = D
         return await _proxy(wt, "POST", f"/api/tasks/{task_id}/stop-session")
 
     from backend.main import dispatcher
-    cleared = dispatcher.clear_task_queue(task_id)
+    cleared = await dispatcher.clear_task_queue(task_id)
     stopped = await _stop_task_process(task_id, db)
     if not stopped:
         task = await db.get(Task, task_id)

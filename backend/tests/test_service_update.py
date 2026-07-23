@@ -22,6 +22,7 @@ from backend.services.update_service import (
     UpdateService,
     UpdateState,
 )
+from backend.models.instance import Instance
 from backend.models.task import Task
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "update_migrate.sh"
@@ -113,6 +114,89 @@ async def test_get_blocking_tasks_includes_queued_resumes(tmp_path, db_factory):
         ("running", "executing"),
         ("queued resume", "queued_resume"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_start_update_blocks_running_prompt_only_instance(
+    tmp_path, db_factory,
+):
+    """A launched prompt-only instance remains restart-blocking without a Task."""
+    async with db_factory() as db:
+        instance = Instance(
+            name="ad-hoc prompt",
+            status="idle",
+        )
+        db.add(instance)
+        await db.commit()
+        await db.refresh(instance)
+        instance_id = instance.id
+
+    dispatcher = _make_gate_dispatcher(db_factory)
+    # Model the prompt-only API/InstanceManager admission point: launch has
+    # completed and persisted a running Instance, but there is intentionally
+    # no Task row that UpdateService could discover.
+    async with dispatcher.task_start_guard():
+        async with db_factory() as db:
+            launched = await db.get(Instance, instance_id)
+            launched.status = "running"
+            launched.current_task_id = None
+            launched.pid = 43210
+            await db.commit()
+
+    svc = _make_service(
+        tmp_path,
+        db_factory=db_factory,
+        dispatcher=dispatcher,
+    )
+    svc._run_pipeline = AsyncMock()
+
+    result = await svc.start_update(force=True)
+
+    assert result["update_blocked"] is True
+    assert result["active_task_count"] == 1
+    assert result["active_tasks"] == [{
+        "id": instance_id,
+        "instance_id": instance_id,
+        "title": "实例 ad-hoc prompt（未关联任务）",
+        "status": "running_instance",
+        "kind": "instance",
+    }]
+    assert dispatcher.status()["paused"] is False
+    svc._run_pipeline.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_enqueue_then_clear_before_dequeue_removes_resume_blocker(
+    tmp_path, db_factory,
+):
+    """Stop-session cannot leave a phantom queued_resume maintenance blocker."""
+    async with db_factory() as db:
+        task = Task(
+            title="cleared resume",
+            description="d",
+            status="completed",
+        )
+        db.add(task)
+        await db.commit()
+        await db.refresh(task)
+        task_id = task.id
+
+    dispatcher = _make_gate_dispatcher(db_factory)
+    dispatcher._ensure_queue_worker = MagicMock()
+    svc = _make_service(
+        tmp_path,
+        db_factory=db_factory,
+        dispatcher=dispatcher,
+    )
+
+    await dispatcher.enqueue_message(task_id, "cancel before dequeue")
+    assert [item["status"] for item in await svc._get_blocking_tasks()] == [
+        "queued_resume"
+    ]
+
+    assert await dispatcher.clear_task_queue(task_id) == 1
+    assert await dispatcher.pending_task_start_ids() == set()
+    assert await svc._get_blocking_tasks() == []
 
 
 @pytest.mark.asyncio

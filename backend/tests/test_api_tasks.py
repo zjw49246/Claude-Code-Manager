@@ -1222,7 +1222,7 @@ async def test_stop_session_clears_pending_queue(client):
     task_id = create_resp.json()["id"]
 
     import backend.main
-    with patch.object(backend.main.dispatcher, "clear_task_queue", return_value=2) as mock_clear, \
+    with patch.object(backend.main.dispatcher, "clear_task_queue", new_callable=AsyncMock, return_value=2) as mock_clear, \
          patch("backend.api.tasks._stop_task_process", new_callable=AsyncMock, return_value=True):
         resp = await client.post(f"/api/tasks/{task_id}/stop-session")
 
@@ -1231,7 +1231,7 @@ async def test_stop_session_clears_pending_queue(client):
     assert body["ok"] is True
     assert body["stopped"] is True
     assert body["cleared_messages"] == 2
-    mock_clear.assert_called_once_with(task_id)
+    mock_clear.assert_awaited_once_with(task_id)
 
 
 @pytest.mark.asyncio
@@ -1249,7 +1249,7 @@ async def test_stop_session_no_process_reports_not_stopped(client, session_facto
         await db.commit()
 
     import backend.main
-    with patch.object(backend.main.dispatcher, "clear_task_queue", return_value=0), \
+    with patch.object(backend.main.dispatcher, "clear_task_queue", new_callable=AsyncMock, return_value=0), \
          patch("backend.api.tasks._stop_task_process", new_callable=AsyncMock, return_value=False):
         resp = await client.post(f"/api/tasks/{task_id}/stop-session")
 
@@ -1268,7 +1268,7 @@ async def test_stop_session_cleared_only_returns_ok(client):
     task_id = create_resp.json()["id"]
 
     import backend.main
-    with patch.object(backend.main.dispatcher, "clear_task_queue", return_value=1), \
+    with patch.object(backend.main.dispatcher, "clear_task_queue", new_callable=AsyncMock, return_value=1), \
          patch("backend.api.tasks._stop_task_process", new_callable=AsyncMock, return_value=False):
         resp = await client.post(f"/api/tasks/{task_id}/stop-session")
 

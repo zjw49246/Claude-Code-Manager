@@ -327,6 +327,10 @@ class GlobalDispatcher:
         # status becomes executing. Keeping it as a maintenance blocker avoids
         # restarting after accepting a chat/monitor message but before launch.
         self._pending_task_starts: set[int] = set()
+        # A queue item stops contributing to qsize() as soon as a consumer
+        # dequeues it. Track consumers separately so clearing the remaining
+        # queue cannot erase the blocker for work already in preparation.
+        self._task_queue_inflight: dict[int, int] = {}
         # Fresh lifecycle tasks waiting for a Codex account cooldown or
         # maintenance window. TaskQueue excludes them without consuming retry
         # budget, while unrelated pending tasks can still use idle instances.
@@ -3575,23 +3579,27 @@ class GlobalDispatcher:
             f"queue_depth={q.qsize()}"
         )
 
-    def clear_task_queue(self, task_id: int) -> int:
+    async def clear_task_queue(self, task_id: int) -> int:
         """Drop all pending queued messages for a task (used on interrupt).
 
         Returns the number of messages discarded. The message currently being
         processed (if any) is not affected — callers stop the process separately.
         """
-        q = self._task_queues.get(task_id)
-        if not q:
-            return 0
-        cleared = 0
-        while True:
-            try:
-                q.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-            q.task_done()
-            cleared += 1
+        async with self._dispatch_claim_lock:
+            q = self._task_queues.get(task_id)
+            if not q:
+                self._pending_task_starts.discard(task_id)
+                return 0
+            cleared = 0
+            while True:
+                try:
+                    q.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                q.task_done()
+                cleared += 1
+            if q.empty() and not self._task_queue_inflight.get(task_id, 0):
+                self._pending_task_starts.discard(task_id)
         if cleared:
             logger.info(f"Cleared {cleared} pending queued message(s) for task {task_id} on interrupt")
         return cleared
@@ -3634,6 +3642,11 @@ class GlobalDispatcher:
                     )
                     break
 
+                async with self._dispatch_claim_lock:
+                    self._task_queue_inflight[task_id] = (
+                        self._task_queue_inflight.get(task_id, 0) + 1
+                    )
+                    self._pending_task_starts.add(task_id)
                 try:
                     while True:
                         await self.wait_until_resumed()
@@ -3677,7 +3690,12 @@ class GlobalDispatcher:
                 finally:
                     q.task_done()
                     async with self._dispatch_claim_lock:
-                        if q.empty():
+                        inflight = self._task_queue_inflight.get(task_id, 0) - 1
+                        if inflight > 0:
+                            self._task_queue_inflight[task_id] = inflight
+                        else:
+                            self._task_queue_inflight.pop(task_id, None)
+                        if q.empty() and inflight <= 0:
                             self._pending_task_starts.discard(task_id)
         finally:
             hb_task.cancel()
@@ -3688,8 +3706,10 @@ class GlobalDispatcher:
             # *second* live consumer → two concurrent `--resume` (task #728).
             if self._task_queue_workers.get(task_id) is asyncio.current_task():
                 self._task_queue_workers.pop(task_id, None)
-            if q.empty():
-                self._task_queues.pop(task_id, None)
+            async with self._dispatch_claim_lock:
+                if q.empty() and not self._task_queue_inflight.get(task_id, 0):
+                    self._pending_task_starts.discard(task_id)
+                    self._task_queues.pop(task_id, None)
 
     async def _process_queued_message(self, task_id: int, msg: QueuedMessage):
         """Resume main agent session with a queued message."""

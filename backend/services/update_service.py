@@ -18,6 +18,7 @@ from typing import Any
 
 from sqlalchemy import select
 
+from backend.models.instance import Instance
 from backend.models.task import Task
 from backend.services.git_info import git_head_commit
 from backend.services.ws_broadcaster import WebSocketBroadcaster
@@ -276,12 +277,43 @@ class UpdateService:
             for row in rows
         ]
 
+    async def _get_running_taskless_instances(self) -> list[dict[str, Any]]:
+        """Return prompt-only instance runs that have no active Task row.
+
+        ``POST /api/instances/{id}/run?prompt=...`` persists the instance as
+        running with ``current_task_id=NULL``.  The launch is real work even
+        though it cannot appear in the Task-status query, so maintenance must
+        treat it as a blocker until InstanceManager marks the slot idle again.
+        """
+        if self.db_factory is None:
+            return []
+        async with self.db_factory() as db:
+            rows = (await db.execute(
+                select(Instance.id, Instance.name, Instance.status)
+                .where(
+                    Instance.status == "running",
+                    Instance.current_task_id.is_(None),
+                )
+                .order_by(Instance.id.asc())
+            )).all()
+        return [
+            {
+                "id": row.id,
+                "instance_id": row.id,
+                "title": f"实例 {row.name}（未关联任务）",
+                "status": "running_instance",
+                "kind": "instance",
+            }
+            for row in rows
+        ]
+
     async def _get_blocking_tasks(
         self,
         pending_task_ids: set[int] | None = None,
     ) -> list[dict[str, Any]]:
-        """Combine running DB tasks with queued/in-flight resume work."""
+        """Combine running tasks, taskless instances, and pending resumes."""
         active_tasks = await self._get_active_tasks()
+        taskless_instances = await self._get_running_taskless_instances()
         active_ids = {task["id"] for task in active_tasks}
         if pending_task_ids is None:
             if self.dispatcher is None or not hasattr(
@@ -292,7 +324,7 @@ class UpdateService:
                 pending_task_ids = await self.dispatcher.pending_task_start_ids()
         queued_ids = set(pending_task_ids) - active_ids
         if not queued_ids:
-            return active_tasks
+            return active_tasks + taskless_instances
 
         if self.db_factory is None:
             queued_tasks = [
@@ -315,7 +347,7 @@ class UpdateService:
                 {"id": task_id, "title": f"Task {task_id}", "status": "queued_resume"}
                 for task_id in sorted(queued_ids - found)
             )
-        return active_tasks + queued_tasks
+        return active_tasks + queued_tasks + taskless_instances
 
     @staticmethod
     def _blocker_payload(active_tasks: list[dict[str, Any]]) -> dict[str, Any]:

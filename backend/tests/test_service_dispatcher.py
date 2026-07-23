@@ -3032,7 +3032,7 @@ async def test_clear_task_queue_drops_pending_messages(db_factory):
             prompt=f"msg {i}", source="user",
         ))
 
-    cleared = dispatcher.clear_task_queue(1)
+    cleared = await dispatcher.clear_task_queue(1)
 
     assert cleared == 3
     assert q.empty()
@@ -3042,7 +3042,7 @@ async def test_clear_task_queue_drops_pending_messages(db_factory):
 async def test_clear_task_queue_no_queue_returns_zero(db_factory):
     """clear_task_queue on a task with no queue is a no-op returning 0."""
     dispatcher = _make_dispatcher(db_factory)
-    assert dispatcher.clear_task_queue(999) == 0
+    assert await dispatcher.clear_task_queue(999) == 0
 
 
 class TestResolveTimeout:
