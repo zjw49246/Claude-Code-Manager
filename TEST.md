@@ -288,15 +288,21 @@ cd frontend && npx tsc --noEmit
 
 | 测试 | 验证内容 |
 |------|---------|
-| `test_generate_mcp_config_none_skills` | enabled_skills 为 None → 返回 None |
-| `test_generate_mcp_config_empty_skills` | 空 dict → 返回 None |
-| `test_generate_mcp_config_no_matching_skills` | 无匹配 skill → 返回 None |
+| `test_generate_mcp_config_none_skills_still_includes_ccm_skills` | enabled_skills 为 None 时仍注入统一 ccm_skills server |
+| `test_generate_mcp_config_empty_skills_still_includes_ccm_skills` | enabled_skills 为空时仍注入统一 ccm_skills server |
+| `test_generate_mcp_config_skills_do_not_add_extra_servers` | 任意 skill 组合不会产生独立的 per-skill server |
 | `test_generate_mcp_config_monitor_enabled` | monitor: true → 生成包含 ccm_skills server 的配置 |
 | `test_generate_mcp_config_file_path` | 配置文件路径格式正确 |
 | `test_cleanup_mcp_config` | 正确清理临时文件 |
 | `test_cleanup_mcp_config_missing_file` | 文件不存在时不报错 |
-
-> **注意**: `generate_monitor_agent_mcp_config()` 和 `cleanup_monitor_agent_mcp_config()` 为子 Agent 专用 MCP 配置生成/清理函数，目前通过集成测试验证（见下方「子 Agent 系统集成测试」）。
+| `test_*_mcp_server_spec_snapshot` | 主任务、Monitor、Sub-Agent 的 provider-neutral spec、上下文参数、工具白名单和超时快照 |
+| `test_spec_enabled_tools_match_registered_server_tools` | 三类 spec 的工具白名单与 FastMCP 实际注册工具完全一致 |
+| `test_claude_json_output_remains_compatible` | 三类现有生成函数仍输出原有 Claude `mcpServers` JSON |
+| `test_default_api_base_and_empty_auth_token` | 默认 API 地址归一化且空 token 不进入参数 |
+| `test_platform_paths_are_preserved` | Linux/Windows、空格和中文路径不被 renderer 改写 |
+| `test_claude_renderer_includes_env_but_not_provider_metadata` | Claude renderer 透传 env 且不泄漏 provider 专用字段 |
+| `test_mcp_server_spec_collections_are_immutable` | spec 拷贝参数、环境变量和工具列表，避免调用方后续修改 |
+| `test_claude_renderer_rejects_duplicate_server_names` | 重名 server 明确失败而不是静默覆盖 |
 
 #### `test_monitor_dispatcher.py` — Monitor Dispatcher 生命周期
 
