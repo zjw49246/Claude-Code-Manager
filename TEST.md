@@ -454,6 +454,8 @@ cd frontend && npx tsc --noEmit
 | `test_pause_dispatching_does_not_stop_dispatcher` | 维护 pause 只停止领取新任务，不停止 Dispatcher/活动 lifecycle；resume 后恢复 |
 | `test_queued_resume_waits_at_maintenance_gate_and_stays_blocking` | chat/monitor 续跑在维护期间不 launch、保持 blocker，恢复后只执行一次 |
 | `test_pause_wins_after_queued_resume_preparation_before_launch` | 续跑已完成准备但尚未写 `executing` 时，维护门禁仍能赢得竞态并阻止 launch |
+| `test_clear_cancels_message_dequeued_before_inflight_registration` | consumer 在 `q.get()` 后、登记 in-flight 前暂停时，stop-session clear 推进 generation 并取消该 handoff；恢复后不 launch、不残留 blocker |
+| `test_clear_preserves_registered_inflight_message_blocker` | 已登记为 in-flight 的真实工作不会被清队列隐藏，pending blocker 保留到处理结束 |
 | `test_start_sets_running` / `test_start_idempotent` | 启动/幂等性 |
 | `test_stop` | 停止并取消所有任务 |
 | `test_ensure_instances_creates_workers` | 自动创建 worker 实例 |

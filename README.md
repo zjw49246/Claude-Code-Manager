@@ -311,6 +311,8 @@ curl -X POST http://localhost:8000/api/system/update \
 
 为避免中断任务，更新开始前会关闭统一的任务启动门禁：普通 Dispatcher、Worker 转发、聊天/Monitor 续跑、RalphLoop 和手动 Instance 运行都不能越过维护窗口。`in_progress/executing` task、无 Task 关联但仍为 `running` 的 prompt-only 实例，或已经进入队列、尚未启动的续跑消息都会阻止停服；stop-session 清空消息时会在同一门禁内同步移除已经失效的队列 blocker，避免之后出现幽灵阻塞。若更新期间收到新的续跑消息，本次重启会取消并恢复调度，消息不会因进程重启而从内存队列丢失。更新与回滚请求还共用同一个操作准入锁：一次只能放行一个操作，回滚使用的 commit 和备份会在锁内固定，不能被并发更新替换。所有更新、迁移、手动拉取后的快速重启和回滚都在同一门禁内完成最后一次 blocker 查询，并在查询成功后不再经过异步等待，直接提交停服操作。任务完成后点击「重新检查」即可继续。手动 `git pull` 后触发更新时，系统会以服务实际加载的旧 commit 为基线补齐部署步骤，而不是只做一次盲目重启。
 
+stop-session 清理 per-task 消息时还会推进该队列的 cancellation generation。已经被 consumer 从队列取走、但尚未登记为 in-flight 的旧代次消息会被明确取消，不会在清理成功后再次启动；已经登记的真实 in-flight 工作仍保留为更新 blocker，直到其生命周期结束。
+
 ### 方式二：手动更新
 
 ```bash
