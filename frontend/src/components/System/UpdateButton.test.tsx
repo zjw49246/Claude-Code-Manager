@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, screen, waitFor, cleanup } from '@testing-library/react';
+import { render, screen, waitFor, cleanup, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { UpdateButton } from './UpdateButton';
 
@@ -28,6 +28,9 @@ const mockDryRun = {
   has_new_migrations: false,
   has_frontend_changes: true,
   has_package_changes: false,
+  active_task_count: 0,
+  active_tasks: [],
+  update_blocked: false,
 };
 
 function findModalOverlay(): HTMLElement | null {
@@ -37,11 +40,20 @@ function findModalOverlay(): HTMLElement | null {
 describe('UpdateButton', () => {
   beforeEach(() => {
     vi.mocked(api.startUpdate).mockResolvedValue(mockDryRun as never);
+    vi.mocked(api.getUpdateStatus).mockResolvedValue({ status: 'idle' } as never);
+    localStorage.clear();
+    Object.defineProperty(document, 'visibilityState', {
+      value: 'visible',
+      writable: true,
+      configurable: true,
+    });
   });
 
   afterEach(() => {
     cleanup();
     vi.clearAllMocks();
+    vi.useRealTimers();
+    localStorage.clear();
   });
 
   it('renders the update trigger button', () => {
@@ -216,6 +228,43 @@ describe('UpdateButton', () => {
         expect(screen.getByText('已是最新版本，无需更新。')).toBeInTheDocument();
       });
     });
+
+    it('forces a fresh dry-run when the user checks manually', async () => {
+      const user = userEvent.setup();
+      render(<UpdateButton />);
+
+      await user.click(screen.getByTitle('更新并重启'));
+
+      await waitFor(() => {
+        expect(api.startUpdate).toHaveBeenCalledWith({
+          dry_run: true,
+          force: true,
+          branch: undefined,
+        });
+      });
+    });
+
+    it('allows a locally pending restart when the remote check failed', async () => {
+      vi.mocked(api.startUpdate).mockResolvedValue({
+        has_updates: false,
+        needs_restart: true,
+        manual_update_detected: true,
+        current_commit: 'def5678',
+        running_commit: 'abc1234',
+        error: 'network unavailable',
+      } as never);
+
+      const user = userEvent.setup();
+      render(<UpdateButton />);
+      await user.click(screen.getByTitle('更新并重启'));
+
+      await waitFor(() => {
+        expect(screen.getByText(/磁盘代码已更新/)).toBeInTheDocument();
+      });
+      expect(screen.getByText(/远端更新检查失败/)).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: '完成部署并重启' })).toBeEnabled();
+      expect(screen.queryByText('检查更新失败')).not.toBeInTheDocument();
+    });
   });
 
   describe('modal content rendering', () => {
@@ -263,6 +312,170 @@ describe('UpdateButton', () => {
       await waitFor(() => {
         expect(screen.getByText('前端变更')).toBeInTheDocument();
       });
+    });
+
+    it('blocks confirmation while tasks are active', async () => {
+      vi.mocked(api.startUpdate).mockResolvedValue({
+        ...mockDryRun,
+        active_task_count: 1,
+        active_tasks: [{ id: 42, title: '正在写代码', status: 'executing' }],
+        update_blocked: true,
+      } as never);
+
+      const user = userEvent.setup();
+      render(<UpdateButton />);
+      await user.click(screen.getByTitle('更新并重启'));
+
+      await waitFor(() => {
+        expect(screen.getByText(/当前有 1 个任务正在执行/)).toBeInTheDocument();
+      });
+      expect(screen.getByText(/#42 正在写代码/)).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: '等待任务完成' })).toBeDisabled();
+      expect(api.startUpdate).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('automatic update reminder', () => {
+    it('performs a dry-run and shows a non-blocking top notice after the initial delay', async () => {
+      vi.useFakeTimers();
+      render(<UpdateButton />);
+
+      expect(findModalOverlay()).toBeNull();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+
+      expect(api.getUpdateStatus).toHaveBeenCalledTimes(1);
+      expect(api.startUpdate).toHaveBeenCalledTimes(1);
+      expect(api.startUpdate).toHaveBeenCalledWith({ dry_run: true });
+      const notice = screen.getByTestId('update-available-notice');
+      expect(notice.className).toContain('pointer-events-none');
+      expect(screen.getByText('发现可用更新')).toBeInTheDocument();
+      expect(screen.getByTestId('update-available-dot')).toBeInTheDocument();
+      expect(findModalOverlay()).toBeNull();
+    });
+
+    it('opens the existing update modal only after the user clicks view details', async () => {
+      vi.useFakeTimers();
+      render(<UpdateButton />);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+      expect(findModalOverlay()).toBeNull();
+
+      await act(async () => {
+        screen.getByRole('button', { name: '查看详情' }).click();
+      });
+
+      expect(screen.queryByTestId('update-available-notice')).not.toBeInTheDocument();
+      expect(findModalOverlay()).toBeTruthy();
+      expect(screen.getByRole('button', { name: '确认更新' })).toBeInTheDocument();
+    });
+
+    it('silently ignores automatic check failures', async () => {
+      vi.useFakeTimers();
+      vi.mocked(api.startUpdate).mockRejectedValue(new Error('offline'));
+      render(<UpdateButton />);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+
+      expect(findModalOverlay()).toBeNull();
+      expect(screen.queryByTestId('update-available-notice')).not.toBeInTheDocument();
+      expect(screen.queryByText('更新失败')).not.toBeInTheDocument();
+    });
+
+    it('stays silent when the automatic check finds the latest version', async () => {
+      vi.useFakeTimers();
+      vi.mocked(api.startUpdate).mockResolvedValue({
+        has_updates: false,
+        needs_restart: false,
+      } as never);
+      render(<UpdateButton />);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+
+      expect(api.startUpdate).toHaveBeenCalledWith({ dry_run: true });
+      expect(findModalOverlay()).toBeNull();
+      expect(screen.queryByTestId('update-available-notice')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('update-available-dot')).not.toBeInTheDocument();
+    });
+
+    it('still reminds about a manual pull when the remote fetch failed', async () => {
+      vi.useFakeTimers();
+      vi.mocked(api.startUpdate).mockResolvedValue({
+        has_updates: false,
+        needs_restart: true,
+        manual_update_detected: true,
+        current_commit: 'def5678',
+        running_commit: 'abc1234',
+        error: 'network unavailable',
+      } as never);
+      render(<UpdateButton />);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+
+      expect(screen.getByText('检测到待完成的本地更新')).toBeInTheDocument();
+      expect(screen.getByTestId('update-available-dot')).toBeInTheDocument();
+      expect(findModalOverlay()).toBeNull();
+
+      await act(async () => {
+        screen.getByRole('button', { name: '查看详情' }).click();
+      });
+      expect(screen.getByText(/磁盘代码已更新/)).toBeInTheDocument();
+      expect(screen.getByText(/远端更新检查失败/)).toBeInTheDocument();
+    });
+
+    it('does not repeat the same reminder fingerprint during one page lifetime', async () => {
+      vi.useFakeTimers();
+      render(<UpdateButton />);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+
+      expect(api.startUpdate).toHaveBeenCalledWith({ dry_run: true });
+      expect(screen.getByText('发现可用更新')).toBeInTheDocument();
+
+      await act(async () => {
+        screen.getByRole('button', { name: '关闭更新提醒' }).click();
+      });
+      expect(screen.queryByTestId('update-available-notice')).not.toBeInTheDocument();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60 * 60_000);
+      });
+
+      expect(api.startUpdate).toHaveBeenCalledTimes(2);
+      expect(findModalOverlay()).toBeNull();
+      expect(screen.queryByTestId('update-available-notice')).not.toBeInTheDocument();
+      expect(screen.getByTestId('update-available-dot')).toBeInTheDocument();
+    });
+
+    it('reminds again when the page is opened again', async () => {
+      vi.useFakeTimers();
+      const firstPage = render(<UpdateButton />);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+      expect(screen.getByTestId('update-available-notice')).toBeInTheDocument();
+
+      firstPage.unmount();
+      render(<UpdateButton />);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+
+      expect(api.startUpdate).toHaveBeenCalledTimes(2);
+      expect(screen.getByTestId('update-available-notice')).toBeInTheDocument();
+      expect(screen.getByText('发现可用更新')).toBeInTheDocument();
     });
   });
 

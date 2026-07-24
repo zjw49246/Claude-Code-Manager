@@ -82,6 +82,8 @@ class PRReviewResponse(BaseModel):
     id: int
     repo_id: int
     pr_number: int
+    head_sha: str | None
+    delivery_id: str | None
     pr_title: str
     pr_author: str
     pr_url: str

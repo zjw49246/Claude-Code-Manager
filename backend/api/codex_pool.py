@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -203,8 +204,17 @@ def _begin_login_transaction(
     account_id: str,
     codex_home: str,
     pool=None,
+    reused_retired_slot: bool = False,
+    expected_email: str | None = None,
 ) -> Path:
     """Persist the parent's rollback point before the wrapper can mutate state."""
+
+    if reused_retired_slot and (
+        kind != "add"
+        or not isinstance(expected_email, str)
+        or not expected_email.strip()
+    ):
+        raise RuntimeError("Retired slot reuse requires an add email identity")
 
     home = Path(codex_home).expanduser()
     if home.is_symlink():
@@ -226,6 +236,8 @@ def _begin_login_transaction(
         "kind": kind,
         "account_id": account_id,
         "codex_home": str(home),
+        "reused_retired_slot": bool(reused_retired_slot),
+        "expected_email": expected_email if reused_retired_slot else None,
         "created_at": time.time(),
         "auth": _snapshot_private_file(home / "auth.json"),
         "previous_backups": sorted(
@@ -239,6 +251,15 @@ def _begin_login_transaction(
     if kind == "add":
         journal["credential_store"] = _snapshot_private_file(
             _credential_store_path(pool)
+        )
+    if reused_retired_slot:
+        journal["retired_marker"] = _snapshot_private_file(
+            home / ".ccm-retired-account"
+        )
+        # Validate the on-disk pool snapshot and marker before the journal is
+        # committed or a login wrapper gets any chance to mutate this home.
+        _assert_reused_retired_snapshot_is_safe(
+            journal, require_current_marker=True,
         )
     journal_path = transaction_dir / f"{attempt_id}.json"
     _write_private_json(journal_path, journal)
@@ -259,6 +280,28 @@ def _read_login_transaction(
         raise RuntimeError(f"Mismatched Codex login transaction id: {journal_path}")
     if journal.get("kind") not in {"add", "relogin"}:
         raise RuntimeError(f"Invalid Codex login transaction kind: {journal_path}")
+    created_at = journal.get("created_at")
+    if (
+        not isinstance(created_at, (int, float))
+        or isinstance(created_at, bool)
+        or not math.isfinite(float(created_at))
+        or created_at <= 0
+    ):
+        raise RuntimeError(f"Invalid login transaction timestamp: {journal_path}")
+    reused_retired_slot = journal.get("reused_retired_slot", False)
+    if not isinstance(reused_retired_slot, bool) or (
+        reused_retired_slot and journal.get("kind") != "add"
+    ):
+        raise RuntimeError(
+            f"Invalid retired-slot state in login transaction: {journal_path}"
+        )
+    expected_email = journal.get("expected_email")
+    if reused_retired_slot and (
+        not isinstance(expected_email, str) or not expected_email.strip()
+    ):
+        raise RuntimeError(
+            f"Missing retired-slot email in login transaction: {journal_path}"
+        )
     home = Path(str(journal.get("codex_home") or ""))
     if (
         not home.is_absolute()
@@ -289,13 +332,198 @@ def _read_login_transaction(
             raise RuntimeError(
                 f"Invalid credential snapshot in login transaction: {journal_path}"
             )
+    if reused_retired_slot:
+        retired_marker = journal.get("retired_marker")
+        if (
+            not isinstance(retired_marker, dict)
+            or Path(str(retired_marker.get("path") or ""))
+            != home / ".ccm-retired-account"
+            or retired_marker.get("existed") is not True
+        ):
+            raise RuntimeError(
+                f"Invalid retired marker snapshot in login transaction: {journal_path}"
+            )
     return journal
+
+
+def _snapshot_json_object(snapshot: dict, *, label: str) -> dict:
+    """Decode a transaction snapshot as one JSON object without restoring it."""
+
+    if snapshot.get("existed") is not True:
+        raise RuntimeError(f"Missing {label} snapshot")
+    try:
+        raw = base64.b64decode(
+            str(snapshot.get("content_b64") or ""), validate=True,
+        )
+        value = json.loads(raw.decode("utf-8"))
+    except (ValueError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Invalid {label} snapshot") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError(f"Invalid {label} snapshot")
+    return value
+
+
+def _pool_record_home_matches(record: dict, expected_home: Path) -> bool:
+    raw_home = record.get("codex_home")
+    if not isinstance(raw_home, str) or not raw_home:
+        return False
+    candidate = Path(os.path.expandvars(os.path.expanduser(raw_home)))
+    return candidate.is_absolute() and candidate.resolve(strict=False) == expected_home
+
+
+def _assert_reused_retired_snapshot_is_safe(
+    journal: dict,
+    *,
+    require_current_marker: bool = False,
+) -> None:
+    """Prove a reuse journal originated from one finalized tombstone."""
+
+    if not journal.get("reused_retired_slot", False):
+        return
+    account_id = str(journal["account_id"])
+    home = Path(str(journal["codex_home"]))
+    if journal["auth"].get("existed") is not False:
+        raise RuntimeError("Retired slot auth snapshot was not empty")
+
+    pool_data = _snapshot_json_object(
+        journal["pool_config"], label="retired pool config",
+    )
+    accounts = pool_data.get("accounts")
+    if not isinstance(accounts, list):
+        raise RuntimeError("Retired pool snapshot has no accounts list")
+    matches = [
+        record for record in accounts
+        if isinstance(record, dict) and record.get("id") == account_id
+    ]
+    if len(matches) != 1:
+        raise RuntimeError("Retired pool snapshot does not contain one account id")
+    record = matches[0]
+    if (
+        not _pool_record_home_matches(record, home)
+        or record.get("retired") is not True
+        or record.get("enabled") is not False
+        or bool(record.get("cleanup_pending", False))
+        or bool(record.get("login_recovery_failed", False))
+        or str(record.get("email") or "") != ""
+    ):
+        raise RuntimeError("Pool snapshot is not a finalized retired account")
+
+    marker_snapshot = journal["retired_marker"]
+    try:
+        marker_content = base64.b64decode(
+            str(marker_snapshot.get("content_b64") or ""), validate=True,
+        ).decode("utf-8")
+    except (ValueError, TypeError, UnicodeDecodeError) as exc:
+        raise RuntimeError("Invalid retired marker snapshot") from exc
+    if marker_content.strip() != account_id:
+        raise RuntimeError("Retired marker snapshot does not match account id")
+
+    managed_home = _managed_codex_home_path(home)
+    if require_current_marker:
+        marker = managed_home / ".ccm-retired-account"
+        if (
+            marker.is_symlink()
+            or not marker.is_file()
+            or stat.S_IMODE(marker.stat().st_mode) & 0o077
+            or marker.stat().st_size > 256
+            or marker.read_text(encoding="utf-8").strip() != account_id
+        ):
+            raise RuntimeError("Current retired marker is unsafe or mismatched")
+
+
+def _assert_reused_retired_commit_is_active(journal: dict) -> None:
+    """Validate wrapper registration before committing a reused account."""
+
+    if not journal.get("reused_retired_slot", False):
+        return
+    account_id = str(journal["account_id"])
+    home = Path(str(journal["codex_home"]))
+    pool_path = Path(str(journal["pool_config"]["path"]))
+    try:
+        pool_data = json.loads(pool_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Committed pool config is unreadable") from exc
+    accounts = pool_data.get("accounts") if isinstance(pool_data, dict) else None
+    if not isinstance(accounts, list):
+        raise RuntimeError("Committed pool config has no accounts list")
+    id_matches = [
+        record for record in accounts
+        if isinstance(record, dict) and record.get("id") == account_id
+    ]
+    home_matches = [
+        record for record in accounts
+        if isinstance(record, dict) and _pool_record_home_matches(record, home)
+    ]
+    if len(id_matches) != 1 or len(home_matches) != 1 or id_matches[0] is not home_matches[0]:
+        raise RuntimeError("Committed reused account id/home is not unique")
+    record = id_matches[0]
+    cutoff = record.get("quota_valid_after")
+    if (
+        record.get("enabled") is not True
+        or record.get("email") != journal["expected_email"]
+        or bool(record.get("retired", False))
+        or bool(record.get("cleanup_pending", False))
+        or bool(record.get("login_recovery_failed", False))
+        or not isinstance(cutoff, (int, float))
+        or isinstance(cutoff, bool)
+        or not math.isfinite(float(cutoff))
+        or cutoff <= float(journal["created_at"])
+    ):
+        raise RuntimeError("Committed reused account is not fully activated")
 
 
 def _remove_login_transaction(journal_path: Path) -> None:
     journal_path.unlink(missing_ok=True)
     if journal_path.parent.exists():
         _fsync_directory(journal_path.parent)
+
+
+def _remove_reactivated_retired_marker(journal: dict) -> None:
+    """Drop a retired marker only after an add transaction has committed.
+
+    The marker snapshot proves the slot was retired and lets rollback rebuild
+    it after a failed reuse attempt. Once the journal has been durably removed,
+    marker cleanup failure is cosmetic and must not roll back valid new auth.
+    """
+
+    if (
+        journal.get("kind") != "add"
+        or not journal.get("reused_retired_slot", False)
+    ):
+        return
+    home = Path(str(journal.get("codex_home") or ""))
+    try:
+        if home.is_symlink() or not home.is_dir():
+            logger.warning(
+                "Refusing retired marker cleanup from unsafe home %s",
+                home,
+            )
+            return
+        marker = home / ".ccm-retired-account"
+        if not marker.exists() and not marker.is_symlink():
+            return
+        account_id = str(journal.get("account_id") or "")
+        if (
+            marker.is_symlink()
+            or not marker.is_file()
+            or marker.stat().st_size > 256
+            or marker.read_text(encoding="utf-8").strip() != account_id
+        ):
+            logger.warning(
+                "Retaining mismatched retired marker after activating %s at %s",
+                account_id,
+                home,
+            )
+            return
+        marker.unlink()
+        _fsync_directory(home)
+    except (OSError, UnicodeError):
+        logger.warning(
+            "Failed to remove retired marker after activating %s at %s",
+            journal.get("account_id"),
+            home,
+            exc_info=True,
+        )
 
 
 def _durably_prepare_login_commit(
@@ -308,6 +536,7 @@ def _durably_prepare_login_commit(
     journal = _read_login_transaction(
         journal_path, expected_pool_path=expected_pool_path,
     )
+    _assert_reused_retired_snapshot_is_safe(journal)
     auth_path = Path(str(journal["auth"]["path"]))
     _fsync_regular_file_and_parent(auth_path)
     if journal["kind"] == "add":
@@ -317,6 +546,7 @@ def _durably_prepare_login_commit(
         _fsync_regular_file_and_parent(
             Path(str(journal["pool_config"]["path"]))
         )
+    _assert_reused_retired_commit_is_active(journal)
     return journal
 
 
@@ -330,6 +560,7 @@ def _rollback_login_transaction(
     journal = _read_login_transaction(
         journal_path, expected_pool_path=expected_pool_path,
     )
+    _assert_reused_retired_snapshot_is_safe(journal)
     home = Path(str(journal["codex_home"]))
     if home.is_symlink():
         raise RuntimeError(f"CODEX_HOME became a symlink during rollback: {home}")
@@ -350,6 +581,11 @@ def _rollback_login_transaction(
     if journal["kind"] == "add":
         _restore_private_file(journal["credential_store"])
     _restore_private_file(journal["pool_config"])
+    if journal.get("reused_retired_slot", False):
+        # A failed Codex login can create caches/config/state beyond auth.json.
+        # Restore the exact finalized tombstone shape before committing the
+        # rollback, otherwise the allocator would skip this slot next time.
+        _purge_retired_codex_home(home, str(journal["account_id"]))
     _remove_login_transaction(journal_path)
     return journal
 
@@ -625,12 +861,13 @@ async def _finalize_login_transaction(
                     commit_pool_path = Path(
                         str(journal["pool_config"]["path"])
                     )
-                _durably_prepare_login_commit(
+                committed_journal = _durably_prepare_login_commit(
                     journal_path,
                     expected_pool_path=commit_pool_path,
                 )
                 _remove_login_transaction(journal_path)
                 committed = True
+                _remove_reactivated_retired_marker(committed_journal)
             except BaseException as exc:
                 detail = (
                     "Login commit validation failed and was rolled back: "
@@ -677,11 +914,20 @@ async def _finalize_login_transaction(
             cleanup_safe = False
 
     _login_attempts.pop(attempt_id, None)
+    # Add-account state carries the allocated slot id.  Keep it through the
+    # watcher/finalizer hand-off so a Manager that joins an already-running
+    # attempt can persist the exact slot and retry idempotently.
+    previous_state = state_store.get(state_key, {})
+    account_identity = (
+        {"account_id": previous_state["account_id"]}
+        if previous_state.get("account_id") else {}
+    )
     if committed:
         state_store[state_key] = {
             "status": "success",
             "finished_at": time.time(),
             "attempt_id": attempt_id,
+            **account_identity,
         }
     elif cleanup_safe and recovery_failed:
         state_store[state_key] = {
@@ -689,6 +935,7 @@ async def _finalize_login_transaction(
             "detail": detail,
             "finished_at": time.time(),
             "attempt_id": attempt_id,
+            **account_identity,
         }
     elif cleanup_safe and state_store.get(state_key, {}).get("status") in ACTIVE_LOGIN_STATUSES:
         state_store[state_key] = {
@@ -699,6 +946,7 @@ async def _finalize_login_transaction(
             ),
             "finished_at": time.time(),
             "attempt_id": attempt_id,
+            **account_identity,
         }
     elif not cleanup_safe:
         state_store[state_key] = {
@@ -709,6 +957,7 @@ async def _finalize_login_transaction(
             ),
             "finished_at": time.time(),
             "attempt_id": attempt_id,
+            **account_identity,
         }
 
     if cleanup_safe:
@@ -723,6 +972,7 @@ async def _finalize_login_transaction(
                 "detail": f"Credentials are safe but maintenance release failed: {exc}",
                 "finished_at": time.time(),
                 "attempt_id": attempt_id,
+                **account_identity,
             }
         finally:
             if login_lock.locked():
@@ -825,6 +1075,65 @@ def _failed_login_home_is_reusable(codex_home: Path) -> bool:
         ):
             return False
     return True
+
+
+def _retired_account_slot_index(account) -> int | None:
+    """Return the stable numeric slot for a standard ``codex-N`` tombstone."""
+
+    match = re.fullmatch(r"codex-([1-9][0-9]*)", str(getattr(account, "id", "")))
+    return int(match.group(1)) if match else None
+
+
+def _clean_retired_home_is_reusable(account) -> bool:
+    """Prove that a retired account home completed CCM's safe cleanup.
+
+    Deletion deliberately preserves native sessions so old tasks remain
+    recoverable.  A new identity may reuse that exact slot only when the pool
+    tombstone is final, no login recovery is outstanding, and the directory
+    still has precisely the post-delete shape written by
+    ``_purge_retired_codex_home``.
+    """
+
+    if (
+        not bool(getattr(account, "retired", False))
+        or bool(getattr(account, "cleanup_pending", False))
+        or bool(getattr(account, "login_recovery_failed", False))
+        or str(getattr(account, "email", "") or "") != ""
+        or _retired_account_slot_index(account) is None
+    ):
+        return False
+
+    try:
+        codex_home = _managed_codex_home_path(
+            Path(str(getattr(account, "codex_home", "")))
+        )
+        if not codex_home.is_dir() or codex_home.is_symlink():
+            return False
+        # Deletion locks the managed home to the service user.  Treat later
+        # permission broadening as evidence that CCM no longer controls it.
+        if stat.S_IMODE(codex_home.stat().st_mode) & 0o077:
+            return False
+
+        children = {child.name: child for child in codex_home.iterdir()}
+        if not set(children).issubset({"sessions", ".ccm-retired-account"}):
+            return False
+
+        sessions = children.get("sessions")
+        if sessions is not None and (sessions.is_symlink() or not sessions.is_dir()):
+            return False
+
+        marker = children.get(".ccm-retired-account")
+        if (
+            marker is None
+            or marker.is_symlink()
+            or not marker.is_file()
+            or stat.S_IMODE(marker.stat().st_mode) & 0o077
+            or marker.stat().st_size > 256
+        ):
+            return False
+        return marker.read_text(encoding="utf-8").strip() == account.id
+    except (OSError, RuntimeError, UnicodeError, ValueError):
+        return False
 
 
 def _managed_codex_home_path(codex_home: Path) -> Path:
@@ -1082,12 +1391,19 @@ async def codex_clear_cooldown(request: Request, account_id: str):
 
 
 @router.get("/accounts/{account_id}/verify")
-async def codex_verify_account(account_id: str):
-    """Check login status of an account by reading its auth.json."""
+async def codex_verify_account(
+    request: Request,
+    account_id: str,
+    live: bool = False,
+):
+    """Check local credentials and optionally prove them with a live RPC."""
+    require_admin(request)
     pool = _get_pool()
     acc = pool.account(account_id)
     if not acc or getattr(acc, "retired", False):
         raise HTTPException(status_code=404, detail=f"Unknown account: {account_id}")
+    if live:
+        return await pool.verify_account_live(account_id)
     from backend.services.codex_pool import verify_login
     return verify_login(acc.codex_home)
 
@@ -1114,7 +1430,8 @@ async def _watch_relogin(
         _relogin_state[account_id] = {
             "status": (
                 "finalizing" if proc.returncode == 0
-                else "expired" if previous_status == "expired"
+                else previous_status
+                if previous_status in {"expired", "cancelled"}
                 else "failed"
             ),
             "detail": tail,
@@ -1388,24 +1705,36 @@ async def _watch_add(
     try:
         tail = await _collect_login_output(proc, attempt_id)
         watch_completed = True
-        previous_status = _add_state.get(email, {}).get("status")
+        previous_state = _add_state.get(email, {})
+        previous_status = previous_state.get("status")
         _add_state[email] = {
             "status": (
                 "finalizing" if proc.returncode == 0
-                else "expired" if previous_status == "expired"
+                else previous_status
+                if previous_status in {"expired", "cancelled"}
                 else "failed"
             ),
             "detail": tail,
             "attempt_id": attempt_id,
+            **(
+                {"account_id": previous_state["account_id"]}
+                if previous_state.get("account_id") else {}
+            ),
         }
         if proc.returncode != 0:
             _add_state[email]["finished_at"] = time.time()
     except Exception as exc:
         logger.exception("Codex add-account watcher failed for %s", email)
+        previous_state = _add_state.get(email, {})
         _add_state[email] = {
             "status": "failed",
             "detail": str(exc),
             "finished_at": time.time(),
+            "attempt_id": attempt_id,
+            **(
+                {"account_id": previous_state["account_id"]}
+                if previous_state.get("account_id") else {}
+            ),
         }
     finally:
         await _await_login_cleanup(_finalize_login_transaction(
@@ -1424,26 +1753,35 @@ async def _watch_add(
 
 
 def _allocate_codex_account_home(pool) -> tuple[str, str]:
-    """Allocate an id/home without reusing retired or session-bearing storage.
+    """Allocate the lowest safe retired slot, then a never-used numeric slot.
 
     A failed first login can leave a harmless directory containing no auth or
     rollout; that exact slot is reusable so retries do not skip account ids.
-    Retired homes carry a marker and homes with credentials/session history are
-    never assigned to another OpenAI identity.
+    A fully cleaned retired home is also reusable because its retained sessions
+    are the only account data left.  Pending cleanup/recovery/login transactions
+    remain fail-closed and active account ids are never renumbered.
     """
-    existing_ids = {account.id for account in pool._accounts}
+    # Keep the safety invariant inside the allocator too, rather than relying
+    # only on its HTTP caller.  An in-flight add/relogin always owns a journal.
+    _reject_unresolved_login_transactions(pool)
+
+    accounts_by_id = {account.id: account for account in pool._accounts}
     index = 1
     while True:
         account_id = f"codex-{index}"
+        existing_account = accounts_by_id.get(account_id)
+        if existing_account is not None:
+            if _clean_retired_home_is_reusable(existing_account):
+                return existing_account.id, existing_account.codex_home
+            index += 1
+            continue
         codex_home = (
             Path.home() / ".codex"
             if index == 1
             else Path.home() / f".codex-{account_id}"
         )
         reusable_existing_home = _failed_login_home_is_reusable(codex_home)
-        if account_id not in existing_ids and (
-            not codex_home.exists() or reusable_existing_home
-        ):
+        if not codex_home.exists() or reusable_existing_home:
             return account_id, str(codex_home)
         index += 1
 
@@ -1467,6 +1805,7 @@ async def codex_add_account(request: Request, body: AddCodexAccountRequest):
             "ok": True,
             "status": state["status"],
             "attempt_id": state.get("attempt_id"),
+            "account_id": state.get("account_id"),
         }
 
     if _login_lock.locked():
@@ -1482,6 +1821,14 @@ async def codex_add_account(request: Request, body: AddCodexAccountRequest):
     pool = _get_pool()
     _reject_unresolved_login_transactions(pool)
     account_id, codex_home = _allocate_codex_account_home(pool)
+    allocated_account = pool.account(account_id) if hasattr(pool, "account") else next(
+        (account for account in pool._accounts if account.id == account_id),
+        None,
+    )
+    reusing_retired_slot = bool(
+        allocated_account is not None
+        and getattr(allocated_account, "retired", False)
+    )
 
     root = Path(__file__).resolve().parents[2]
     login_py = root / ".venv" / "bin" / "python3"
@@ -1524,12 +1871,32 @@ async def codex_add_account(request: Request, body: AddCodexAccountRequest):
         except CodexAppServerBusyError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         maintenance_started = True
+        if reusing_retired_slot:
+            # Re-prove the finalized tombstone under home maintenance, then
+            # normalize it once more before the wrapper can write new auth.
+            current_account = (
+                pool.account(account_id)
+                if hasattr(pool, "account")
+                else allocated_account
+            )
+            if (
+                current_account is None
+                or current_account.codex_home != codex_home
+                or not _clean_retired_home_is_reusable(current_account)
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Codex 账号槽位 {account_id} 已变化，请重试",
+                )
+            _purge_retired_codex_home(Path(codex_home), account_id)
         journal_path = _begin_login_transaction(
             attempt_id=attempt_id,
             kind="add",
             account_id=account_id,
             codex_home=codex_home,
             pool=pool,
+            reused_retired_slot=reusing_retired_slot,
+            expected_email=email if reusing_retired_slot else None,
         )
 
         proc = await asyncio.create_subprocess_exec(
@@ -1681,6 +2048,51 @@ async def codex_submit_login_otp(
         "challenge_id": body.challenge_id,
     })
     return {"ok": True, "status": "verifying_otp"}
+
+
+@router.delete("/login-attempts/{attempt_id}")
+async def codex_cancel_login(request: Request, attempt_id: str):
+    """Abort an interactive login and wait until its rollback releases locks."""
+    require_admin(request)
+    attempt = _login_attempts.get(attempt_id)
+    if not attempt:
+        raise HTTPException(status_code=404, detail="登录流程已结束或不存在")
+
+    state = _attempt_state(attempt)
+    if state.get("status") not in ACTIVE_LOGIN_STATUSES:
+        raise HTTPException(status_code=409, detail="当前登录流程无法取消")
+    proc = attempt.get("proc")
+    if proc is None or proc.returncode is not None:
+        raise HTTPException(status_code=409, detail="登录进程已经结束")
+
+    state.update({
+        "status": "cancelled",
+        "detail": "登录已取消，凭据变更已回滚",
+        "attempt_id": attempt_id,
+    })
+    try:
+        await _stop_unfinished_login_process(
+            proc,
+            operation=f"cancelled {attempt.get('kind', 'login')}",
+        )
+    except LoginProcessNotTerminal as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"登录进程取消状态无法确认，请重启 CCM 完成恢复：{exc}",
+        ) from exc
+
+    # The watcher owns journal rollback and home-maintenance release.  Do not
+    # report cancellation complete while a following account would still hit
+    # the process-wide login lock.
+    deadline = asyncio.get_running_loop().time() + LOGIN_REAP_TIMEOUT_SECONDS
+    while attempt_id in _login_attempts and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.05)
+    if attempt_id in _login_attempts:
+        raise HTTPException(
+            status_code=503,
+            detail="登录进程已停止，但凭据回滚尚未完成，请稍后重试",
+        )
+    return {"ok": True, "status": "cancelled"}
 
 
 # ---------------------------------------------------------------------------
@@ -1856,6 +2268,13 @@ async def codex_delete_account(request: Request, account_id: str):
                 status_code=500,
                 detail="Private data was removed, but deletion finalization failed",
             )
+        _relogin_state.pop(account_id, None)
+        for state_email, state in list(_add_state.items()):
+            if (
+                str(state_email).casefold() == account_email.casefold()
+                or state.get("account_id") == account_id
+            ):
+                _add_state.pop(state_email, None)
         return {
             "ok": True,
             "deleted": account_id,

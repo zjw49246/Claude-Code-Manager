@@ -125,6 +125,36 @@ async def test_stop_returns_claimed_task_to_pending_before_it_returns(db_factory
 
 
 @pytest.mark.asyncio
+async def test_ralph_dequeue_waits_for_shared_maintenance_gate(db_factory):
+    from backend.services.dispatcher import GlobalDispatcher
+
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    instance_manager = MagicMock()
+    gate = GlobalDispatcher(db_factory, instance_manager, broadcaster)
+    await gate.pause_dispatching()
+    rl = RalphLoop(db_factory, instance_manager, broadcaster)
+
+    async with db_factory() as db:
+        instance = Instance(name="ralph-maintenance-worker")
+        task = Task(title="must stay pending", description="work")
+        db.add_all([instance, task])
+        await db.commit()
+        await db.refresh(instance)
+        await db.refresh(task)
+        instance_id, task_id = instance.id, task.id
+
+    with patch("backend.main.dispatcher", gate):
+        await rl.start(instance_id)
+        await asyncio.sleep(0.05)
+        async with db_factory() as db:
+            task = await db.get(Task, task_id)
+            assert task.status == "pending"
+        instance_manager.launch.assert_not_called()
+        await rl.stop(instance_id)
+
+
+@pytest.mark.asyncio
 async def test_is_running_true():
     rl = _make_ralph_loop()
 

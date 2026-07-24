@@ -5,18 +5,21 @@ Config: ~/.codex-pool/accounts.json
 Each account has its own CODEX_HOME directory with auth.json.
 
 Manual quota refresh uses Codex app-server's account/rateLimits/read RPC for
-the account's own CODEX_HOME. Session rollout rate_limits payloads remain the
-cached/background source and the fallback when live account reads fail.
+the account's own CODEX_HOME. Session rollout rate_limits payloads remain a
+cached/background source, but never substitute for a failed live account read:
+migrated sessions can carry another account's historical quota snapshot.
 """
 
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import time
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Iterator
 
 from backend.services.claude_pool import (
     is_codex_auth_failure,
@@ -151,6 +154,7 @@ def canonical_codex_home(codex_home: str | os.PathLike[str]) -> str:
 class CodexPoolAccount:
     __slots__ = (
         "id", "codex_home", "email", "enabled", "retired", "cleanup_pending",
+        "login_recovery_failed", "quota_valid_after", "quota_cutoff_invalid",
     )
 
     def __init__(self, data: dict):
@@ -161,6 +165,26 @@ class CodexPoolAccount:
         self.email: str = str(data.get("email") or "")
         self.retired: bool = bool(data.get("retired", False))
         self.cleanup_pending: bool = bool(data.get("cleanup_pending", False))
+        self.login_recovery_failed: bool = bool(
+            data.get("login_recovery_failed", False)
+        )
+        has_quota_cutoff = "quota_valid_after" in data
+        raw_quota_cutoff = data.get("quota_valid_after")
+        parsed_quota_cutoff = 0.0
+        valid_quota_cutoff = False
+        if isinstance(raw_quota_cutoff, (int, float)) and not isinstance(
+            raw_quota_cutoff, bool,
+        ):
+            try:
+                candidate_cutoff = float(raw_quota_cutoff)
+            except (OverflowError, TypeError, ValueError):
+                pass
+            else:
+                if math.isfinite(candidate_cutoff) and candidate_cutoff > 0:
+                    parsed_quota_cutoff = candidate_cutoff
+                    valid_quota_cutoff = True
+        self.quota_valid_after = parsed_quota_cutoff
+        self.quota_cutoff_invalid: bool = has_quota_cutoff and not valid_quota_cutoff
         self.enabled: bool = bool(data.get("enabled", True)) and not self.retired
 
 
@@ -187,7 +211,9 @@ class CodexPool:
         self._quota_cache: dict[str, dict] | None = None
         self._quota_cache_at: float = 0.0
         self._quota_cache_live_until: float = 0.0
+        self._selection_quota_cache: dict[str, dict] | None = None
         self._quota_reader = quota_reader
+        self._config_generation = 0
         self._load()
 
     @property
@@ -241,6 +267,9 @@ class CodexPool:
         logger.info("Bootstrapped default codex account (%s) into pool", email)
 
     def reload(self):
+        # In-flight quota reads must not publish data for an identity that was
+        # replaced under the same account id/home.
+        self._config_generation += 1
         self._accounts.clear()
         self._load()
 
@@ -262,6 +291,7 @@ class CodexPool:
         self._quota_cache = None
         self._quota_cache_at = 0.0
         self._quota_cache_live_until = 0.0
+        self._selection_quota_cache = None
 
     def account(self, account_id: str) -> CodexPoolAccount | None:
         return next((a for a in self._accounts if a.id == account_id), None)
@@ -306,6 +336,10 @@ class CodexPool:
             "email": account.email,
             "enabled": account.enabled,
             "retired": account.retired,
+            "cleanup_pending": account.cleanup_pending,
+            "login_recovery_failed": account.login_recovery_failed,
+            "quota_valid_after": account.quota_valid_after or None,
+            "quota_cutoff_invalid": account.quota_cutoff_invalid,
             "available": account.enabled and now >= cooldown_until,
             "cooldown_until": cooldown_until if cooldown_until > now else None,
             "cooldown_remaining": (
@@ -523,7 +557,7 @@ class CodexPool:
             raise AmbiguousCodexSessionHomeError(session_id, homes)
         return homes[0] if homes else None
 
-    # --- Quota tracking (live account RPC with rollout fallback) ---
+    # --- Quota tracking (live account RPC and rollout-backed rotation) ---
 
     async def fetch_quota(
         self, force: bool = False, *, live: bool = False,
@@ -540,40 +574,60 @@ class CodexPool:
         if not force and self._quota_cache is not None and (now - self._quota_cache_at) < QUOTA_CACHE_TTL:
             return list(self._quota_cache.values())
 
-        results = {}
-        enabled_accounts = [acc for acc in self._accounts if acc.enabled]
-
         async def _read_account_quota(
             acc: CodexPoolAccount,
         ) -> tuple[dict | None, str | None]:
-            live_failed = False
-            if live and self._quota_reader is not None:
+            if live:
+                if self._quota_reader is None:
+                    logger.warning(
+                        "Codex live quota reader is unavailable for %s",
+                        acc.id,
+                    )
+                    return None, "live_unavailable"
                 try:
                     response = await self._quota_reader(acc.codex_home)
                     quota = _quota_from_app_server_response(response)
                     if quota is not None:
                         return quota, None
-                    live_failed = True
                     logger.warning(
                         "Codex live quota response had no rate-limit snapshot: %s",
                         acc.id,
                     )
                 except Exception as exc:
-                    live_failed = True
                     logger.warning(
-                        "Codex live quota read failed for %s; falling back to rollout: %s",
+                        "Codex live quota read failed for %s: %s",
                         acc.id,
                         exc,
                     )
-            quota = await asyncio.to_thread(
-                _read_quota_from_rollout, acc.codex_home
-            )
-            error = "live_unavailable" if live_failed and quota is None else None
-            return quota, error
+                # A rollout belongs to a session, not to credentials. Session
+                # migration preserves its old rate_limits events, so it cannot
+                # safely substitute for an unavailable live account response.
+                return None, "live_unavailable"
 
-        quota_results = await asyncio.gather(*(
-            _read_account_quota(acc) for acc in enabled_accounts
-        ))
+            if acc.quota_cutoff_invalid:
+                return None, "invalid_quota_cutoff"
+            quota = await asyncio.to_thread(
+                _read_quota_from_rollout,
+                acc.codex_home,
+                min_event_timestamp=acc.quota_valid_after or None,
+            )
+            return quota, None
+
+        while True:
+            generation = self._config_generation
+            enabled_accounts = [acc for acc in self._accounts if acc.enabled]
+            quota_results = await asyncio.gather(*(
+                _read_account_quota(acc) for acc in enabled_accounts
+            ))
+            if generation == self._config_generation:
+                break
+            logger.info(
+                "Discarding Codex quota read across pool reload (%s -> %s)",
+                generation,
+                self._config_generation,
+            )
+
+        results = {}
         for acc, (quota, quota_error) in zip(enabled_accounts, quota_results):
             results[acc.id] = {
                 "id": acc.id,
@@ -589,13 +643,62 @@ class CodexPool:
             self._quota_cache = results
             self._quota_cache_at = completed_at
             self._quota_cache_live_until = completed_at + QUOTA_CACHE_TTL
-        elif completed_at >= self._quota_cache_live_until:
-            # A background rollout scan may overlap a manual live refresh.
-            # Return its fresh data to quota-aware switching, but do not let it
-            # replace a newer authoritative UI snapshot during the short TTL.
-            self._quota_cache = results
-            self._quota_cache_at = completed_at
+        else:
+            # Quota-aware rotation needs the exact rollout snapshot it just
+            # selected on, even while a live UI result is protected by TTL.
+            self._selection_quota_cache = results
+            if completed_at >= self._quota_cache_live_until:
+                # A background rollout scan may overlap a manual live refresh.
+                # Return its fresh data to quota-aware switching, but do not let
+                # it replace a newer authoritative UI snapshot during the TTL.
+                self._quota_cache = results
+                self._quota_cache_at = completed_at
         return list(results.values())
+
+    async def verify_account_live(self, account_id: str) -> dict:
+        """Classify one account with an authenticated app-server RPC.
+
+        Reading auth.json alone cannot detect a revoked refresh token.  A live
+        rate-limit RPC proves the credential is accepted; transient transport
+        failures remain ``logged_in=None`` so callers fail closed instead of
+        unnecessarily launching a destructive relogin.
+        """
+        account = self.account(account_id)
+        if account is None or account.retired:
+            return {"logged_in": False, "detail": "account missing"}
+        local = await asyncio.to_thread(verify_login, account.codex_home)
+        if local.get("logged_in") is not True:
+            return local
+        if self._quota_reader is None:
+            return {
+                **local,
+                "logged_in": None,
+                "live_verified": False,
+                "detail": "live account verification unavailable",
+            }
+        try:
+            await self._quota_reader(account.codex_home)
+        except Exception as exc:
+            detail = str(exc)
+            if is_auth_failure(detail):
+                return {
+                    **local,
+                    "logged_in": False,
+                    "live_verified": True,
+                    "detail": "live account authentication was rejected",
+                }
+            return {
+                **local,
+                "logged_in": None,
+                "live_verified": False,
+                "detail": "live account verification temporarily unavailable",
+            }
+        return {
+            **local,
+            "logged_in": True,
+            "live_verified": True,
+            "detail": "ok",
+        }
 
     async def select_quota_alternative(
         self,
@@ -650,62 +753,151 @@ class CodexPool:
         return self.select(exclude=excluded)
 
     def cached_quota_for_home(self, codex_home: str) -> dict | None:
-        """Return the latest quota snapshot populated by ``fetch_quota``."""
+        """Return the latest selection snapshot for one account home."""
 
         account_id = self.account_id_for_home(codex_home)
-        if not account_id or not isinstance(self._quota_cache, dict):
+        if not account_id:
             return None
-        row = self._quota_cache.get(account_id)
-        quota = row.get("quota") if isinstance(row, dict) else None
-        return quota if isinstance(quota, dict) else None
+        for cache in (self._selection_quota_cache, self._quota_cache):
+            if not isinstance(cache, dict):
+                continue
+            row = cache.get(account_id)
+            quota = row.get("quota") if isinstance(row, dict) else None
+            if isinstance(quota, dict):
+                return quota
+        return None
 
 
 # ---------------------------------------------------------------------------
 # Quota helpers
 # ---------------------------------------------------------------------------
 
-def _read_quota_from_rollout(codex_home: str) -> dict | None:
-    """Parse the newest available rate_limits snapshot across rollouts."""
+def _read_quota_from_rollout(
+    codex_home: str,
+    *,
+    min_event_timestamp: float | None = None,
+) -> dict | None:
+    """Parse the newest rate_limits event across an account's rollouts.
+
+    Session migration changes the destination file's mtime without changing
+    the embedded events. Read only the last valid quota event in each JSONL,
+    then compare those events by their own timestamps. Missing or malformed
+    event timestamps fall back to mtime for compatibility with older files.
+    When a login activation cutoff is present, events without a valid embedded
+    timestamp are rejected: a migrated old session's fresh mtime must never
+    make its previous identity's quota look current.
+    """
+    if min_event_timestamp is not None and (
+        not isinstance(min_event_timestamp, (int, float))
+        or isinstance(min_event_timestamp, bool)
+        or not math.isfinite(float(min_event_timestamp))
+    ):
+        return None
     sessions_dir = Path(codex_home) / "sessions"
     if not sessions_dir.is_dir():
         return None
 
-    candidates: list[tuple[float, Path]] = []
+    latest_key: tuple[float, str] | None = None
+    latest_quota: dict | None = None
     for path in sessions_dir.glob("*/*/*/rollout-*.jsonl"):
         try:
-            candidates.append((path.stat().st_mtime, path))
+            fallback_mtime = path.stat().st_mtime
         except OSError:
             continue
-    if not candidates:
-        return None
-
-    for _mtime, path in sorted(
-        candidates, key=lambda candidate: candidate[0], reverse=True,
-    ):
-        found = None
         try:
-            with path.open() as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or '"rate_limits"' not in line:
-                        continue
-                    try:
-                        event = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    payload = event.get("payload") or {}
-                    if payload.get("type") != "token_count":
-                        continue
-                    rate_limits = payload.get("rate_limits")
-                    if isinstance(rate_limits, dict):
-                        found = rate_limits
+            candidate = _latest_quota_event_in_rollout(
+                path,
+                fallback_mtime,
+                min_event_timestamp=min_event_timestamp,
+            )
         except OSError:
             continue
+        if candidate is None:
+            continue
+        event_timestamp, quota = candidate
+        candidate_key = (event_timestamp, str(path))
+        if latest_key is None or candidate_key > latest_key:
+            latest_key = candidate_key
+            latest_quota = quota
+    return latest_quota
 
-        quota = _normalize_rate_limits(found)
-        if quota is not None:
-            return quota
+
+def _latest_quota_event_in_rollout(
+    path: Path,
+    fallback_mtime: float,
+    *,
+    min_event_timestamp: float | None = None,
+) -> tuple[float, dict] | None:
+    """Read one rollout from its tail and return its last usable snapshot."""
+
+    for raw_line in _iter_rollout_lines_reverse(path):
+        if not raw_line or b'"rate_limits"' not in raw_line:
+            continue
+        try:
+            event = json.loads(raw_line)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if not isinstance(event, dict):
+            continue
+        payload = event.get("payload") or {}
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("type") != "token_count":
+            continue
+        quota = _normalize_rate_limits(payload.get("rate_limits"))
+        if quota is None:
+            continue
+        event_timestamp = _rollout_event_timestamp(event)
+        if min_event_timestamp is not None and (
+            event_timestamp is None
+            or event_timestamp <= min_event_timestamp
+        ):
+            continue
+        return (
+            fallback_mtime if event_timestamp is None else event_timestamp,
+            quota,
+        )
     return None
+
+
+def _iter_rollout_lines_reverse(
+    path: Path, *, chunk_size: int = 64 * 1024,
+) -> Iterator[bytes]:
+    """Yield JSONL lines newest-first without loading a rollout into memory."""
+
+    with path.open("rb") as stream:
+        stream.seek(0, os.SEEK_END)
+        position = stream.tell()
+        remainder = b""
+        while position > 0:
+            read_size = min(chunk_size, position)
+            position -= read_size
+            stream.seek(position)
+            parts = (stream.read(read_size) + remainder).split(b"\n")
+            remainder = parts[0]
+            yield from reversed(parts[1:])
+        if remainder:
+            yield remainder
+
+
+def _rollout_event_timestamp(event: dict) -> float | None:
+    """Convert a native rollout event timestamp to Unix seconds."""
+
+    value = event.get("timestamp")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        timestamp = float(value)
+        if not math.isfinite(timestamp):
+            return None
+        return timestamp / 1000 if timestamp > 10_000_000_000 else timestamp
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
 
 
 def _value(data: dict, camel: str, snake: str):
@@ -729,17 +921,21 @@ def _normalize_rate_limits(snapshot: dict | None) -> dict | None:
     reached_type = _value(
         snapshot, "rateLimitReachedType", "rate_limit_reached_type"
     )
-    if not (primary or secondary or plan_type is not None or reached_type is not None):
+    primary_used = _value(primary, "usedPercent", "used_percent")
+    secondary_used = _value(secondary, "usedPercent", "used_percent")
+    if (
+        primary_used is None
+        and secondary_used is None
+        and reached_type is None
+    ):
         return None
     return {
-        "primary_used_percent": _value(primary, "usedPercent", "used_percent"),
+        "primary_used_percent": primary_used,
         "primary_window_minutes": _value(
             primary, "windowDurationMins", "window_minutes"
         ),
         "primary_resets_at": _value(primary, "resetsAt", "resets_at"),
-        "secondary_used_percent": _value(
-            secondary, "usedPercent", "used_percent"
-        ),
+        "secondary_used_percent": secondary_used,
         "secondary_window_minutes": _value(
             secondary, "windowDurationMins", "window_minutes"
         ),

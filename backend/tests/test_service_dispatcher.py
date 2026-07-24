@@ -2,6 +2,7 @@
 import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+from sqlalchemy import select
 
 from backend.services.dispatcher import GlobalDispatcher
 from backend.models.instance import Instance
@@ -43,6 +44,20 @@ async def test_status_not_running(db_factory):
     s = d.status()
     assert s["running"] is False
     assert s["active_tasks"] == {}
+
+
+@pytest.mark.asyncio
+async def test_pause_dispatching_does_not_stop_dispatcher(db_factory):
+    d = _make_dispatcher(db_factory)
+    d._running = True
+
+    await d.pause_dispatching()
+
+    assert d.status()["running"] is True
+    assert d.status()["paused"] is True
+
+    d.resume_dispatching()
+    assert d.status()["paused"] is False
 
 
 @pytest.mark.asyncio
@@ -110,7 +125,6 @@ async def test_ensure_instances_creates_workers(db_factory):
         await d._ensure_instances()
 
     async with db_factory() as db:
-        from sqlalchemy import select
         result = await db.execute(select(Instance))
         instances = list(result.scalars().all())
     assert len(instances) == 3
@@ -138,6 +152,28 @@ async def test_ensure_instances_skips_if_enough(db_factory):
         result = await db.execute(select(Instance))
         instances = list(result.scalars().all())
     assert len(instances) == 2
+
+
+@pytest.mark.asyncio
+async def test_ensure_instances_ignores_terminal_workers(db_factory):
+    """Startup replenishes workers even when terminal rows exceed the cap."""
+    d = _make_dispatcher(db_factory)
+
+    async with db_factory() as db:
+        for i in range(9):
+            status = "error" if i < 8 else "stopped"
+            db.add(Instance(name=f"old-worker-{i + 1}", status=status))
+        await db.commit()
+
+    with patch("backend.services.dispatcher.settings") as mock_settings:
+        mock_settings.max_concurrent_instances = 8
+        await d._ensure_instances()
+
+    async with db_factory() as db:
+        result = await db.execute(select(Instance))
+        instances = list(result.scalars().all())
+    assert sum(1 for i in instances if i.status == "idle") == 8
+    assert sum(1 for i in instances if i.status in ("idle", "running")) == 8
 
 
 @pytest.mark.asyncio
@@ -2996,7 +3032,7 @@ async def test_clear_task_queue_drops_pending_messages(db_factory):
             prompt=f"msg {i}", source="user",
         ))
 
-    cleared = dispatcher.clear_task_queue(1)
+    cleared = await dispatcher.clear_task_queue(1)
 
     assert cleared == 3
     assert q.empty()
@@ -3006,7 +3042,85 @@ async def test_clear_task_queue_drops_pending_messages(db_factory):
 async def test_clear_task_queue_no_queue_returns_zero(db_factory):
     """clear_task_queue on a task with no queue is a no-op returning 0."""
     dispatcher = _make_dispatcher(db_factory)
-    assert dispatcher.clear_task_queue(999) == 0
+    assert await dispatcher.clear_task_queue(999) == 0
+
+
+@pytest.mark.asyncio
+async def test_clear_cancels_message_dequeued_before_inflight_registration(
+    db_factory,
+):
+    """A stop-session clear invalidates the consumer's unclaimed handoff."""
+    dispatcher = _make_dispatcher(db_factory)
+    process_message = AsyncMock()
+    dispatcher._process_queued_message = process_message
+
+    claim_started = asyncio.Event()
+    release_claim = asyncio.Event()
+    claim_finished = asyncio.Event()
+    original_claim = dispatcher._claim_dequeued_message
+
+    async def delayed_claim(task_id, msg):
+        claim_started.set()
+        await release_claim.wait()
+        claimed = await original_claim(task_id, msg)
+        claim_finished.set()
+        return claimed
+
+    dispatcher._claim_dequeued_message = AsyncMock(side_effect=delayed_claim)
+
+    await dispatcher.enqueue_message(1, "cancel after dequeue")
+    await asyncio.wait_for(claim_started.wait(), timeout=1)
+
+    cleared = await dispatcher.clear_task_queue(1)
+    assert cleared == 1
+    assert await dispatcher.pending_task_start_ids() == set()
+
+    release_claim.set()
+    await asyncio.wait_for(claim_finished.wait(), timeout=1)
+    await asyncio.sleep(0)
+
+    process_message.assert_not_awaited()
+    worker = dispatcher._task_queue_workers.get(1)
+    if worker and not worker.done():
+        worker.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker
+
+
+@pytest.mark.asyncio
+async def test_clear_preserves_registered_inflight_message_blocker(db_factory):
+    """Queue clearing cannot hide work that already owns an in-flight claim."""
+    dispatcher = _make_dispatcher(db_factory)
+    process_started = asyncio.Event()
+    release_process = asyncio.Event()
+
+    async def process_message(_task_id, _msg):
+        process_started.set()
+        await release_process.wait()
+
+    dispatcher._process_queued_message = AsyncMock(side_effect=process_message)
+
+    await dispatcher.enqueue_message(1, "already in flight")
+    await asyncio.wait_for(process_started.wait(), timeout=1)
+
+    cleared = await dispatcher.clear_task_queue(1)
+
+    assert cleared == 0
+    assert dispatcher._task_queue_inflight == {1: 1}
+    assert await dispatcher.pending_task_start_ids() == {1}
+
+    release_process.set()
+    for _ in range(20):
+        if not await dispatcher.pending_task_start_ids():
+            break
+        await asyncio.sleep(0.01)
+    assert await dispatcher.pending_task_start_ids() == set()
+
+    worker = dispatcher._task_queue_workers.get(1)
+    if worker and not worker.done():
+        worker.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker
 
 
 class TestResolveTimeout:
@@ -3431,6 +3545,102 @@ async def _setup_queued_msg_two_idle(db_factory, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_queued_resume_waits_at_maintenance_gate_and_stays_blocking(
+    db_factory, monkeypatch,
+):
+    d, _id1, _id2, task_id, _msg = await _setup_queued_msg_two_idle(
+        db_factory, monkeypatch
+    )
+    launched = asyncio.Event()
+
+    async def launch(**_kwargs):
+        launched.set()
+        return 12345
+
+    d.instance_manager.launch = AsyncMock(side_effect=launch)
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+        task.status = "completed"
+        await db.commit()
+    await d.pause_dispatching()
+    await d.enqueue_message(task_id, "continue", source="monitor:complete")
+
+    await asyncio.sleep(0.05)
+    assert not launched.is_set()
+    assert await d.pending_task_start_ids() == {task_id}
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+        assert task.status == "completed"
+
+    d.resume_dispatching()
+    await asyncio.wait_for(launched.wait(), timeout=1)
+
+    for _ in range(20):
+        if not await d.pending_task_start_ids():
+            break
+        await asyncio.sleep(0.01)
+    assert await d.pending_task_start_ids() == set()
+
+    worker = d._task_queue_workers.get(task_id)
+    if worker and not worker.done():
+        worker.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker
+
+
+@pytest.mark.asyncio
+async def test_pause_wins_after_queued_resume_preparation_before_launch(
+    db_factory, monkeypatch,
+):
+    """Late admission closes the exact preparation -> executing race."""
+    d, _id1, _id2, task_id, _msg = await _setup_queued_msg_two_idle(
+        db_factory, monkeypatch
+    )
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+        task.status = "completed"
+        await db.commit()
+
+    preparation_reached = asyncio.Event()
+    release_preparation = asyncio.Event()
+    launched = asyncio.Event()
+
+    async def resolve(*_args, **_kwargs):
+        preparation_reached.set()
+        await release_preparation.wait()
+        return None
+
+    async def launch(**_kwargs):
+        launched.set()
+        return 12345
+
+    d._resolve_resume_config_dir = AsyncMock(side_effect=resolve)
+    d.instance_manager.launch = AsyncMock(side_effect=launch)
+    await d.enqueue_message(task_id, "continue")
+    await asyncio.wait_for(preparation_reached.wait(), timeout=1)
+
+    await d.pause_dispatching()
+    release_preparation.set()
+    await asyncio.sleep(0.05)
+
+    assert not launched.is_set()
+    assert await d.pending_task_start_ids() == {task_id}
+    async with d.maintenance_shutdown_guard() as pending_ids:
+        assert pending_ids == {task_id}
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+        assert task.status == "completed"
+
+    d.resume_dispatching()
+    await asyncio.wait_for(launched.wait(), timeout=1)
+    worker = d._task_queue_workers.get(task_id)
+    if worker and not worker.done():
+        worker.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker
+
+
+@pytest.mark.asyncio
 async def test_queued_codex_busy_launch_rolls_back_status_and_temp_skills(
     db_factory, monkeypatch,
 ):
@@ -3507,6 +3717,39 @@ async def test_queued_message_skips_launching_instance(db_factory, monkeypatch):
     # The pre-existing claim on id1 is untouched; id2's transient claim is freed.
     assert id1 in d._launching_instances
     assert id2 not in d._launching_instances
+
+
+@pytest.mark.asyncio
+async def test_reserve_idle_instance_excludes_only_integer_running_keys(
+    db_factory,
+):
+    """Remote-worker lifecycle keys must never enter the integer SQL predicate.
+
+    SQLite silently accepts mixed values in ``Instance.id NOT IN (...)``, while
+    PostgreSQL/asyncpg rejects a string such as ``worker-42`` for an integer
+    bind parameter.
+    """
+    d = _make_dispatcher(db_factory)
+    remote_lifecycle = asyncio.get_running_loop().create_future()
+    d._running_tasks["worker-42"] = remote_lifecycle
+    instance = Instance(id=7, name="local-worker", status="idle")
+
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = instance
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=result)
+
+    try:
+        reserved, token = await d._reserve_idle_instance(db)
+
+        assert reserved is instance
+        assert token is not None
+        statement = db.execute.await_args.args[0]
+        assert "worker-42" not in repr(statement.compile().params)
+        await d._release_instance_reservation(instance.id, token)
+        assert not d._launching_instances
+    finally:
+        remote_lifecycle.cancel()
 
 
 @pytest.mark.asyncio

@@ -120,6 +120,8 @@ update_service = UpdateService(
     broadcaster=broadcaster,
     port=settings.port,
     project_dir=str(Path(__file__).resolve().parent.parent),
+    db_factory=async_session,
+    dispatcher=dispatcher,
 )
 
 # 分布式 Worker（可选，WORKER_ENABLED=true 且装了 boto3 才启用）
@@ -303,6 +305,42 @@ async def _recover_worker_relays():
         logger.exception("worker relay recovery failed")
 
 
+async def _recover_stale_worker_lifecycles():
+    """Make process-owned Worker transitions recoverable after a restart.
+
+    Lifecycle work runs in fire-and-forget tasks and cannot survive process
+    exit.  Leaving these rows in a busy state would hide retry/destroy actions
+    forever; move them to ``error`` while preserving instance ids and account
+    credentials for an idempotent operator retry.
+    """
+    from backend.models.worker import Worker
+
+    stale_statuses = (
+        "creating", "bootstrapping", "starting", "stopping", "destroying",
+    )
+    async with async_session() as db:
+        result = await db.execute(
+            select(Worker).where(Worker.status.in_(stale_statuses))
+        )
+        stale = result.scalars().all()
+        for worker in stale:
+            previous = worker.status
+            worker.status = "error"
+            worker.bootstrap_step = (
+                "destroy" if previous == "destroying" else "startup-recovery"
+            )
+            worker.bootstrap_error = (
+                f"Manager restarted while Worker was {previous}; "
+                "the interrupted lifecycle operation must be retried"
+            )
+        if stale:
+            await db.commit()
+            logger.warning(
+                "Recovered %d interrupted Worker lifecycle operation(s) to error",
+                len(stale),
+            )
+
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -339,6 +377,7 @@ async def lifespan(app: FastAPI):
     update_service.recover_from_status_file()
     await _reset_stale_discussion_agents()
     await _cleanup_stale_sub_agents()
+    await _recover_stale_worker_lifecycles()
     await _sync_tags()
     sub_agent_watcher.start()
     await _ensure_claude_warmup()

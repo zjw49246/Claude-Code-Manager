@@ -4,7 +4,8 @@ import logging
 import secrets
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import select, func, desc
+from sqlalchemy import and_, desc, func, or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config import settings
@@ -43,6 +44,54 @@ def _gh_login() -> str:
 
 router = APIRouter(prefix="/api/pr-monitor", tags=["pr-monitor"])
 webhook_router = APIRouter(prefix="/api/github", tags=["pr-monitor"])
+
+
+async def _find_processed_review(
+    db: AsyncSession,
+    repo_id: int,
+    pr_number: int,
+    head_sha: str,
+    delivery_id: str | None,
+) -> PRReview | None:
+    """Find an existing review for this commit or exact webhook delivery."""
+    duplicate_keys = [
+        and_(
+            PRReview.repo_id == repo_id,
+            PRReview.pr_number == pr_number,
+            PRReview.head_sha == head_sha,
+        )
+    ]
+    if delivery_id:
+        duplicate_keys.append(
+            and_(
+                PRReview.repo_id == repo_id,
+                PRReview.delivery_id == delivery_id,
+            )
+        )
+
+    result = await db.execute(
+        select(PRReview)
+        .where(or_(*duplicate_keys))
+        .order_by(desc(PRReview.id))
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+def _duplicate_review_response(
+    review: PRReview,
+    delivery_id: str | None,
+) -> dict:
+    same_delivery = bool(delivery_id and review.delivery_id == delivery_id)
+    return {
+        "status": "ignored",
+        "reason": (
+            "webhook delivery already processed"
+            if same_delivery
+            else "PR commit already reviewed"
+        ),
+        "review_id": review.id,
+    }
 
 
 @router.get("/webhook-info")
@@ -292,8 +341,38 @@ async def github_webhook(request: Request, db: AsyncSession = Depends(get_db)):
         return {"status": "ignored", "reason": f"self PR (gh login: {own_login})"}
 
     pr_number = pr.get("number")
+    head_sha = (pr.get("head", {}).get("sha") or "").strip().lower()
+    delivery_id = (request.headers.get("X-GitHub-Delivery", "") or "").strip() or None
+    repo_id = repo.id
+    repo_name = repo.repo_full_name
+
+    if not pr_number:
+        return {"status": "ignored", "reason": "missing PR number"}
+    if not head_sha:
+        return {"status": "ignored", "reason": "missing PR head SHA"}
+
     pr_title = pr.get("title", "")
     pr_url = pr.get("html_url", "")
+
+    # Fast-path idempotency check. The database uniqueness constraints below
+    # are still required because two deliveries can race between this SELECT
+    # and the INSERT performed by create_pr_review_task.
+    processed_review = await _find_processed_review(
+        db,
+        repo_id,
+        pr_number,
+        head_sha,
+        delivery_id,
+    )
+    if processed_review:
+        logger.info(
+            "Ignored duplicate PR webhook for %s#%d at %s (review %d)",
+            repo_name,
+            pr_number,
+            head_sha,
+            processed_review.id,
+        )
+        return _duplicate_review_response(processed_review, delivery_id)
 
     # Dedup: check for existing reviews (any non-terminal status)
     active_result = await db.execute(
@@ -334,12 +413,38 @@ async def github_webhook(request: Request, db: AsyncSession = Depends(get_db)):
     # Import and call service
     from backend.services.pr_review_service import create_pr_review_task
 
-    review = await create_pr_review_task(db, repo, {
-        "number": pr_number,
-        "title": pr_title,
-        "author": pr_author,
-        "url": pr_url,
-    })
+    try:
+        review = await create_pr_review_task(db, repo, {
+            "number": pr_number,
+            "head_sha": head_sha,
+            "delivery_id": delivery_id,
+            "title": pr_title,
+            "author": pr_author,
+            "url": pr_url,
+        })
+    except IntegrityError:
+        # A concurrent delivery may have inserted the same idempotency key
+        # after our fast-path SELECT. Roll back supersede/task changes from
+        # this transaction and return the winner instead of surfacing a 500.
+        await db.rollback()
+        processed_review = await _find_processed_review(
+            db,
+            repo_id,
+            pr_number,
+            head_sha,
+            delivery_id,
+        )
+        if processed_review:
+            logger.info(
+                "Ignored concurrently duplicated PR webhook for %s#%d at %s "
+                "(review %d)",
+                repo_name,
+                pr_number,
+                head_sha,
+                processed_review.id,
+            )
+            return _duplicate_review_response(processed_review, delivery_id)
+        raise
 
     if superseded_task_ids:
         # 显式 commit：不依赖 create_pr_review_task 内部恰好提交了 superseded

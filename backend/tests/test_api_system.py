@@ -1,4 +1,6 @@
 """Tests for System API endpoints."""
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 from sqlalchemy import update
 
@@ -50,6 +52,48 @@ async def test_stats_running_instances(client, session_factory):
     resp = await client.get("/api/system/stats")
     data = resp.json()
     assert data["running_instances"] >= 1
+
+
+# === /api/system/update tests ===
+
+
+@pytest.mark.asyncio
+async def test_update_dry_run_forwards_force_and_branch(client, monkeypatch):
+    service = MagicMock()
+    service.dry_run = AsyncMock(return_value={"has_updates": False})
+    monkeypatch.setattr("backend.main.update_service", service)
+
+    resp = await client.post(
+        "/api/system/update",
+        json={"dry_run": True, "force": True, "branch": "release/test"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json() == {"has_updates": False}
+    service.dry_run.assert_awaited_once_with(branch="release/test", force=True)
+
+
+@pytest.mark.asyncio
+async def test_update_returns_conflict_when_active_tasks_block_start(client, monkeypatch):
+    service = MagicMock()
+    service.start_update = AsyncMock(return_value={
+        "error": "当前有 1 个任务正在运行，请等待任务完成后再更新",
+        "update_blocked": True,
+    })
+    monkeypatch.setattr("backend.main.update_service", service)
+
+    resp = await client.post(
+        "/api/system/update",
+        json={"force": True, "branch": "main"},
+    )
+
+    assert resp.status_code == 409
+    assert "当前有 1 个任务正在运行" in resp.json()["detail"]
+    service.start_update.assert_awaited_once_with(
+        skip_frontend_build=False,
+        force=True,
+        branch="main",
+    )
 
 
 # === /api/system/config tests ===

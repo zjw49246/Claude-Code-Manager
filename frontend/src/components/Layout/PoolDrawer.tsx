@@ -372,7 +372,7 @@ function CodexAccountCard({ account, preferred, onClearCooldown, onSetPreferred,
             <span>{account.quota_error === 'no_rollout_data'
               ? '暂无额度数据（使用后自动更新）'
               : account.quota_error === 'live_unavailable'
-                ? '实时额度查询失败，暂无历史数据'
+                ? '实时额度查询失败，无法确认当前额度'
                 : (account.quota_error || '未知')}</span>
             <button
               onClick={onRetryUsage}
@@ -736,6 +736,7 @@ export function PoolDrawer() {
   const [codexStatus, setCodexStatus] = useState<CodexPoolUsageStatus | null>(null);
   const [codexLoading, setCodexLoading] = useState(false);
   const [codexError, setCodexError] = useState<string | null>(null);
+  const codexUsageRequestSeq = useRef(0);
 
   useEffect(() => {
     api.getPoolStatus()
@@ -758,22 +759,40 @@ export function PoolDrawer() {
     }
   }, []);
 
-  const loadCodexUsage = useCallback(async (force?: boolean) => {
+  const loadCodexUsage = useCallback(async (force = true) => {
+    const requestSeq = ++codexUsageRequestSeq.current;
     setCodexLoading(true);
     setCodexError(null);
-    try {
-      setCodexStatus(await api.getCodexPoolUsage(force));
-    } catch (e) {
-      setCodexError(e instanceof Error ? e.message : '加载失败');
-    } finally {
-      setCodexLoading(false);
+    if (force) {
+      // A previous account snapshot is not evidence of the current quota.
+      // Hide it while the live-only request is pending or if that request fails.
+      setCodexStatus(null);
     }
+    try {
+      const status = await api.getCodexPoolUsage(force);
+      if (requestSeq === codexUsageRequestSeq.current) {
+        setCodexStatus(status);
+      }
+    } catch (e) {
+      if (requestSeq === codexUsageRequestSeq.current) {
+        setCodexError(e instanceof Error ? e.message : '加载失败');
+      }
+    } finally {
+      if (requestSeq === codexUsageRequestSeq.current) {
+        setCodexLoading(false);
+      }
+    }
+  }, []);
+
+  useEffect(() => () => {
+    // Invalidate any request still in flight when the drawer component leaves.
+    codexUsageRequestSeq.current += 1;
   }, []);
 
   useEffect(() => {
     if (open) {
       if (tab === 'claude') loadClaudeUsage();
-      else loadCodexUsage();
+      else loadCodexUsage(true);
     }
   }, [open, tab, loadClaudeUsage, loadCodexUsage]);
 
@@ -916,7 +935,10 @@ export function PoolDrawer() {
   return (
     <>
       <button
-        onClick={() => setOpen(true)}
+        onClick={() => {
+          if (!claudeEnabled && codexEnabled) setTab('codex');
+          setOpen(true);
+        }}
         className="flex items-center gap-1 px-2 py-1 rounded bg-gray-800 border border-gray-700 hover:border-indigo-500 transition-colors"
         title="账号池额度"
       >
@@ -1041,7 +1063,7 @@ export function PoolDrawer() {
                   {codexLoading && !codexStatus && <div className="text-xs text-gray-500">加载中…</div>}
                   {codexStatus?.accounts.map((a) => (
                     <CodexAccountCard
-                      key={a.id}
+                      key={`${a.id}:${a.codex_home}`}
                       account={a}
                       preferred={codexStatus.preferred ?? null}
                       onClearCooldown={handleCodexClearCooldown}

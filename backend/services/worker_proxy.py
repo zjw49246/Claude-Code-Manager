@@ -14,9 +14,11 @@ import logging
 import httpx
 from fastapi import HTTPException
 
+from backend.config import settings
 from backend.models.project import Project
 from backend.models.task import Task
 from backend.models.worker import Worker
+from backend.services.ssh_executor import SSHExecutor, worker_known_hosts_path
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +38,19 @@ class WorkerProxy:
     @staticmethod
     def _headers(worker: Worker) -> dict:
         return {"Authorization": f"Bearer {worker.auth_token}"}
+
+    @staticmethod
+    def _ssh(worker: Worker) -> SSHExecutor:
+        """Build every WorkerProxy SSH path with per-instance host trust."""
+        return SSHExecutor(
+            host=worker.private_ip,
+            user=worker.ssh_user,
+            key_path=worker.ssh_key_path or settings.worker_ssh_key_path,
+            known_hosts_path=(
+                worker_known_hosts_path(worker.cloud_instance_id)
+                if worker.cloud_instance_id else None
+            ),
+        )
 
     async def get_worker(self, worker_id: int) -> Worker | None:
         async with self.db_factory() as db:
@@ -83,15 +98,10 @@ class WorkerProxy:
                 # 纯本地项目：先把整个项目目录（含 .git 和未提交改动）rsync 到
                 # worker 同路径，worker 的 _init_local_repo 见 .git 存在即跳过 init
                 import os as _os
-                from backend.config import settings as _settings
-                from backend.services.ssh_executor import SSHExecutor as _SSH
                 path = _os.path.expanduser(project.local_path).rstrip("/")
                 if not _os.path.isdir(path):
                     raise RuntimeError(f"项目目录不存在: {path}")
-                ssh = _SSH(
-                    host=worker.private_ip, user=worker.ssh_user,
-                    key_path=worker.ssh_key_path or _settings.worker_ssh_key_path,
-                )
+                ssh = self._ssh(worker)
                 await ssh.run(f"mkdir -p {path}")
                 await ssh.rsync_to(path + "/", path + "/", excludes=[], timeout=1200)
 
@@ -196,13 +206,7 @@ class WorkerProxy:
 
     async def push_files(self, worker: Worker, paths: list[str]):
         """chat 附件推到 worker 同一绝对路径（worker 上 Claude 用 Read 读）。"""
-        from backend.config import settings
-        from backend.services.ssh_executor import SSHExecutor
-        ssh = SSHExecutor(
-            host=worker.private_ip,
-            user=worker.ssh_user,
-            key_path=worker.ssh_key_path or settings.worker_ssh_key_path,
-        )
+        ssh = self._ssh(worker)
         for path in paths:
             await ssh.copy_file(path, path)
 
@@ -219,15 +223,32 @@ class WorkerProxy:
                     method, self._api(worker, path),
                     headers=self._headers(worker), json=body,
                 )
-            except httpx.ConnectError:
-                raise HTTPException(503, f"无法连接到 Worker {worker.name}，请检查 Worker 状态")
-        if r.status_code >= 400:
-            detail = r.text[:500]
-            try:
-                detail = r.json().get("detail", detail)
-            except Exception:
-                pass
-            raise HTTPException(r.status_code, f"Worker: {detail}")
+            except (httpx.TimeoutException, TimeoutError) as exc:
+                raise HTTPException(
+                    503,
+                    f"Worker {worker.name} 请求超时，请稍后重试",
+                ) from exc
+            except (httpx.RequestError, OSError) as exc:
+                raise HTTPException(
+                    502,
+                    f"Worker 网关连接失败，无法连接到 Worker {worker.name}",
+                ) from exc
+
+        # Worker token is an internal Manager→Worker credential.  Never
+        # propagate a remote 401/403: doing so makes the frontend treat the
+        # Manager login as expired.  Other upstream failures are gateway
+        # errors too, and their response bodies may contain Worker internals.
+        if r.status_code in (401, 403):
+            raise HTTPException(
+                502,
+                f"内部 Worker 认证失败（远端 HTTP {r.status_code}），"
+                "请重试 Worker 引导以同步认证凭据",
+            )
+        if not 200 <= r.status_code < 300:
+            raise HTTPException(
+                502,
+                f"Worker 上游请求失败（远端 HTTP {r.status_code}）",
+            )
         try:
             return r.json()
         except Exception:

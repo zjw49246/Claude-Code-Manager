@@ -387,6 +387,8 @@ export interface PRReview {
   id: number;
   repo_id: number;
   pr_number: number;
+  head_sha: string | null;
+  delivery_id: string | null;
   pr_title: string;
   pr_author: string;
   pr_url: string;
@@ -478,9 +480,11 @@ export type CodexLoginStatusName =
   | 'awaiting_otp'
   | 'verifying_otp'
   | 'finalizing'
+  | 'cancelling'
   | 'success'
   | 'failed'
-  | 'expired';
+  | 'expired'
+  | 'cancelled';
 
 export interface CodexLoginStatus {
   status: CodexLoginStatusName;
@@ -500,6 +504,53 @@ export interface TeamUser {
   avatar_url: string;
 }
 
+export type WorkerProvider = 'codex' | 'claude';
+
+export interface WorkerAccountInput {
+  email: string;
+  provider?: WorkerProvider;
+  token?: string;
+  password?: string;
+  login_method?: string;
+}
+
+export interface WorkerAccountSummary {
+  email: string;
+  provider?: WorkerProvider;
+  status: string;
+}
+
+export interface WorkerPoolUsageWindow {
+  utilization: number;
+  resets_at: string | null;
+}
+
+export interface WorkerPoolAccount {
+  id: string;
+  email?: string | null;
+  enabled: boolean;
+  available: boolean;
+  cooldown_remaining?: number;
+  subscription_type?: string | null;
+  plan_type?: string | null;
+  usage?: {
+    five_hour?: WorkerPoolUsageWindow | null;
+    seven_day?: WorkerPoolUsageWindow | null;
+    seven_day_opus?: WorkerPoolUsageWindow | null;
+  } | null;
+  usage_error?: string | null;
+  quota?: CodexPoolQuota | null;
+  quota_error?: string | null;
+}
+
+export interface WorkerPoolStatus {
+  enabled?: boolean;
+  provider?: WorkerProvider;
+  total?: number;
+  available?: number;
+  accounts: WorkerPoolAccount[];
+}
+
 export interface Worker {
   id: number;
   name: string;
@@ -512,7 +563,7 @@ export interface Worker {
   ssh_key_path: string | null;
   ccm_port: number;
   ccm_commit: string | null;
-  accounts: { email: string; status: string }[] | null;
+  accounts: WorkerAccountSummary[] | null;
   last_heartbeat: string | null;
   bootstrap_step: string | null;
   bootstrap_error: string | null;
@@ -795,7 +846,7 @@ export const api = {
   stopTaskSession: (id: number) =>
     request<{ ok: boolean; stopped?: boolean; cleared_messages?: number; note?: string }>(`/api/tasks/${id}/stop-session`, { method: 'POST' }),
   distillTask: (id: number, customInstruction?: string) =>
-    request<{ task_id: number; suggested_name: string; content: string }>(`/api/tasks/${id}/distill`, { method: 'POST', body: JSON.stringify({ custom_instruction: customInstruction || null }) }),
+    request<{ task_id: number; suggested_name: string; content: string; provider: string; model: string }>(`/api/tasks/${id}/distill`, { method: 'POST', body: JSON.stringify({ custom_instruction: customInstruction || null }) }),
   saveDistilledSkill: (taskId: number, data: { name: string; description?: string; content: string }) =>
     request<{ id: number; name: string; description: string; content: string }>(`/api/tasks/${taskId}/distill/save`, { method: 'POST', body: JSON.stringify(data) }),
   createTask: (data: { id?: number; worker_id?: number; title?: string; description?: string; project_id?: number; priority?: number; target_branch?: string; mode?: string; todo_file_path?: string; max_iterations?: number; goal_condition?: string; goal_max_turns?: number; goal_evaluator_model?: string; image_paths?: string[]; file_paths?: string[]; attachments?: { url: string; name: string; is_image: boolean }[]; secret_ids?: number[]; provider?: string; model?: string; effort_level?: string; thinking_budget?: number | null; timeout_hours?: number | null; enable_workflows?: boolean; enabled_skills?: Record<string, boolean>; starred?: boolean; clone_from_task_id?: number }) =>
@@ -1019,21 +1070,28 @@ export const api = {
 
   // Workers (distributed)
   listWorkers: () => request<Worker[]>('/api/workers'),
-  addWorkerAccount: (workerId: number, data: { email: string; token: string; login_method?: string }) =>
-    request<{ ok: boolean; status: string; slot?: string }>(`/api/workers/${workerId}/pool/add`, { method: 'POST', body: JSON.stringify(data) }),
-  workerAddStatus: (workerId: number, email: string) =>
-    request<{ status: string; detail?: string }>(`/api/workers/${workerId}/pool/add/${encodeURIComponent(email)}`),
-  deleteWorkerAccount: (workerId: number, accountId: string) =>
-    request<{ ok: boolean }>(`/api/workers/${workerId}/pool/${accountId}`, { method: 'DELETE' }),
-  getWorkerPoolUsage: (id: number) =>
-    request<any>(`/api/workers/${id}/pool/usage`),
+  addWorkerAccount: (workerId: number, data: WorkerAccountInput) =>
+    request<{ ok: boolean; status: string; slot?: string; provider?: WorkerProvider; account_id?: string }>(`/api/workers/${workerId}/pool/add`, { method: 'POST', body: JSON.stringify(data) }),
+  workerAddStatus: (workerId: number, email: string, provider: WorkerProvider = 'codex') =>
+    request<CodexLoginStatus & { provider?: WorkerProvider }>(`/api/workers/${workerId}/pool/add/${encodeURIComponent(email)}?provider=${provider}`),
+  submitWorkerLoginOtp: (workerId: number, attemptId: string, challengeId: string, code: string) =>
+    request<{ ok: boolean; status: CodexLoginStatusName }>(`/api/workers/${workerId}/pool/login-attempts/${encodeURIComponent(attemptId)}/otp`, {
+      method: 'POST',
+      body: JSON.stringify({ challenge_id: challengeId, code }),
+    }),
+  cancelWorkerLogin: (workerId: number, attemptId: string) =>
+    request<{ ok: boolean; status: string }>(`/api/workers/${workerId}/pool/login-attempts/${encodeURIComponent(attemptId)}`, { method: 'DELETE' }),
+  deleteWorkerAccount: (workerId: number, accountId: string, provider: WorkerProvider = 'codex') =>
+    request<{ ok: boolean }>(`/api/workers/${workerId}/pool/${encodeURIComponent(accountId)}?provider=${provider}`, { method: 'DELETE' }),
+  getWorkerPoolUsage: (id: number, provider: WorkerProvider = 'codex') =>
+    request<WorkerPoolStatus>(`/api/workers/${id}/pool/usage?provider=${provider}`),
   getWorkerRuntimeSettings: (id: number) =>
     request<RuntimeSettings>(`/api/workers/${id}/settings/runtime`),
   updateWorkerRuntimeSettings: (id: number, data: Partial<RuntimeSettings>) =>
     request<RuntimeSettings>(`/api/workers/${id}/settings/runtime`, { method: 'PUT', body: JSON.stringify(data) }),
-  getWorkerPool: (id: number) =>
-    request<{ enabled: boolean; total: number; available: number; accounts: { id: string; email: string | null; enabled: boolean; available: boolean; cooldown_remaining: number }[] }>(`/api/workers/${id}/pool`),
-  createWorker: (data: { accounts: { email: string; token?: string; login_method?: string }[]; name?: string }) =>
+  getWorkerPool: (id: number, provider: WorkerProvider = 'codex') =>
+    request<WorkerPoolStatus>(`/api/workers/${id}/pool?provider=${provider}`),
+  createWorker: (data: { accounts: WorkerAccountInput[]; name?: string }) =>
     request<Worker>('/api/workers', { method: 'POST', body: JSON.stringify(data) }),
   getWorker: (id: number) => request<Worker>(`/api/workers/${id}`),
   getWorkerLogs: (id: number) => request<{ id: number; bootstrap_log: string | null }>(`/api/workers/${id}/logs`),

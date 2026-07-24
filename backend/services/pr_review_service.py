@@ -135,6 +135,8 @@ async def create_pr_review_task(
     review = PRReview(
         repo_id=repo.id,
         pr_number=pr_data["number"],
+        head_sha=pr_data.get("head_sha"),
+        delivery_id=pr_data.get("delivery_id"),
         pr_title=pr_data["title"],
         pr_author=pr_data["author"],
         pr_url=pr_data["url"],

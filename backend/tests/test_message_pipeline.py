@@ -851,6 +851,43 @@ async def test_chat_send_broadcasts_user_message(client, session_factory):
 
 
 @pytest.mark.asyncio
+async def test_chat_send_returns_conflict_after_shutdown_commit(
+    client, session_factory,
+):
+    from sqlalchemy import update
+    from backend.services.dispatcher import TaskStartPausedError
+
+    create_resp = await client.post("/api/tasks", json={
+        "title": "T", "description": "d", "target_repo": "/tmp",
+    })
+    task_id = create_resp.json()["id"]
+    async with session_factory() as db:
+        await db.execute(
+            update(Task).where(Task.id == task_id).values(
+                session_id="test-session", last_cwd="/tmp"
+            )
+        )
+        await db.commit()
+
+    dispatcher = MagicMock()
+    dispatcher.enqueue_message = AsyncMock(
+        side_effect=TaskStartPausedError("shutdown committed")
+    )
+    broadcaster = MagicMock()
+    broadcaster.broadcast = AsyncMock()
+    with (
+        patch("backend.main.dispatcher", dispatcher),
+        patch("backend.main.broadcaster", broadcaster),
+    ):
+        resp = await client.post(
+            f"/api/tasks/{task_id}/chat", json={"message": "too late"}
+        )
+
+    assert resp.status_code == 409
+    assert "重连后重试" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
 async def test_context_usage_window_only_merges_into_stored(client, session_factory):
     """result 事件只带 context_window（usage 数字是累计值已被剥离）——
     应合并进已存的 per-request usage，而不是整体覆盖。"""

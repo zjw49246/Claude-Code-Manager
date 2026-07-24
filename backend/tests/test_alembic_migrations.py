@@ -220,6 +220,10 @@ class TestLegacyMigration:
         assert "sort_order" in project_cols
         assert "tags" in project_cols
 
+        pr_review_cols = _get_table_columns(engine, "pr_reviews")
+        assert "head_sha" in pr_review_cols
+        assert "delivery_id" in pr_review_cols
+
         # Verify existing data survived
         with engine.connect() as conn:
             result = conn.execute(text("SELECT title FROM tasks WHERE id = 1"))
@@ -291,6 +295,16 @@ class TestFreshMigration:
         assert "sort_order" in project_cols
         assert "tags" in project_cols
 
+        pr_review_cols = _get_table_columns(engine, "pr_reviews")
+        assert "head_sha" in pr_review_cols
+        assert "delivery_id" in pr_review_cols
+        unique_column_sets = {
+            tuple(constraint["column_names"])
+            for constraint in inspect(engine).get_unique_constraints("pr_reviews")
+        }
+        assert ("repo_id", "pr_number", "head_sha") in unique_column_sets
+        assert ("repo_id", "delivery_id") in unique_column_sets
+
         # Verify alembic_version at head
         with engine.connect() as conn:
             version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
@@ -337,6 +351,46 @@ class TestAlreadyMigratedDb:
         with engine.connect() as conn:
             version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
             assert version == _get_head_revision(cfg)
+        engine.dispose()
+
+    def test_idempotency_migration_preserves_existing_pr_reviews(self, tmp_path):
+        db_path = str(tmp_path / "existing_pr_reviews.db")
+        cfg = _alembic_cfg(db_path)
+        _run_alembic(cfg, command.upgrade, "31fe767354b7")
+
+        engine = create_engine(f"sqlite:///{db_path}")
+        with engine.begin() as conn:
+            conn.execute(text("""
+                INSERT INTO monitored_repos (
+                    repo_full_name, enabled, auto_merge, webhook_secret,
+                    provider, default_branch, allowed_authors, status,
+                    created_at, updated_at
+                ) VALUES (
+                    'owner/repo', 1, 0, 'secret', 'codex', 'main', '[]',
+                    'active', '2026-07-22 00:00:00', '2026-07-22 00:00:00'
+                )
+            """))
+            for created_at in ("2026-07-22 00:00:00", "2026-07-22 00:01:00"):
+                conn.execute(text("""
+                    INSERT INTO pr_reviews (
+                        repo_id, pr_number, pr_title, pr_author, pr_url,
+                        status, created_at
+                    ) VALUES (
+                        1, 42, 'Title', 'alice',
+                        'https://github.com/owner/repo/pull/42',
+                        'approved', :created_at
+                    )
+                """), {"created_at": created_at})
+        engine.dispose()
+
+        _run_alembic(cfg, command.upgrade, "head")
+
+        engine = create_engine(f"sqlite:///{db_path}")
+        with engine.connect() as conn:
+            rows = conn.execute(text(
+                "SELECT head_sha, delivery_id FROM pr_reviews ORDER BY id"
+            )).fetchall()
+            assert rows == [(None, None), (None, None)]
         engine.dispose()
 
 
