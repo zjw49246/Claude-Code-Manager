@@ -470,6 +470,9 @@ cd frontend && npx tsc --noEmit
 | `test_lifecycle_failure_retry` / `test_lifecycle_failure_max_retries` | 失败重试/达到上限 |
 | `test_lifecycle_exception` | 异常标记 task failed |
 | `test_plan_phase` | plan 模式进入 plan_review |
+| `test_concurrent_task_consumers_reserve_distinct_idle_instances` | 不同 task 的 queued-message consumer 同时选 instance 时原子预留，分配到不同 idle worker |
+| `test_reserve_idle_instance_excludes_only_integer_running_keys` | 远端 Worker 的字符串 lifecycle key 不进入本地 `Instance.id` 整数 SQL 过滤 |
+| `test_instance_contention_requeues_exact_message` | 底层 `InstanceAlreadyRunningError` 防线触发时，原 `QueuedMessage` 重排队且不丢用户消息 |
 
 ##### `test_service_update.py` / `UpdateButton.test.tsx` — 安全更新与自动提醒
 
