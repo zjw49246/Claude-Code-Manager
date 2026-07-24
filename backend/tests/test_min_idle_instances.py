@@ -92,3 +92,33 @@ async def test_idempotent_across_polls(dispatcher, db_factory):
         await dispatcher._ensure_min_idle_instances()
         await dispatcher._ensure_min_idle_instances()
     assert len(await _all_instances(db_factory)) == 10
+
+
+@pytest.mark.asyncio
+async def test_terminal_instances_do_not_consume_cap(dispatcher, db_factory):
+    """Error/stopped history must not prevent replenishing idle capacity."""
+    await _seed(db_factory, ["error"] * 8 + ["stopped"])
+
+    with patch("backend.services.dispatcher.settings") as s:
+        s.max_concurrent_instances = 8
+        s.min_idle_instances = 2
+        await dispatcher._ensure_min_idle_instances()
+
+    instances = await _all_instances(db_factory)
+    assert sum(1 for i in instances if i.status == "idle") == 2
+    assert sum(1 for i in instances if i.status in ("idle", "running")) == 2
+
+
+@pytest.mark.asyncio
+async def test_terminal_instances_do_not_bypass_live_cap(dispatcher, db_factory):
+    """Top-up may replace terminal capacity but cannot exceed the live cap."""
+    await _seed(db_factory, ["running"] * 7 + ["error"] * 9)
+
+    with patch("backend.services.dispatcher.settings") as s:
+        s.max_concurrent_instances = 8
+        s.min_idle_instances = 2
+        await dispatcher._ensure_min_idle_instances()
+
+    instances = await _all_instances(db_factory)
+    assert sum(1 for i in instances if i.status == "idle") == 1
+    assert sum(1 for i in instances if i.status in ("idle", "running")) == 8

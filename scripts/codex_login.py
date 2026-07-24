@@ -774,17 +774,23 @@ def add_to_codex_pool(
 
     accounts = data.get("accounts", [])
     # Update if exists, else append
+    activated_at = time.time()
     existing = next((a for a in accounts if a["id"] == account_id), None)
     if existing:
         existing["email"] = email
         existing["codex_home"] = codex_home
         existing["enabled"] = True
+        existing["quota_valid_after"] = activated_at
+        existing.pop("retired", None)
+        existing.pop("cleanup_pending", None)
+        existing.pop("login_recovery_failed", None)
     else:
         accounts.append({
             "id": account_id,
             "codex_home": codex_home,
             "email": email,
             "enabled": True,
+            "quota_valid_after": activated_at,
         })
     data["accounts"] = accounts
     _write_private_json(pool_path, data)
@@ -829,6 +835,7 @@ def _persist_new_pool_login(
     }
     updated_pool = json.loads(json.dumps(pool_data))
     updated_accounts = updated_pool["accounts"]
+    activated_at = time.time()
     existing = next(
         (
             account for account in updated_accounts
@@ -842,15 +849,18 @@ def _persist_new_pool_login(
             "codex_home": codex_home,
             "email": email,
             "enabled": True,
+            "quota_valid_after": activated_at,
         })
     else:
         existing.update({
             "codex_home": codex_home,
             "email": email,
             "enabled": True,
+            "quota_valid_after": activated_at,
         })
         existing.pop("retired", None)
         existing.pop("cleanup_pending", None)
+        existing.pop("login_recovery_failed", None)
 
     _write_private_json(tokens_path, updated_tokens)
     try:

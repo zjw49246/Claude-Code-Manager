@@ -5,7 +5,7 @@ class Settings(BaseSettings):
     database_url: str = "sqlite+aiosqlite:///./claude_manager.db"
     openai_api_key: str = ""
     auth_token: str = ""
-    max_concurrent_instances: int = 8   # hard cap on total local instances (idle + running)
+    max_concurrent_instances: int = 8   # hard cap on live local instances (idle + running)
     min_idle_instances: int = 2         # auto top-up idle instances (capped by max_concurrent)
     claude_binary: str = "claude"
     codex_binary: str = "codex"

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { render, screen, within, waitFor, cleanup } from '@testing-library/react';
+import { act, render, screen, within, waitFor, cleanup } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { PoolDrawer } from './PoolDrawer';
 
@@ -62,6 +62,16 @@ function enablePool() {
 function enableCodexPool(usage: Record<string, unknown> = { total: 0, available: 0, preferred: null, accounts: [] }) {
   vi.mocked(api.getCodexPoolStatus).mockResolvedValue({ enabled: true } as never);
   vi.mocked(api.getCodexPoolUsage).mockResolvedValue(usage as never);
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 async function renderAndWaitForPro() {
@@ -310,7 +320,7 @@ describe('PoolDrawer', () => {
       });
     });
 
-    it('explains when live Codex quota and rollout history are both unavailable', async () => {
+    it('explains when the current live Codex quota cannot be confirmed', async () => {
       enableCodexPool({
         total: 1,
         available: 1,
@@ -330,7 +340,7 @@ describe('PoolDrawer', () => {
       await openDrawer(user);
       await user.click(screen.getByRole('button', { name: 'Codex' }));
 
-      expect(await screen.findByText('实时额度查询失败，暂无历史数据')).toBeInTheDocument();
+      expect(await screen.findByText('实时额度查询失败，无法确认当前额度')).toBeInTheDocument();
     });
   });
 
@@ -539,6 +549,180 @@ describe('PoolDrawer', () => {
       await user.click(screen.getByRole('button', { name: 'Codex' }));
       await waitFor(() => expect(screen.getByText('Codex Pool')).toBeInTheDocument());
     }
+
+    it('loads live quota when the Codex tab is opened for the first time', async () => {
+      enableCodexPool();
+      const user = userEvent.setup();
+
+      await openCodexTab(user);
+
+      await waitFor(() => {
+        expect(api.getCodexPoolUsage).toHaveBeenCalledTimes(1);
+        expect(api.getCodexPoolUsage).toHaveBeenCalledWith(true);
+      });
+    });
+
+    it('keeps account quota bound to its account and CODEX_HOME', async () => {
+      enableCodexPool({
+        enabled: true,
+        total: 2,
+        available: 2,
+        cooldown: 0,
+        disabled: 0,
+        preferred: null,
+        accounts: [
+          {
+            ...codexAccount,
+            id: 'codex-1',
+            email: 'one@example.com',
+            codex_home: '/home/ubuntu/.codex',
+            quota: {
+              primary_used_percent: 100,
+              primary_window_minutes: 10080,
+              primary_resets_at: null,
+              secondary_used_percent: null,
+              secondary_window_minutes: null,
+              secondary_resets_at: null,
+              is_rate_limited: true,
+              has_credits: false,
+            },
+            quota_error: null,
+          },
+          {
+            ...codexAccount,
+            id: 'codex-2',
+            email: 'two@example.com',
+            codex_home: '/home/ubuntu/.codex-codex-2',
+            quota: {
+              primary_used_percent: 14,
+              primary_window_minutes: 10080,
+              primary_resets_at: null,
+              secondary_used_percent: null,
+              secondary_window_minutes: null,
+              secondary_resets_at: null,
+              is_rate_limited: false,
+              has_credits: false,
+            },
+            quota_error: null,
+          },
+        ],
+      });
+      const user = userEvent.setup();
+
+      await openCodexTab(user);
+
+      const accountOne = screen.getByText('codex-1').closest('.rounded-lg');
+      const accountTwo = screen.getByText('codex-2').closest('.rounded-lg');
+      expect(accountOne).toBeTruthy();
+      expect(accountTwo).toBeTruthy();
+      expect(within(accountOne as HTMLElement).getByText('CODEX_HOME: /home/ubuntu/.codex')).toBeInTheDocument();
+      expect(within(accountOne as HTMLElement).getByText('已用 100.0%')).toBeInTheDocument();
+      expect(within(accountTwo as HTMLElement).getByText('CODEX_HOME: /home/ubuntu/.codex-codex-2')).toBeInTheDocument();
+      expect(within(accountTwo as HTMLElement).getByText('已用 14.0%')).toBeInTheDocument();
+    });
+
+    it('does not let an older Codex quota response overwrite a newer refresh', async () => {
+      const staleRequest = deferred<Record<string, unknown>>();
+      const latestUsage = {
+        enabled: true,
+        total: 1,
+        available: 1,
+        cooldown: 0,
+        disabled: 0,
+        preferred: null,
+        accounts: [{ ...codexAccount, id: 'codex-new', email: 'latest@example.com' }],
+      };
+      vi.mocked(api.getCodexPoolStatus).mockResolvedValue({ enabled: true } as never);
+      vi.mocked(api.getCodexPoolUsage)
+        .mockImplementationOnce(() => staleRequest.promise as never)
+        .mockResolvedValueOnce(latestUsage as never);
+      const user = userEvent.setup();
+
+      await renderAndWaitForPro();
+      await openDrawer(user);
+      await user.click(screen.getByRole('button', { name: 'Codex' }));
+      await waitFor(() => expect(api.getCodexPoolUsage).toHaveBeenCalledTimes(1));
+
+      await user.click(screen.getByRole('button', { name: 'Claude' }));
+      await user.click(screen.getByRole('button', { name: 'Codex' }));
+      expect(await screen.findByText('codex-new')).toBeInTheDocument();
+
+      await act(async () => {
+        staleRequest.resolve({
+          ...latestUsage,
+          accounts: [{ ...codexAccount, id: 'codex-stale', email: 'stale@example.com' }],
+        });
+        await staleRequest.promise;
+      });
+      expect(api.getCodexPoolUsage).toHaveBeenCalledTimes(2);
+      expect(screen.getByText('codex-new')).toBeInTheDocument();
+      expect(screen.queryByText('codex-stale')).not.toBeInTheDocument();
+    });
+
+    it('does not show a previous quota while live refresh is pending or after it fails', async () => {
+      const refreshRequest = deferred<Record<string, unknown>>();
+      enableCodexPool({
+        enabled: true,
+        total: 1,
+        available: 1,
+        cooldown: 0,
+        disabled: 0,
+        preferred: null,
+        accounts: [{
+          ...codexAccount,
+          id: 'codex-previous',
+          quota: {
+            primary_used_percent: 3,
+            primary_window_minutes: 10080,
+            primary_resets_at: null,
+            secondary_used_percent: null,
+            secondary_window_minutes: null,
+            secondary_resets_at: null,
+            is_rate_limited: false,
+            has_credits: false,
+          },
+          quota_error: null,
+        }],
+      });
+      vi.mocked(api.getCodexPoolUsage)
+        .mockResolvedValueOnce({
+          enabled: true,
+          total: 1,
+          available: 1,
+          cooldown: 0,
+          disabled: 0,
+          preferred: null,
+          accounts: [{
+            ...codexAccount,
+            id: 'codex-previous',
+            quota: {
+              primary_used_percent: 3,
+              primary_window_minutes: 10080,
+              primary_resets_at: null,
+              secondary_used_percent: null,
+              secondary_window_minutes: null,
+              secondary_resets_at: null,
+              is_rate_limited: false,
+              has_credits: false,
+            },
+            quota_error: null,
+          }],
+        } as never)
+        .mockImplementationOnce(() => refreshRequest.promise as never);
+      const user = userEvent.setup();
+
+      await openCodexTab(user);
+      expect(await screen.findByText('已用 3.0%')).toBeInTheDocument();
+
+      await user.click(screen.getByTitle('刷新'));
+      expect(screen.queryByText('已用 3.0%')).not.toBeInTheDocument();
+      expect(screen.getByText('加载中…')).toBeInTheDocument();
+
+      refreshRequest.reject(new Error('live quota unavailable'));
+      expect(await screen.findByText('live quota unavailable')).toBeInTheDocument();
+      expect(screen.queryByText('已用 3.0%')).not.toBeInTheDocument();
+      expect(screen.queryByText('codex-previous')).not.toBeInTheDocument();
+    });
 
     it('shows each account CODEX_HOME and can set it preferred', async () => {
       enableCodexPool({

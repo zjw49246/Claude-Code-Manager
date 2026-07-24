@@ -28,6 +28,10 @@ class Worker(Base):
     cloud_instance_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     private_ip: Mapped[str | None] = mapped_column(String(45), nullable=True)  # 主通信地址（VPC 内网）
     public_ip: Mapped[str | None] = mapped_column(String(45), nullable=True)  # 仅记录，不用于通信
+    # RunInstances request journal (name + non-secret overrides).  Persisted
+    # before the call so a lost AWS response can be retried with an identical
+    # ClientToken *and* identical parameters.
+    provision_spec: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     # 连接信息
     ssh_user: Mapped[str] = mapped_column(String(50), default="ubuntu", server_default="ubuntu")
@@ -36,8 +40,9 @@ class Worker(Base):
     auth_token: Mapped[str | None] = mapped_column(String(128), nullable=True)
     ccm_commit: Mapped[str | None] = mapped_column(String(64), nullable=True)  # 版本锁定校验
 
-    # 账号信息（在 Worker 本机登录；接码 token 留存供 bootstrap retry，API 响应脱敏）
-    accounts: Mapped[list | None] = mapped_column(JSON, default=list)  # email/token/login_method/status
+    # 账号信息（在 Worker 本机登录；凭据留存供 bootstrap retry，API 响应严格脱敏）
+    # provider/email/token/password/login_method/status；历史无 provider = claude。
+    accounts: Mapped[list | None] = mapped_column(JSON, default=list)
 
     # Project ID 映射（manager_project_id → worker_project_id）
     project_mapping: Mapped[dict | None] = mapped_column(JSON, default=dict)

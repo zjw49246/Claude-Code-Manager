@@ -29,7 +29,7 @@ from backend.config import settings
 from backend.models.project import Project
 from backend.models.task import Task
 from backend.models.worker import Worker
-from backend.services.ssh_executor import SSHExecutor
+from backend.services.ssh_executor import SSHExecutor, worker_known_hosts_path
 
 logger = logging.getLogger(__name__)
 _CODEX_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -293,6 +293,10 @@ class TaskMigrator:
             host=worker.private_ip,
             user=worker.ssh_user,
             key_path=worker.ssh_key_path or settings.worker_ssh_key_path,
+            known_hosts_path=(
+                worker_known_hosts_path(worker.cloud_instance_id)
+                if worker.cloud_instance_id else None
+            ),
         )
 
     async def _broadcast_status(self, task_id: int, old: str, new: str):

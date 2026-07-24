@@ -1,16 +1,20 @@
 """Phase 2 测试：WorkerRelay 事件处理 / Dispatcher 双路径 / Chat 与操作代理。"""
 import asyncio
 import json
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
+import httpx
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import select
 
 import backend.main as main_module
+import backend.services.worker_proxy as worker_proxy_module
 from backend.models.log_entry import LogEntry
 from backend.models.monitor_session import MonitorCheck, MonitorSession
 from backend.models.task import Task
 from backend.models.worker import Worker
+from backend.services.worker_proxy import WorkerProxy
 from backend.services.worker_relay import WorkerRelay
 
 
@@ -54,6 +58,36 @@ async def _mk_task(session_factory, **fields) -> Task:
         await db.commit()
         await db.refresh(t)
         return t
+
+
+def test_worker_proxy_ssh_is_scoped_to_cloud_instance(monkeypatch):
+    ssh_factory = Mock()
+    monkeypatch.setattr(worker_proxy_module, "SSHExecutor", ssh_factory)
+    monkeypatch.setattr(
+        worker_proxy_module,
+        "worker_known_hosts_path",
+        Mock(return_value="/tmp/known-hosts/i-worker-proxy"),
+    )
+    proxy = WorkerProxy(None, relay=AsyncMock())
+    worker = Worker(
+        name="scoped-worker",
+        private_ip="10.0.0.9",
+        ssh_user="ubuntu",
+        ssh_key_path="/tmp/worker-key",
+        cloud_instance_id="i-worker-proxy",
+    )
+
+    proxy._ssh(worker)
+
+    worker_proxy_module.worker_known_hosts_path.assert_called_once_with(
+        "i-worker-proxy"
+    )
+    ssh_factory.assert_called_once_with(
+        host="10.0.0.9",
+        user="ubuntu",
+        key_path="/tmp/worker-key",
+        known_hosts_path="/tmp/known-hosts/i-worker-proxy",
+    )
 
 
 # === WorkerRelay._handle ===
@@ -242,6 +276,107 @@ async def test_dispatch_forward_failure_marks_failed(db_factory, session_factory
 
 
 # === API 代理 ===
+
+
+class _ProxyResponse:
+    def __init__(self, status_code: int, body):
+        self.status_code = status_code
+        self._body = body
+
+    def json(self):
+        return self._body
+
+
+def _install_proxy_transport(monkeypatch, outcome):
+    requests = []
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            self.timeout = kwargs.get("timeout")
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def request(self, method, url, **kwargs):
+            requests.append((method, url, kwargs))
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+
+    monkeypatch.setattr(worker_proxy_module.httpx, "AsyncClient", FakeAsyncClient)
+    return requests
+
+
+@pytest.mark.parametrize("remote_status", [401, 403])
+async def test_generic_worker_proxy_hides_internal_auth_failures(
+    session_factory, monkeypatch, remote_status,
+):
+    worker = await _mk_worker(session_factory)
+    task = await _mk_task(session_factory, worker_id=worker.id)
+    requests = _install_proxy_transport(
+        monkeypatch,
+        _ProxyResponse(remote_status, {"detail": "secret Worker auth diagnostic"}),
+    )
+    proxy = WorkerProxy(session_factory, AsyncMock())
+
+    with pytest.raises(HTTPException) as caught:
+        await proxy.proxy_to_worker(task, "POST", f"/api/tasks/{task.id}/retry")
+
+    assert caught.value.status_code == 502
+    assert "内部 Worker 认证失败" in caught.value.detail
+    assert str(remote_status) in caught.value.detail
+    assert "secret Worker auth diagnostic" not in caught.value.detail
+    assert requests[0][2]["headers"] == {"Authorization": "Bearer wtoken"}
+
+
+@pytest.mark.parametrize(
+    ("transport_error", "expected_status", "expected_detail"),
+    [
+        (httpx.ConnectError("private address unreachable"), 502, "Worker 网关连接失败"),
+        (httpx.ReadTimeout("Worker stalled"), 503, "Worker w1 请求超时"),
+    ],
+)
+async def test_generic_worker_proxy_maps_transport_failures(
+    session_factory,
+    monkeypatch,
+    transport_error,
+    expected_status,
+    expected_detail,
+):
+    worker = await _mk_worker(session_factory)
+    task = await _mk_task(session_factory, worker_id=worker.id)
+    _install_proxy_transport(monkeypatch, transport_error)
+    proxy = WorkerProxy(session_factory, AsyncMock())
+
+    with pytest.raises(HTTPException) as caught:
+        await proxy.proxy_to_worker(task, "POST", f"/api/tasks/{task.id}/retry")
+
+    assert caught.value.status_code == expected_status
+    assert expected_detail in caught.value.detail
+    assert str(transport_error) not in caught.value.detail
+
+
+@pytest.mark.parametrize("remote_status", [302, 400, 404, 429, 500, 503])
+async def test_generic_worker_proxy_hides_other_upstream_error_bodies(
+    session_factory, monkeypatch, remote_status,
+):
+    worker = await _mk_worker(session_factory)
+    task = await _mk_task(session_factory, worker_id=worker.id)
+    _install_proxy_transport(
+        monkeypatch,
+        _ProxyResponse(remote_status, {"detail": "sensitive Worker traceback"}),
+    )
+    proxy = WorkerProxy(session_factory, AsyncMock())
+
+    with pytest.raises(HTTPException) as caught:
+        await proxy.proxy_to_worker(task, "POST", f"/api/tasks/{task.id}/retry")
+
+    assert caught.value.status_code == 502
+    assert f"远端 HTTP {remote_status}" in caught.value.detail
+    assert "sensitive Worker traceback" not in caught.value.detail
 
 
 async def test_create_task_with_worker_id_and_explicit_id(client, session_factory):
