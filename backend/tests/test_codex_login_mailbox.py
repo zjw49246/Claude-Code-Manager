@@ -5,6 +5,7 @@ import base64
 import json
 import logging
 import os
+import signal
 import subprocess
 import sys
 from collections.abc import Iterable
@@ -939,17 +940,52 @@ def test_add_account_home_allocator_blocks_pending_login_transaction(
     assert exc_info.value.status_code == 409
 
 
+@pytest.mark.parametrize("unsafe_pid", [None, -1, 0, 1, False, True])
+async def test_stop_unfinished_login_rejects_unsafe_group_without_signal(
+    monkeypatch, unsafe_pid,
+):
+    proc = SimpleNamespace(
+        pid=unsafe_pid,
+        returncode=None,
+        kill=Mock(),
+        wait=AsyncMock(),
+    )
+    killpg = Mock()
+    monkeypatch.setattr(codex_pool_api.os, "killpg", killpg)
+
+    with pytest.raises(
+        codex_pool_api.LoginProcessNotTerminal,
+        match="unsafe process identity",
+    ):
+        await codex_pool_api._stop_unfinished_login_process(
+            proc,
+            operation="unsafe-pid test",
+        )
+
+    killpg.assert_not_called()
+    proc.kill.assert_not_called()
+    proc.wait.assert_not_awaited()
+
+
 @pytest.mark.parametrize("watcher_kind", ["add", "relogin"])
 async def test_login_watcher_kills_live_process_before_releasing_home(
     monkeypatch, tmp_path, watcher_kind,
 ):
-    proc = SimpleNamespace(returncode=None, kill=Mock())
+    proc = SimpleNamespace(pid=54_342, returncode=None, kill=Mock())
 
     async def finish_killed_process():
-        proc.returncode = -9
         return -9
 
     proc.wait = AsyncMock(side_effect=finish_killed_process)
+    killpg = Mock()
+
+    def kill_wrapper_group(pid, sig):
+        assert pid == proc.pid
+        assert sig == signal.SIGKILL
+        proc.returncode = -9
+
+    killpg.side_effect = kill_wrapper_group
+    monkeypatch.setattr(codex_pool_api.os, "killpg", killpg)
     manager = _maintenance_manager()
     login_lock = asyncio.Lock()
     await login_lock.acquire()
@@ -995,7 +1031,8 @@ async def test_login_watcher_kills_live_process_before_releasing_home(
             str(home), login_lock, journal_path,
         )
 
-    proc.kill.assert_called_once_with()
+    killpg.assert_called_once_with(proc.pid, signal.SIGKILL)
+    proc.kill.assert_not_called()
     proc.wait.assert_awaited_once_with()
     manager.end_codex_app_server_home_maintenance.assert_awaited_once_with(
         str(home)
@@ -1188,7 +1225,11 @@ async def test_login_watcher_delays_cancellation_until_reap_and_rollback(
     auth_path.write_text("partial-new-auth")
     wait_started = asyncio.Event()
     allow_exit = asyncio.Event()
-    proc = SimpleNamespace(returncode=None, kill=Mock())
+    proc = SimpleNamespace(
+        pid=54_343,
+        returncode=None,
+        kill=Mock(),
+    )
 
     async def wait_for_terminal():
         wait_started.set()
@@ -1196,7 +1237,15 @@ async def test_login_watcher_delays_cancellation_until_reap_and_rollback(
         proc.returncode = -9
         return -9
 
-    proc.wait = wait_for_terminal
+    proc.wait = AsyncMock(side_effect=wait_for_terminal)
+    killpg = Mock()
+
+    def kill_wrapper_group(pid, sig):
+        assert pid == proc.pid
+        assert sig == signal.SIGKILL
+
+    killpg.side_effect = kill_wrapper_group
+    monkeypatch.setattr(codex_pool_api.os, "killpg", killpg)
     monkeypatch.setattr(
         codex_pool_api,
         "_collect_login_output",
@@ -1225,6 +1274,9 @@ async def test_login_watcher_delays_cancellation_until_reap_and_rollback(
     with pytest.raises(asyncio.CancelledError):
         await watcher
 
+    killpg.assert_called_once_with(proc.pid, signal.SIGKILL)
+    proc.kill.assert_not_called()
+    proc.wait.assert_awaited_once_with()
     assert auth_path.read_text() == "old-auth"
     assert not backup.exists()
     assert not journal_path.exists()
@@ -1330,10 +1382,13 @@ async def test_unconfirmed_wrapper_keeps_home_maintenance_and_journal(
     )
     auth_path.write_text("partial-new-auth")
     proc = SimpleNamespace(
+        pid=54_344,
         returncode=None,
         kill=Mock(),
         wait=AsyncMock(side_effect=asyncio.Event().wait),
     )
+    killpg = Mock()
+    monkeypatch.setattr(codex_pool_api.os, "killpg", killpg)
     manager = _maintenance_manager()
     login_lock = asyncio.Lock()
     await login_lock.acquire()
@@ -1354,6 +1409,11 @@ async def test_unconfirmed_wrapper_keeps_home_maintenance_and_journal(
 
     assert result["cleanup_safe"] is False
     assert state["codex-unconfirmed"]["status"] == "recovery_failed"
+    killpg.assert_called_once_with(proc.pid, signal.SIGKILL)
+    proc.kill.assert_not_called()
+    # A zero reap deadline cancels the scheduled waiter before its coroutine
+    # receives a loop tick, but the exact wait operation must still be created.
+    proc.wait.assert_called_once_with()
     assert auth_path.read_text() == "partial-new-auth"
     assert journal_path.exists()
     manager.end_codex_app_server_home_maintenance.assert_not_awaited()

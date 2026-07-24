@@ -20,16 +20,23 @@ import re
 import shlex
 import shutil
 import tempfile
+from dataclasses import dataclass, replace
+from datetime import datetime
 from pathlib import PurePosixPath
 
 import httpx
-from sqlalchemy import update
+from sqlalchemy import select, update
 
 from backend.config import settings
 from backend.models.project import Project
 from backend.models.task import Task
 from backend.models.worker import Worker
 from backend.services.ssh_executor import SSHExecutor, worker_known_hosts_path
+from backend.services.task_queue import (
+    PR_REVIEW_SUPERSEDED_METADATA_KEY,
+    task_retry_not_superseded_predicate,
+)
+from backend.services.worker_proxy import get_task_operation_lock
 
 logger = logging.getLogger(__name__)
 _CODEX_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -38,6 +45,54 @@ _COPY_BUFFER_SIZE = 1024 * 1024
 
 class MigrationError(Exception):
     pass
+
+
+@dataclass(frozen=True)
+class MigrationTaskGeneration:
+    """Exact Manager-side Task generation owned by one migration attempt."""
+
+    task_id: int
+    worker_id: int | None
+    status: str
+    retry_count: int
+    instance_id: int | None
+    started_at: datetime | None
+    completed_at: datetime | None
+
+
+def migration_task_generation(task: Task) -> MigrationTaskGeneration:
+    return MigrationTaskGeneration(
+        task_id=task.id,
+        worker_id=task.worker_id,
+        status=task.status,
+        retry_count=task.retry_count,
+        instance_id=task.instance_id,
+        started_at=task.started_at,
+        completed_at=task.completed_at,
+    )
+
+
+def _nullable_eq(column, value):
+    return column.is_(None) if value is None else column == value
+
+
+def migration_generation_predicates(
+    generation: MigrationTaskGeneration,
+) -> tuple:
+    return (
+        Task.id == generation.task_id,
+        (
+            Task.worker_id.is_(None)
+            if generation.worker_id is None
+            else Task.worker_id == generation.worker_id
+        ),
+        Task.shared_from_id.is_(None),
+        Task.status == generation.status,
+        Task.retry_count == generation.retry_count,
+        _nullable_eq(Task.instance_id, generation.instance_id),
+        _nullable_eq(Task.started_at, generation.started_at),
+        _nullable_eq(Task.completed_at, generation.completed_at),
+    )
 
 
 class TaskMigrator:
@@ -57,7 +112,12 @@ class TaskMigrator:
         if lock.locked():
             raise MigrationError("该 task 正在迁移中")
         async with lock:
-            await self._migrate_locked(task_id, target_worker_id)
+            # Migration keeps its fast duplicate-request guard above, but the
+            # full workflow also shares WorkerProxy's mutation lock.  Chat,
+            # retry and plan operations therefore cannot mutate the source
+            # Worker while files/session state are being copied.
+            async with get_task_operation_lock(task_id):
+                await self._migrate_locked(task_id, target_worker_id)
 
     async def _migrate_locked(self, task_id: int, target: int | None):
         async with self.db_factory() as db:
@@ -66,10 +126,18 @@ class TaskMigrator:
                 raise MigrationError("task 不存在")
             if task.worker_id == target:
                 return  # 已在目标位置
+            if (
+                (task.metadata_ or {}).get(
+                    PR_REVIEW_SUPERSEDED_METADATA_KEY
+                )
+                is True
+            ):
+                raise MigrationError("已被新 push 取代的 PR review task 不可迁移")
             if task.status in ("in_progress", "executing", "migrating"):
                 raise MigrationError(f"task 状态 {task.status}，先停止再切换")
-            prev_status = task.status
-            src_worker_id = task.worker_id
+            observed = migration_task_generation(task)
+            prev_status = observed.status
+            src_worker_id = observed.worker_id
 
         src = await self._get_worker(src_worker_id) if src_worker_id else None
         dst = await self._get_worker(target) if target else None
@@ -84,7 +152,7 @@ class TaskMigrator:
         # Worker validation contains awaits, so the snapshot above is not a
         # claim.  Atomically transition the exact original state to migrating;
         # a dispatcher/user update which wins the race makes this CAS fail.
-        await self._claim_migration(task_id, prev_status, src_worker_id)
+        claimed = await self._claim_migration(observed)
         await self._broadcast_status(task_id, prev_status, "migrating")
 
         local_codex_target_home: str | None = None
@@ -94,13 +162,16 @@ class TaskMigrator:
         try:
             # 1. 源是 worker：先把 relay 收不到的字段同步回来（session_id/last_cwd）
             if src is not None:
-                await self._sync_task_fields_from_worker(src, task_id)
+                await self._sync_task_fields_from_worker(
+                    src,
+                    claimed,
+                    expected_remote_status=prev_status,
+                )
 
-            async with self.db_factory() as db:
-                task = await db.get(Task, task_id)
-                session_id = task.session_id
-                project_id = task.project_id
-                provider = (task.provider or "claude").lower()
+            task = await self._read_claimed_task(claimed)
+            session_id = task.session_id
+            project_id = task.project_id
+            provider = (task.provider or "claude").lower()
 
             # 2. 工作目录搬运（含 .git + 未提交改动，无过滤全量 rsync）
             local_path = None
@@ -125,10 +196,9 @@ class TaskMigrator:
             # 4. 目标是 worker：确保项目记录 + 用同 ID 重建 task
             if dst is not None:
                 from backend.main import worker_proxy
-                async with self.db_factory() as db:
-                    task = await db.get(Task, task_id)
-                    worker_project_id = await worker_proxy.ensure_worker_project(dst, task)
-                    await self._ensure_worker_task(dst, task, worker_project_id)
+                task = await self._read_claimed_task(claimed)
+                worker_project_id = await worker_proxy.ensure_worker_project(dst, task)
+                await self._ensure_worker_task(dst, task, worker_project_id)
 
             # 5. relay 订阅切换
             if src is not None:
@@ -141,8 +211,7 @@ class TaskMigrator:
             # 6. 切指针 + 状态复原。仍以 migrating + 原 worker_id 为 CAS
             # 条件；并发取消/认领不能被迁移完成阶段覆盖。
             await self._finish_migration(
-                task_id=task_id,
-                expected_worker_id=src_worker_id,
+                claimed=claimed,
                 target_worker_id=target,
                 restored_status=prev_status,
                 provider=provider,
@@ -155,7 +224,8 @@ class TaskMigrator:
             # 复制式搬运：源机文件未动，失败无害，状态复原可重试
             if claim_active:
                 restored = await self._restore_migration_claim(
-                    task_id, prev_status, src_worker_id
+                    claimed,
+                    prev_status,
                 )
                 if restored:
                     await self._broadcast_status(task_id, "migrating", prev_status)
@@ -184,33 +254,40 @@ class TaskMigrator:
         async with self.db_factory() as db:
             return await db.get(Worker, worker_id)
 
-    @staticmethod
-    def _worker_id_condition(worker_id: int | None):
-        return (
-            Task.worker_id.is_(None)
-            if worker_id is None
-            else Task.worker_id == worker_id
-        )
+    async def _read_claimed_task(
+        self,
+        claimed: MigrationTaskGeneration,
+    ) -> Task:
+        async with self.db_factory() as db:
+            task = (
+                await db.execute(
+                    select(Task).where(
+                        *migration_generation_predicates(claimed)
+                    )
+                )
+            ).scalar_one_or_none()
+            if task is None:
+                raise MigrationError(
+                    "task 迁移 generation 已被并发修改，拒绝继续使用旧状态"
+                )
+            return task
 
     async def _claim_migration(
         self,
-        task_id: int,
-        expected_status: str,
-        expected_worker_id: int | None,
-    ) -> None:
+        observed: MigrationTaskGeneration,
+    ) -> MigrationTaskGeneration:
         async with self.db_factory() as db:
             result = await db.execute(
                 update(Task)
                 .where(
-                    Task.id == task_id,
-                    Task.status == expected_status,
-                    self._worker_id_condition(expected_worker_id),
+                    *migration_generation_predicates(observed),
+                    task_retry_not_superseded_predicate(),
                 )
                 .values(status="migrating")
             )
             if result.rowcount != 1:
                 await db.rollback()
-                current = await db.get(Task, task_id)
+                current = await db.get(Task, observed.task_id)
                 if current is None:
                     raise MigrationError("task 不存在")
                 raise MigrationError(
@@ -218,22 +295,18 @@ class TaskMigrator:
                     f"（status={current.status}, worker_id={current.worker_id}）"
                 )
             await db.commit()
+        return replace(observed, status="migrating")
 
     async def _restore_migration_claim(
         self,
-        task_id: int,
+        claimed: MigrationTaskGeneration,
         restored_status: str,
-        expected_worker_id: int | None,
     ) -> bool:
         """Restore only a claim that this migration still owns."""
         async with self.db_factory() as db:
             result = await db.execute(
                 update(Task)
-                .where(
-                    Task.id == task_id,
-                    Task.status == "migrating",
-                    self._worker_id_condition(expected_worker_id),
-                )
+                .where(*migration_generation_predicates(claimed))
                 .values(status=restored_status)
             )
             await db.commit()
@@ -242,17 +315,24 @@ class TaskMigrator:
     async def _finish_migration(
         self,
         *,
-        task_id: int,
-        expected_worker_id: int | None,
+        claimed: MigrationTaskGeneration,
         target_worker_id: int | None,
         restored_status: str,
         provider: str,
         local_codex_target_home: str | None,
     ) -> None:
         async with self.db_factory() as db:
-            task = await db.get(Task, task_id)
+            task = (
+                await db.execute(
+                    select(Task)
+                    .where(*migration_generation_predicates(claimed))
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
             if task is None:
-                raise MigrationError("task 不存在")
+                raise MigrationError(
+                    "task 迁移状态或 generation 已被并发修改，拒绝覆盖"
+                )
 
             values: dict = {
                 "worker_id": target_worker_id,
@@ -276,11 +356,7 @@ class TaskMigrator:
 
             result = await db.execute(
                 update(Task)
-                .where(
-                    Task.id == task_id,
-                    Task.status == "migrating",
-                    self._worker_id_condition(expected_worker_id),
-                )
+                .where(*migration_generation_predicates(claimed))
                 .values(**values)
             )
             if result.rowcount != 1:
@@ -309,8 +385,15 @@ class TaskMigrator:
             except Exception:
                 logger.exception("task %s status broadcast failed", task_id)
 
-    async def _sync_task_fields_from_worker(self, worker: Worker, task_id: int):
+    async def _sync_task_fields_from_worker(
+        self,
+        worker: Worker,
+        claimed: MigrationTaskGeneration,
+        *,
+        expected_remote_status: str,
+    ):
         """worker 广播会 pop session_id、last_cwd 只写 worker DB——迁移前必须拉全。"""
+        task_id = claimed.task_id
         async with httpx.AsyncClient(timeout=30) as c:
             r = await c.get(
                 f"http://{worker.private_ip}:{worker.ccm_port}/api/tasks/{task_id}",
@@ -319,11 +402,88 @@ class TaskMigrator:
             if r.status_code != 200:
                 raise MigrationError(f"从 worker 拉取 task 详情失败: HTTP {r.status_code}")
             wt = r.json()
+        if (
+            not isinstance(wt, dict)
+            or wt.get("id") != task_id
+            # Destination imports are deliberately inert ("cancelled") while
+            # the Manager mirror restores the pre-migration status.  A later
+            # move back must accept that intentional mismatch, but no other
+            # unexpected source status may be borrowed.
+            or wt.get("status") not in {
+                expected_remote_status,
+                "cancelled",
+            }
+            or wt.get("retry_count") != claimed.retry_count
+        ):
+            raise MigrationError(
+                "源 Worker task generation 已变化，拒绝迁移旧状态"
+            )
         async with self.db_factory() as db:
-            task = await db.get(Task, task_id)
-            for f in ("session_id", "last_cwd", "target_repo", "error_message"):
-                if wt.get(f):
-                    setattr(task, f, wt[f])
+            task = (
+                await db.execute(
+                    select(Task)
+                    .where(*migration_generation_predicates(claimed))
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if task is None:
+                await db.rollback()
+                raise MigrationError(
+                    "task 在 Worker 状态同步期间已被并发修改"
+                )
+            remote_metadata = wt.get("metadata_") or {}
+            if (
+                isinstance(remote_metadata, dict)
+                and remote_metadata.get(
+                    PR_REVIEW_SUPERSEDED_METADATA_KEY
+                )
+                is True
+            ):
+                # A lost hidden-termination response can leave the source
+                # Worker gated while the Manager mirror is still stale. Mirror
+                # that durable proof before aborting migration; otherwise the
+                # destination TaskCreate payload would drop the gate and make
+                # the obsolete review retryable again.
+                metadata = dict(task.metadata_ or {})
+                metadata[PR_REVIEW_SUPERSEDED_METADATA_KEY] = True
+                changed = await db.execute(
+                    update(Task)
+                    .where(*migration_generation_predicates(claimed))
+                    .values(metadata_=metadata)
+                )
+                if changed.rowcount != 1:
+                    await db.rollback()
+                    raise MigrationError(
+                        "task 在 Worker 状态同步期间已被并发修改"
+                    )
+                await db.commit()
+                raise MigrationError(
+                    "源 Worker task 已被新 push 取代，拒绝迁移"
+                )
+            values = {
+                field: wt[field]
+                for field in (
+                    "session_id",
+                    "last_cwd",
+                    "target_repo",
+                    "error_message",
+                )
+                if wt.get(field)
+            }
+            # Even an empty response must prove that the claimed generation is
+            # still current after the network await.
+            if not values:
+                values["status"] = claimed.status
+            changed = await db.execute(
+                update(Task)
+                .where(*migration_generation_predicates(claimed))
+                .values(**values)
+            )
+            if changed.rowcount != 1:
+                await db.rollback()
+                raise MigrationError(
+                    "task 在 Worker 状态同步期间已被并发修改"
+                )
             await db.commit()
 
     async def _sync_workspace(self, src: Worker | None, dst: Worker | None, local_path: str):
@@ -587,6 +747,7 @@ class TaskMigrator:
             "target_repo": task.target_repo,
             "target_branch": task.target_branch or "main",
             "priority": task.priority,
+            "retry_count": task.retry_count,
             "max_retries": task.max_retries,
             "mode": task.mode,
             "todo_file_path": task.todo_file_path,

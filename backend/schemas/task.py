@@ -65,6 +65,19 @@ class TaskMigrationImport(TaskCreate):
     """
 
     id: int
+    # Keep Manager and destination Worker retry generations monotonic. This is
+    # intentionally internal-only; public task creation always starts at zero.
+    retry_count: int = Field(default=0, ge=0)
+
+
+class TaskTerminationRequest(BaseModel):
+    """Manager→Worker fence for the hidden PR-review termination endpoint."""
+
+    expected_status: str
+    expected_retry_count: int = Field(ge=0)
+    expected_instance_id: int | None = None
+    expected_started_at: datetime | None = None
+    expected_completed_at: datetime | None = None
 
 
 class TaskUpdate(BaseModel):

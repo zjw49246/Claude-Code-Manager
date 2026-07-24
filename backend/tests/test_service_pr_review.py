@@ -1,6 +1,7 @@
 """Tests for backend/services/pr_review_service.py."""
 import pytest
 import pytest_asyncio
+from sqlalchemy import update
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from backend.models.pr_monitor import MonitoredRepo, PRReview
@@ -229,6 +230,43 @@ async def test_check_and_update_review_transient_failure_retry_succeeds(
     await db_session.refresh(review)
     assert review.status == "merged"
     assert gh_mock.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_check_and_update_review_cannot_overwrite_superseded_during_gh_wait(
+    db_session,
+    repo,
+    no_broadcast,
+):
+    """A stale gh result must not move a synchronized review out of superseded."""
+
+    review = await _make_review(db_session, repo)
+
+    async def supersede_before_gh_returns(*_args, **_kwargs):
+        await db_session.execute(
+            update(PRReview)
+            .where(PRReview.id == review.id)
+            .values(status="superseded")
+        )
+        await db_session.commit()
+        return {
+            "state": "OPEN",
+            "mergedAt": None,
+            "reviews": [{"state": "APPROVED"}],
+        }
+
+    with patch.object(
+        pr_review_service,
+        "_gh_pr_view",
+        side_effect=supersede_before_gh_returns,
+    ):
+        await check_and_update_review(db_session, review.id, "owner/repo")
+
+    await db_session.refresh(review)
+    assert review.status == "superseded"
+    assert review.action_taken is None
+    assert review.completed_at is None
+    no_broadcast.broadcast.assert_not_awaited()
 
 
 # === _gh_pr_view (subprocess mocked) ===

@@ -1,4 +1,6 @@
 """Tests for Chat and Plan API endpoints."""
+import asyncio
+
 import pytest
 import pytest_asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -268,6 +270,70 @@ async def test_plan_reject_success(client, session_factory):
     data = resp.json()
     assert data["status"] == "cancelled"
     assert data["plan_approved"] is False
+
+
+@pytest.mark.parametrize("action", ["approve", "reject"])
+@pytest.mark.asyncio
+async def test_plan_transition_revalidates_after_operation_lock(
+    client,
+    session_factory,
+    monkeypatch,
+    action,
+):
+    """A stale plan_review read cannot overwrite a migration generation."""
+
+    create_resp = await client.post("/api/tasks", json={
+        "title": "Plan race",
+        "description": "d",
+        "target_repo": "/tmp",
+        "mode": "plan",
+    })
+    task_id = create_resp.json()["id"]
+    async with session_factory() as db:
+        await db.execute(
+            update(Task)
+            .where(Task.id == task_id)
+            .values(status="plan_review")
+        )
+        await db.commit()
+
+    lock_waiting = asyncio.Event()
+    release_lock = asyncio.Event()
+
+    class ControlledOperationLock:
+        async def __aenter__(self):
+            lock_waiting.set()
+            await release_lock.wait()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    controlled_lock = ControlledOperationLock()
+    monkeypatch.setattr(
+        "backend.api.tasks.get_task_operation_lock",
+        lambda observed_task_id: controlled_lock,
+    )
+    request = asyncio.create_task(
+        client.post(f"/api/tasks/{task_id}/plan/{action}")
+    )
+    await asyncio.wait_for(lock_waiting.wait(), timeout=1)
+
+    async with session_factory() as db:
+        await db.execute(
+            update(Task)
+            .where(Task.id == task_id)
+            .values(status="migrating", retry_count=Task.retry_count + 1)
+        )
+        await db.commit()
+    release_lock.set()
+    response = await request
+
+    assert response.status_code == 400
+    async with session_factory() as db:
+        task = await db.get(Task, task_id)
+    assert task.status == "migrating"
+    assert task.retry_count == 1
+    assert task.plan_approved is None
 
 
 @pytest.mark.asyncio

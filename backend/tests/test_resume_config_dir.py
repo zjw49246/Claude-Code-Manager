@@ -7,15 +7,21 @@ inherited ``CLAUDE_CONFIG_DIR`` that lacks the file and ``claude --resume`` dies
 with "No conversation found with session ID", hard-failing the task and losing
 the session.
 """
+import asyncio
 import json
 import time
 import pytest
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 from backend.services.claude_pool import ClaudePool
 from backend.services.codex_pool import CodexPool
-from backend.services.dispatcher import CodexAccountRoutingError, GlobalDispatcher
+from backend.services.dispatcher import (
+    CodexAccountRoutingError,
+    GlobalDispatcher,
+    TaskLifecycleSupersededError,
+    _TaskStatusGeneration,
+)
 
 
 @pytest.fixture
@@ -159,6 +165,9 @@ class TestResolveResumeConfigDir:
 def _codex_db_factory(task):
     db = MagicMock()
     db.get = AsyncMock(return_value=task)
+    locked = MagicMock()
+    locked.scalar_one_or_none.return_value = task
+    db.execute = AsyncMock(return_value=locked)
     db.commit = AsyncMock()
     ctx = MagicMock()
     ctx.__aenter__ = AsyncMock(return_value=db)
@@ -182,6 +191,9 @@ class TestResolveResumeConfigDirCodex:
         ]}))
         manager = MagicMock()
         manager.rebind_codex_thread = AsyncMock()
+        manager.clear_codex_thread_owner_for_recovery = AsyncMock(
+            return_value=True
+        )
         disp = GlobalDispatcher(
             db_factory=_codex_db_factory(task),
             instance_manager=manager,
@@ -235,6 +247,106 @@ class TestResolveResumeConfigDirCodex:
             source_codex_home=str(source.resolve()),
             target_codex_home=str(target.resolve()),
         )
+
+    @pytest.mark.asyncio
+    async def test_rebind_rolls_back_when_generation_loses_binding_cas(
+        self, tmp_path,
+    ):
+        task = MagicMock(id=42, metadata_={"codex_account_id": "codex-1"})
+        disp = self._dispatcher(tmp_path, task)
+        source = str((tmp_path / "codex-1").resolve())
+        target = str((tmp_path / "codex-2").resolve())
+        _codex_rollout(Path(source), "thread-stale-rebind")
+        disp.codex_pool.mark_rate_limited(source, duration=999)
+        generation = _TaskStatusGeneration(
+            task_id=42,
+            worker_id=None,
+            shared_from_id=None,
+            status="completed",
+            retry_count=0,
+            instance_id=None,
+            started_at=None,
+            completed_at=None,
+        )
+        disp._set_codex_task_binding = AsyncMock(return_value=False)
+
+        with pytest.raises(TaskLifecycleSupersededError):
+            await disp._resolve_resume_config_dir(
+                "thread-stale-rebind",
+                "codex",
+                task_id=42,
+                expected_generation=generation,
+            )
+
+        assert disp.instance_manager.rebind_codex_thread.await_args_list == [
+            call(
+                "thread-stale-rebind",
+                source_codex_home=source,
+                target_codex_home=target,
+            ),
+            call(
+                "thread-stale-rebind",
+                source_codex_home=target,
+                target_codex_home=source,
+            ),
+        ]
+        disp.instance_manager.clear_codex_thread_owner_for_recovery.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_cancel_at_forward_rebind_settles_binding_and_rollback(
+        self, tmp_path,
+    ):
+        task = MagicMock(id=42, metadata_={"codex_account_id": "codex-1"})
+        disp = self._dispatcher(tmp_path, task)
+        source = str((tmp_path / "codex-1").resolve())
+        target = str((tmp_path / "codex-2").resolve())
+        _codex_rollout(Path(source), "thread-cancel-rebind")
+        disp.codex_pool.mark_rate_limited(source, duration=999)
+        generation = _TaskStatusGeneration(
+            task_id=42,
+            worker_id=None,
+            shared_from_id=None,
+            status="completed",
+            retry_count=0,
+            instance_id=None,
+            started_at=None,
+            completed_at=None,
+        )
+        disp._set_codex_task_binding = AsyncMock(return_value=False)
+        calls = []
+        resolver_task = None
+
+        async def cancel_outer_after_owner_move(*args, **kwargs):
+            calls.append(call(*args, **kwargs))
+            if len(calls) == 1:
+                resolver_task.cancel()
+
+        disp.instance_manager.rebind_codex_thread = AsyncMock(
+            side_effect=cancel_outer_after_owner_move
+        )
+        resolver_task = asyncio.create_task(
+            disp._resolve_resume_config_dir(
+                "thread-cancel-rebind",
+                "codex",
+                task_id=42,
+                expected_generation=generation,
+            )
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await resolver_task
+
+        assert calls == [
+            call(
+                "thread-cancel-rebind",
+                source_codex_home=source,
+                target_codex_home=target,
+            ),
+            call(
+                "thread-cancel-rebind",
+                source_codex_home=target,
+                target_codex_home=source,
+            ),
+        ]
 
     @pytest.mark.asyncio
     async def test_real_usage_limit_rotation_preserves_rollout_and_binding(self, tmp_path):

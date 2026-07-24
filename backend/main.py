@@ -341,6 +341,124 @@ async def _recover_stale_worker_lifecycles():
             )
 
 
+async def _shutdown_runtime_services(
+    *,
+    heartbeat_task,
+    worker_health_task,
+    upload_cleanup_task,
+    backup_svc,
+) -> None:
+    """Run every shutdown stage and re-raise the first teardown failure."""
+
+    failures: list[BaseException] = []
+    dispatcher_failure: BaseException | None = None
+
+    # Periodic producers are real asyncio tasks.  Cancelling without awaiting
+    # leaves their final DB/network operation racing the teardown below and
+    # produces "Task was destroyed but it is pending" at loop close.
+    background_tasks = [
+        task
+        for task in (
+            heartbeat_task,
+            worker_health_task,
+            upload_cleanup_task,
+        )
+        if task is not None
+    ]
+    for task in background_tasks:
+        task.cancel()
+    async_tasks = {
+        task for task in background_tasks if isinstance(task, asyncio.Future)
+    }
+    if async_tasks:
+        try:
+            done, pending = await asyncio.wait(async_tasks, timeout=10.0)
+            if done:
+                await asyncio.gather(*done, return_exceptions=True)
+            if pending:
+                failures.append(
+                    RuntimeError(
+                        "Background task(s) ignored shutdown cancellation"
+                    )
+                )
+                logger.error(
+                    "%d background task(s) ignored shutdown cancellation",
+                    len(pending),
+                )
+        except BaseException as exc:
+            failures.append(exc)
+            logger.exception("Background task shutdown failed")
+
+    # Legacy Ralph loops are independent dequeue producers. Stop them before
+    # Dispatcher takes its final InstanceManager generation snapshot.
+    try:
+        await ralph_loop.shutdown()
+    except BaseException as exc:
+        failures.append(exc)
+        logger.exception("Ralph loop shutdown failed")
+
+    # Close every Dispatcher admission path before taking down transports.
+    # A failure is retained, but later cleanup must still run: those transports
+    # may be the only remaining handles capable of reaping child processes.
+    try:
+        await dispatcher.shutdown()
+    except BaseException as exc:
+        dispatcher_failure = exc
+        if isinstance(exc, asyncio.CancelledError):
+            # Cleanup is retried below, but caller cancellation must still be
+            # delivered after the exact reapers have settled.
+            failures.append(exc)
+        logger.exception("Dispatcher shutdown failed")
+
+    if instance_manager._pty_backend is not None:
+        try:
+            await instance_manager._pty_backend.shutdown()
+        except BaseException as exc:
+            failures.append(exc)
+            logger.exception("PTY backend shutdown failed")
+
+    try:
+        await instance_manager.shutdown_codex_app_server()
+    except BaseException as exc:
+        failures.append(exc)
+        logger.exception("Codex app-server shutdown failed")
+
+    if dispatcher_failure is not None:
+        # A first pass can time out on a lifecycle that is already inside
+        # shielded spawn/reap cleanup. PTY/Codex teardown above may settle the
+        # missing exact handle, so retry against the deliberately retained
+        # dispatcher maps before declaring shutdown incomplete.
+        try:
+            await dispatcher.shutdown()
+        except BaseException as exc:
+            failures.append(exc)
+            logger.exception(
+                "Dispatcher shutdown retry failed after transport cleanup"
+            )
+        else:
+            logger.info(
+                "Dispatcher shutdown retry proved all retained generations "
+                "terminal"
+            )
+
+    try:
+        sub_agent_watcher.stop()
+    except BaseException as exc:
+        failures.append(exc)
+        logger.exception("Sub-agent watcher shutdown failed")
+    if backup_svc:
+        try:
+            backup_svc.stop()
+        except BaseException as exc:
+            failures.append(exc)
+            logger.exception("Backup service shutdown failed")
+
+    if failures:
+        # Preserve the original exception type/traceback for systemd/test
+        # visibility. Secondary cleanup failures were already logged above.
+        raise failures[0]
+
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -423,32 +541,12 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    if heartbeat_task is not None:
-        heartbeat_task.cancel()
-
-    # Stop all PTY sessions on shutdown — orphaned CC processes keep holding
-    # their session files and break cold resume after restart.
-    if instance_manager._pty_backend is not None:
-        try:
-            await instance_manager._pty_backend.shutdown()
-        except Exception:
-            logger.exception("PTY backend shutdown failed")
-
-    if worker_health_task is not None:
-        worker_health_task.cancel()
-    upload_cleanup_task.cancel()
-    # Stop all running Claude processes before shutdown
-    for inst_id in list(instance_manager.processes.keys()):
-        await instance_manager.stop(inst_id)
-    try:
-        await instance_manager.shutdown_codex_app_server()
-    except Exception:
-        logger.exception("Codex app-server shutdown failed")
-
-    sub_agent_watcher.stop()
-    if backup_svc:
-        backup_svc.stop()
-    await dispatcher.stop()
+    await _shutdown_runtime_services(
+        heartbeat_task=heartbeat_task,
+        worker_health_task=worker_health_task,
+        upload_cleanup_task=upload_cleanup_task,
+        backup_svc=backup_svc,
+    )
 
 
 app = FastAPI(title="Claude Code Manager", version="0.1.0", lifespan=lifespan)

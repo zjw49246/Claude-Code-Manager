@@ -18,14 +18,35 @@ from backend.models.task import Task
 
 from backend.models.log_entry import LogEntry
 from backend.services.codex_models import clamp_codex_effort
+from backend.services.process_safety import require_safe_process_group_id
 from backend.services.stream_parser import StreamParser
+from backend.services.task_queue import task_retry_not_superseded_predicate
 from backend.services.ws_broadcaster import WebSocketBroadcaster
 
 logger = logging.getLogger(__name__)
+_EXPECTED_GENERATION_UNSET = object()
+DEFAULT_TERMINAL_CONSUMER_TIMEOUT = 30.0
+DEFAULT_CONSUMER_CANCEL_TIMEOUT = 5.0
 
 
 class InstanceAlreadyRunningError(RuntimeError):
     """A second turn attempted to claim an occupied instance slot."""
+
+
+class InstanceNotFoundError(InstanceAlreadyRunningError):
+    """The reusable instance slot disappeared before launch was committed."""
+
+
+class LaunchSupersededError(RuntimeError):
+    """The task claim was cancelled or replaced while its agent was starting."""
+
+
+class CodexLaunchCommitError(RuntimeError):
+    """An app-server turn started but its CCM ownership commit did not finish."""
+
+
+class ConsumerRecoveryUnsettledError(RuntimeError):
+    """A crashed consumer could not durably settle its exact generation."""
 
 
 @dataclass(frozen=True)
@@ -36,6 +57,49 @@ class _OutputConsumerRecord:
     task: asyncio.Task
     chat_initiated: bool
     provider: str
+    task_id: int | None = None
+    task_retry_count: int | None = None
+    # Durable per-turn token. PTY hot reuse keeps the same native Session and
+    # PID across many turns, so neither process identity nor PID alone can
+    # distinguish a late exit callback from a newer turn on the same slot.
+    instance_started_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class _LaunchReservation:
+    """Task identity held across the pre-owner subprocess launch window."""
+
+    token: object
+    task_id: int | None
+    previous_process: asyncio.subprocess.Process | None
+
+
+@dataclass(frozen=True)
+class _ConsumerRecoveryEvidence:
+    """Fail-closed evidence for one terminal consumer awaiting DB recovery."""
+
+    error: BaseException
+    tracked_generation: bool
+    task_id: int | None
+    task_retry_count: int | None
+    instance_started_at: datetime | None
+
+
+@dataclass(frozen=True)
+class _TaskLifecycleFence:
+    """Duck-compatible immutable Task generation for routing side effects."""
+
+    task_id: int
+    worker_id: int | None
+    shared_from_id: int | None
+    retry_count: int
+    instance_id: int | None
+    started_at: datetime | None
+    completed_at: datetime | None
+    # Routing from a queued chat freezes its pre-claim status. Dispatcher
+    # lifecycles omit status because one generation advances in_progress →
+    # executing without changing ownership.
+    status: str | None = None
 
 
 class InstanceManager:
@@ -56,7 +120,18 @@ class InstanceManager:
         self._consumer_errors: dict[
             tuple[int, asyncio.subprocess.Process], BaseException
         ] = {}
-        self._stopping: set[int] = set()  # instance_ids being intentionally stopped
+        # A terminal process is not a settled lifecycle when its recovery
+        # transaction could not be confirmed.  Keep this exact generation
+        # visible to admission, stop, and shutdown until a later lifecycle
+        # call durably clears its Task/Instance ownership.
+        self._consumer_recovery_pending: dict[
+            tuple[int, asyncio.subprocess.Process],
+            _ConsumerRecoveryEvidence,
+        ] = {}
+        # Reference-counted stop intents.  Multiple exact stop callers may
+        # overlap while a terminal consumer finishes bookkeeping; one stale or
+        # faster caller must not remove another caller's retry/relaunch fence.
+        self._stopping: dict[int, int] = {}
         # Serialize process admission and stop cleanup for each reusable worker
         # slot.  API-level ``is_running`` checks are advisory; this lock is the
         # authoritative guard against two concurrent launches or stop→run map
@@ -67,11 +142,21 @@ class InstanceManager:
         # exactly one may advance this token and the loser must return busy,
         # never wait through the winner and execute the prompt afterwards.
         self._instance_launch_generations: dict[int, int] = {}
+        # A process can exist before Instance.current_task_id/PID is committed.
+        # Keep the Task-visible reservation until launch either publishes its
+        # durable reverse owner or proves the aborted generation fully reaped.
+        self._launch_reservations: dict[int, _LaunchReservation] = {}
         # instance_id -> provider credential home used for the current/recent
         # launch (CLAUDE_CONFIG_DIR for Claude, CODEX_HOME for Codex).  Retry
         # paths read this map to stay on the same account.
         self._config_dirs: dict[int, str] = {}
         self._container_tasks: dict[int, int] = {}  # instance_id -> project_id (if running in container)
+        # Exact direct ``docker exec`` generation for each reusable slot.  A
+        # host docker client can exit while its command remains alive in the
+        # container, so process-group cleanup must prove both sides terminal.
+        self._container_exec_processes: dict[
+            int, asyncio.subprocess.Process
+        ] = {}
         self._last_stderr: dict[int, str] = {}  # instance_id -> stderr from last run
         self._launch_params: dict[int, dict] = {}  # instance_id -> params for re-launch on rotation
         # instance_id -> consecutive transient-overload retry count. Survives
@@ -110,6 +195,11 @@ class InstanceManager:
         # Count by canonical home because they do not own a reusable Instance
         # slot and therefore cannot safely be represented in _codex_exec_homes.
         self._codex_ephemeral_home_users: dict[str, int] = {}
+        # Direct CLI subprocesses start in their own POSIX session.  Remember
+        # the exact process generation so stop can signal the whole process
+        # group without ever targeting a later app-server/PTY generation that
+        # reused the same Instance id.
+        self._process_groups: dict[int, asyncio.subprocess.Process] = {}
 
         # PTY persistent-session backend (claude provider only).
         # Runtime-switchable: env USE_PTY_MODE is the boot default, the
@@ -246,6 +336,49 @@ class InstanceManager:
             self._instance_lifecycle_locks[instance_id] = lock
         return lock
 
+    async def wait_for_task_launch_barrier(
+        self,
+        instance_id: int,
+        task_id: int,
+        *,
+        timeout: float = 30.0,
+    ) -> bool:
+        """Wait until a Task's pre-owner launch window is proven settled.
+
+        Cancellation first terminally CASes the Task.  A launch that already
+        spawned but has not committed ``Instance.current_task_id`` must then
+        observe that CAS, abort, and reap under this same lifecycle lock.
+        Returning ``True`` proves there is no retained hidden reservation for
+        the Task; ``False`` is fail-closed evidence for an API 409.
+        """
+
+        lock = self._instance_lifecycle_lock(instance_id)
+        try:
+            await asyncio.wait_for(lock.acquire(), timeout=timeout)
+        except asyncio.TimeoutError:
+            return False
+        try:
+            reservation = self._launch_reservations.get(instance_id)
+            if reservation is not None and reservation.task_id == task_id:
+                return False
+            return True
+        finally:
+            lock.release()
+
+    def _begin_stopping(self, instance_id: int) -> None:
+        """Publish one owned stop-intent token for a reusable slot."""
+
+        self._stopping[instance_id] = self._stopping.get(instance_id, 0) + 1
+
+    def _end_stopping(self, instance_id: int) -> None:
+        """Release only this caller's stop-intent token."""
+
+        remaining = self._stopping.get(instance_id, 0) - 1
+        if remaining > 0:
+            self._stopping[instance_id] = remaining
+        else:
+            self._stopping.pop(instance_id, None)
+
     async def launch(
         self,
         instance_id: int,
@@ -273,6 +406,14 @@ class InstanceManager:
         observed_generation: int | None = None
         while True:
             async with lifecycle_lock:
+                # This check is inside the same admission lock used by stop().
+                # It closes the long retry window where a terminal consumer
+                # passed its early `_stopping` check, then slept/migrated and
+                # attempted an in-place replacement after stop intent began.
+                if instance_id in self._stopping:
+                    raise InstanceAlreadyRunningError(
+                        f"Instance {instance_id} is being stopped"
+                    )
                 generation = self._instance_launch_generations.get(instance_id, 0)
                 if observed_generation is None:
                     observed_generation = generation
@@ -280,12 +421,18 @@ class InstanceManager:
                     raise InstanceAlreadyRunningError(
                         f"Instance {instance_id} was claimed by another launch"
                     )
-                process = self.processes.get(instance_id)
+                process = (
+                    self.processes.get(instance_id)
+                    or self._process_groups.get(instance_id)
+                    or self._container_exec_processes.get(instance_id)
+                )
                 record = self._consumer_records.get(instance_id)
                 consumer = record.task if record is not None else self._tasks.get(instance_id)
                 if (
                     process is not None
-                    and process.returncode is None
+                    and not self._generation_reap_confirmed(
+                        instance_id, process
+                    )
                     and consumer is not current
                 ):
                     raise InstanceAlreadyRunningError(
@@ -293,24 +440,66 @@ class InstanceManager:
                     )
                 if consumer is None or consumer is current:
                     self._instance_launch_generations[instance_id] = generation + 1
-                    return await self._launch_locked(
-                        instance_id=instance_id,
-                        prompt=prompt,
-                        task_id=task_id,
-                        cwd=cwd,
-                        model=model,
-                        resume_session_id=resume_session_id,
-                        loop_iteration=loop_iteration,
-                        git_env=git_env,
-                        thinking_budget=thinking_budget,
-                        effort_level=effort_level,
-                        chat_initiated=chat_initiated,
-                        config_dir=config_dir,
-                        provider=provider,
-                        enable_workflows=enable_workflows,
-                        enabled_skills=enabled_skills,
-                        system_prompt_mode=system_prompt_mode,
+                    reservation = _LaunchReservation(
+                        object(), task_id, process
                     )
+                    self._launch_reservations[instance_id] = reservation
+                    try:
+                        result = await self._launch_locked(
+                            instance_id=instance_id,
+                            prompt=prompt,
+                            task_id=task_id,
+                            cwd=cwd,
+                            model=model,
+                            resume_session_id=resume_session_id,
+                            loop_iteration=loop_iteration,
+                            git_env=git_env,
+                            thinking_budget=thinking_budget,
+                            effort_level=effort_level,
+                            chat_initiated=chat_initiated,
+                            config_dir=config_dir,
+                            provider=provider,
+                            enable_workflows=enable_workflows,
+                            enabled_skills=enabled_skills,
+                            system_prompt_mode=system_prompt_mode,
+                        )
+                    except BaseException:
+                        current_process = (
+                            self.processes.get(instance_id)
+                            or self._process_groups.get(instance_id)
+                            or self._container_exec_processes.get(instance_id)
+                        )
+                        current_record = self._consumer_records.get(instance_id)
+                        unresolved_generation = bool(
+                            (
+                                current_process is not None
+                                and current_process is not process
+                                and not self._generation_reap_confirmed(
+                                    instance_id, current_process
+                                )
+                            )
+                            or (
+                                current_record is not None
+                                and current_record.task_id == task_id
+                                and not self._generation_reap_confirmed(
+                                    instance_id, current_record.process
+                                )
+                            )
+                        )
+                        if (
+                            not unresolved_generation
+                            and self._launch_reservations.get(instance_id)
+                            is reservation
+                        ):
+                            self._launch_reservations.pop(instance_id, None)
+                        raise
+                    else:
+                        if (
+                            self._launch_reservations.get(instance_id)
+                            is reservation
+                        ):
+                            self._launch_reservations.pop(instance_id, None)
+                        return result
 
             # Never hold admission while waiting: a terminal consumer may
             # legitimately self-launch a transient/account retry, which needs
@@ -354,6 +543,31 @@ class InstanceManager:
         that loop-task chat history can be grouped by iteration in the frontend.
         """
         provider = (provider or "claude").lower()
+        # The API and Dispatcher serialize deletion/reservation with this
+        # lifecycle lock.  Verify the reusable slot before creating config
+        # files, containers, or a real agent process; a post-spawn rowcount
+        # check remains below as defense against cross-process DB mutation.
+        task_retry_count: int | None = None
+        async with self.db_factory() as db:
+            if await db.get(Instance, instance_id) is None:
+                raise InstanceNotFoundError(
+                    f"Instance {instance_id} no longer exists"
+                )
+            if task_id is not None:
+                generation_row = (
+                    await db.execute(
+                        select(Task.retry_count).where(
+                            Task.id == task_id,
+                            Task.instance_id == instance_id,
+                            Task.status.in_(["in_progress", "executing"]),
+                        )
+                    )
+                ).first()
+                if generation_row is None:
+                    raise LaunchSupersededError(
+                        f"Task {task_id} no longer owns instance {instance_id}"
+                    )
+                task_retry_count = generation_row[0]
         if provider == "codex":
             # A Codex turn is not reusable when its process adapter reaches a
             # terminal returncode: the output consumer may still be migrating
@@ -407,6 +621,7 @@ class InstanceManager:
         # Check if shared project → prepare Docker container wrapper for PTY
         _container_project_id = None
         _container_wrapper = None
+        _container_exec_spec = None
         if provider == "claude" and task_id:
             try:
                 from backend.services.container_manager import is_shared_project, ContainerManager
@@ -429,12 +644,13 @@ class InstanceManager:
                                 git_https_username=_proj.git_https_username if _proj else None,
                                 git_https_token=_proj.git_https_token if _proj else None,
                             )
-                            # Create wrapper script for PTY: docker exec <container> claude "$@"
-                            wrapper_path = f"/tmp/ccm-docker-claude-{_container_project_id}.sh"
-                            with open(wrapper_path, "w") as wf:
-                                wf.write(f'#!/bin/bash\nexec docker exec -i {container_name} claude "$@"\n')
-                            os.chmod(wrapper_path, 0o755)
-                            _container_wrapper = wrapper_path
+                            (
+                                _container_wrapper,
+                                _container_exec_spec,
+                            ) = self._container_mgr.create_pty_wrapper(
+                                _container_project_id,
+                                instance_id,
+                            )
                             self._container_tasks[instance_id] = _container_project_id
             except Exception:
                 logger.debug("Container setup failed, falling back to bare process")
@@ -461,11 +677,15 @@ class InstanceManager:
                         config_dir=config_dir,
                         enable_workflows=enable_workflows,
                         enabled_skills=enabled_skills,
+                        task_retry_count=task_retry_count,
                     )
                 except (
                     asyncio.TimeoutError,
                     CodexAppServerBusyError,
                     CodexThreadHomeMismatchError,
+                    CodexLaunchCommitError,
+                    InstanceNotFoundError,
+                    LaunchSupersededError,
                 ):
                     # These failures are not safe to replay through `codex exec`:
                     # a timed-out turn/start may already be running, while busy or
@@ -501,6 +721,8 @@ class InstanceManager:
                 enabled_skills=enabled_skills,
                 mcp_config_path=str(mcp_config_path) if mcp_config_path else None,
                 claude_binary_override=_container_wrapper,
+                container_exec_spec=_container_exec_spec,
+                task_retry_count=task_retry_count,
             )
 
         cmd = self._build_command(
@@ -559,7 +781,10 @@ class InstanceManager:
                 logger.debug("Container check failed, falling back to bare process")
 
         if use_container and container_project_id:
-            from backend.services.container_manager import ContainerManager
+            from backend.services.container_manager import (
+                ContainerExecSpawnCleanupError,
+                ContainerManager,
+            )
             if not hasattr(self, '_container_mgr'):
                 self._container_mgr = ContainerManager()
             project_path = cwd or os.getcwd()
@@ -581,10 +806,45 @@ class InstanceManager:
             await self._container_mgr.ensure_container(
                 container_project_id, project_path, config_dir, **_git_creds
             )
-            process = await self._container_mgr.exec_command(
-                container_project_id, cmd, env=env, cwd="/workspace"
-            )
+            try:
+                process = await self._container_mgr.exec_command(
+                    container_project_id, cmd, env=env, cwd="/workspace"
+                )
+            except ContainerExecSpawnCleanupError as exc:
+                # exec_command was cancelled after docker(1) may have asked
+                # the daemon to create the inner command, and exact cleanup
+                # could not be proven.  Install the hidden spawn outcome under
+                # this Instance before surfacing the failure so stop/shutdown
+                # can retry it; never release the slot as idle.
+                process = exc.process
+                self.processes[instance_id] = process
+                self._container_tasks[instance_id] = container_project_id
+                self._container_exec_processes[instance_id] = process
+                if os.name == "posix":
+                    self._process_groups[instance_id] = process
+                try:
+                    async with self.db_factory() as db:
+                        await db.execute(
+                            update(Instance)
+                            .where(Instance.id == instance_id)
+                            .values(
+                                status="error",
+                                pid=getattr(process, "pid", None),
+                                current_task_id=task_id,
+                            )
+                        )
+                        await db.commit()
+                except Exception:
+                    logger.exception(
+                        "Failed to persist unresolved container spawn "
+                        "for instance %s",
+                        instance_id,
+                    )
+                raise
             self._container_tasks[instance_id] = container_project_id
+            self._container_exec_processes[instance_id] = process
+            if os.name == "posix":
+                self._process_groups[instance_id] = process
         else:
             if provider == "codex":
                 # Hold the per-home gate through process creation and tracking.
@@ -596,24 +856,37 @@ class InstanceManager:
                         raise CodexAppServerBusyError(
                             f"Codex account is under maintenance: {config_dir}"
                         )
-                    process = await asyncio.create_subprocess_exec(
-                        *cmd,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                        cwd=cwd or os.getcwd(),
-                        env=env,
-                        limit=10 * 1024 * 1024,
+                    spawn_kwargs = {
+                        "stdout": asyncio.subprocess.PIPE,
+                        "stderr": asyncio.subprocess.PIPE,
+                        "cwd": cwd or os.getcwd(),
+                        "env": env,
+                        "limit": 10 * 1024 * 1024,
+                    }
+                    if os.name == "posix":
+                        spawn_kwargs["start_new_session"] = True
+                    process = await self._spawn_managed_direct_process(
+                        instance_id,
+                        task_id,
+                        cmd,
+                        spawn_kwargs,
                     )
-                    self.processes[instance_id] = process
                     self._codex_exec_homes[instance_id] = config_dir
             else:
-                process = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    cwd=cwd or os.getcwd(),
-                    env=env,
-                    limit=10 * 1024 * 1024,
+                spawn_kwargs = {
+                    "stdout": asyncio.subprocess.PIPE,
+                    "stderr": asyncio.subprocess.PIPE,
+                    "cwd": cwd or os.getcwd(),
+                    "env": env,
+                    "limit": 10 * 1024 * 1024,
+                }
+                if os.name == "posix":
+                    spawn_kwargs["start_new_session"] = True
+                process = await self._spawn_managed_direct_process(
+                    instance_id,
+                    task_id,
+                    cmd,
+                    spawn_kwargs,
                 )
 
         if provider != "codex":
@@ -643,6 +916,7 @@ class InstanceManager:
             loop_iteration=loop_iteration,
             chat_initiated=chat_initiated,
             provider=provider,
+            task_retry_count=task_retry_count,
         )
 
     def _ensure_codex_app_server_registry(self):
@@ -722,6 +996,7 @@ class InstanceManager:
         config_dir: str | None,
         enable_workflows: bool,
         enabled_skills: dict | None,
+        task_retry_count: int | None = None,
     ) -> int:
         """Launch one turn on the persistent app-server for its CODEX_HOME."""
         registry = self._ensure_codex_app_server_registry()
@@ -760,15 +1035,26 @@ class InstanceManager:
                 "config_dir": config_dir,
             }
 
-        return await self._persist_and_track_launch(
-            instance_id=instance_id,
-            task_id=task_id,
-            process=process,
-            actual_cwd=actual_cwd,
-            loop_iteration=loop_iteration,
-            chat_initiated=chat_initiated,
-            provider="codex",
-        )
+        try:
+            return await self._persist_and_track_launch(
+                instance_id=instance_id,
+                task_id=task_id,
+                process=process,
+                actual_cwd=actual_cwd,
+                loop_iteration=loop_iteration,
+                chat_initiated=chat_initiated,
+                provider="codex",
+                task_retry_count=task_retry_count,
+            )
+        except (InstanceNotFoundError, LaunchSupersededError):
+            raise
+        except Exception as exc:
+            # start_turn already returned a real native turn.  Even when its
+            # cleanup appears successful, replaying via `codex exec` is not a
+            # protocol compatibility fallback—it can duplicate model work.
+            raise CodexLaunchCommitError(
+                f"Codex turn ownership commit failed for instance {instance_id}"
+            ) from exc
 
     async def _persist_and_track_launch(
         self,
@@ -780,29 +1066,59 @@ class InstanceManager:
         loop_iteration: int | None,
         chat_initiated: bool,
         provider: str,
+        task_retry_count: int | None = None,
     ) -> int:
         """Commit launch metadata and install the consumer as one guarded step."""
 
         consumer: asyncio.Task | None = None
+        launch_started_at = datetime.utcnow()
+        persisted_started_at: datetime | None = None
         try:
             async with self.db_factory() as db:
-                await db.execute(
+                if task_id:
+                    task_update = await db.execute(
+                        update(Task)
+                        .where(
+                            Task.id == task_id,
+                            Task.instance_id == instance_id,
+                            Task.status.in_(["in_progress", "executing"]),
+                            task_retry_not_superseded_predicate(),
+                            (
+                                Task.id == task_id
+                                if task_retry_count is None
+                                else Task.retry_count == task_retry_count
+                            ),
+                        )
+                        .values(last_cwd=actual_cwd)
+                    )
+                    if task_update.rowcount == 0:
+                        raise LaunchSupersededError(
+                            f"Task {task_id} no longer owns instance {instance_id}"
+                        )
+                instance_update = await db.execute(
                     update(Instance)
                     .where(Instance.id == instance_id)
                     .values(
                         pid=process.pid,
                         status="running",
                         current_task_id=task_id,
-                        started_at=datetime.utcnow(),
+                        started_at=launch_started_at,
                         last_heartbeat=datetime.utcnow(),
                     )
                 )
-                if task_id:
-                    await db.execute(
-                        update(Task)
-                        .where(Task.id == task_id)
-                        .values(last_cwd=actual_cwd)
+                if instance_update.rowcount == 0:
+                    raise InstanceNotFoundError(
+                        f"Instance {instance_id} no longer exists"
                     )
+                # MySQL's generic DATETIME drops Python microseconds.  Keep
+                # the consumer generation fence aligned with the value that
+                # was actually persisted, otherwise its own terminal CAS
+                # rejects every direct turn on MySQL.
+                persisted_started_at = await db.scalar(
+                    select(Instance.started_at)
+                    .where(Instance.id == instance_id)
+                    .with_for_update()
+                )
                 await db.commit()
 
             # No await is allowed between task creation and map registration.
@@ -823,44 +1139,107 @@ class InstanceManager:
                 consumer,
                 chat_initiated=chat_initiated,
                 provider=provider,
+                task_id=task_id,
+                task_retry_count=task_retry_count,
+                instance_started_at=persisted_started_at,
             )
             return process.pid
         except BaseException:
             async def _cleanup_failed_launch() -> None:
+                reap_confirmed = True
                 if consumer is not None and not consumer.done():
                     consumer.cancel()
                     await asyncio.gather(consumer, return_exceptions=True)
-                if process.returncode is None:
+                try:
+                    container_alive = await self._container_exec_alive(
+                        instance_id, process
+                    )
+                except Exception:
+                    # Losing Docker control-plane visibility is not proof that
+                    # the inner process vanished.
+                    container_alive = True
+                    logger.exception(
+                        "Could not inspect aborted container launch for "
+                        "instance %s",
+                        instance_id,
+                    )
+                if (
+                    process.returncode is None
+                    or self._process_group_alive(instance_id, process)
+                    or container_alive
+                ):
                     from backend.services.codex_app_server import CodexTurnProcess
                     if (
                         isinstance(process, CodexTurnProcess)
                         and self._codex_app_server is not None
                     ):
-                        await self._codex_app_server.abort_unclaimed_turn(
-                            self._config_dirs.get(instance_id),
-                            process,
-                            reason="CCM launch metadata commit failed",
-                        )
+                        try:
+                            await self._codex_app_server.abort_unclaimed_turn(
+                                self._config_dirs.get(instance_id),
+                                process,
+                                reason="CCM launch metadata commit failed",
+                            )
+                            await self._wait_process_tree(
+                                instance_id, process, 5.0
+                            )
+                        except Exception:
+                            reap_confirmed = False
+                            logger.exception(
+                                "Could not abort unclaimed Codex turn for instance %s",
+                                instance_id,
+                            )
                     else:
                         try:
-                            process.kill()
-                        except (ProcessLookupError, RuntimeError):
-                            pass
-                        await process.wait()
-                if self.processes.get(instance_id) is process:
-                    self.processes.pop(instance_id, None)
-                    self._codex_exec_homes.pop(instance_id, None)
-                    self._launch_params.pop(instance_id, None)
+                            await self._signal_managed_process_tree(
+                                instance_id, process, signal.SIGKILL
+                            )
+                            await self._wait_process_tree(
+                                instance_id, process, 5.0
+                            )
+                        except Exception:
+                            reap_confirmed = False
+                            logger.exception(
+                                "Aborted launch process group survived for instance %s",
+                                instance_id,
+                            )
+                if reap_confirmed:
+                    if self.processes.get(instance_id) is process:
+                        self.processes.pop(instance_id, None)
+                        self._codex_exec_homes.pop(instance_id, None)
+                        self._launch_params.pop(instance_id, None)
+                    if self._process_groups.get(instance_id) is process:
+                        self._process_groups.pop(instance_id, None)
+                    self._forget_container_exec(instance_id, process)
+                    if consumer is not None and self._tasks.get(instance_id) is consumer:
+                        self._tasks.pop(instance_id, None)
+                    record = self._consumer_records.get(instance_id)
+                    if record is not None and record.task is consumer:
+                        self._consumer_records.pop(instance_id, None)
                 try:
                     async with self.db_factory() as db:
-                        await db.execute(
-                            update(Instance)
-                            .where(
-                                Instance.id == instance_id,
-                                Instance.pid == getattr(process, "pid", None),
+                        if reap_confirmed:
+                            await db.execute(
+                                update(Instance)
+                                .where(
+                                    Instance.id == instance_id,
+                                    Instance.pid == getattr(process, "pid", None),
+                                )
+                                .values(
+                                    status="idle",
+                                    pid=None,
+                                    current_task_id=None,
+                                )
                             )
-                            .values(status="idle", pid=None, current_task_id=None)
-                        )
+                        else:
+                            await db.execute(
+                                update(Instance)
+                                .where(Instance.id == instance_id)
+                                .values(
+                                    status="error",
+                                    pid=getattr(process, "pid", None),
+                                    current_task_id=task_id,
+                                )
+                            )
                         await db.commit()
                 except Exception:
                     logger.exception(
@@ -885,7 +1264,10 @@ class InstanceManager:
         *,
         chat_initiated: bool = False,
         provider: str = "claude",
-    ) -> None:
+        task_id: int | None = None,
+        task_retry_count: int | None = None,
+        instance_started_at: datetime | None = None,
+    ) -> _OutputConsumerRecord:
         """Register a consumer with identity-safe terminal cleanup.
 
         Most cleanup happens inside ``_consume_output`` because it also owns
@@ -899,9 +1281,17 @@ class InstanceManager:
             consumer,
             chat_initiated,
             (provider or "claude").lower(),
+            task_id,
+            task_retry_count,
+            instance_started_at,
         )
         self._tasks[instance_id] = consumer
         self._consumer_records[instance_id] = record
+        # The instance-keyed registry can already point at a replacement when
+        # an old PTY consumer reaches on_exit. Keep its immutable generation
+        # record on the task itself so that callback can still clean up exactly
+        # its own proxy without borrowing the replacement's identity.
+        setattr(consumer, "_ccm_output_consumer_record", record)
 
         def _consumer_done(done: asyncio.Task) -> None:
             try:
@@ -916,25 +1306,88 @@ class InstanceManager:
                 )
 
             if self._consumer_records.get(instance_id) is record:
+                recovery_key = (instance_id, process)
+                pending_recovery = self._consumer_recovery_pending.get(
+                    recovery_key
+                )
+                if pending_recovery is not None:
+                    # The OS process is gone, but the durable Task/Instance
+                    # owner was not settled.  Keep every exact in-memory handle
+                    # so stop/admission can expose and retry that recovery.
+                    self._consumer_errors[recovery_key] = (
+                        pending_recovery.error
+                    )
+                    return
                 if error is not None and not record.chat_initiated:
                     self._consumer_errors[(instance_id, process)] = error
+                if not self._generation_reap_confirmed(
+                    instance_id, process
+                ):
+                    # A terminal parent is not terminal generation evidence.
+                    # Keep the record/task/process maps so is_running, stop and
+                    # shutdown can still find and reap surviving descendants.
+                    return
                 self._consumer_records.pop(instance_id, None)
                 if self._tasks.get(instance_id) is done:
                     self._tasks.pop(instance_id, None)
-                if self.processes.get(instance_id) is process and process.returncode is not None:
+                if (
+                    self.processes.get(instance_id) is process
+                    and self._generation_reap_confirmed(instance_id, process)
+                ):
                     self.processes.pop(instance_id, None)
                     self._codex_exec_homes.pop(instance_id, None)
                     self._launch_params.pop(instance_id, None)
+                    if self._process_groups.get(instance_id) is process:
+                        self._process_groups.pop(instance_id, None)
 
         consumer.add_done_callback(_consumer_done)
+        return record
+
+    def _mark_consumer_recovery_pending(
+        self,
+        instance_id: int,
+        process: asyncio.subprocess.Process,
+        *,
+        error: BaseException,
+        tracked_generation: bool,
+        task_id: int | None,
+        task_retry_count: int | None,
+        instance_started_at: datetime | None,
+    ) -> _ConsumerRecoveryEvidence:
+        """Retain one exact terminal generation whose DB recovery is unknown."""
+
+        evidence = _ConsumerRecoveryEvidence(
+            error=error,
+            tracked_generation=tracked_generation,
+            task_id=task_id,
+            task_retry_count=task_retry_count,
+            instance_started_at=instance_started_at,
+        )
+        key = (instance_id, process)
+        self._consumer_recovery_pending[key] = evidence
+        self._consumer_errors[key] = error
+        return evidence
+
+    def _clear_consumer_recovery_pending(
+        self,
+        instance_id: int,
+        process: asyncio.subprocess.Process | None,
+    ) -> None:
+        """Forget recovery evidence only after a confirmed durable settlement."""
+
+        if process is None:
+            return
+        key = (instance_id, process)
+        self._consumer_recovery_pending.pop(key, None)
+        self._consumer_errors.pop(key, None)
 
     async def shutdown_codex_app_server(self) -> None:
         """Stop every persistent Codex account transport at app shutdown."""
-        if self._codex_app_server is None:
+        registry = self._codex_app_server
+        if registry is None:
             return
-        try:
-            await self._codex_app_server.shutdown()
-        finally:
+        await registry.shutdown()
+        if self._codex_app_server is registry:
             self._codex_app_server = None
 
     async def shutdown_codex_app_server_home(
@@ -1097,6 +1550,8 @@ class InstanceManager:
         enabled_skills: dict | None,
         mcp_config_path: str | None,
         claude_binary_override: str | None = None,
+        container_exec_spec=None,
+        task_retry_count: int | None = None,
     ) -> int:
         """PTY-mode launch: delegate to claude_pty, mirror -p bookkeeping.
 
@@ -1163,13 +1618,23 @@ class InstanceManager:
 
             process = self.processes.get(instance_id)
             consumer = self._tasks.get(instance_id)
+            turn_started_at = datetime.utcnow()
+            if container_exec_spec is not None and process is not None:
+                self._container_mgr.register_exec(
+                    process, container_exec_spec
+                )
+                self._container_exec_processes[instance_id] = process
+            consumer_record = None
             if consumer is not None and process is not None:
-                self._track_output_consumer(
+                consumer_record = self._track_output_consumer(
                     instance_id,
                     process,
                     consumer,
                     chat_initiated=chat_initiated,
                     provider="claude",
+                    task_id=task_id,
+                    task_retry_count=task_retry_count,
+                    instance_started_at=turn_started_at,
                 )
             pid = getattr(process, "pid", 0) or 0
 
@@ -1177,29 +1642,61 @@ class InstanceManager:
             # commit. A failure/cancellation below tears down the exact PTY
             # generation before the per-instance lifecycle lock is released.
             async with self.db_factory() as db:
-                if task_id and session_id:
-                    await db.execute(
+                if task_id:
+                    task_values = {"last_cwd": cwd or os.getcwd()}
+                    if session_id:
+                        task_values["session_id"] = session_id
+                    task_update = await db.execute(
                         update(Task)
-                        .where(Task.id == task_id)
-                        .values(session_id=session_id)
+                        .where(
+                            Task.id == task_id,
+                            Task.instance_id == instance_id,
+                            Task.status.in_(["in_progress", "executing"]),
+                            task_retry_not_superseded_predicate(),
+                            (
+                                Task.id == task_id
+                                if task_retry_count is None
+                                else Task.retry_count == task_retry_count
+                            ),
+                        )
+                        .values(**task_values)
                     )
-                await db.execute(
+                    if task_update.rowcount == 0:
+                        raise LaunchSupersededError(
+                            f"Task {task_id} no longer owns instance {instance_id}"
+                        )
+                instance_update = await db.execute(
                     update(Instance)
                     .where(Instance.id == instance_id)
                     .values(
                         pid=pid,
                         status="running",
                         current_task_id=task_id,
-                        started_at=datetime.utcnow(),
+                        started_at=turn_started_at,
                         last_heartbeat=datetime.utcnow(),
                     )
                 )
-                if task_id:
-                    actual_cwd = cwd or os.getcwd()
+                if instance_update.rowcount == 0:
+                    raise InstanceNotFoundError(
+                        f"Instance {instance_id} no longer exists"
+                    )
+                persisted_turn_started_at = (
                     await db.execute(
-                        update(Task)
-                        .where(Task.id == task_id)
-                        .values(last_cwd=actual_cwd)
+                        select(Instance.started_at)
+                        .where(Instance.id == instance_id)
+                        .with_for_update()
+                    )
+                ).scalar_one_or_none()
+                if consumer_record is not None:
+                    # The PTY consumer is registered before this commit so its
+                    # on-exit callback cannot outrun launch metadata. Update
+                    # that same immutable identity object with the
+                    # database-normalized timestamp before opening the
+                    # metadata barrier.
+                    object.__setattr__(
+                        consumer_record,
+                        "instance_started_at",
+                        persisted_turn_started_at,
                     )
                 await db.commit()
             metadata_barrier.set()
@@ -1215,6 +1712,15 @@ class InstanceManager:
                 self._pty_launch_barriers.pop(instance_id, None)
             process = self.processes.get(instance_id)
             consumer = self._tasks.get(instance_id)
+            if (
+                container_exec_spec is not None
+                and process is not None
+                and not self._container_mgr.owns_exec(process)
+            ):
+                self._container_mgr.register_exec(
+                    process, container_exec_spec
+                )
+                self._container_exec_processes[instance_id] = process
             owns_new_process = (
                 process is not None and process is not previous_process
             )
@@ -1223,12 +1729,15 @@ class InstanceManager:
             )
 
             async def _cleanup_failed_pty_launch() -> None:
+                reap_confirmed = not (owns_new_process or owns_new_consumer)
                 if owns_new_process or owns_new_consumer:
+                    backend_stopped = True
                     stop_pty = getattr(self._pty_backend, "stop", None)
                     if stop_pty is not None:
                         try:
                             await stop_pty(instance_id)
                         except Exception:
+                            backend_stopped = False
                             logger.exception(
                                 "Failed to stop aborted PTY launch for instance %s",
                                 instance_id,
@@ -1236,43 +1745,86 @@ class InstanceManager:
                     if consumer is not None and not consumer.done():
                         consumer.cancel()
                         await asyncio.gather(consumer, return_exceptions=True)
-                    if process is not None and process.returncode is None:
+                    container_alive = False
+                    if process is not None:
                         try:
-                            process.kill()
-                        except (ProcessLookupError, RuntimeError):
-                            pass
+                            container_alive = await self._container_exec_alive(
+                                instance_id, process
+                            )
+                        except Exception:
+                            container_alive = True
+                    if process is not None and (
+                        process.returncode is None or container_alive
+                    ):
                         try:
-                            await asyncio.wait_for(process.wait(), timeout=10)
-                        except asyncio.TimeoutError:
-                            logger.error(
-                                "Aborted PTY process did not terminate for instance %s",
+                            await self._signal_managed_process_tree(
+                                instance_id, process, signal.SIGKILL
+                            )
+                            await self._wait_process_tree(
+                                instance_id, process, 10.0
+                            )
+                        except Exception:
+                            backend_stopped = False
+                            logger.exception(
+                                "Aborted PTY/container process did not "
+                                "terminate for instance %s",
                                 instance_id,
                             )
 
-                    if self.processes.get(instance_id) is process:
-                        self.processes.pop(instance_id, None)
-                    if self._tasks.get(instance_id) is consumer:
-                        self._tasks.pop(instance_id, None)
-                    record = self._consumer_records.get(instance_id)
-                    if record is not None and record.task is consumer:
-                        self._consumer_records.pop(instance_id, None)
-                    self._launch_params.pop(instance_id, None)
+                    reap_confirmed = backend_stopped and (
+                        process is None or process.returncode is not None
+                    )
+                    if reap_confirmed and process is not None:
+                        try:
+                            reap_confirmed = not await self._container_exec_alive(
+                                instance_id, process
+                            )
+                        except Exception:
+                            reap_confirmed = False
+                    if reap_confirmed:
+                        if process is not None:
+                            self._forget_container_exec(instance_id, process)
+                        if self.processes.get(instance_id) is process:
+                            self.processes.pop(instance_id, None)
+                        if self._tasks.get(instance_id) is consumer:
+                            self._tasks.pop(instance_id, None)
+                        record = self._consumer_records.get(instance_id)
+                        if record is not None and record.task is consumer:
+                            self._consumer_records.pop(instance_id, None)
+                        self._launch_params.pop(instance_id, None)
+                if (
+                    reap_confirmed
+                    and process is None
+                    and container_exec_spec is not None
+                ):
+                    self._container_mgr.discard_spec(container_exec_spec)
+                    self._container_tasks.pop(instance_id, None)
 
-                # Commit outcome is indeterminate under cancellation, and an
-                # ultra-short consumer may already have removed its maps. The
-                # slot is still lifecycle-locked, so always reconcile DB idle
-                # rather than conditioning rollback on in-memory ownership.
+                # Commit outcome is indeterminate under cancellation.  Reopen
+                # the slot only after both PTY backend and proxy are confirmed
+                # stopped; otherwise retain the generation evidence fail-closed.
                 try:
                     async with self.db_factory() as db:
-                        await db.execute(
-                            update(Instance)
-                            .where(Instance.id == instance_id)
-                            .values(
-                                status="idle",
-                                pid=None,
-                                current_task_id=None,
+                        if reap_confirmed:
+                            await db.execute(
+                                update(Instance)
+                                .where(Instance.id == instance_id)
+                                .values(
+                                    status="idle",
+                                    pid=None,
+                                    current_task_id=None,
+                                )
                             )
-                        )
+                        else:
+                            await db.execute(
+                                update(Instance)
+                                .where(Instance.id == instance_id)
+                                .values(
+                                    status="error",
+                                    pid=(getattr(process, "pid", None) or None),
+                                    current_task_id=task_id,
+                                )
+                            )
                         await db.commit()
                 except Exception:
                     logger.exception(
@@ -1295,6 +1847,152 @@ class InstanceManager:
         barrier = self._pty_launch_barriers.get(instance_id)
         if barrier is not None:
             await barrier.wait()
+
+    async def finalize_pty_chat_generation(
+        self,
+        instance_id: int,
+        task_id: int,
+        exit_code: int | None,
+        record: _OutputConsumerRecord,
+    ) -> str | None:
+        """Finalize one exact PTY chat turn, or discard a stale exit callback.
+
+        A PTY ``Session`` and its OS PID are deliberately reused across turns.
+        The upstream adapter therefore cannot safely finalize by
+        ``instance_id``/``task_id`` alone: an old callback can otherwise clear
+        a newer owner on the same slot (including a same-task ABA).  The
+        consumer record carries the Task retry generation plus the exact
+        ``Instance.started_at`` written for this turn.  Finalization is ordered
+        Task -> Instance and both updates live in one transaction; a failure of
+        either CAS rolls the other back.
+        """
+
+        consumer = asyncio.current_task()
+        process = record.process
+        expected_started_at = record.instance_started_at
+        expected_retry_count = record.task_retry_count
+        if (
+            record.task is not consumer
+            or record.task_id != task_id
+            or expected_started_at is None
+            or expected_retry_count is None
+        ):
+            return None
+
+        def owns_generation() -> bool:
+            return (
+                self._consumer_records.get(instance_id) is record
+                and self._tasks.get(instance_id) is consumer
+                and self.processes.get(instance_id) is process
+            )
+
+        lifecycle_lock = self._instance_lifecycle_lock(instance_id)
+        ec = exit_code if exit_code is not None else 0
+        interrupted = ec in (-2, 130)
+        final_status = "completed" if ec == 0 or interrupted else "failed"
+        completed_at = datetime.utcnow()
+
+        async with lifecycle_lock:
+            if instance_id in self._stopping or not owns_generation():
+                return None
+
+            async with self.db_factory() as db:
+                task_values: dict = {"status": final_status}
+                if final_status == "completed":
+                    task_values.update(
+                        completed_at=completed_at,
+                        error_message=None,
+                    )
+                else:
+                    task_values.update(
+                        completed_at=completed_at,
+                        error_message=f"Process exited with code {ec}",
+                    )
+                # Lock/update the Task first.  Cancellation and retry use the
+                # same global Task -> Instance order.
+                task_result = await db.execute(
+                    update(Task)
+                    .where(
+                        Task.id == task_id,
+                        Task.status.in_(
+                            ["executing", "in_progress", "failed", "pending"]
+                        ),
+                        Task.instance_id == instance_id,
+                        Task.retry_count == expected_retry_count,
+                    )
+                    .values(**task_values)
+                )
+                if not task_result.rowcount:
+                    await db.rollback()
+                    return None
+
+                instance_result = await db.execute(
+                    update(Instance)
+                    .where(
+                        Instance.id == instance_id,
+                        Instance.status == "running",
+                        Instance.pid == (getattr(process, "pid", 0) or 0),
+                        Instance.current_task_id == task_id,
+                        Instance.started_at == expected_started_at,
+                    )
+                    .values(
+                        status=(
+                            "idle"
+                            if final_status == "completed" or interrupted
+                            else "error"
+                        ),
+                        pid=None,
+                        current_task_id=None,
+                    )
+                )
+                if not instance_result.rowcount or not owns_generation():
+                    await db.rollback()
+                    return None
+                # MySQL DATETIME without fractional precision normalizes away
+                # Python microseconds.  Re-read the locked row before commit
+                # and use that database value for the publication fence.
+                completed_at = (
+                    await db.execute(
+                        select(Task.completed_at).where(Task.id == task_id)
+                    )
+                ).scalar_one()
+                await db.commit()
+
+            # Publish only while an exact no-op Task update holds this terminal
+            # generation.  A retry/replacement must take the same row lock and
+            # cannot be followed by this old "completed"/"failed" event.
+            async with self.db_factory() as db:
+                publish_guard = await db.execute(
+                    update(Task)
+                    .where(
+                        Task.id == task_id,
+                        Task.status == final_status,
+                        Task.instance_id == instance_id,
+                        Task.retry_count == expected_retry_count,
+                        Task.completed_at == completed_at,
+                    )
+                    .values(status=final_status)
+                )
+                if publish_guard.rowcount:
+                    await self.broadcaster.broadcast(
+                        "tasks",
+                        {
+                            "event": "status_change",
+                            "task_id": task_id,
+                            "new_status": final_status,
+                            "instance_id": instance_id,
+                        },
+                    )
+                    await self.broadcaster.broadcast(
+                        f"task:{task_id}",
+                        {
+                            "event_type": "process_exit",
+                            "exit_code": ec,
+                            "stderr": None,
+                        },
+                    )
+                await db.commit()
+        return final_status
 
     def _build_command(
         self,
@@ -1425,59 +2123,399 @@ class InstanceManager:
                 task_id,
             )
             consumer = asyncio.current_task()
-            owns_turn = (
-                self.processes.get(instance_id) is process
-                and self._tasks.get(instance_id) is consumer
+            record = self._consumer_records.get(instance_id)
+            tracked_generation = bool(
+                record is not None
+                and record.process is process
+                and record.task is consumer
             )
-            if not owns_turn:
+            expected_retry_count = (
+                record.task_retry_count
+                if tracked_generation
+                else None
+            )
+            expected_started_at = (
+                record.instance_started_at
+                if tracked_generation
+                else None
+            )
+            mapped_process = self.processes.get(instance_id)
+            mapped_consumer = self._tasks.get(instance_id)
+            if (
+                mapped_process is not process
+                or (
+                    mapped_consumer is not None
+                    and mapped_consumer is not consumer
+                )
+            ):
+                # A replacement already owns the reusable key.  This stale
+                # callback must not retain or mutate the replacement.
                 return
-            if process.returncode is None:
+            if mapped_consumer is None:
+                # Legacy/direct integrations may have registered only the
+                # process. Preserve this crashed consumer as fail-closed
+                # evidence; it still lacks the durable token required below.
+                self._tasks[instance_id] = consumer
+            try:
+                container_alive = await self._container_exec_alive(
+                    instance_id, process
+                )
+            except Exception:
+                container_alive = True
+                logger.exception(
+                    "Could not inspect container exec after consumer failure "
+                    "for instance %s",
+                    instance_id,
+                )
+            reap_confirmed = (
+                process.returncode is not None
+                and not self._process_group_alive(instance_id, process)
+                and not container_alive
+            )
+            if not reap_confirmed:
                 try:
-                    process.kill()
-                    await process.wait()
+                    await self._signal_managed_process_tree(
+                        instance_id, process, signal.SIGKILL
+                    )
+                    await self._wait_process_tree(instance_id, process, 5.0)
+                    reap_confirmed = True
                 except Exception:
                     logger.exception(
                         "Could not terminate crashed consumer process for instance %s",
                         instance_id,
                     )
+            if reap_confirmed:
+                self._forget_container_exec(instance_id, process)
+            if not tracked_generation:
+                # In-memory identity alone cannot prove which durable
+                # Task/Instance generation is still stored.  Never degrade an
+                # emergency recovery into id-only writes: retain the exact
+                # process/task handles and require an explicitly fenced
+                # lifecycle operation to reconcile them.
+                unsettled = ConsumerRecoveryUnsettledError(
+                    "Output consumer recovery lacks an exact generation "
+                    f"record for instance {instance_id}"
+                )
+                self._mark_consumer_recovery_pending(
+                    instance_id,
+                    process,
+                    error=unsettled,
+                    tracked_generation=False,
+                    task_id=task_id,
+                    task_retry_count=None,
+                    instance_started_at=None,
+                )
+                raise unsettled from exc
             # A failed post-process hook must not leave the DB advertising a
             # running worker after the process is terminal.  Conditions on the
             # task status preserve a result already committed before a later
             # broadcast/cleanup failure.
+            task_publication_generation: dict | None = None
+            recovery_failure: ConsumerRecoveryUnsettledError | None = None
             try:
                 async with self.db_factory() as db:
-                    recovery_status = (
-                        "idle" if process.returncode in (0, -2, 130) else "error"
-                    )
-                    await db.execute(
-                        update(Instance)
-                        .where(Instance.id == instance_id)
-                        .values(
-                            status=recovery_status,
-                            pid=None,
-                            current_task_id=None,
-                        )
-                    )
+                    task_recovery = None
                     if task_id and chat_initiated:
-                        await db.execute(
+                        # Recovery participates in the same global
+                        # Task -> Instance lock order as every other terminal
+                        # lifecycle path. If the reverse Instance CAS below
+                        # fails, this Task write is rolled back with it.
+                        task_recovery = await db.execute(
                             update(Task)
                             .where(
                                 Task.id == task_id,
-                                Task.status.in_(["executing", "in_progress"]),
+                                Task.status.in_(
+                                    ["executing", "in_progress"]
+                                ),
+                                (
+                                    Task.instance_id == instance_id
+                                    if tracked_generation
+                                    else Task.id == task_id
+                                ),
+                                (
+                                    Task.id == task_id
+                                    if expected_retry_count is None
+                                    else Task.retry_count
+                                    == expected_retry_count
+                                ),
                             )
                             .values(
                                 status="failed",
+                                completed_at=datetime.utcnow(),
                                 error_message=(
                                     f"Output bookkeeping failed: {exc}"
                                 )[:500],
                             )
                         )
-                    await db.commit()
-            except Exception:
+                    if reap_confirmed:
+                        recovery_status = (
+                            "idle"
+                            if process.returncode in (0, -2, 130)
+                            else "error"
+                        )
+                        instance_recovery = await db.execute(
+                            update(Instance)
+                            .where(
+                                Instance.id == instance_id,
+                                Instance.pid
+                                == getattr(process, "pid", None),
+                                (
+                                    Instance.current_task_id.is_(None)
+                                    if task_id is None
+                                    else Instance.current_task_id == task_id
+                                ),
+                                (
+                                    Instance.started_at.is_(None)
+                                    if expected_started_at is None
+                                    else Instance.started_at
+                                    == expected_started_at
+                                ),
+                            )
+                            .values(
+                                status=recovery_status,
+                                pid=None,
+                                current_task_id=None,
+                            )
+                        )
+                    else:
+                        instance_recovery = await db.execute(
+                            update(Instance)
+                            .where(
+                                Instance.id == instance_id,
+                                Instance.pid
+                                == getattr(process, "pid", None),
+                                (
+                                    Instance.current_task_id.is_(None)
+                                    if task_id is None
+                                    else Instance.current_task_id == task_id
+                                ),
+                                (
+                                    Instance.started_at.is_(None)
+                                    if expected_started_at is None
+                                    else Instance.started_at
+                                    == expected_started_at
+                                ),
+                            )
+                            .values(
+                                status="error",
+                                pid=getattr(process, "pid", None),
+                                current_task_id=task_id,
+                            )
+                        )
+                    if not instance_recovery.rowcount:
+                        await db.rollback()
+                        durable_instance_generation = (
+                            await db.execute(
+                                select(
+                                    Instance.pid,
+                                    Instance.current_task_id,
+                                    Instance.started_at,
+                                ).where(Instance.id == instance_id)
+                            )
+                        ).one_or_none()
+                        # A missing row or a different durable per-turn token
+                        # proves this terminal callback was superseded.  Any
+                        # other CAS miss is ambiguous (including same-second
+                        # PID reuse on MySQL) and must retain fail-closed
+                        # recovery evidence.
+                        recovery_superseded = (
+                            durable_instance_generation is None
+                            or durable_instance_generation.started_at
+                            != expected_started_at
+                        )
+                        if not recovery_superseded:
+                            raise RuntimeError(
+                                "Exact Instance recovery CAS did not match "
+                                f"generation {instance_id}/"
+                                f"{getattr(process, 'pid', None)}/"
+                                f"{expected_started_at}"
+                            )
+                    else:
+                        if task_recovery is not None and task_recovery.rowcount:
+                            # MySQL DATETIME may discard Python microseconds.
+                            # Capture the exact persisted values while the Task
+                            # row is still locked for the publication fence.
+                            resulting_task_generation = (
+                                await db.execute(
+                                    select(
+                                        Task.status,
+                                        Task.retry_count,
+                                        Task.instance_id,
+                                        Task.started_at,
+                                        Task.completed_at,
+                                    ).where(Task.id == task_id)
+                                )
+                            ).one()
+                            task_publication_generation = {
+                                "status": resulting_task_generation.status,
+                                "retry_count": (
+                                    resulting_task_generation.retry_count
+                                ),
+                                "instance_id": (
+                                    resulting_task_generation.instance_id
+                                ),
+                                "started_at": (
+                                    resulting_task_generation.started_at
+                                ),
+                                "completed_at": (
+                                    resulting_task_generation.completed_at
+                                ),
+                            }
+                        await db.commit()
+            except Exception as recovery_exc:
                 logger.exception(
                     "Failed to persist consumer recovery for instance %s",
                     instance_id,
                 )
+                recovery_failure = ConsumerRecoveryUnsettledError(
+                    "Could not confirm output consumer recovery for "
+                    f"instance {instance_id}: {recovery_exc}"
+                )
+                self._mark_consumer_recovery_pending(
+                    instance_id,
+                    process,
+                    error=recovery_failure,
+                    tracked_generation=True,
+                    task_id=task_id,
+                    task_retry_count=expected_retry_count,
+                    instance_started_at=expected_started_at,
+                )
+            if task_publication_generation is not None:
+                try:
+                    async with self.db_factory() as db:
+                        publish_guard = await db.execute(
+                            update(Task)
+                            .where(
+                                Task.id == task_id,
+                                Task.status
+                                == task_publication_generation["status"],
+                                Task.retry_count
+                                == task_publication_generation["retry_count"],
+                                (
+                                    Task.instance_id.is_(None)
+                                    if task_publication_generation[
+                                        "instance_id"
+                                    ]
+                                    is None
+                                    else Task.instance_id
+                                    == task_publication_generation[
+                                        "instance_id"
+                                    ]
+                                ),
+                                (
+                                    Task.started_at.is_(None)
+                                    if task_publication_generation["started_at"]
+                                    is None
+                                    else Task.started_at
+                                    == task_publication_generation["started_at"]
+                                ),
+                                (
+                                    Task.completed_at.is_(None)
+                                    if task_publication_generation[
+                                        "completed_at"
+                                    ]
+                                    is None
+                                    else Task.completed_at
+                                    == task_publication_generation[
+                                        "completed_at"
+                                    ]
+                                ),
+                            )
+                            .values(
+                                status=task_publication_generation["status"]
+                            )
+                        )
+                        if publish_guard.rowcount:
+                            await self.broadcaster.broadcast(
+                                "tasks",
+                                {
+                                    "event": "status_change",
+                                    "task_id": task_id,
+                                    "new_status": "failed",
+                                    "instance_id": instance_id,
+                                },
+                            )
+                        await db.commit()
+                except Exception:
+                    logger.exception(
+                        "Failed to publish consumer recovery for instance %s",
+                        instance_id,
+                    )
+            if recovery_failure is not None:
+                raise recovery_failure from exc
+            raise
+
+    @staticmethod
+    async def _drain_stderr(stream, *, retain_bytes: int = 2 * 1024 * 1024) -> bytes:
+        """Continuously drain a child stderr pipe while retaining a bounded tail."""
+
+        if stream is None:
+            return b""
+        retained = bytearray()
+        while True:
+            try:
+                chunk = await stream.read(64 * 1024)
+            except TypeError:
+                # A few process/test adapters expose ``read()`` without the
+                # optional size argument. They are one-shot readers.
+                chunk = await stream.read()
+                if isinstance(chunk, str):
+                    chunk = chunk.encode()
+                return bytes(chunk or b"")[-retain_bytes:]
+            if not chunk:
+                break
+            if isinstance(chunk, str):
+                chunk = chunk.encode()
+            retained.extend(chunk)
+            if len(retained) > retain_bytes:
+                del retained[:-retain_bytes]
+        return bytes(retained)
+
+    @staticmethod
+    async def _wait_for_parent_exit(process: asyncio.subprocess.Process) -> None:
+        """Wait for the OS parent without requiring inherited pipe EOF.
+
+        On POSIX asyncio may keep ``Process.wait()`` pending until pipe
+        transports close, even though the child watcher has already populated
+        ``returncode``.  Run wait concurrently, but stop awaiting its adapter
+        as soon as either source proves the parent exited.
+        """
+
+        if process.returncode is not None:
+            return
+        waiter = asyncio.create_task(process.wait())
+        try:
+            while process.returncode is None and not waiter.done():
+                await asyncio.sleep(0.02)
+            if waiter.done():
+                await waiter
+        finally:
+            if not waiter.done():
+                waiter.cancel()
+                await asyncio.gather(waiter, return_exceptions=True)
+
+    @staticmethod
+    async def _readline_until_parent_exit(
+        process: asyncio.subprocess.Process,
+    ) -> bytes:
+        """Read one stdout line without letting an orphaned fd block forever."""
+
+        reader = asyncio.create_task(process.stdout.readline())
+        try:
+            while not reader.done():
+                await asyncio.wait({reader}, timeout=0.05)
+                if process.returncode is not None and not reader.done():
+                    # The OS parent is terminal and no buffered complete line
+                    # is available.  A descendant owns the remaining fd; let
+                    # finally terminate the exact process group.
+                    reader.cancel()
+                    await asyncio.gather(reader, return_exceptions=True)
+                    return b""
+            return await reader
+        except BaseException:
+            if not reader.done():
+                reader.cancel()
+                await asyncio.gather(reader, return_exceptions=True)
             raise
 
     async def _consume_output_impl(self, instance_id: int, task_id: int | None, process: asyncio.subprocess.Process, loop_iteration: int | None = None, chat_initiated: bool = False, provider: str = "claude"):
@@ -1488,6 +2526,24 @@ class InstanceManager:
         a single bad line or transient DB error never kills the whole consumer.
         """
         consumer_task = asyncio.current_task()
+        record = self._consumer_records.get(instance_id)
+        tracked_generation = bool(
+            record is not None
+            and record.process is process
+            and record.task is consumer_task
+        )
+        expected_retry_count = (
+            record.task_retry_count
+            if tracked_generation
+            else None
+        )
+        # Drain stderr while stdout is being consumed. Reading stderr only
+        # after process.wait() can deadlock once the OS pipe buffer fills: the
+        # child blocks writing stderr and can neither close stdout nor exit.
+        stderr_reader = asyncio.create_task(
+            self._drain_stderr(process.stderr),
+            name=f"instance-{instance_id}-stderr",
+        )
 
         def owns_instance_turn() -> bool:
             """Whether this consumer still owns the instance bookkeeping.
@@ -1512,7 +2568,7 @@ class InstanceManager:
         try:
             while True:
                 try:
-                    line = await process.stdout.readline()
+                    line = await self._readline_until_parent_exit(process)
                     if not line:
                         break
                     text = line.decode("utf-8", errors="replace").strip()
@@ -1529,7 +2585,15 @@ class InstanceManager:
 
                     for event in events:
                         try:
-                            await self._process_event(instance_id, task_id, event, loop_iteration)
+                            await self._process_event(
+                                instance_id,
+                                task_id,
+                                event,
+                                loop_iteration,
+                                consumer_record=(
+                                    record if tracked_generation else None
+                                ),
+                            )
                             if event.get("event_type") == "rate_limit_event":
                                 # Only a genuine near-limit/blocked event should
                                 # evaluate a switch. The CLI emits an
@@ -1562,83 +2626,169 @@ class InstanceManager:
                     logger.exception("Unexpected error in consume loop for instance %s, continuing", instance_id)
 
         except asyncio.CancelledError:
+            # Consumer cancellation is a shutdown/stop signal, but the exact
+            # process generation still has to be reaped and its durable owner
+            # settled before the task may finish.  Continue into the terminal
+            # cleanup below instead of returning from a ``finally`` block.
             pass
-        finally:
-            # Wait for process to finish
-            await process.wait()
-            exit_code = process.returncode
 
-            # Read stderr
-            stderr_data = await process.stderr.read()
-            stderr_text = stderr_data.decode("utf-8", errors="replace").strip() if stderr_data else ""
-            if stderr_text:
-                lines = stderr_text.splitlines()
-                lines = [l for l in lines if not re.sub(r'\x1b\[[0-9;]*m', '', l).strip().startswith("[auto]")]
-                stderr_text = "\n".join(lines).strip()
-            self._last_stderr[instance_id] = stderr_text
-
-            # If stop() was called, it handles instance + task cleanup — skip here
-            if instance_id in self._stopping:
-                return
-
-            # Empty-reply retry: if chat turn produced only "No response requested."
-            # or similar non-response, re-enqueue the original prompt once.
-            _NO_RESPONSE_PATTERNS = {"no response requested.", "no response requested", "no response needed."}
+        # The CLI parent can exit while a tool process remains in its
+        # session and keeps inherited stdout/stderr fds open.  Parent
+        # returncode alone is therefore never enough to release this
+        # reusable slot: kill and prove the exact direct/container
+        # generation gone before writing idle or dropping group evidence.
+        reap_error: Exception | None = None
+        try:
+            await self._wait_for_parent_exit(process)
             if (
-                task_id
-                and chat_initiated
-                and exit_code == 0
-                and not _saw_error
-                and instance_id in self._launch_params
-                and not self._launch_params[instance_id].get("_retried")
+                self._process_group_alive(instance_id, process)
+                or await self._container_exec_alive(instance_id, process)
             ):
-                combined = " ".join(_assistant_texts).strip().lower().rstrip(".")
-                if not _assistant_texts or combined in _NO_RESPONSE_PATTERNS:
-                    params = self._launch_params[instance_id]
-                    params["_retried"] = True
-                    logger.warning(
-                        "Task %d got empty/non-response (%r), re-enqueueing prompt",
-                        task_id, combined[:80],
-                    )
-                    from backend.main import dispatcher
-                    from backend.services.dispatcher import PRIORITY_USER
-                    await dispatcher.enqueue_message(
-                        task_id=task_id,
-                        prompt=params["prompt"],
-                        priority=PRIORITY_USER,
-                        source="retry",
-                    )
-                    # Still clean up instance below so it's available for the retry
-                    # fall through to normal cleanup
-
-            # Quota-aware proactive switch after a successful turn. Claude is
-            # event-driven; Codex refreshes its rollout quota on every completed
-            # turn because its exec/app-server stream has no equivalent event.
-            if task_id and exit_code == 0 and (
-                provider == "codex" or _saw_rate_limit
-            ):
-                await self._try_proactive_pool_switch(
-                    instance_id,
-                    task_id,
-                    rate_limit_info=_rate_limit_info,
+                await self._signal_managed_process_tree(
+                    instance_id, process, signal.SIGKILL
                 )
+                await self._wait_process_tree(instance_id, process, 5.0)
+            else:
+                self._forget_container_exec(instance_id, process)
+            if not self._generation_reap_confirmed(instance_id, process):
+                raise RuntimeError(
+                    f"Process generation for instance {instance_id} "
+                    "could not be proven terminal"
+                )
+        except Exception as exc:
+            # Drain/cancel stderr below before surfacing the failure.  The
+            # outer recovery boundary will retry the exact kill and retain
+            # DB ownership plus generation maps if proof still fails.
+            reap_error = exc
+        exit_code = process.returncode
 
-            if task_id and chat_initiated and exit_code not in (0, -2, 130):
-                # "Prompt is too long" — session context exceeded window.
-                # Compact the session and retry with summary.
-                _prompt_too_long = _assistant_texts and any("prompt is too long" in t.lower() for t in _assistant_texts)
-                if _prompt_too_long:
-                    try:
-                        from backend.main import dispatcher
-                        async with self.db_factory() as db:
-                            from backend.models.task import Task as _Task
-                            task = await db.get(_Task, task_id)
-                            if task and task.session_id:
-                                logger.warning("Task %d hit 'Prompt is too long', compacting session", task_id)
-                                summary = await dispatcher._compact_session(task_id, task.session_id, db)
-                                if summary:
-                                    task.session_id = None
-                                    task.context_window_usage = None
+        # stderr has been drained concurrently since the turn started.
+        # A tool/descendant can outlive the CLI parent while retaining the
+        # inherited pipe fd.  Never let that orphan hold the reusable
+        # Instance lifecycle forever waiting for EOF.
+        try:
+            stderr_data = await asyncio.wait_for(
+                asyncio.shield(stderr_reader), timeout=2.0
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Timed out draining inherited stderr for instance %s",
+                instance_id,
+            )
+            stderr_reader.cancel()
+            await asyncio.gather(stderr_reader, return_exceptions=True)
+            stderr_data = b""
+        stderr_text = stderr_data.decode("utf-8", errors="replace").strip() if stderr_data else ""
+        if stderr_text:
+            lines = stderr_text.splitlines()
+            lines = [l for l in lines if not re.sub(r'\x1b\[[0-9;]*m', '', l).strip().startswith("[auto]")]
+            stderr_text = "\n".join(lines).strip()
+        self._last_stderr[instance_id] = stderr_text
+
+        if reap_error is not None:
+            raise RuntimeError(
+                f"Could not reap process generation for instance {instance_id}"
+            ) from reap_error
+
+        # If stop() was called, it handles instance + task cleanup — skip here
+        if instance_id in self._stopping:
+            return
+
+        # Empty-reply retry: if chat turn produced only "No response requested."
+        # or similar non-response, re-enqueue the original prompt once.
+        _NO_RESPONSE_PATTERNS = {"no response requested.", "no response requested", "no response needed."}
+        if (
+            task_id
+            and chat_initiated
+            and exit_code == 0
+            and not _saw_error
+            and instance_id in self._launch_params
+            and not self._launch_params[instance_id].get("_retried")
+        ):
+            combined = " ".join(_assistant_texts).strip().lower().rstrip(".")
+            if not _assistant_texts or combined in _NO_RESPONSE_PATTERNS:
+                params = self._launch_params[instance_id]
+                params["_retried"] = True
+                logger.warning(
+                    "Task %d got empty/non-response (%r), re-enqueueing prompt",
+                    task_id, combined[:80],
+                )
+                from backend.main import dispatcher
+                from backend.services.dispatcher import PRIORITY_USER
+                await dispatcher.enqueue_message(
+                    task_id=task_id,
+                    prompt=params["prompt"],
+                    priority=PRIORITY_USER,
+                    source="retry",
+                )
+                # Still clean up instance below so it's available for the retry
+                # fall through to normal cleanup
+
+        # Quota-aware proactive switch after a successful turn. Claude is
+        # event-driven; Codex refreshes its rollout quota on every completed
+        # turn because its exec/app-server stream has no equivalent event.
+        if task_id and exit_code == 0 and (
+            provider == "codex" or _saw_rate_limit
+        ):
+            await self._try_proactive_pool_switch(
+                instance_id,
+                task_id,
+                rate_limit_info=_rate_limit_info,
+                consumer_record=(
+                    record if tracked_generation else None
+                ),
+            )
+
+        if task_id and chat_initiated and exit_code not in (0, -2, 130):
+            # "Prompt is too long" — session context exceeded window.
+            # Compact the session and retry with summary.
+            _prompt_too_long = _assistant_texts and any("prompt is too long" in t.lower() for t in _assistant_texts)
+            if _prompt_too_long:
+                try:
+                    from backend.main import dispatcher
+                    async with self.db_factory() as db:
+                        from backend.models.task import Task as _Task
+                        task = await db.get(_Task, task_id)
+                        if task and task.session_id:
+                            logger.warning("Task %d hit 'Prompt is too long', compacting session", task_id)
+                            compacted_session_id = task.session_id
+                            compacted_status = task.status
+                            summary = await dispatcher._compact_session(
+                                task_id,
+                                compacted_session_id,
+                                db,
+                            )
+                            if summary:
+                                compact_generation_predicates = [
+                                    Task.id == task_id,
+                                    Task.status == compacted_status,
+                                    Task.session_id == compacted_session_id,
+                                ]
+                                if tracked_generation:
+                                    compact_generation_predicates.append(
+                                        Task.instance_id == instance_id
+                                    )
+                                    if expected_retry_count is not None:
+                                        compact_generation_predicates.append(
+                                            Task.retry_count
+                                            == expected_retry_count
+                                        )
+                                compacted = await db.execute(
+                                    update(Task)
+                                    .where(*compact_generation_predicates)
+                                    .values(
+                                        session_id=None,
+                                        context_window_usage=None,
+                                    )
+                                )
+                                if not compacted.rowcount:
+                                    await db.rollback()
+                                    logger.info(
+                                        "Discarding stale prompt-too-long "
+                                        "compaction for task %s",
+                                        task_id,
+                                    )
+                                else:
                                     await db.commit()
                                     from backend.services.dispatcher import PRIORITY_USER
                                     params = self._launch_params.get(instance_id, {})
@@ -1648,157 +2798,341 @@ class InstanceManager:
                                         priority=PRIORITY_USER,
                                         source="compact_retry",
                                     )
-                    except Exception:
-                        logger.exception("Prompt-too-long compact failed for task %d", task_id)
-                # Transient server-side 429/overload: wait + retry same account
-                elif await self._try_chat_transient_retry(instance_id, task_id, exit_code, stderr_text):
-                    return
-                # Pool rotation for chat-initiated rate limit failures
-                elif await self._try_chat_pool_rotation(instance_id, task_id, exit_code, stderr_text):
-                    return
-            elif task_id and chat_initiated:
-                # Clean turn — drop any transient-retry tally for this instance.
-                self._transient_attempts.pop(instance_id, None)
-
-            if not owns_instance_turn():
-                logger.info(
-                    "Skipping stale consumer cleanup for instance %s task %s; "
-                    "a replacement turn now owns the instance",
-                    instance_id,
-                    task_id,
-                )
+                except Exception:
+                    logger.exception("Prompt-too-long compact failed for task %d", task_id)
+            # Transient server-side 429/overload: wait + retry same account
+            elif await self._try_chat_transient_retry(instance_id, task_id, exit_code, stderr_text):
                 return
+            # Pool rotation for chat-initiated rate limit failures
+            elif await self._try_chat_pool_rotation(instance_id, task_id, exit_code, stderr_text):
+                return
+        elif task_id and chat_initiated:
+            # Clean turn — drop any transient-retry tally for this instance.
+            self._transient_attempts.pop(instance_id, None)
 
-            # Update instance status
-            # SIGINT (exit code -2 or 130) = user interrupt, treat as idle not error
-            async with self.db_factory() as db:
-                interrupted = exit_code in (-2, 130)
-                new_status = "idle" if (exit_code == 0 or interrupted) else "error"
-                values = {
-                    "status": new_status,
-                    "pid": None,
-                    "current_task_id": None,
-                }
-                await db.execute(
-                    update(Instance).where(Instance.id == instance_id).values(**values)
+        if not owns_instance_turn():
+            logger.info(
+                "Skipping stale consumer cleanup for instance %s task %s; "
+                "a replacement turn now owns the instance",
+                instance_id,
+                task_id,
+            )
+            return
+
+        # Commit terminal bookkeeping in the global Task -> Instance lock
+        # order. Cancellation/retry/delete use the same order; taking the
+        # Instance write first here can deadlock those paths on PostgreSQL or
+        # MySQL.
+        interrupted = exit_code in (-2, 130)
+        new_status = "idle" if (exit_code == 0 or interrupted) else "error"
+        final_status = None
+        task_publication_generation: dict | None = None
+        async with self.db_factory() as db:
+            if task_id and chat_initiated:
+                # Lock this exact Task generation even when cancellation has
+                # already made it terminal. The terminal Task must still allow
+                # its exact reverse Instance owner to be released.
+                task_generation_predicates = [Task.id == task_id]
+                if tracked_generation:
+                    task_generation_predicates.append(
+                        Task.instance_id == instance_id
+                    )
+                    if expected_retry_count is not None:
+                        task_generation_predicates.append(
+                            Task.retry_count == expected_retry_count
+                        )
+                task_lock = await db.execute(
+                    update(Task)
+                    .where(*task_generation_predicates)
+                    .values(status=Task.status)
                 )
-                # Restore task status for chat-initiated runs (not managed by dispatcher)
-                final_status = None
-                if task_id and chat_initiated:
-                    chat_active_statuses = ["executing", "in_progress", "failed", "pending"]
-                    if exit_code == 0 or interrupted:
-                        result = await db.execute(
-                            update(Task)
-                            .where(Task.id == task_id, Task.status.in_(chat_active_statuses))
-                            .values(status="completed", completed_at=datetime.utcnow(), error_message=None)
-                        )
-                        if result.rowcount:
-                            final_status = "completed"
-                    else:
-                        result = await db.execute(
-                            update(Task)
-                            .where(Task.id == task_id, Task.status.in_(chat_active_statuses))
-                            .values(status="failed", error_message=stderr_text[:500] if stderr_text else f"Process exited with code {exit_code}")
-                        )
-                        if result.rowcount:
-                            final_status = "failed"
-                # ``launch`` waits for the old consumer, but retain a final
-                # ownership check as defense in depth for direct/internal map
-                # replacement.  Do not commit stale task/instance updates.
-                if not owns_instance_turn():
+                if not task_lock.rowcount:
                     await db.rollback()
                     logger.info(
-                        "Discarding stale consumer DB cleanup for instance %s task %s",
+                        "Discarding stale chat consumer for instance %s task %s "
+                        "because its Task generation changed",
                         instance_id,
                         task_id,
                     )
                     return
-                await db.commit()
-            # 广播必须在 commit 之后：先广播的话手快的客户端收到事件立刻回读，
-            # 拿到的还是旧状态，反而把 UI 钉在过期值上
-            if final_status:
-                await self.broadcaster.broadcast("tasks", {
-                    "event": "status_change",
-                    "task_id": task_id,
-                    "new_status": final_status,
-                    "instance_id": instance_id,
-                })
 
-            # 原生子 agent（native-monitor 等）生命周期跟 session 走——
-            # session 退出/重建时一律标 completed，否则 UI 上永远显示 running。
-            # CCM 自己的 monitor 子 agent（source="ccm"）有独立进程，不跟主
-            # session 走，必须排除，否则 chat turn 结束就误杀 monitor。
-            # 但如果有 native-monitor 在 running，说明 monitor 被进程退出打断，
-            # 需要 auto-resume 让主 agent 处理积压的 <task-notification>。
-            if task_id:
-                from backend.models.sub_agent import SubAgentSession
-                has_pending_native = False
-                async with self.db_factory() as db:
-                    stale = await db.execute(
-                        select(SubAgentSession).where(
-                            SubAgentSession.task_id == task_id,
-                            SubAgentSession.status == "running",
-                            SubAgentSession.source != "ccm",
-                        )
+                current_task_generation = (
+                    await db.execute(
+                        select(
+                            Task.status,
+                            Task.retry_count,
+                            Task.instance_id,
+                            Task.started_at,
+                            Task.completed_at,
+                        ).where(Task.id == task_id)
                     )
-                    for sa in stale.scalars().all():
-                        if sa.agent_type in ("native-monitor", "monitor", "native-agent"):
-                            has_pending_native = True
-                        sa.status = "completed"
-                        sa.completed_at = datetime.utcnow()
-                    await db.commit()
-
-                # Auto-resume: native sub-agents (monitor/agent) 随进程退出，
-                # resume 让主 agent 处理积压的结果并回复用户
-                if has_pending_native and exit_code == 0 and chat_initiated:
-                    try:
-                        from backend.main import dispatcher
-                        from backend.services.dispatcher import PRIORITY_MONITOR_COMPLETE
-                        await dispatcher.enqueue_message(
-                            task_id=task_id,
-                            prompt=(
-                                "[Monitor 通知] 你之前启动的 Monitor 已有结果。"
-                                "请检查 monitor 的 task-notification 并根据结果决定下一步操作。"
-                            ),
-                            priority=PRIORITY_MONITOR_COMPLETE,
-                            source="monitor:native-exit-resume",
-                            user_message_text="[Monitor] 后台监控已产生通知，自动恢复会话",
+                ).one()
+                chat_active_statuses = {
+                    "executing",
+                    "in_progress",
+                    "failed",
+                    "pending",
+                }
+                if current_task_generation.status in chat_active_statuses:
+                    final_status = (
+                        "completed"
+                        if exit_code == 0 or interrupted
+                        else "failed"
+                    )
+                    task_values: dict = {"status": final_status}
+                    if final_status == "completed":
+                        task_values.update(
+                            completed_at=datetime.utcnow(),
+                            error_message=None,
                         )
-                        logger.info(
-                            "Task %d had pending native monitors on exit, enqueued auto-resume",
-                            task_id,
+                    else:
+                        task_values["error_message"] = (
+                            stderr_text[:500]
+                            if stderr_text
+                            else f"Process exited with code {exit_code}"
                         )
-                    except Exception:
-                        logger.exception(
-                            "Failed to enqueue monitor auto-resume for task %s", task_id,
+                    task_update = await db.execute(
+                        update(Task)
+                        .where(
+                            *task_generation_predicates,
+                            Task.status == current_task_generation.status,
                         )
+                        .values(**task_values)
+                    )
+                    if not task_update.rowcount:
+                        await db.rollback()
+                        return
 
-            # Broadcast completion
-            exit_event = {
-                "event_type": "process_exit",
-                "exit_code": exit_code,
-                "stderr": stderr_text[:2000] if stderr_text else None,
-            }
-            await self.broadcaster.broadcast(f"instance:{instance_id}", exit_event)
-            if task_id:
-                await self.broadcaster.broadcast(f"task:{task_id}", exit_event)
-            await self.broadcaster.broadcast("system", {
-                "event": "instance_status",
-                "instance_id": instance_id,
-                "status": new_status,
-                "exit_code": exit_code,
-            })
+                # MySQL DATETIME may discard Python microseconds. Re-read the
+                # exact values under the Task lock for the publication fence.
+                resulting_task_generation = (
+                    await db.execute(
+                        select(
+                            Task.status,
+                            Task.retry_count,
+                            Task.instance_id,
+                            Task.started_at,
+                            Task.completed_at,
+                        ).where(Task.id == task_id)
+                    )
+                ).one()
+                task_publication_generation = {
+                    "status": resulting_task_generation.status,
+                    "retry_count": resulting_task_generation.retry_count,
+                    "instance_id": resulting_task_generation.instance_id,
+                    "started_at": resulting_task_generation.started_at,
+                    "completed_at": resulting_task_generation.completed_at,
+                }
 
-            # Never let an old consumer erase a replacement process/consumer.
-            # Conditional identity checks also make cleanup safe if a caller
-            # bypasses ``launch`` and installs a turn directly in the maps.
-            if self.processes.get(instance_id) is process:
-                self.processes.pop(instance_id, None)
-            if self._tasks.get(instance_id) is consumer_task:
-                self._tasks.pop(instance_id, None)
-            if owns_instance_turn():
-                self._launch_params.pop(instance_id, None)
-                self._codex_exec_homes.pop(instance_id, None)
+            instance_generation_predicates = [Instance.id == instance_id]
+            if tracked_generation:
+                instance_generation_predicates.extend(
+                    [
+                        Instance.pid == getattr(process, "pid", None),
+                        (
+                            Instance.current_task_id.is_(None)
+                            if task_id is None
+                            else Instance.current_task_id == task_id
+                        ),
+                        (
+                            Instance.started_at.is_(None)
+                            if record is None
+                            or record.instance_started_at is None
+                            else Instance.started_at
+                            == record.instance_started_at
+                        ),
+                    ]
+                )
+            instance_cleanup = await db.execute(
+                update(Instance)
+                .where(*instance_generation_predicates)
+                .values(
+                    status=new_status,
+                    pid=None,
+                    current_task_id=None,
+                )
+            )
+            if not instance_cleanup.rowcount:
+                await db.rollback()
+                logger.info(
+                    "Discarding stale consumer cleanup for instance %s "
+                    "because its durable generation changed",
+                    instance_id,
+                )
+                return
+            if not owns_instance_turn():
+                await db.rollback()
+                logger.info(
+                    "Discarding stale consumer DB cleanup for instance %s task %s",
+                    instance_id,
+                    task_id,
+                )
+                return
+            await db.commit()
+
+        # Publish only while no-op writes hold the exact terminal generation.
+        # A retry/reclaim must take the same locks and therefore cannot be
+        # followed by this old status or process-exit event.
+        async with self.db_factory() as db:
+            publish_allowed = True
+            if task_publication_generation is not None:
+                task_publish_guard = await db.execute(
+                    update(Task)
+                    .where(
+                        Task.id == task_id,
+                        Task.status
+                        == task_publication_generation["status"],
+                        Task.retry_count
+                        == task_publication_generation["retry_count"],
+                        (
+                            Task.instance_id.is_(None)
+                            if task_publication_generation["instance_id"]
+                            is None
+                            else Task.instance_id
+                            == task_publication_generation["instance_id"]
+                        ),
+                        (
+                            Task.started_at.is_(None)
+                            if task_publication_generation["started_at"]
+                            is None
+                            else Task.started_at
+                            == task_publication_generation["started_at"]
+                        ),
+                        (
+                            Task.completed_at.is_(None)
+                            if task_publication_generation["completed_at"]
+                            is None
+                            else Task.completed_at
+                            == task_publication_generation["completed_at"]
+                        ),
+                    )
+                    .values(
+                        status=task_publication_generation["status"]
+                    )
+                )
+                publish_allowed = bool(task_publish_guard.rowcount)
+
+            if publish_allowed:
+                instance_publish_predicates = [
+                    Instance.id == instance_id,
+                    Instance.status == new_status,
+                    Instance.pid.is_(None),
+                    Instance.current_task_id.is_(None),
+                ]
+                if tracked_generation:
+                    instance_publish_predicates.append(
+                        Instance.started_at.is_(None)
+                        if record is None
+                        or record.instance_started_at is None
+                        else Instance.started_at
+                        == record.instance_started_at
+                    )
+                instance_publish_guard = await db.execute(
+                    update(Instance)
+                    .where(*instance_publish_predicates)
+                    .values(status=new_status)
+                )
+                publish_allowed = bool(instance_publish_guard.rowcount)
+
+            if publish_allowed:
+                if final_status:
+                    await self.broadcaster.broadcast(
+                        "tasks",
+                        {
+                            "event": "status_change",
+                            "task_id": task_id,
+                            "new_status": final_status,
+                            "instance_id": instance_id,
+                        },
+                    )
+                exit_event = {
+                    "event_type": "process_exit",
+                    "exit_code": exit_code,
+                    "stderr": (
+                        stderr_text[:2000] if stderr_text else None
+                    ),
+                }
+                await self.broadcaster.broadcast(
+                    f"instance:{instance_id}",
+                    exit_event,
+                )
+                if task_id:
+                    await self.broadcaster.broadcast(
+                        f"task:{task_id}",
+                        exit_event,
+                    )
+                await self.broadcaster.broadcast(
+                    "system",
+                    {
+                        "event": "instance_status",
+                        "instance_id": instance_id,
+                        "status": new_status,
+                        "exit_code": exit_code,
+                    },
+                )
+            await db.commit()
+
+        # 原生子 agent（native-monitor 等）生命周期跟 session 走——
+        # session 退出/重建时一律标 completed，否则 UI 上永远显示 running。
+        # CCM 自己的 monitor 子 agent（source="ccm"）有独立进程，不跟主
+        # session 走，必须排除，否则 chat turn 结束就误杀 monitor。
+        # 但如果有 native-monitor 在 running，说明 monitor 被进程退出打断，
+        # 需要 auto-resume 让主 agent 处理积压的 <task-notification>。
+        if task_id:
+            from backend.models.sub_agent import SubAgentSession
+            has_pending_native = False
+            async with self.db_factory() as db:
+                stale = await db.execute(
+                    select(SubAgentSession).where(
+                        SubAgentSession.task_id == task_id,
+                        SubAgentSession.status == "running",
+                        SubAgentSession.source != "ccm",
+                    )
+                )
+                for sa in stale.scalars().all():
+                    if sa.agent_type in ("native-monitor", "monitor", "native-agent"):
+                        has_pending_native = True
+                    sa.status = "completed"
+                    sa.completed_at = datetime.utcnow()
+                await db.commit()
+
+            # Auto-resume: native sub-agents (monitor/agent) 随进程退出，
+            # resume 让主 agent 处理积压的结果并回复用户
+            if has_pending_native and exit_code == 0 and chat_initiated:
+                try:
+                    from backend.main import dispatcher
+                    from backend.services.dispatcher import PRIORITY_MONITOR_COMPLETE
+                    await dispatcher.enqueue_message(
+                        task_id=task_id,
+                        prompt=(
+                            "[Monitor 通知] 你之前启动的 Monitor 已有结果。"
+                            "请检查 monitor 的 task-notification 并根据结果决定下一步操作。"
+                        ),
+                        priority=PRIORITY_MONITOR_COMPLETE,
+                        source="monitor:native-exit-resume",
+                        user_message_text="[Monitor] 后台监控已产生通知，自动恢复会话",
+                    )
+                    logger.info(
+                        "Task %d had pending native monitors on exit, enqueued auto-resume",
+                        task_id,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Failed to enqueue monitor auto-resume for task %s", task_id,
+                    )
+
+        # Never let an old consumer erase a replacement process/consumer.
+        # Conditional identity checks also make cleanup safe if a caller
+        # bypasses ``launch`` and installs a turn directly in the maps.
+        if self.processes.get(instance_id) is process:
+            self.processes.pop(instance_id, None)
+            if self._process_groups.get(instance_id) is process:
+                self._process_groups.pop(instance_id, None)
+        if self._tasks.get(instance_id) is consumer_task:
+            self._tasks.pop(instance_id, None)
+        if owns_instance_turn():
+            self._launch_params.pop(instance_id, None)
+            self._codex_exec_homes.pop(instance_id, None)
 
     async def _try_chat_transient_retry(
         self, instance_id: int, task_id: int, exit_code: int, stderr_text: str,
@@ -2137,6 +3471,8 @@ class InstanceManager:
         task_id: int,
         *,
         rate_limit_info: dict | None = None,
+        expected_generation=None,
+        consumer_record: _OutputConsumerRecord | None = None,
     ) -> bool:
         """Move a completed session when its active quota reaches 90%.
 
@@ -2151,13 +3487,96 @@ class InstanceManager:
             if not dispatcher:
                 return False
 
+            def generation_predicates(generation) -> list:
+                predicates = [
+                    Task.id == generation.task_id,
+                    Task.retry_count == generation.retry_count,
+                    (
+                        Task.worker_id.is_(None)
+                        if generation.worker_id is None
+                        else Task.worker_id == generation.worker_id
+                    ),
+                    (
+                        Task.shared_from_id.is_(None)
+                        if generation.shared_from_id is None
+                        else Task.shared_from_id
+                        == generation.shared_from_id
+                    ),
+                    (
+                        Task.instance_id.is_(None)
+                        if generation.instance_id is None
+                        else Task.instance_id == generation.instance_id
+                    ),
+                    (
+                        Task.started_at.is_(None)
+                        if generation.started_at is None
+                        else Task.started_at == generation.started_at
+                    ),
+                    (
+                        Task.completed_at.is_(None)
+                        if generation.completed_at is None
+                        else Task.completed_at == generation.completed_at
+                    ),
+                    task_retry_not_superseded_predicate(),
+                ]
+                frozen_status = getattr(generation, "status", None)
+                predicates.append(
+                    Task.status == frozen_status
+                    if frozen_status is not None
+                    else Task.status.in_(("in_progress", "executing"))
+                )
+                return predicates
+
+            async def generation_is_current(generation) -> bool:
+                if consumer_record is not None:
+                    if not (
+                        self._consumer_records.get(instance_id)
+                        is consumer_record
+                        and self._tasks.get(instance_id)
+                        is consumer_record.task
+                        and self.processes.get(instance_id)
+                        is consumer_record.process
+                    ):
+                        return False
+                async with self.db_factory() as generation_db:
+                    current = await generation_db.scalar(
+                        select(Task.id).where(
+                            *generation_predicates(generation)
+                        )
+                    )
+                return current is not None
+
             async with self.db_factory() as db:
-                task = await db.get(Task, task_id)
+                task_stmt = select(Task).where(Task.id == task_id)
+                if expected_generation is not None:
+                    task_stmt = task_stmt.where(
+                        *generation_predicates(expected_generation)
+                    )
+                task = (
+                    await db.execute(task_stmt)
+                ).scalar_one_or_none()
                 if not task:
                     return False
+                generation = _TaskLifecycleFence(
+                    task_id=task.id,
+                    worker_id=task.worker_id,
+                    shared_from_id=task.shared_from_id,
+                    retry_count=task.retry_count,
+                    instance_id=task.instance_id,
+                    started_at=task.started_at,
+                    completed_at=task.completed_at,
+                    status=(
+                        getattr(expected_generation, "status", None)
+                        if expected_generation is not None
+                        else task.status
+                    ),
+                )
                 provider = (task.provider or "claude").lower()
                 session_id = task.session_id
                 bound_codex_id = (task.metadata_ or {}).get("codex_account_id")
+
+            if not await generation_is_current(generation):
+                return False
 
             if provider == "codex":
                 if not session_id:
@@ -2172,6 +3591,8 @@ class InstanceManager:
                     return False
                 old_home = pool.canonical_home(old_home)
                 new_home = await pool.select_quota_alternative(old_home)
+                if not await generation_is_current(generation):
+                    return False
                 if not new_home:
                     logger.info(
                         "Codex quota switch: current account below 90%% or no "
@@ -2194,14 +3615,12 @@ class InstanceManager:
                         old_home,
                         new_home,
                     )
-                    await self.rebind_codex_thread(
-                        session_id,
-                        source_codex_home=old_home,
-                        target_codex_home=new_home,
-                    )
+                    if not await generation_is_current(generation):
+                        return False
                 except Exception as exc:
-                    # Do not cool or rebind the task on a partial failure. The
-                    # authoritative rollout and binding remain on the old home.
+                    # A copied rollout is non-destructive.  Before the owner is
+                    # rebound, failures leave the authoritative DB/in-memory
+                    # route on the old home.
                     logger.warning(
                         "Codex quota switch failed for task %d (%s -> %s): %s",
                         task_id,
@@ -2213,12 +3632,8 @@ class InstanceManager:
 
                 old_account_id = pool.account_id_for_home(old_home)
                 new_account_id = pool.account_id_for_home(new_home)
-                try:
-                    await dispatcher._set_codex_task_binding(task_id, new_account_id)
-                except Exception as exc:
-                    # The live app-server registry moved before the durable
-                    # task binding. Restore its old owner so DB metadata and
-                    # in-memory routing cannot disagree on the next resume.
+
+                async def rollback_codex_owner() -> bool:
                     try:
                         await self.rebind_codex_thread(
                             session_id,
@@ -2247,37 +3662,99 @@ class InstanceManager:
                                 task_id,
                                 session_id,
                             )
-                    logger.warning(
-                        "Codex quota switch binding persist failed for task %d; "
-                        "old binding %s retained (owner rollback succeeded=%s): %s",
+                    return rollback_succeeded
+
+                async def finish_codex_switch() -> bool:
+                    """Settle owner + durable affinity as one cancellation unit."""
+
+                    owner_rebound = False
+                    try:
+                        await self.rebind_codex_thread(
+                            session_id,
+                            source_codex_home=old_home,
+                            target_codex_home=new_home,
+                        )
+                        owner_rebound = True
+                        if not await generation_is_current(generation):
+                            raise RuntimeError(
+                                "task generation changed after owner rebind"
+                            )
+                        binding_changed = (
+                            await dispatcher._set_codex_task_binding(
+                                task_id,
+                                new_account_id,
+                                expected_generation=generation,
+                            )
+                        )
+                        if not binding_changed:
+                            raise RuntimeError(
+                                "task generation changed before binding commit"
+                            )
+                    except BaseException as exc:
+                        # Once the live owner moved, never expose DB=old /
+                        # owner=new.  The enclosing task is shielded from its
+                        # caller; this branch also compensates direct internal
+                        # cancellation before propagating it.
+                        rollback_succeeded = (
+                            await rollback_codex_owner()
+                            if owner_rebound else True
+                        )
+                        if isinstance(exc, asyncio.CancelledError):
+                            raise
+                        logger.warning(
+                            "Codex quota switch binding persist failed for task "
+                            "%d; old binding %s retained (owner rollback "
+                            "succeeded=%s): %s",
+                            task_id,
+                            old_account_id,
+                            rollback_succeeded,
+                            exc,
+                        )
+                        return False
+
+                    self._config_dirs[instance_id] = new_home
+                    pool.mark_rate_limited(
+                        old_home,
+                        duration=quota_cooldown_seconds(
+                            old_quota,
+                            fallback=pool._cooldown_seconds,
+                        ),
+                    )
+                    await self.broadcaster.broadcast(f"task:{task_id}", {
+                        "event_type": "pool_rotation",
+                        "provider": "codex",
+                        "old_account": old_account_id,
+                        "new_account": new_account_id,
+                        "reason": "quota_threshold",
+                    })
+                    logger.info(
+                        "Codex quota switch: task %d migrated %s -> %s",
                         task_id,
                         old_account_id,
-                        rollback_succeeded,
-                        exc,
+                        new_account_id,
                     )
-                    return False
-                self._config_dirs[instance_id] = new_home
-                pool.mark_rate_limited(
-                    old_home,
-                    duration=quota_cooldown_seconds(
-                        old_quota,
-                        fallback=pool._cooldown_seconds,
-                    ),
-                )
-                await self.broadcaster.broadcast(f"task:{task_id}", {
-                    "event_type": "pool_rotation",
-                    "provider": "codex",
-                    "old_account": old_account_id,
-                    "new_account": new_account_id,
-                    "reason": "quota_threshold",
-                })
-                logger.info(
-                    "Codex quota switch: task %d migrated %s -> %s",
-                    task_id,
-                    old_account_id,
-                    new_account_id,
-                )
-                return True
+                    return True
+
+                # Parent cancellation (request disconnect / backend shutdown)
+                # must not land between the live owner move and the durable
+                # Task binding.  Delay it until the exact operation commits or
+                # compensates; repeated cancellations are deliberately ignored
+                # while the shielded child is still settling.
+                switch_operation = asyncio.create_task(finish_codex_switch())
+                delayed_cancellation: asyncio.CancelledError | None = None
+                while not switch_operation.done():
+                    try:
+                        await asyncio.shield(switch_operation)
+                    except asyncio.CancelledError as exc:
+                        delayed_cancellation = (
+                            delayed_cancellation or exc
+                        )
+                    except BaseException:
+                        break
+                switched = switch_operation.result()
+                if delayed_cancellation is not None:
+                    raise delayed_cancellation
+                return switched
 
             if provider != "claude" or not (
                 dispatcher.pool and dispatcher.pool.enabled
@@ -2317,6 +3794,8 @@ class InstanceManager:
                 new_config_dir = await dispatcher.pool.select_quota_alternative(
                     old_config_dir
                 )
+                if not await generation_is_current(generation):
+                    return False
                 reason = "quota_threshold"
 
             if not new_config_dir:
@@ -2333,6 +3812,8 @@ class InstanceManager:
                 return False
 
             source_dir = dispatcher.pool.locate_session_config_dir(session_id) or old_config_dir
+            if not await generation_is_current(generation):
+                return False
             migrated = migrate_session(
                 old_config_dir=source_dir,
                 new_config_dir=new_config_dir,
@@ -2345,6 +3826,8 @@ class InstanceManager:
                 )
                 return False
 
+            if not await generation_is_current(generation):
+                return False
             if not hard_limit:
                 # Soft >=90% isolation begins only after context is safely
                 # available on the replacement account. Use the event's reset
@@ -2358,6 +3841,8 @@ class InstanceManager:
                 )
 
             new_account_id = dispatcher.pool.account_id_from_config_dir(new_config_dir)
+            if not await generation_is_current(generation):
+                return False
             self._config_dirs[instance_id] = new_config_dir
             logger.info(
                 "Proactive pool switch: task %d migrated %s -> %s (%s)",
@@ -2648,11 +4133,116 @@ class InstanceManager:
             "total_input_tokens": input_tokens,
         }
 
-    async def _process_event(self, instance_id: int, task_id: int | None, event: dict, loop_iteration: int | None = None):
+    async def _process_event(
+        self,
+        instance_id: int,
+        task_id: int | None,
+        event: dict,
+        loop_iteration: int | None = None,
+        *,
+        consumer_record: _OutputConsumerRecord | None = None,
+        detached_autonomous: bool = False,
+        expected_session_id: str | None = None,
+    ):
         """Process a single parsed event: save to DB and broadcast."""
         provider = str(
             self._launch_params.get(instance_id, {}).get("provider") or "claude"
         ).lower()
+        # Subprocess consumers pass their immutable record explicitly. PTY
+        # callbacks run through the currently registered record instead. This
+        # distinction lets an old subprocess that was replaced mid-callback be
+        # rejected rather than borrowing the replacement turn's identity.
+        explicit_consumer_record = consumer_record is not None
+        event_record = (
+            consumer_record
+            if explicit_consumer_record
+            else (
+                None
+                if detached_autonomous
+                else self._consumer_records.get(instance_id)
+            )
+        )
+
+        def owns_event_generation() -> bool:
+            if event_record is None:
+                return False
+            return (
+                event_record.task_id == task_id
+                and (
+                    task_id is None
+                    or event_record.task_retry_count is not None
+                )
+                and event_record.instance_started_at is not None
+                and self._consumer_records.get(instance_id) is event_record
+                and self._tasks.get(instance_id) is event_record.task
+                and self.processes.get(instance_id) is event_record.process
+            )
+
+        def task_event_predicates() -> list:
+            predicates = [
+                Task.id == task_id,
+                task_retry_not_superseded_predicate(),
+            ]
+            if detached_autonomous and expected_session_id is not None:
+                predicates.append(Task.session_id == expected_session_id)
+            elif event_record is not None:
+                predicates.extend(
+                    [
+                        Task.instance_id == instance_id,
+                        Task.retry_count == event_record.task_retry_count,
+                    ]
+                )
+            return predicates
+
+        async def guard_managed_event_generation(db) -> bool:
+            """Lock the exact durable Task→Instance event generation."""
+
+            if event_record is None:
+                return True
+            if not owns_event_generation():
+                return False
+            if task_id is not None:
+                task_guard = await db.execute(
+                    update(Task)
+                    .where(
+                        *task_event_predicates(),
+                        Task.status.in_(
+                            ("in_progress", "executing", "completed")
+                        ),
+                    )
+                    .values(status=Task.status)
+                )
+                if not task_guard.rowcount:
+                    return False
+            instance_guard = await db.execute(
+                update(Instance)
+                .where(
+                    Instance.id == instance_id,
+                    Instance.status == "running",
+                    Instance.pid
+                    == (getattr(event_record.process, "pid", 0) or 0),
+                    (
+                        Instance.current_task_id.is_(None)
+                        if task_id is None
+                        else Instance.current_task_id == task_id
+                    ),
+                    Instance.started_at
+                    == event_record.instance_started_at,
+                )
+                .values(status="running")
+            )
+            return bool(
+                instance_guard.rowcount and owns_event_generation()
+            )
+
+        if explicit_consumer_record and not owns_event_generation():
+            logger.info(
+                "Dropping stale event for instance %s task %s because its "
+                "consumer generation was replaced",
+                instance_id,
+                task_id,
+            )
+            return
         # Extract session_id, cost, and context usage from event
         session_id = event.pop("session_id", None)
         cost_usd = event.pop("cost_usd", None)
@@ -2686,45 +4276,118 @@ class InstanceManager:
             broadcast_data = {k: v for k, v in event.items() if k != "raw_json"}
             if loop_iteration is not None:
                 broadcast_data["loop_iteration"] = loop_iteration
-            await self.broadcaster.broadcast(f"instance:{instance_id}", broadcast_data)
+            if not detached_autonomous:
+                await self.broadcaster.broadcast(
+                    f"instance:{instance_id}", broadcast_data
+                )
             if task_id:
                 await self.broadcaster.broadcast(f"task:{task_id}", broadcast_data)
             return
 
-        # Native sub-agent lifecycle (model-spawned Agent/Monitor, observed by
-        # the PTY layer) — register into the generic sub-agent tables so the
-        # 前端徽章/面板 shows them next to $monitor sessions.
-        if task_id and event.get("subagent") and event["event_type"].startswith("subagent_"):
-            try:
-                await self._upsert_native_sub_agent(
-                    task_id, event["event_type"], event["subagent"]
-                )
-            except Exception:
-                logger.exception(
-                    "Failed to upsert native sub-agent for task %s", task_id
-                )
-        # Reactivate completed task if sub-agent produces new output.
-        # 与 transient 打标同理（见下方 _transient_seen 处、task #729）：orphan
-        # （resume 时 PTY 回放的上一 turn 旧事件）和 autonomous（后台子 agent
-        # turn）不算"任务又活了"——它们没有对应的收尾路径，把 completed 翻回
-        # executing 后没人再标回来，任务会永远卡在 executing。
+        # A foreground turn can still produce output after another callback
+        # prematurely marked it completed. Reactivate only while the exact
+        # durable Task/Instance/process generation is still live. A plain
+        # ``Task.id + completed`` write here used to let a late event revive a
+        # retry or a PR-review Task that synchronize had permanently
+        # superseded.
         if (
             task_id
             and event.get("role") == "assistant"
             and event["event_type"] in ("message", "tool_use")
             and not event.get("orphan")
             and not event.get("autonomous")
+            and owns_event_generation()
         ):
+            reactivated_completed_at: datetime | None = None
             async with self.db_factory() as db:
-                task = await db.get(Task, task_id)
-                if task and task.status == "completed":
-                    task.status = "executing"
+                task_reactivated = await db.execute(
+                    update(Task)
+                    .where(
+                        Task.id == task_id,
+                        Task.status == "completed",
+                        Task.instance_id == instance_id,
+                        Task.retry_count == event_record.task_retry_count,
+                        task_retry_not_superseded_predicate(),
+                    )
+                    .values(status="executing")
+                )
+                if task_reactivated.rowcount:
+                    instance_guard = await db.execute(
+                        update(Instance)
+                        .where(
+                            Instance.id == instance_id,
+                            Instance.status == "running",
+                            Instance.pid
+                            == (getattr(event_record.process, "pid", 0) or 0),
+                            Instance.current_task_id == task_id,
+                            Instance.started_at
+                            == event_record.instance_started_at,
+                        )
+                        .values(status="running")
+                    )
+                    if not instance_guard.rowcount or not owns_event_generation():
+                        await db.rollback()
+                        task_reactivated = None
+                    else:
+                        reactivated_completed_at = await db.scalar(
+                            select(Task.completed_at).where(Task.id == task_id)
+                        )
+                        await db.commit()
+                else:
+                    await db.rollback()
+
+            if task_reactivated is not None and task_reactivated.rowcount:
+                # Fence publication as well: retry/supersede must acquire the
+                # same Task row lock, so an old executing event cannot cross a
+                # newer generation.
+                async with self.db_factory() as db:
+                    publish_task_guard = await db.execute(
+                        update(Task)
+                        .where(
+                            Task.id == task_id,
+                            Task.status == "executing",
+                            Task.instance_id == instance_id,
+                            Task.retry_count == event_record.task_retry_count,
+                            (
+                                Task.completed_at.is_(None)
+                                if reactivated_completed_at is None
+                                else Task.completed_at
+                                == reactivated_completed_at
+                            ),
+                            task_retry_not_superseded_predicate(),
+                        )
+                        .values(status="executing")
+                    )
+                    publish_instance_guard = None
+                    if publish_task_guard.rowcount:
+                        publish_instance_guard = await db.execute(
+                            update(Instance)
+                            .where(
+                                Instance.id == instance_id,
+                                Instance.status == "running",
+                                Instance.pid
+                                == (
+                                    getattr(event_record.process, "pid", 0)
+                                    or 0
+                                ),
+                                Instance.current_task_id == task_id,
+                                Instance.started_at
+                                == event_record.instance_started_at,
+                            )
+                            .values(status="running")
+                        )
+                    if (
+                        publish_task_guard.rowcount
+                        and publish_instance_guard is not None
+                        and publish_instance_guard.rowcount
+                        and owns_event_generation()
+                    ):
+                        await self.broadcaster.broadcast("tasks", {
+                            "event": "status_change",
+                            "task_id": task_id,
+                            "new_status": "executing",
+                        })
                     await db.commit()
-                    await self.broadcaster.broadcast("tasks", {
-                        "event": "status_change",
-                        "task_id": task_id,
-                        "new_status": "executing",
-                    })
 
         # Skip streaming text fragments (e.g. "court" from Opus 4.8 encrypted
         # thinking). These are tiny text chunks emitted before a tool_use block
@@ -2753,7 +4416,17 @@ class InstanceManager:
         # Store the event and related heartbeat/session/unread updates in one
         # transaction.  The old path committed 2-4 times per Codex event,
         # serializing the stream behind SQLite fsyncs before WebSocket delivery.
+        # When both ownership rows are touched, preserve the global
+        # Task -> Instance lock order used by lifecycle transactions.
         async with self.db_factory() as db:
+            if not await guard_managed_event_generation(db):
+                await db.rollback()
+                logger.info(
+                    "Dropping stale durable event for instance %s task %s",
+                    instance_id,
+                    task_id,
+                )
+                return
             entry = LogEntry(
                 instance_id=instance_id,
                 task_id=task_id,
@@ -2768,17 +4441,9 @@ class InstanceManager:
                 loop_iteration=loop_iteration,
             )
             db.add(entry)
-            instance_values = {"last_heartbeat": datetime.utcnow()}
-            if cost_usd is not None:
-                instance_values["total_cost_usd"] = cost_usd
-            await db.execute(
-                update(Instance)
-                .where(Instance.id == instance_id)
-                .values(**instance_values)
-            )
             if task_id:
                 task_values = {}
-                if session_id:
+                if session_id and not detached_autonomous:
                     task_values["session_id"] = session_id
                 if (
                     event.get("role") == "assistant"
@@ -2788,10 +4453,46 @@ class InstanceManager:
                 if task_values:
                     await db.execute(
                         update(Task)
-                        .where(Task.id == task_id)
+                        .where(*task_event_predicates())
                         .values(**task_values)
                     )
+            if not detached_autonomous:
+                instance_values = {"last_heartbeat": datetime.utcnow()}
+                if cost_usd is not None:
+                    instance_values["total_cost_usd"] = cost_usd
+                await db.execute(
+                    update(Instance)
+                    .where(Instance.id == instance_id)
+                    .values(**instance_values)
+                )
+            if event_record is not None and not owns_event_generation():
+                await db.rollback()
+                logger.info(
+                    "Dropping event for replaced consumer generation on "
+                    "instance %s task %s",
+                    instance_id,
+                    task_id,
+                )
+                return
             await db.commit()
+
+        # Native sub-agent lifecycle (model-spawned Agent/Monitor, observed by
+        # the PTY layer) — register only after the exact parent event
+        # generation committed, so a late old callback cannot create lifecycle
+        # state under a replacement turn.
+        if (
+            task_id
+            and event.get("subagent")
+            and event["event_type"].startswith("subagent_")
+        ):
+            try:
+                await self._upsert_native_sub_agent(
+                    task_id, event["event_type"], event["subagent"]
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to upsert native sub-agent for task %s", task_id
+                )
 
         # Per-turn transient-overload detection: a server-side 429/overload
         # surfaces as an is_error message ("Server is temporarily limiting
@@ -2885,9 +4586,18 @@ class InstanceManager:
 
         # Broadcast via WebSocket
         broadcast_data = {k: v for k, v in event.items() if k != "raw_json"}
+        broadcast_data.update(
+            id=entry.id,
+            instance_id=instance_id,
+            task_id=task_id,
+            timestamp=(entry.timestamp or datetime.utcnow()).isoformat(),
+        )
         if loop_iteration is not None:
             broadcast_data["loop_iteration"] = loop_iteration
-        await self.broadcaster.broadcast(f"instance:{instance_id}", broadcast_data)
+        if not detached_autonomous:
+            await self.broadcaster.broadcast(
+                f"instance:{instance_id}", broadcast_data
+            )
         if task_id:
             await self.broadcaster.broadcast(f"task:{task_id}", broadcast_data)
 
@@ -2897,7 +4607,17 @@ class InstanceManager:
             m = (model_name or "").lower()
             return 1_000_000 if ("[1m]" in m or "fable" in m) else 200_000
 
-        if context_usage and "total_input_tokens" not in context_usage:
+        if (
+            event_record is not None
+            and not owns_event_generation()
+        ):
+            context_usage = None
+        if detached_autonomous:
+            # The reusable Instance key may already belong to another turn.
+            # Without the old session id in every upstream usage envelope,
+            # persisting this value could overwrite the replacement's context.
+            context_usage = None
+        elif context_usage and "total_input_tokens" not in context_usage:
             # Window-only refinement (result events carry just the
             # authoritative contextWindow — their usage numbers are cumulative
             # and unusable). Merge into the stored per-request usage.
@@ -2905,7 +4625,11 @@ class InstanceManager:
             context_usage = None
             if window and task_id:
                 async with self.db_factory() as db:
-                    t = await db.get(Task, task_id)
+                    t = (
+                        await db.execute(
+                            select(Task).where(*task_event_predicates())
+                        )
+                    ).scalar_one_or_none()
                     stored = dict(t.context_window_usage) if (t and t.context_window_usage) else None
                     model_name = (t.model or "") if t else ""
                 # modelUsage 上报的窗口对大上下文模型（fable）会低报 200K，
@@ -2922,7 +4646,11 @@ class InstanceManager:
             task_provider = "claude"
             if task_id:
                 async with self.db_factory() as db:
-                    t = await db.get(Task, task_id)
+                    t = (
+                        await db.execute(
+                            select(Task).where(*task_event_predicates())
+                        )
+                    ).scalar_one_or_none()
                     model_name = (t.model or "") if t else ""
                     task_provider = ((t.provider if t else None) or "claude").lower()
             if task_provider == "codex":
@@ -2932,16 +4660,24 @@ class InstanceManager:
                 context_usage["context_window"] = _model_context_window(model_name)
         if context_usage and task_id:
             async with self.db_factory() as db:
-                await db.execute(
+                context_updated = await db.execute(
                     update(Task)
-                    .where(Task.id == task_id)
+                    .where(*task_event_predicates())
                     .values(context_window_usage=context_usage)
                 )
-                await db.commit()
-            await self.broadcaster.broadcast(f"task:{task_id}", {
-                "event_type": "context_usage",
-                **context_usage,
-            })
+                if (
+                    event_record is not None
+                    and not owns_event_generation()
+                ):
+                    await db.rollback()
+                    context_updated = None
+                else:
+                    await db.commit()
+            if context_updated is not None and context_updated.rowcount:
+                await self.broadcaster.broadcast(f"task:{task_id}", {
+                    "event_type": "context_usage",
+                    **context_usage,
+                })
 
     async def _upsert_native_sub_agent(
         self, task_id: int, event_type: str, info: dict
@@ -3179,10 +4915,416 @@ class InstanceManager:
             })
         return bool(ok)
 
-    async def stop(self, instance_id: int) -> bool:
-        """Cancellation-safe stop of one reusable worker slot."""
+    async def _spawn_managed_direct_process(
+        self,
+        instance_id: int,
+        task_id: int | None,
+        cmd: list[str],
+        spawn_kwargs: dict,
+    ) -> asyncio.subprocess.Process:
+        """Spawn and register a direct process without a cancellation gap.
 
-        operation = asyncio.create_task(self._stop_serialized(instance_id))
+        ``create_subprocess_exec`` can create the OS child and then be
+        cancelled before returning its Process adapter.  Shield the spawn,
+        collect its outcome, and synchronously install generation evidence.
+        If the caller was cancelled, cleanup is itself shielded and the
+        original cancellation is delayed until the exact group is proven gone.
+        """
+
+        spawn = asyncio.create_task(
+            asyncio.create_subprocess_exec(*cmd, **spawn_kwargs)
+        )
+        cancellation: asyncio.CancelledError | None = None
+        first_wait = True
+        while first_wait or not spawn.done():
+            first_wait = False
+            try:
+                await asyncio.shield(spawn)
+            except asyncio.CancelledError as exc:
+                if cancellation is None:
+                    cancellation = exc
+
+        process = spawn.result()
+        self.processes[instance_id] = process
+        if os.name == "posix":
+            self._process_groups[instance_id] = process
+
+        if cancellation is None:
+            return process
+
+        async def cleanup_cancelled_spawn() -> None:
+            if (
+                process.returncode is None
+                or self._process_group_alive(instance_id, process)
+            ):
+                self._signal_process_tree(
+                    instance_id, process, signal.SIGKILL
+                )
+            await self._wait_process_tree(instance_id, process, 5.0)
+            if not self._generation_reap_confirmed(instance_id, process):
+                raise RuntimeError(
+                    f"Cancelled spawn for instance {instance_id} "
+                    "could not be proven terminal"
+                )
+            if self.processes.get(instance_id) is process:
+                self.processes.pop(instance_id, None)
+            if self._process_groups.get(instance_id) is process:
+                self._process_groups.pop(instance_id, None)
+
+        cleanup = asyncio.create_task(cleanup_cancelled_spawn())
+        cleanup_error: BaseException | None = None
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                # Preserve the first cancellation while refusing to abandon
+                # the OS child during repeated application-shutdown cancels.
+                continue
+            except BaseException:
+                # Retrieve and handle the completed cleanup failure below,
+                # where generation evidence is persisted before cancellation
+                # is propagated.
+                if cleanup.done():
+                    break
+                raise
+        try:
+            cleanup.result()
+        except BaseException as exc:
+            cleanup_error = exc
+            logger.exception(
+                "Could not reap cancelled direct spawn for instance %s",
+                instance_id,
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+
+        if cleanup_error is not None:
+            try:
+                async with self.db_factory() as db:
+                    await db.execute(
+                        update(Instance)
+                        .where(Instance.id == instance_id)
+                        .values(
+                            status="error",
+                            pid=getattr(process, "pid", None),
+                            current_task_id=task_id,
+                        )
+                    )
+                    await db.commit()
+            except Exception:
+                logger.exception(
+                    "Failed to persist cancelled spawn evidence for "
+                    "instance %s",
+                    instance_id,
+                )
+        raise cancellation
+
+    def _uses_managed_process_group(
+        self,
+        instance_id: int,
+        process: asyncio.subprocess.Process,
+    ) -> bool:
+        return self._managed_process_group_id(instance_id, process) is not None
+
+    def _managed_process_group_id(
+        self,
+        instance_id: int,
+        process: asyncio.subprocess.Process,
+    ) -> int | None:
+        """Return a signal-safe PGID for one registered direct generation.
+
+        ``os.killpg(1, sig)`` is translated to ``kill(-1, sig)`` on POSIX,
+        which broadcasts to every process the service user may signal.  Treat
+        missing, synthetic, or corrupted group identities as unresolved
+        generation evidence instead of ever falling back to that broadcast.
+        """
+
+        if (
+            os.name != "posix"
+            or self._process_groups.get(instance_id) is not process
+        ):
+            return None
+        return require_safe_process_group_id(
+            getattr(process, "pid", None),
+            context=f"instance {instance_id}",
+        )
+
+    def _process_group_alive(
+        self,
+        instance_id: int,
+        process: asyncio.subprocess.Process,
+    ) -> bool:
+        process_group_id = self._managed_process_group_id(
+            instance_id, process
+        )
+        if process_group_id is None:
+            return False
+        try:
+            os.killpg(process_group_id, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+
+    def _generation_reap_confirmed(
+        self,
+        instance_id: int,
+        process: asyncio.subprocess.Process,
+    ) -> bool:
+        """Whether every known part of one exact process generation is gone.
+
+        This deliberately uses only synchronous evidence so task done
+        callbacks can decide whether map cleanup is safe.  A retained
+        container-exec mapping is treated as live/unknown until the async
+        control-plane check has proved it gone and ``_forget_container_exec``
+        removes that evidence.
+        """
+
+        if process.returncode is None:
+            return False
+        try:
+            if self._process_group_alive(instance_id, process):
+                return False
+        except Exception:
+            return False
+        return self._container_exec_processes.get(instance_id) is not process
+
+    def _signal_process_tree(
+        self,
+        instance_id: int,
+        process: asyncio.subprocess.Process,
+        sig: signal.Signals,
+    ) -> None:
+        """Signal a direct CLI process group, or one adapter process."""
+
+        process_group_id = self._managed_process_group_id(
+            instance_id, process
+        )
+        if process_group_id is not None:
+            try:
+                os.killpg(process_group_id, sig)
+                return
+            except ProcessLookupError:
+                return
+        try:
+            if sig == signal.SIGTERM:
+                process.terminate()
+            elif sig == signal.SIGKILL:
+                process.kill()
+            else:
+                process.send_signal(sig)
+        except ProcessLookupError:
+            return
+
+    def _is_managed_container_exec(
+        self,
+        instance_id: int,
+        process: asyncio.subprocess.Process,
+    ) -> bool:
+        manager = getattr(self, "_container_mgr", None)
+        return (
+            manager is not None
+            and self._container_exec_processes.get(instance_id) is process
+            and manager.owns_exec(process)
+        )
+
+    async def _container_exec_alive(
+        self,
+        instance_id: int,
+        process: asyncio.subprocess.Process,
+    ) -> bool:
+        if not self._is_managed_container_exec(instance_id, process):
+            return False
+        return await self._container_mgr.exec_is_alive(process)
+
+    def _forget_container_exec(
+        self,
+        instance_id: int,
+        process: asyncio.subprocess.Process,
+    ) -> None:
+        if self._container_exec_processes.get(instance_id) is not process:
+            return
+        manager = getattr(self, "_container_mgr", None)
+        if manager is not None:
+            manager.forget_exec(process)
+        self._container_exec_processes.pop(instance_id, None)
+        self._container_tasks.pop(instance_id, None)
+
+    async def finalize_pty_container_exec(
+        self,
+        instance_id: int,
+        *,
+        expected_process: asyncio.subprocess.Process | None = None,
+    ) -> None:
+        """Prove a PTY container generation gone before on_exit advertises idle."""
+
+        process = self._container_exec_processes.get(instance_id)
+        if expected_process is not None and process is not expected_process:
+            # A late PTY callback must never signal a replacement container
+            # generation that already reused this instance key.
+            return
+        if process is None or not self._is_managed_container_exec(
+            instance_id, process
+        ):
+            return
+        if await self._container_exec_alive(instance_id, process):
+            await self._container_mgr.signal_exec(
+                process, signal.SIGKILL
+            )
+            deadline = asyncio.get_running_loop().time() + 5.0
+            while await self._container_exec_alive(instance_id, process):
+                if asyncio.get_running_loop().time() >= deadline:
+                    raise RuntimeError(
+                        f"Container PTY for instance {instance_id} "
+                        "survived SIGKILL"
+                    )
+                await asyncio.sleep(0.05)
+        self._forget_container_exec(instance_id, process)
+
+    async def _signal_managed_process_tree(
+        self,
+        instance_id: int,
+        process: asyncio.subprocess.Process,
+        sig: signal.Signals,
+    ) -> None:
+        """Signal an inner container group and its exact host process group."""
+
+        container_error: Exception | None = None
+        if self._is_managed_container_exec(instance_id, process):
+            try:
+                await self._container_mgr.signal_exec(process, sig)
+            except Exception as exc:
+                # Still stop the host-side docker client, but fail closed: the
+                # caller must retain PID/owner evidence because inner cleanup
+                # could not be proven.
+                container_error = exc
+        self._signal_process_tree(instance_id, process, sig)
+        if container_error is not None:
+            raise container_error
+
+    async def _wait_process_tree(
+        self,
+        instance_id: int,
+        process: asyncio.subprocess.Process,
+        timeout: float,
+    ) -> None:
+        """Wait for the CLI parent and every child in its managed group."""
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        if process.returncode is None:
+            await asyncio.wait_for(
+                asyncio.shield(process.wait()), timeout=max(0.01, timeout)
+            )
+        while (
+            self._process_group_alive(instance_id, process)
+            or await self._container_exec_alive(instance_id, process)
+        ):
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            await asyncio.sleep(min(0.05, remaining))
+        self._forget_container_exec(instance_id, process)
+
+    async def kill_process_generation(
+        self,
+        instance_id: int,
+        expected_process: asyncio.subprocess.Process,
+        *,
+        timeout: float = 5.0,
+    ) -> bool:
+        """SIGKILL one exact direct/adapted generation without changing DB state.
+
+        Dispatcher timeout handling still owns the Task retry/fail decision,
+        so it must not call the higher-level ``stop()`` (which releases the
+        claim).  This narrow operation shares the launch/stop lifecycle lock,
+        signals the managed POSIX process group, and delays caller cancellation
+        until the reap attempt has settled.
+        """
+
+        async def kill_exact() -> bool:
+            lifecycle_lock = self._instance_lifecycle_lock(instance_id)
+            async with lifecycle_lock:
+                record = self._consumer_records.get(instance_id)
+                exact_generation_known = (
+                    self.processes.get(instance_id) is expected_process
+                    or self._process_groups.get(instance_id) is expected_process
+                    or self._container_exec_processes.get(instance_id)
+                    is expected_process
+                    or (
+                        record is not None
+                        and record.process is expected_process
+                    )
+                )
+                if not exact_generation_known:
+                    return False
+                if (
+                    expected_process.returncode is None
+                    or self._process_group_alive(instance_id, expected_process)
+                ):
+                    await self._signal_managed_process_tree(
+                        instance_id, expected_process, signal.SIGKILL
+                    )
+                try:
+                    await self._wait_process_tree(
+                        instance_id, expected_process, timeout
+                    )
+                except asyncio.TimeoutError as exc:
+                    raise RuntimeError(
+                        f"Process group for instance {instance_id} survived SIGKILL"
+                    ) from exc
+                return True
+
+        operation = asyncio.create_task(kill_exact())
+        cancellation: asyncio.CancelledError | None = None
+        while not operation.done():
+            try:
+                await asyncio.shield(operation)
+            except asyncio.CancelledError as exc:
+                cancellation = exc
+        result = operation.result()
+        if cancellation is not None:
+            raise cancellation
+        return result
+
+    async def stop(
+        self,
+        instance_id: int,
+        *,
+        expected_task_id: int | None = None,
+        expected_pid: int | None | object = _EXPECTED_GENERATION_UNSET,
+        expected_started_at: datetime | None | object = _EXPECTED_GENERATION_UNSET,
+        task_status: str = "pending",
+        terminal_consumer_timeout: float | None = (
+            DEFAULT_TERMINAL_CONSUMER_TIMEOUT
+        ),
+        consumer_cancel_timeout: float | None = DEFAULT_CONSUMER_CANCEL_TIMEOUT,
+    ) -> bool:
+        """Cancellation-safe stop of one reusable worker slot.
+
+        ``expected_task_id`` turns a historical instance reference into an
+        owner-checked operation. ``expected_pid`` and
+        ``expected_started_at`` additionally fence the exact process
+        generation (explicit ``None`` is a real expected value; omission
+        disables that one fence). All are verified under the launch lock and
+        again in the terminal DB CAS, so a recycled slot cannot stop a newer
+        generation even when it belongs to the same task.
+        """
+
+        if task_status not in {"pending", "completed", "cancelled"}:
+            raise ValueError(f"Unsupported terminal task status: {task_status}")
+
+        operation = asyncio.create_task(
+            self._stop_serialized(
+                instance_id,
+                expected_task_id=expected_task_id,
+                expected_pid=expected_pid,
+                expected_started_at=expected_started_at,
+                task_status=task_status,
+                terminal_consumer_timeout=terminal_consumer_timeout,
+                consumer_cancel_timeout=consumer_cancel_timeout,
+            )
+        )
         cancellation: asyncio.CancelledError | None = None
         while not operation.done():
             try:
@@ -3197,16 +5339,76 @@ class InstanceManager:
             raise cancellation
         return result
 
-    async def _stop_serialized(self, instance_id: int) -> bool:
+    async def _stop_serialized(
+        self,
+        instance_id: int,
+        *,
+        expected_task_id: int | None,
+        expected_pid: int | None | object,
+        expected_started_at: datetime | None | object,
+        task_status: str,
+        terminal_consumer_timeout: float | None,
+        consumer_cancel_timeout: float | None,
+    ) -> bool:
         """Serialize stop against launch without cancelling terminal bookkeeping."""
 
         lifecycle_lock = self._instance_lifecycle_lock(instance_id)
         settled_terminal_consumer = False
         force_cancel_consumer = False
+        expected_owner_verified = False
+        stop_fence_registered = False
         try:
             while True:
                 async with lifecycle_lock:
-                    process = self.processes.get(instance_id)
+                    if (
+                        expected_task_id is not None
+                        or expected_pid is not _EXPECTED_GENERATION_UNSET
+                        or expected_started_at is not _EXPECTED_GENERATION_UNSET
+                    ):
+                        async with self.db_factory() as db:
+                            owner = await db.get(Instance, instance_id)
+                        if (
+                            owner is None
+                            or (
+                                expected_task_id is not None
+                                and owner.current_task_id != expected_task_id
+                            )
+                            or (
+                                expected_pid is not _EXPECTED_GENERATION_UNSET
+                                and owner.pid != expected_pid
+                            )
+                            or (
+                                expected_started_at
+                                is not _EXPECTED_GENERATION_UNSET
+                                and owner.started_at != expected_started_at
+                            )
+                        ):
+                            if (
+                                expected_pid is not _EXPECTED_GENERATION_UNSET
+                                or expected_started_at
+                                is not _EXPECTED_GENERATION_UNSET
+                            ):
+                                # An exact generation fence is never satisfied
+                                # by merely settling an older consumer: the
+                                # same Task/Instance may already own a new PID.
+                                return False
+                            return bool(
+                                settled_terminal_consumer
+                                and expected_owner_verified
+                            )
+                        expected_owner_verified = True
+                    if not stop_fence_registered:
+                        # Register exactly one token owned by this stop call.
+                        # Do this only after any requested generation fence has
+                        # succeeded, so a stale/mismatched stop cannot tear down
+                        # or contribute a fence for the current owner.
+                        self._begin_stopping(instance_id)
+                        stop_fence_registered = True
+                    process = (
+                        self.processes.get(instance_id)
+                        or self._process_groups.get(instance_id)
+                        or self._container_exec_processes.get(instance_id)
+                    )
                     record = self._consumer_records.get(instance_id)
                     task = (
                         record.task
@@ -3214,7 +5416,19 @@ class InstanceManager:
                         else self._tasks.get(instance_id)
                     )
                     record_process = record.process if record is not None else process
-                    process_live = process is not None and process.returncode is None
+                    recovery_pending = (
+                        self._consumer_recovery_pending.get(
+                            (instance_id, record_process)
+                        )
+                        if record_process is not None
+                        else None
+                    )
+                    process_live = (
+                        process is not None
+                        and not self._generation_reap_confirmed(
+                            instance_id, process
+                        )
+                    )
                     consumer_live = task is not None and not task.done()
                     terminal_consumer = (
                         consumer_live
@@ -3225,25 +5439,51 @@ class InstanceManager:
                         )
                     )
                     if terminal_consumer and not force_cancel_consumer:
+                        # The exact owner fence above has succeeded.  Publish
+                        # stop intent before releasing the lifecycle lock so
+                        # this consumer cannot launch a retry/replacement while
+                        # we await its terminal bookkeeping.
                         expected_process = record_process
                         provider = record.provider if record is not None else "claude"
                     else:
-                        stopped = await self._stop_locked(instance_id)
-                        return stopped or settled_terminal_consumer
+                        stopped = await self._stop_locked(
+                            instance_id,
+                            expected_task_id=expected_task_id,
+                            expected_pid=expected_pid,
+                            expected_started_at=expected_started_at,
+                            task_status=task_status,
+                            consumer_cancel_timeout=consumer_cancel_timeout,
+                            allow_settled_cleanup=(
+                                settled_terminal_consumer
+                                or recovery_pending is not None
+                            ),
+                        )
+                        return stopped or (
+                            settled_terminal_consumer
+                            and recovery_pending is None
+                        )
 
                 # The model process has already ended. In particular, a Codex
                 # consumer may now be migrating its rollout, rebinding the
                 # app-server owner, and persisting task affinity. Await it
-                # outside the lifecycle lock so a consumer-driven retry can
-                # acquire the lock; the next loop then stops that replacement.
+                # outside the lifecycle lock so terminal bookkeeping can finish.
+                # A consumer-driven retry may acquire the lock, but launch()
+                # observes this stop token there and rejects the replacement.
                 try:
-                    await self.wait_for_output_consumer(
+                    terminal_wait = self.wait_for_output_consumer(
                         instance_id,
                         provider=provider,
                         timeout=None if provider == "codex" else 30,
                         expected_process=expected_process,
                         preserve_error=True,
                     )
+                    if terminal_consumer_timeout is None:
+                        await terminal_wait
+                    else:
+                        await asyncio.wait_for(
+                            terminal_wait,
+                            timeout=terminal_consumer_timeout,
+                        )
                 except asyncio.TimeoutError:
                     force_cancel_consumer = True
                 except Exception:
@@ -3253,23 +5493,100 @@ class InstanceManager:
                     )
                 settled_terminal_consumer = True
         finally:
-            self._stopping.discard(instance_id)
+            if stop_fence_registered:
+                self._end_stopping(instance_id)
 
-    async def _stop_locked(self, instance_id: int) -> bool:
+    async def _stop_locked(
+        self,
+        instance_id: int,
+        *,
+        expected_task_id: int | None,
+        task_status: str,
+        expected_pid: int | None | object = _EXPECTED_GENERATION_UNSET,
+        expected_started_at: datetime | None | object = _EXPECTED_GENERATION_UNSET,
+        consumer_cancel_timeout: float | None = None,
+        allow_settled_cleanup: bool = False,
+    ) -> bool:
         """Stop a running Claude Code instance via SIGINT (interrupt).
 
         Sends SIGINT first so Claude can gracefully save session state,
         then falls back to SIGTERM and SIGKILL if needed.
         """
-        process = self.processes.get(instance_id)
+        process = (
+            self.processes.get(instance_id)
+            or self._process_groups.get(instance_id)
+            or self._container_exec_processes.get(instance_id)
+        )
         record = self._consumer_records.get(instance_id)
         task = record.task if record is not None else self._tasks.get(instance_id)
-        process_live = process is not None and process.returncode is None
+        recovery_evidence = (
+            self._consumer_recovery_pending.get((instance_id, process))
+            if process is not None
+            else None
+        )
+        # A tracked recovery record supplies the durable per-turn token even
+        # when the caller is a generic lifecycle cleanup.  An untracked record
+        # may only be reconciled when the caller independently supplies both
+        # exact Instance fences.
+        if recovery_evidence is not None:
+            if recovery_evidence.tracked_generation:
+                effective_expected_pid = (
+                    getattr(process, "pid", None)
+                    if expected_pid is _EXPECTED_GENERATION_UNSET
+                    else expected_pid
+                )
+                effective_expected_started_at = (
+                    recovery_evidence.instance_started_at
+                    if expected_started_at is _EXPECTED_GENERATION_UNSET
+                    else expected_started_at
+                )
+            else:
+                if (
+                    expected_pid is _EXPECTED_GENERATION_UNSET
+                    or expected_started_at is _EXPECTED_GENERATION_UNSET
+                ):
+                    return False
+                effective_expected_pid = expected_pid
+                effective_expected_started_at = expected_started_at
+        else:
+            effective_expected_pid = expected_pid
+            effective_expected_started_at = expected_started_at
+
+        if (
+            expected_task_id is not None
+            or effective_expected_pid is not _EXPECTED_GENERATION_UNSET
+            or effective_expected_started_at is not _EXPECTED_GENERATION_UNSET
+        ):
+            async with self.db_factory() as db:
+                owner = await db.get(Instance, instance_id)
+                if (
+                    owner is None
+                    or (
+                        expected_task_id is not None
+                        and owner.current_task_id != expected_task_id
+                    )
+                    or (
+                        effective_expected_pid
+                        is not _EXPECTED_GENERATION_UNSET
+                        and owner.pid != effective_expected_pid
+                    )
+                    or (
+                        effective_expected_started_at
+                        is not _EXPECTED_GENERATION_UNSET
+                        and owner.started_at
+                        != effective_expected_started_at
+                    )
+                ):
+                    return False
+
+        process_live = (
+            process is not None
+            and not self._generation_reap_confirmed(instance_id, process)
+        )
         consumer_live = task is not None and not task.done()
-        if not process_live and not consumer_live:
+        if not process_live and not consumer_live and not allow_settled_cleanup:
             return False
 
-        self._stopping.add(instance_id)
         pty_managed = (
             process_live
             and self._pty_backend is not None
@@ -3278,24 +5595,64 @@ class InstanceManager:
         if pty_managed:
             # Esc-interrupt the turn, then tear the session down; the proxy's
             # wait() is unblocked by the backend's on_exit.
+            container_signal_error: Exception | None = None
+            if self._is_managed_container_exec(instance_id, process):
+                try:
+                    await self._container_mgr.signal_exec(
+                        process, signal.SIGINT
+                    )
+                except Exception as exc:
+                    container_signal_error = exc
+                    logger.exception(
+                        "Could not interrupt container PTY for instance %s",
+                        instance_id,
+                    )
             await self._pty_backend.stop(instance_id)
             try:
-                await asyncio.wait_for(process.wait(), timeout=10.0)
+                await self._wait_process_tree(instance_id, process, 10.0)
             except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
-        elif process_live:
-            import signal
-            process.send_signal(signal.SIGINT)
-            try:
-                await asyncio.wait_for(process.wait(), timeout=10.0)
-            except asyncio.TimeoutError:
-                process.terminate()
                 try:
-                    await asyncio.wait_for(process.wait(), timeout=5.0)
+                    await self._signal_managed_process_tree(
+                        instance_id, process, signal.SIGKILL
+                    )
+                    await self._wait_process_tree(
+                        instance_id, process, 5.0
+                    )
+                except (asyncio.TimeoutError, RuntimeError) as exc:
+                    raise RuntimeError(
+                        f"PTY process for instance {instance_id} survived SIGKILL"
+                    ) from exc
+            if container_signal_error is not None:
+                raise RuntimeError(
+                    f"Container PTY state for instance {instance_id} "
+                    "could not be controlled"
+                ) from container_signal_error
+        elif process_live:
+            await self._signal_managed_process_tree(
+                instance_id, process, signal.SIGINT
+            )
+            try:
+                await self._wait_process_tree(instance_id, process, 10.0)
+            except asyncio.TimeoutError:
+                await self._signal_managed_process_tree(
+                    instance_id, process, signal.SIGTERM
+                )
+                try:
+                    await self._wait_process_tree(instance_id, process, 5.0)
                 except asyncio.TimeoutError:
-                    process.kill()
-                    await process.wait()
+                    await self._signal_managed_process_tree(
+                        instance_id, process, signal.SIGKILL
+                    )
+                    try:
+                        await self._wait_process_tree(instance_id, process, 5.0)
+                    except asyncio.TimeoutError:
+                        logger.error(
+                            "Process group for instance %s survived SIGKILL",
+                            instance_id,
+                        )
+                        raise RuntimeError(
+                            f"Process group for instance {instance_id} survived SIGKILL"
+                        )
 
         # Cancel consumer task
         if task and not task.done():
@@ -3304,39 +5661,225 @@ class InstanceManager:
             # The consumer's stopping branch still drains process/stderr state.
             # Reap that exact task before the lifecycle lock can admit a new
             # process under the same instance id.
-            await asyncio.gather(task, return_exceptions=True)
+            if consumer_cancel_timeout is None:
+                await asyncio.gather(task, return_exceptions=True)
+            else:
+                done, pending = await asyncio.wait(
+                    {task},
+                    timeout=consumer_cancel_timeout,
+                )
+                if pending:
+                    raise RuntimeError(
+                        "Output consumer for instance "
+                        f"{instance_id} ignored cancellation"
+                    )
+                await asyncio.gather(*done, return_exceptions=True)
 
+        if expected_task_id is not None:
+            task_id = expected_task_id
+        elif recovery_evidence is not None:
+            task_id = recovery_evidence.task_id
+        elif record is not None:
+            task_id = record.task_id
+        else:
+            task_id = None
+        if task_id is None:
+            # Discovery is a plain snapshot outside the terminal transaction;
+            # the exact Instance CAS below validates it.  Never lock Instance
+            # and then Task in one transaction.
+            async with self.db_factory() as db:
+                task_id = (
+                    await db.execute(
+                        select(Instance.current_task_id).where(
+                            Instance.id == instance_id
+                        )
+                    )
+                ).scalar_one_or_none()
+
+        changed_task_status = False
+        published_generation: dict | None = None
         async with self.db_factory() as db:
-            inst = await db.get(Instance, instance_id)
-            task_id = inst.current_task_id if inst else None
-            await db.execute(
+            if task_id is not None:
+                # Global ownership lock order is Task -> Instance.  A no-op
+                # UPDATE is portable across SQLite/PostgreSQL/MySQL and also
+                # locks an already-terminal Task that cancellation published
+                # before asking us to clear its reverse Instance owner.
+                task_lock = await db.execute(
+                    update(Task)
+                    .where(
+                        Task.id == task_id,
+                        Task.instance_id == instance_id,
+                        (
+                            Task.id == task_id
+                            if recovery_evidence is None
+                            or recovery_evidence.task_retry_count is None
+                            else Task.retry_count
+                            == recovery_evidence.task_retry_count
+                        ),
+                    )
+                    .values(status=Task.status)
+                )
+                if not task_lock.rowcount:
+                    await db.rollback()
+                    return False
+
+                current_task_generation = (
+                    await db.execute(
+                        select(
+                            Task.status,
+                            Task.retry_count,
+                            Task.instance_id,
+                            Task.started_at,
+                            Task.completed_at,
+                        ).where(Task.id == task_id)
+                    )
+                ).one()
+                if current_task_generation.status in {
+                    "executing",
+                    "in_progress",
+                }:
+                    task_values: dict = {
+                        "status": task_status,
+                        "error_message": None,
+                    }
+                    if task_status == "pending":
+                        task_values.update(
+                            instance_id=None,
+                            started_at=None,
+                            completed_at=None,
+                        )
+                    else:
+                        task_values["completed_at"] = datetime.utcnow()
+                    task_update = await db.execute(
+                        update(Task)
+                        .where(
+                            Task.id == task_id,
+                            Task.status == current_task_generation.status,
+                            Task.retry_count
+                            == current_task_generation.retry_count,
+                            Task.instance_id == instance_id,
+                        )
+                        .values(**task_values)
+                    )
+                    changed_task_status = bool(task_update.rowcount)
+
+                resulting_task_generation = (
+                    await db.execute(
+                        select(
+                            Task.status,
+                            Task.retry_count,
+                            Task.instance_id,
+                            Task.started_at,
+                            Task.completed_at,
+                        ).where(Task.id == task_id)
+                    )
+                ).one()
+                published_generation = {
+                    "status": resulting_task_generation.status,
+                    "retry_count": resulting_task_generation.retry_count,
+                    "instance_id": resulting_task_generation.instance_id,
+                    "started_at": resulting_task_generation.started_at,
+                    "completed_at": resulting_task_generation.completed_at,
+                }
+
+            instance_predicates = [Instance.id == instance_id]
+            if task_id is not None:
+                instance_predicates.append(
+                    Instance.current_task_id == task_id
+                )
+            if effective_expected_pid is not _EXPECTED_GENERATION_UNSET:
+                instance_predicates.append(
+                    Instance.pid == effective_expected_pid
+                )
+            if (
+                effective_expected_started_at
+                is not _EXPECTED_GENERATION_UNSET
+            ):
+                instance_predicates.append(
+                    (
+                        Instance.started_at.is_(None)
+                        if effective_expected_started_at is None
+                        else Instance.started_at
+                        == effective_expected_started_at
+                    )
+                )
+            instance_update = await db.execute(
                 update(Instance)
-                .where(Instance.id == instance_id)
+                .where(*instance_predicates)
                 .values(status="idle", pid=None, current_task_id=None)
             )
-            if task_id:
-                await db.execute(
-                    update(Task)
-                    .where(Task.id == task_id, Task.status == "executing")
-                    .values(status="completed", error_message=None)
-                )
+            if instance_update.rowcount == 0:
+                await db.rollback()
+                return False
             await db.commit()
 
-        if task_id:
-            await self.broadcaster.broadcast(f"task:{task_id}", {
-                "event_type": "process_exit",
-                "exit_code": process.returncode if process is not None else None,
-                "stderr": None,
-            })
+        if task_id is not None and published_generation is not None:
+            # Keep a row lock across publication. A rapid retry/replacement
+            # must change one of these exact fields first and therefore
+            # suppresses the old generation's status/process-exit events.
+            async with self.db_factory() as db:
+                generation_predicates = [
+                    Task.id == task_id,
+                    Task.status == published_generation["status"],
+                    Task.retry_count == published_generation["retry_count"],
+                    (
+                        Task.instance_id.is_(None)
+                        if published_generation["instance_id"] is None
+                        else Task.instance_id
+                        == published_generation["instance_id"]
+                    ),
+                    (
+                        Task.started_at.is_(None)
+                        if published_generation["started_at"] is None
+                        else Task.started_at
+                        == published_generation["started_at"]
+                    ),
+                    (
+                        Task.completed_at.is_(None)
+                        if published_generation["completed_at"] is None
+                        else Task.completed_at
+                        == published_generation["completed_at"]
+                    ),
+                ]
+                publish_guard = await db.execute(
+                    update(Task)
+                    .where(*generation_predicates)
+                    .values(status=published_generation["status"])
+                )
+                if publish_guard.rowcount:
+                    if changed_task_status:
+                        from backend.services.task_events import (
+                            broadcast_status_change,
+                        )
+
+                        await broadcast_status_change(
+                            task_id, task_status, instance_id
+                        )
+                    await self.broadcaster.broadcast(
+                        f"task:{task_id}",
+                        {
+                            "event_type": "process_exit",
+                            "exit_code": (
+                                process.returncode
+                                if process is not None
+                                else None
+                            ),
+                            "stderr": None,
+                        },
+                    )
+                await db.commit()
 
         if process is not None and self.processes.get(instance_id) is process:
             self.processes.pop(instance_id, None)
             self._codex_exec_homes.pop(instance_id, None)
+        if process is not None and self._process_groups.get(instance_id) is process:
+            self._process_groups.pop(instance_id, None)
         if task is not None and self._tasks.get(instance_id) is task:
             self._tasks.pop(instance_id, None)
         record = self._consumer_records.get(instance_id)
         if record is not None and record.task is task:
             self._consumer_records.pop(instance_id, None)
+        self._clear_consumer_recovery_pending(instance_id, process)
         self._transient_attempts.pop(instance_id, None)
         self._pty_rate_limit_seen.discard(instance_id)
         self._pty_rate_limit_info.pop(instance_id, None)
@@ -3374,9 +5917,12 @@ class InstanceManager:
                 else None
             )
             if expected_key is not None:
+                recovery_pending = (
+                    expected_key in self._consumer_recovery_pending
+                )
                 stored_error = (
                     self._consumer_errors.get(expected_key)
-                    if preserve_error
+                    if preserve_error or recovery_pending
                     else self._consumer_errors.pop(expected_key, None)
                 )
                 if stored_error is not None:
@@ -3435,44 +5981,71 @@ class InstanceManager:
                 failure_key = (
                     (instance_id, process) if process is not None else None
                 )
+                recovery_pending = bool(
+                    failure_key is not None
+                    and failure_key in self._consumer_recovery_pending
+                )
                 if (
                     failure_key is not None
                     and record is not None
-                    and not record.chat_initiated
+                    and (
+                        not record.chat_initiated
+                        or recovery_pending
+                    )
                     and (expected_process is None or preserve_error)
                 ):
                     self._consumer_errors.setdefault(failure_key, exc)
-                elif failure_key is not None:
+                elif failure_key is not None and not recovery_pending:
                     self._consumer_errors.pop(failure_key, None)
-                if self._tasks.get(instance_id) is consumer:
-                    self._tasks.pop(instance_id, None)
-                if record is not None and self._consumer_records.get(instance_id) is record:
-                    self._consumer_records.pop(instance_id, None)
-                if (
-                    process is not None
-                    and self.processes.get(instance_id) is process
-                    and process.returncode is not None
-                ):
-                    self.processes.pop(instance_id, None)
-                    self._codex_exec_homes.pop(instance_id, None)
-                    self._launch_params.pop(instance_id, None)
+                reap_confirmed = (
+                    process is None
+                    or self._generation_reap_confirmed(instance_id, process)
+                )
+                if reap_confirmed and not recovery_pending:
+                    if self._tasks.get(instance_id) is consumer:
+                        self._tasks.pop(instance_id, None)
+                    if (
+                        record is not None
+                        and self._consumer_records.get(instance_id) is record
+                    ):
+                        self._consumer_records.pop(instance_id, None)
+                    if (
+                        process is not None
+                        and self.processes.get(instance_id) is process
+                    ):
+                        self.processes.pop(instance_id, None)
+                        self._codex_exec_homes.pop(instance_id, None)
+                        self._launch_params.pop(instance_id, None)
+                        if self._process_groups.get(instance_id) is process:
+                            self._process_groups.pop(instance_id, None)
                 raise
 
             # A chat consumer may launch its own replacement on a transient or
             # account-limit retry.  Codex callers must wait for that replacement
             # too before considering the instance reusable.
-            if record is not None and self._consumer_records.get(instance_id) is record:
+            if (
+                record is not None
+                and self._consumer_records.get(instance_id) is record
+                and (instance_id, record.process)
+                not in self._consumer_recovery_pending
+                and (
+                    process is None
+                    or self._generation_reap_confirmed(instance_id, process)
+                )
+            ):
                 self._consumer_records.pop(instance_id, None)
                 if self._tasks.get(instance_id) is consumer:
                     self._tasks.pop(instance_id, None)
                 if (
                     process is not None
                     and self.processes.get(instance_id) is process
-                    and process.returncode is not None
+                    and self._generation_reap_confirmed(instance_id, process)
                 ):
                     self.processes.pop(instance_id, None)
                     self._codex_exec_homes.pop(instance_id, None)
                     self._launch_params.pop(instance_id, None)
+                    if self._process_groups.get(instance_id) is process:
+                        self._process_groups.pop(instance_id, None)
 
             replacement = self._consumer_records.get(instance_id)
             if (
@@ -3484,11 +6057,22 @@ class InstanceManager:
                 return
 
     def is_running(self, instance_id: int) -> bool:
-        process = self.processes.get(instance_id)
+        process = (
+            self.processes.get(instance_id)
+            or self._process_groups.get(instance_id)
+            or self._container_exec_processes.get(instance_id)
+        )
         record = self._consumer_records.get(instance_id)
         consumer = record.task if record is not None else self._tasks.get(instance_id)
         return (
-            (process is not None and process.returncode is None)
+            any(
+                key[0] == instance_id
+                for key in self._consumer_recovery_pending
+            )
+            or (
+                process is not None
+                and not self._generation_reap_confirmed(instance_id, process)
+            )
             or (consumer is not None and not consumer.done())
         )
 

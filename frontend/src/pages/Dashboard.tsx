@@ -62,7 +62,7 @@ export function Dashboard() {
 
       {/* Log modal */}
       {logInstanceId !== null && (
-        <InstanceLog instanceId={logInstanceId} onClose={() => setLogInstanceId(null)} />
+        <InstanceLog key={logInstanceId} instanceId={logInstanceId} onClose={() => setLogInstanceId(null)} />
       )}
 
     </div>

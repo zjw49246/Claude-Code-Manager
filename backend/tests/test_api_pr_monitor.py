@@ -3,6 +3,8 @@ import asyncio
 import hashlib
 import hmac
 import json
+from datetime import datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -552,6 +554,775 @@ async def test_pr_review_head_sha_unique_constraint(db_session):
 
 
 @pytest.mark.asyncio
+async def test_webhook_synchronize_stops_exact_running_review_generation(
+    client,
+    session_factory,
+):
+    """A replacement review is created only after the old owner is reaped."""
+
+    import backend.main
+    from backend.models.instance import Instance
+
+    repo = await _create_repo(client, "owner/running-review")
+    opened = await _post_webhook(
+        client,
+        repo["webhook_secret"],
+        _pr_payload("owner/running-review", action="opened"),
+    )
+    old_review_id = opened.json()["review_id"]
+    old_started_at = datetime.utcnow() - timedelta(minutes=1)
+    async with session_factory() as db:
+        old_review = await db.get(PRReview, old_review_id)
+        old_task = await db.get(Task, old_review.task_id)
+        instance = Instance(
+            name="pr-review-running",
+            status="running",
+            pid=51001,
+            current_task_id=old_task.id,
+            started_at=old_started_at,
+        )
+        db.add(instance)
+        await db.flush()
+        old_task.status = "executing"
+        old_task.instance_id = instance.id
+        old_task.started_at = old_started_at
+        await db.commit()
+        old_task_id = old_task.id
+        instance_id = instance.id
+
+    lifecycle_order: list[str] = []
+
+    async def stop_exact(stopped_instance_id, **kwargs):
+        assert stopped_instance_id == instance_id
+        assert kwargs == {
+            "expected_task_id": old_task_id,
+            "expected_pid": 51001,
+            "expected_started_at": old_started_at,
+            "task_status": "completed",
+            "terminal_consumer_timeout": 30.0,
+            "consumer_cancel_timeout": 10.0,
+        }
+        async with session_factory() as db:
+            owner = await db.get(Instance, instance_id)
+            assert owner.current_task_id == old_task_id
+            assert owner.pid == 51001
+            assert owner.started_at == old_started_at
+            owner.status = "idle"
+            owner.current_task_id = None
+            owner.pid = None
+            await db.commit()
+        lifecycle_order.append("stopped")
+        return True
+
+    async def publish_after_cleanup(task_id, status):
+        assert task_id == old_task_id
+        assert status == "completed"
+        assert lifecycle_order == ["stopped"]
+        lifecycle_order.append("published")
+
+    with (
+        patch.object(
+            backend.main.dispatcher,
+            "abort_task_queue",
+            new_callable=AsyncMock,
+            return_value=0,
+        ) as abort_queue,
+        patch.object(
+            backend.main.instance_manager,
+            "wait_for_task_launch_barrier",
+            new_callable=AsyncMock,
+            return_value=True,
+        ) as launch_barrier,
+        patch.object(
+            backend.main.instance_manager,
+            "stop",
+            new_callable=AsyncMock,
+            side_effect=stop_exact,
+        ) as stop,
+        patch(
+            "backend.services.task_events.broadcast_status_change",
+            new_callable=AsyncMock,
+            side_effect=publish_after_cleanup,
+        ),
+    ):
+        synchronized = await _post_webhook(
+            client,
+            repo["webhook_secret"],
+            _pr_payload(
+                "owner/running-review",
+                action="synchronize",
+                head_sha="head-sha-2",
+            ),
+        )
+
+    assert synchronized.status_code == 200, synchronized.text
+    assert synchronized.json()["status"] == "accepted"
+    abort_queue.assert_awaited_once_with(old_task_id)
+    launch_barrier.assert_awaited_once_with(instance_id, old_task_id)
+    stop.assert_awaited_once()
+    assert lifecycle_order == ["stopped", "published"]
+
+    async with session_factory() as db:
+        old_review = await db.get(PRReview, old_review_id)
+        old_task = await db.get(Task, old_task_id)
+        instance = await db.get(Instance, instance_id)
+        assert old_review.status == "superseded"
+        assert old_task.status == "completed"
+        assert old_task.error_message == "Superseded by new push"
+        assert instance.status == "idle"
+        assert instance.current_task_id is None
+        assert instance.pid is None
+
+
+@pytest.mark.asyncio
+async def test_webhook_synchronize_same_task_slot_aba_does_not_stop_new_generation(
+    client,
+    session_factory,
+):
+    """A same-task retry cannot satisfy the old PID/start/generation fences."""
+
+    import backend.main
+    from backend.models.instance import Instance
+
+    repo = await _create_repo(client, "owner/review-aba")
+    opened = await _post_webhook(
+        client,
+        repo["webhook_secret"],
+        _pr_payload("owner/review-aba", action="opened"),
+    )
+    old_review_id = opened.json()["review_id"]
+    old_started_at = datetime.utcnow() - timedelta(minutes=2)
+    replacement_started_at = datetime.utcnow()
+    async with session_factory() as db:
+        old_review = await db.get(PRReview, old_review_id)
+        old_task = await db.get(Task, old_review.task_id)
+        instance = Instance(
+            name="pr-review-aba-slot",
+            status="running",
+            pid=52001,
+            current_task_id=old_task.id,
+            started_at=old_started_at,
+        )
+        db.add(instance)
+        await db.flush()
+        old_task.status = "executing"
+        old_task.instance_id = instance.id
+        old_task.started_at = old_started_at
+        await db.commit()
+        old_task_id = old_task.id
+        instance_id = instance.id
+
+    async def slot_reused_before_exact_stop(stopped_instance_id, **kwargs):
+        assert stopped_instance_id == instance_id
+        assert kwargs["expected_task_id"] == old_task_id
+        assert kwargs["expected_pid"] == 52001
+        assert kwargs["expected_started_at"] == old_started_at
+        async with session_factory() as db:
+            instance = await db.get(Instance, instance_id)
+            retried_task = await db.get(Task, old_task_id)
+            instance.current_task_id = old_task_id
+            instance.pid = 52002
+            instance.started_at = replacement_started_at
+            retried_task.status = "executing"
+            retried_task.retry_count += 1
+            retried_task.instance_id = instance_id
+            retried_task.started_at = replacement_started_at
+            retried_task.completed_at = None
+            retried_task.error_message = None
+            await db.commit()
+        # Real InstanceManager.stop returns False when its exact owner fence no
+        # longer matches. It must not signal or clear the new generation.
+        return False
+
+    with (
+        patch.object(
+            backend.main.dispatcher,
+            "abort_task_queue",
+            new_callable=AsyncMock,
+            return_value=0,
+        ),
+        patch.object(
+            backend.main.instance_manager,
+            "wait_for_task_launch_barrier",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch.object(
+            backend.main.instance_manager,
+            "stop",
+            new_callable=AsyncMock,
+            side_effect=slot_reused_before_exact_stop,
+        ) as stop,
+    ):
+        synchronized = await _post_webhook(
+            client,
+            repo["webhook_secret"],
+            _pr_payload(
+                "owner/review-aba",
+                action="synchronize",
+                head_sha="head-sha-2",
+            ),
+        )
+
+    assert synchronized.status_code == 409, synchronized.text
+    assert "no new review was created" in synchronized.json()["detail"]
+    stop.assert_awaited_once()
+    async with session_factory() as db:
+        instance = await db.get(Instance, instance_id)
+        retried_task = await db.get(Task, old_task_id)
+        old_review = await db.get(PRReview, old_review_id)
+        reviews = (
+            await db.execute(
+                select(PRReview).where(
+                    PRReview.repo_id == repo["id"],
+                    PRReview.pr_number == 42,
+                )
+            )
+        ).scalars().all()
+        assert len(reviews) == 1
+        assert old_review.status == "reviewing"
+        assert instance.current_task_id == old_task_id
+        assert instance.pid == 52002
+        assert instance.started_at == replacement_started_at
+        assert retried_task.status == "executing"
+        assert retried_task.retry_count == 1
+        assert retried_task.instance_id == instance_id
+        assert retried_task.started_at == replacement_started_at
+
+
+@pytest.mark.asyncio
+async def test_webhook_synchronize_refuses_new_review_when_cleanup_unconfirmed(
+    client,
+    session_factory,
+):
+    """An exact owner left behind keeps the old review active and returns 409."""
+
+    import backend.main
+    from backend.models.instance import Instance
+
+    repo = await _create_repo(client, "owner/review-unreaped")
+    opened = await _post_webhook(
+        client,
+        repo["webhook_secret"],
+        _pr_payload("owner/review-unreaped", action="opened"),
+    )
+    old_review_id = opened.json()["review_id"]
+    old_started_at = datetime.utcnow() - timedelta(minutes=1)
+    async with session_factory() as db:
+        old_review = await db.get(PRReview, old_review_id)
+        old_task = await db.get(Task, old_review.task_id)
+        instance = Instance(
+            name="pr-review-unreaped",
+            status="error",
+            pid=53001,
+            current_task_id=old_task.id,
+            started_at=old_started_at,
+        )
+        db.add(instance)
+        await db.flush()
+        old_task.status = "executing"
+        old_task.instance_id = instance.id
+        old_task.started_at = old_started_at
+        await db.commit()
+        old_task_id = old_task.id
+        instance_id = instance.id
+
+    with (
+        patch.object(
+            backend.main.dispatcher,
+            "abort_task_queue",
+            new_callable=AsyncMock,
+            return_value=0,
+        ),
+        patch.object(
+            backend.main.instance_manager,
+            "wait_for_task_launch_barrier",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch.object(
+            backend.main.instance_manager,
+            "stop",
+            new_callable=AsyncMock,
+            return_value=False,
+        ) as stop,
+        patch(
+            "backend.services.task_events.broadcast_status_change",
+            new_callable=AsyncMock,
+        ) as publish,
+    ):
+        synchronized = await _post_webhook(
+            client,
+            repo["webhook_secret"],
+            _pr_payload(
+                "owner/review-unreaped",
+                action="synchronize",
+                head_sha="head-sha-2",
+            ),
+        )
+
+    assert synchronized.status_code == 409, synchronized.text
+    assert "no new review was created" in synchronized.json()["detail"]
+    stop.assert_awaited_once()
+    publish.assert_not_awaited()
+    async with session_factory() as db:
+        old_review = await db.get(PRReview, old_review_id)
+        old_task = await db.get(Task, old_task_id)
+        instance = await db.get(Instance, instance_id)
+        reviews = (
+            await db.execute(
+                select(PRReview).where(
+                    PRReview.repo_id == repo["id"],
+                    PRReview.pr_number == 42,
+                )
+            )
+        ).scalars().all()
+        assert len(reviews) == 1
+        assert old_review.status == "reviewing"
+        assert old_task.status == "completed"
+        assert old_task.error_message == "Superseded by new push"
+        assert instance.current_task_id == old_task_id
+        assert instance.pid == 53001
+
+
+@pytest.mark.asyncio
+async def test_webhook_synchronize_relocks_terminal_task_before_replacement(
+    client,
+    session_factory,
+):
+    """A retry after cleanup but before review replacement forces a 409."""
+
+    import backend.services.task_termination as termination
+
+    repo = await _create_repo(client, "owner/review-post-cleanup-retry")
+    opened = await _post_webhook(
+        client,
+        repo["webhook_secret"],
+        _pr_payload("owner/review-post-cleanup-retry", action="opened"),
+    )
+    old_review_id = opened.json()["review_id"]
+    async with session_factory() as db:
+        old_review = await db.get(PRReview, old_review_id)
+        old_task_id = old_review.task_id
+
+    real_lock_generation = termination.lock_task_generation
+    lock_calls = 0
+
+    async def retry_before_pr_relock(*args, **kwargs):
+        nonlocal lock_calls
+        lock_calls += 1
+        if lock_calls == 2:
+            async with session_factory() as db:
+                task = await db.get(Task, old_task_id)
+                task.status = "pending"
+                task.retry_count += 1
+                task.instance_id = None
+                task.started_at = None
+                task.completed_at = None
+                task.error_message = None
+                await db.commit()
+        return await real_lock_generation(*args, **kwargs)
+
+    with patch.object(
+        termination,
+        "lock_task_generation",
+        new_callable=AsyncMock,
+        side_effect=retry_before_pr_relock,
+    ):
+        synchronized = await _post_webhook(
+            client,
+            repo["webhook_secret"],
+            _pr_payload(
+                "owner/review-post-cleanup-retry",
+                action="synchronize",
+                head_sha="head-sha-2",
+            ),
+        )
+
+    assert synchronized.status_code == 409, synchronized.text
+    assert "started a newer generation" in synchronized.json()["detail"]
+    assert lock_calls == 2
+    async with session_factory() as db:
+        old_review = await db.get(PRReview, old_review_id)
+        old_task = await db.get(Task, old_task_id)
+        reviews = (
+            await db.execute(
+                select(PRReview).where(
+                    PRReview.repo_id == repo["id"],
+                    PRReview.pr_number == 42,
+                )
+            )
+        ).scalars().all()
+        assert len(reviews) == 1
+        assert old_review.status == "reviewing"
+        assert old_task.status == "pending"
+        assert old_task.retry_count == 1
+
+
+@pytest.mark.asyncio
+async def test_webhook_synchronize_blocks_retry_that_read_before_replacement(
+    client,
+    session_factory,
+):
+    """A retry queued behind supersede revalidates and cannot revive the task."""
+
+    import backend.services.task_termination as termination
+    from backend.services.worker_proxy import get_task_operation_lock
+
+    repo = await _create_repo(client, "owner/review-waiting-retry")
+    opened = await _post_webhook(
+        client,
+        repo["webhook_secret"],
+        _pr_payload("owner/review-waiting-retry", action="opened"),
+    )
+    old_review_id = opened.json()["review_id"]
+    async with session_factory() as db:
+        old_review = await db.get(PRReview, old_review_id)
+        old_task_id = old_review.task_id
+
+    supersede_holds_operation_lock = asyncio.Event()
+    release_supersede = asyncio.Event()
+    real_terminate = termination.terminate_authoritative_task_generation
+
+    async def delayed_supersede(*args, **kwargs):
+        assert kwargs["operation_locks_held"] is True
+        assert get_task_operation_lock(old_task_id).locked()
+        supersede_holds_operation_lock.set()
+        await release_supersede.wait()
+        return await real_terminate(*args, **kwargs)
+
+    with patch.object(
+        termination,
+        "terminate_authoritative_task_generation",
+        side_effect=delayed_supersede,
+    ):
+        synchronize_request = asyncio.create_task(
+            _post_webhook(
+                client,
+                repo["webhook_secret"],
+                _pr_payload(
+                    "owner/review-waiting-retry",
+                    action="synchronize",
+                    head_sha="head-sha-2",
+                ),
+            )
+        )
+        await supersede_holds_operation_lock.wait()
+        retry_request = asyncio.create_task(
+            client.post(f"/api/tasks/{old_task_id}/retry")
+        )
+        await asyncio.sleep(0)
+        assert not retry_request.done()
+        release_supersede.set()
+        synchronized = await synchronize_request
+        retry_response = await retry_request
+
+    assert synchronized.status_code == 200, synchronized.text
+    assert retry_response.status_code == 409, retry_response.text
+    chat_response = await client.post(
+        f"/api/tasks/{old_task_id}/chat",
+        json={"message": "please revive the obsolete review"},
+    )
+    assert chat_response.status_code == 409, chat_response.text
+    async with session_factory() as db:
+        old_review = await db.get(PRReview, old_review_id)
+        old_task = await db.get(Task, old_task_id)
+        reviews = (
+            await db.execute(
+                select(PRReview).where(
+                    PRReview.repo_id == repo["id"],
+                    PRReview.pr_number == 42,
+                )
+            )
+        ).scalars().all()
+        assert len(reviews) == 2
+        assert old_review.status == "superseded"
+        assert old_task.status == "completed"
+        assert old_task.retry_count == 0
+        assert old_task.metadata_["pr_review_superseded"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("remote_initial_status", ["executing", "completed"])
+async def test_webhook_synchronize_worker_review_stops_authoritative_generation(
+    client,
+    session_factory,
+    remote_initial_status,
+):
+    """Worker reviews use the locked internal full-lifecycle endpoint."""
+
+    import backend.main
+
+    repo = await _create_repo(
+        client,
+        "owner/worker-review",
+        worker_id=77,
+    )
+    opened = await _post_webhook(
+        client,
+        repo["webhook_secret"],
+        _pr_payload("owner/worker-review", action="opened"),
+    )
+    old_review_id = opened.json()["review_id"]
+    async with session_factory() as db:
+        old_review = await db.get(PRReview, old_review_id)
+        old_task = await db.get(Task, old_review.task_id)
+        old_task.status = "executing"
+        await db.commit()
+        old_task_id = old_task.id
+
+    operation_lock = asyncio.Lock()
+    migration_lock = asyncio.Lock()
+    calls: list[tuple[str, str]] = []
+
+    async def authoritative_worker_call(
+        routing_task,
+        method,
+        path,
+        body=None,
+        **kwargs,
+    ):
+        assert routing_task.id == old_task_id
+        assert routing_task.worker_id == 77
+        assert operation_lock.locked()
+        assert migration_lock.locked()
+        assert kwargs["operation_lock_held"] is True
+        assert kwargs["require_json"] is True
+        calls.append((method, path))
+        if method == "GET":
+            return {
+                "id": old_task_id,
+                "status": remote_initial_status,
+                "retry_count": 0,
+            }
+        assert method == "POST"
+        assert path == f"/api/tasks/{old_task_id}/terminate-generation"
+        assert body == {
+            "expected_status": remote_initial_status,
+            "expected_retry_count": 0,
+            "expected_instance_id": None,
+            "expected_started_at": None,
+            "expected_completed_at": None,
+        }
+        return {
+            "id": old_task_id,
+            "status": "completed",
+            "retry_count": 0,
+            "error_message": "Superseded by new PR push",
+            "metadata_": {"pr_review_superseded": True},
+        }
+
+    with (
+        patch.object(
+            backend.main,
+            "task_migrator",
+            SimpleNamespace(_locks={old_task_id: migration_lock}),
+        ),
+        patch.object(
+            backend.main.worker_proxy,
+            "task_operation_lock",
+            return_value=operation_lock,
+        ),
+        patch.object(
+            backend.main.worker_proxy,
+            "proxy_to_worker",
+            new_callable=AsyncMock,
+            side_effect=authoritative_worker_call,
+        ),
+    ):
+        synchronized = await _post_webhook(
+            client,
+            repo["webhook_secret"],
+            _pr_payload(
+                "owner/worker-review",
+                action="synchronize",
+                head_sha="head-sha-2",
+            ),
+        )
+
+    assert synchronized.status_code == 200, synchronized.text
+    assert synchronized.json()["status"] == "accepted"
+    assert calls == [
+        ("GET", f"/api/tasks/{old_task_id}"),
+        ("POST", f"/api/tasks/{old_task_id}/terminate-generation"),
+    ]
+    assert not operation_lock.locked()
+    assert not migration_lock.locked()
+    async with session_factory() as db:
+        old_review = await db.get(PRReview, old_review_id)
+        old_task = await db.get(Task, old_task_id)
+        new_review = await db.get(PRReview, synchronized.json()["review_id"])
+        new_task = await db.get(Task, new_review.task_id)
+        assert old_review.status == "superseded"
+        assert old_task.status == "completed"
+        assert old_task.worker_id == 77
+        assert old_task.metadata_ == {
+            "pr_review_id": old_review_id,
+            "pr_review_superseded": True,
+        }
+        assert new_review.status == "reviewing"
+        assert new_task.worker_id == 77
+
+
+@pytest.mark.asyncio
+async def test_webhook_synchronize_worker_lost_response_retries_terminal_cleanup(
+    client,
+    session_factory,
+):
+    """A lost response is fail-closed, then a terminal retry converges."""
+
+    import backend.main
+
+    repo = await _create_repo(
+        client,
+        "owner/worker-review-timeout",
+        worker_id=78,
+    )
+    opened = await _post_webhook(
+        client,
+        repo["webhook_secret"],
+        _pr_payload("owner/worker-review-timeout", action="opened"),
+    )
+    old_review_id = opened.json()["review_id"]
+    async with session_factory() as db:
+        old_review = await db.get(PRReview, old_review_id)
+        old_task = await db.get(Task, old_review.task_id)
+        old_task.status = "executing"
+        await db.commit()
+        old_task_id = old_task.id
+
+    operation_lock = asyncio.Lock()
+    migration_lock = asyncio.Lock()
+    post_attempts = 0
+
+    async def lost_worker_response(
+        _routing_task,
+        method,
+        _path,
+        body=None,
+        **_kwargs,
+    ):
+        nonlocal post_attempts
+        if method == "GET":
+            return {
+                "id": old_task_id,
+                "status": (
+                    "executing"
+                    if post_attempts == 0
+                    else "completed"
+                ),
+                "retry_count": 0,
+                "metadata_": (
+                    {"pr_review_superseded": True}
+                    if post_attempts
+                    else None
+                ),
+            }
+        assert body == {
+            "expected_status": (
+                "executing" if post_attempts == 0 else "completed"
+            ),
+            "expected_retry_count": 0,
+            "expected_instance_id": None,
+            "expected_started_at": None,
+            "expected_completed_at": None,
+        }
+        post_attempts += 1
+        if post_attempts == 1:
+            raise TimeoutError("response lost after remote commit")
+        return {
+            "id": old_task_id,
+            "status": "completed",
+            "retry_count": 0,
+            "error_message": "Superseded by new PR push",
+            "metadata_": {"pr_review_superseded": True},
+        }
+
+    with (
+        patch.object(
+            backend.main,
+            "task_migrator",
+            SimpleNamespace(_locks={old_task_id: migration_lock}),
+        ),
+        patch.object(
+            backend.main.worker_proxy,
+            "task_operation_lock",
+            return_value=operation_lock,
+        ),
+        patch.object(
+            backend.main.worker_proxy,
+            "proxy_to_worker",
+            new_callable=AsyncMock,
+            side_effect=lost_worker_response,
+        ),
+    ):
+        first_attempt = await _post_webhook(
+            client,
+            repo["webhook_secret"],
+            _pr_payload(
+                "owner/worker-review-timeout",
+                action="synchronize",
+                head_sha="head-sha-2",
+            ),
+        )
+        assert first_attempt.status_code == 409, first_attempt.text
+        assert "no new review was created" in first_attempt.json()["detail"]
+        assert not operation_lock.locked()
+        assert not migration_lock.locked()
+        async with session_factory() as db:
+            old_review = await db.get(PRReview, old_review_id)
+            old_task = await db.get(Task, old_task_id)
+            reviews = (
+                await db.execute(
+                    select(PRReview).where(
+                        PRReview.repo_id == repo["id"],
+                        PRReview.pr_number == 42,
+                    )
+                )
+            ).scalars().all()
+            assert len(reviews) == 1
+            assert old_review.status == "reviewing"
+            # The Manager cannot assume the timed-out remote mutation landed.
+            assert old_task.status == "executing"
+            assert old_task.worker_id == 78
+
+        second_attempt = await _post_webhook(
+            client,
+            repo["webhook_secret"],
+            _pr_payload(
+                "owner/worker-review-timeout",
+                action="synchronize",
+                head_sha="head-sha-2",
+            ),
+        )
+
+    assert second_attempt.status_code == 200, second_attempt.text
+    assert second_attempt.json()["status"] == "accepted"
+    assert post_attempts == 2
+    assert not operation_lock.locked()
+    assert not migration_lock.locked()
+    async with session_factory() as db:
+        old_review = await db.get(PRReview, old_review_id)
+        old_task = await db.get(Task, old_task_id)
+        reviews = (
+            await db.execute(
+                select(PRReview).where(
+                    PRReview.repo_id == repo["id"],
+                    PRReview.pr_number == 42,
+                )
+            )
+        ).scalars().all()
+        assert len(reviews) == 2
+        assert old_review.status == "superseded"
+        assert old_task.status == "completed"
+        assert old_task.worker_id == 78
+        assert old_task.metadata_ == {
+            "pr_review_id": old_review_id,
+            "pr_review_superseded": True,
+        }
+
+
+@pytest.mark.asyncio
 async def test_webhook_self_pr_ignored(client, session_factory, monkeypatch):
     """本机 gh 登录账号的 PR 自动屏蔽（self-approval 无意义）。"""
     import backend.api.pr_monitor as prm
@@ -589,7 +1360,8 @@ async def test_create_repo_with_codex_provider(client):
 
 @pytest.mark.asyncio
 async def test_create_repo_defaults_to_configured_provider(client):
-    data = await _create_repo(client, repo_full_name="owner/default-repo")
+    with patch("backend.api.pr_monitor.settings.default_provider", "codex"):
+        data = await _create_repo(client, repo_full_name="owner/default-repo")
     assert data["provider"] == "codex"
 
 

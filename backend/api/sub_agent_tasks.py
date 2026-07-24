@@ -3,11 +3,14 @@
 Parallel to backend/api/monitor.py but for one-shot sub-agent tasks
 (agent_type="sub_agent").
 """
+import asyncio
+from weakref import WeakValueDictionary
 from datetime import datetime
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select, func
+from sqlalchemy import select, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
@@ -18,6 +21,97 @@ from backend.models.project import Project
 router = APIRouter(prefix="/api/tasks/{task_id}/sub-agent-sessions", tags=["sub-agent-tasks"])
 
 MAX_SUB_AGENTS_PER_TASK = 3
+_sub_agent_admission_locks: WeakValueDictionary[int, asyncio.Lock] = (
+    WeakValueDictionary()
+)
+
+
+def _sub_agent_admission_lock(task_id: int) -> asyncio.Lock:
+    lock = _sub_agent_admission_locks.get(task_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _sub_agent_admission_locks[task_id] = lock
+    return lock
+
+
+async def _settle_shielded(operation: asyncio.Task) -> asyncio.CancelledError | None:
+    delayed_cancellation: asyncio.CancelledError | None = None
+    while not operation.done():
+        try:
+            await asyncio.shield(operation)
+        except asyncio.CancelledError as exc:
+            delayed_cancellation = exc
+        except BaseException:
+            break
+    return delayed_cancellation
+
+
+async def _mark_sub_agent_admission_failed(
+    db: AsyncSession,
+    task_id: int,
+    session_id: int,
+) -> None:
+    await db.execute(
+        update(SubAgentSession)
+        .where(
+            SubAgentSession.id == session_id,
+            SubAgentSession.task_id == task_id,
+            SubAgentSession.agent_type == "sub_agent",
+            SubAgentSession.source == "ccm",
+            SubAgentSession.status == "running",
+        )
+        .values(status="failed", completed_at=datetime.utcnow())
+    )
+    await db.commit()
+
+
+async def _commit_and_admit_sub_agent(
+    db: AsyncSession,
+    task_id: int,
+    session: SubAgentSession,
+    dispatcher,
+) -> None:
+    committed = False
+
+    async def commit_and_start() -> None:
+        nonlocal committed
+        await db.commit()
+        committed = True
+        dispatcher.start_sub_agent_session(session)
+
+    operation = asyncio.create_task(commit_and_start())
+    delayed_cancellation = await _settle_shielded(operation)
+    try:
+        operation.result()
+    except Exception as exc:
+        if committed:
+            cleanup = asyncio.create_task(
+                _mark_sub_agent_admission_failed(db, task_id, session.id)
+            )
+            cleanup_cancellation = await _settle_shielded(cleanup)
+            cleanup.result()
+            delayed_cancellation = (
+                delayed_cancellation or cleanup_cancellation
+            )
+        if delayed_cancellation is not None:
+            raise delayed_cancellation
+        if isinstance(exc, RuntimeError):
+            raise HTTPException(503, str(exc)) from exc
+        raise
+    if delayed_cancellation is not None:
+        raise delayed_cancellation
+
+
+async def _sub_agent_session_or_error(
+    db: AsyncSession,
+    task_id: int,
+    session_id: int,
+) -> SubAgentSession:
+    db.expire_all()
+    session = await db.get(SubAgentSession, session_id)
+    if session is None or session.task_id != task_id:
+        raise HTTPException(404, "Sub-agent session not found")
+    raise HTTPException(400, "Sub-agent session is not running")
 
 
 # ---- Pydantic schemas ----
@@ -51,7 +145,7 @@ class SubAgentProgressRequest(BaseModel):
 
 class SubAgentResultRequest(BaseModel):
     result: str
-    status: str = "completed"
+    status: Literal["completed", "failed"] = "completed"
 
 
 # ---- Endpoints ----
@@ -63,55 +157,121 @@ async def create_sub_agent_session(
     db: AsyncSession = Depends(get_db),
 ):
     """Create a sub-agent session and start its subprocess via dispatcher."""
+    # Route remote ownership before taking the local Task write barrier. The
+    # proxy is a network await and must not retain a Manager DB transaction.
     task = await db.get(Task, task_id)
-    if not task:
+    if task is None:
         raise HTTPException(404, "Task not found")
-    # 子 agent 硬编码跑 claude CLI（_launch_sub_agent），codex 任务显式拒绝
-    if (task.provider or "claude").lower() != "claude":
-        raise HTTPException(
-            400, "Sub-agents are claude-only; this task runs on "
-                 f"provider '{task.provider}'"
+    if task.worker_id is not None:
+        from backend.main import worker_proxy
+        if worker_proxy is None:
+            raise HTTPException(503, "Worker 功能未启用")
+        db.expunge(task)
+        await db.rollback()
+        return await worker_proxy.proxy_to_worker(
+            task,
+            "POST",
+            f"/api/tasks/{task_id}/sub-agent-sessions",
+            body=body.model_dump(),
         )
-    skills = task.enabled_skills or {}
-    if not skills.get("sub-agent"):
-        raise HTTPException(403, "Sub-Agent skill not enabled for this task")
-    if task.status not in ("in_progress", "executing"):
-        raise HTTPException(400, "Cannot create sub-agent for inactive task")
+    await db.rollback()
 
-    running_count = await db.scalar(
-        select(func.count(SubAgentSession.id)).where(
-            SubAgentSession.task_id == task_id,
-            SubAgentSession.agent_type == "sub_agent",
-            SubAgentSession.status == "running",
-        )
-    )
-    if running_count >= MAX_SUB_AGENTS_PER_TASK:
-        raise HTTPException(
-            429,
-            f"Too many running sub-agents ({running_count}/{MAX_SUB_AGENTS_PER_TASK}). "
-            "Stop an existing one first.",
-        )
+    async with _sub_agent_admission_lock(task_id):
+        try:
+            # The keyed lock makes SQLite cap admission deterministic in one
+            # CCM process; this Task write barrier additionally serializes
+            # cancellation and other backend processes.
+            guarded = await db.execute(
+                update(Task)
+                .where(
+                    Task.id == task_id,
+                    Task.worker_id.is_(None),
+                    Task.status.in_(("in_progress", "executing")),
+                )
+                .values(status=Task.status)
+            )
+            if not guarded.rowcount:
+                await db.rollback()
+                task = await db.get(Task, task_id)
+                if task is None:
+                    raise HTTPException(404, "Task not found")
+                if task.worker_id is not None:
+                    from backend.main import worker_proxy
+                    if worker_proxy is None:
+                        raise HTTPException(503, "Worker 功能未启用")
+                    db.expunge(task)
+                    await db.rollback()
+                    return await worker_proxy.proxy_to_worker(
+                        task,
+                        "POST",
+                        f"/api/tasks/{task_id}/sub-agent-sessions",
+                        body=body.model_dump(),
+                    )
+                raise HTTPException(
+                    400,
+                    "Cannot create sub-agent for inactive task",
+                )
+            db.expire_all()
+            task = await db.get(Task, task_id)
+            if task is None:
+                raise HTTPException(404, "Task not found")
+            # Sub-agents are currently hard-wired to Claude CLI.
+            if (task.provider or "claude").lower() != "claude":
+                raise HTTPException(
+                    400,
+                    "Sub-agents are claude-only; this task runs on "
+                    f"provider '{task.provider}'",
+                )
+            skills = task.enabled_skills or {}
+            if not skills.get("sub-agent"):
+                raise HTTPException(
+                    403,
+                    "Sub-Agent skill not enabled for this task",
+                )
 
-    session = SubAgentSession(
-        task_id=task_id,
-        agent_type="sub_agent",
-        source="ccm",
-        description=body.name,
-        monitor_context=body.context or None,
-        # Sub-agents don't use interval/max_checks but we store the prompt
-        # in monitor_context for retrieval via get_context endpoint.
-        interval=0,
-        max_checks=0,
-        model=body.model,
-    )
-    # Store original prompt in last_summary temporarily (will be overwritten by progress)
-    session.last_summary = body.prompt
-    db.add(session)
-    await db.commit()
-    await db.refresh(session)
+            running_count = await db.scalar(
+                select(func.count(SubAgentSession.id)).where(
+                    SubAgentSession.task_id == task_id,
+                    SubAgentSession.agent_type == "sub_agent",
+                    SubAgentSession.source == "ccm",
+                    SubAgentSession.status == "running",
+                )
+            )
+            if running_count >= MAX_SUB_AGENTS_PER_TASK:
+                raise HTTPException(
+                    429,
+                    "Too many running sub-agents "
+                    f"({running_count}/{MAX_SUB_AGENTS_PER_TASK}). "
+                    "Stop an existing one first.",
+                )
 
-    from backend.main import dispatcher
-    dispatcher.start_sub_agent_session(session)
+            from backend.main import dispatcher
+            if getattr(dispatcher, "_shutting_down", False) is True:
+                raise HTTPException(503, "Dispatcher is shutting down")
+
+            session = SubAgentSession(
+                task_id=task_id,
+                agent_type="sub_agent",
+                source="ccm",
+                description=body.name,
+                monitor_context=body.context or None,
+                interval=0,
+                max_checks=0,
+                model=body.model,
+                last_summary=body.prompt,
+            )
+            db.add(session)
+            await db.flush()
+            await _commit_and_admit_sub_agent(
+                db,
+                task_id,
+                session,
+                dispatcher,
+            )
+        except BaseException:
+            if db.in_transaction():
+                await db.rollback()
+            raise
 
     await dispatcher.broadcaster.broadcast(
         f"task:{task_id}",
@@ -169,31 +329,34 @@ async def delete_sub_agent_session(
     if not sa or sa.task_id != task_id:
         raise HTTPException(404, "Sub-agent session not found")
 
-    if sa.status == "running":
-        sa.status = "stopped"
-        sa.completed_at = datetime.utcnow()
-        await db.commit()
+    transitioned = await db.execute(
+        update(SubAgentSession)
+        .where(
+            SubAgentSession.id == session_id,
+            SubAgentSession.task_id == task_id,
+            SubAgentSession.agent_type == "sub_agent",
+            SubAgentSession.source == "ccm",
+            SubAgentSession.status == "running",
+        )
+        .values(status="stopped", completed_at=datetime.utcnow())
+    )
+    await db.commit()
 
     from backend.main import dispatcher
-    atask = dispatcher._sub_agent_tasks.get(session_id)
-    if atask and not atask.done():
-        atask.cancel()
-    proc = dispatcher._sub_agent_processes.get(session_id)
-    if proc and proc.returncode is None:
-        proc.kill()
-        await proc.wait()
+    await dispatcher.stop_sub_agent_session_process(session_id)
 
     from backend.services.mcp_config import cleanup_sub_agent_mcp_config
     cleanup_sub_agent_mcp_config(session_id)
 
-    await dispatcher.broadcaster.broadcast(
-        f"task:{task_id}",
-        {
-            "event": "sub_agent_session_status",
-            "sub_agent_session_id": session_id,
-            "status": "stopped",
-        },
-    )
+    if transitioned.rowcount:
+        await dispatcher.broadcaster.broadcast(
+            f"task:{task_id}",
+            {
+                "event": "sub_agent_session_status",
+                "sub_agent_session_id": session_id,
+                "status": "stopped",
+            },
+        )
 
     return {"ok": True}
 
@@ -206,15 +369,37 @@ async def sub_agent_report_progress(
     db: AsyncSession = Depends(get_db),
 ):
     """Sub-agent reports progress via MCP tool."""
-    sa = await db.get(SubAgentSession, session_id)
-    if not sa or sa.task_id != task_id:
-        raise HTTPException(404, "Sub-agent session not found")
-    if sa.status != "running":
-        raise HTTPException(400, "Sub-agent session is not running")
-
-    sa.checks_done += 1
-    sa.last_summary = body.summary
-    progress_count = sa.checks_done
+    advanced = await db.execute(
+        update(SubAgentSession)
+        .where(
+            SubAgentSession.id == session_id,
+            SubAgentSession.task_id == task_id,
+            SubAgentSession.agent_type == "sub_agent",
+            SubAgentSession.source == "ccm",
+            SubAgentSession.status == "running",
+        )
+        .values(
+            checks_done=SubAgentSession.checks_done + 1,
+            last_summary=body.summary,
+        )
+    )
+    if not advanced.rowcount:
+        await db.rollback()
+        await _sub_agent_session_or_error(db, task_id, session_id)
+    state = (
+        await db.execute(
+            select(
+                SubAgentSession.description,
+                SubAgentSession.checks_done,
+            )
+            .where(
+                SubAgentSession.id == session_id,
+                SubAgentSession.task_id == task_id,
+            )
+            .with_for_update()
+        )
+    ).one()
+    description, progress_count = state
 
     report = SubAgentReport(
         session_id=session_id,
@@ -232,7 +417,7 @@ async def sub_agent_report_progress(
         task_id=task_id,
         event_type="system_event",
         role="system",
-        content=f"[Sub-Agent #{session_id}: {sa.description}] {body.summary}",
+        content=f"[Sub-Agent #{session_id}: {description}] {body.summary}",
         raw_json=_json.dumps({"source": "sub-agent", "sub_agent_session_id": session_id,
                               "progress_count": progress_count}),
         is_error=False,
@@ -248,7 +433,7 @@ async def sub_agent_report_progress(
             "sub_agent_session_id": session_id,
             "progress_count": progress_count,
             "summary": body.summary,
-            "description": sa.description,
+            "description": description,
             "source": "sub-agent",
         },
     )
@@ -264,21 +449,43 @@ async def sub_agent_submit_result(
     db: AsyncSession = Depends(get_db),
 ):
     """Sub-agent submits final result and marks completed."""
-    sa = await db.get(SubAgentSession, session_id)
-    if not sa or sa.task_id != task_id:
-        raise HTTPException(404, "Sub-agent session not found")
-    if sa.status != "running":
-        raise HTTPException(400, "Sub-agent session is not running")
+    completed = await db.execute(
+        update(SubAgentSession)
+        .where(
+            SubAgentSession.id == session_id,
+            SubAgentSession.task_id == task_id,
+            SubAgentSession.agent_type == "sub_agent",
+            SubAgentSession.source == "ccm",
+            SubAgentSession.status == "running",
+        )
+        .values(
+            status=body.status,
+            completed_at=datetime.utcnow(),
+            last_summary=body.result[:500] if body.result else None,
+            checks_done=SubAgentSession.checks_done + 1,
+        )
+    )
+    if not completed.rowcount:
+        await db.rollback()
+        await _sub_agent_session_or_error(db, task_id, session_id)
+    state = (
+        await db.execute(
+            select(
+                SubAgentSession.description,
+                SubAgentSession.checks_done,
+            )
+            .where(
+                SubAgentSession.id == session_id,
+                SubAgentSession.task_id == task_id,
+            )
+            .with_for_update()
+        )
+    ).one()
+    description, checks_done = state
 
-    sa.status = body.status
-    sa.completed_at = datetime.utcnow()
-    sa.last_summary = body.result[:500] if body.result else None
-
-    # Store result as a final report
-    sa.checks_done += 1
     report = SubAgentReport(
         session_id=session_id,
-        check_number=sa.checks_done,
+        check_number=checks_done,
         status=body.status,
         summary=body.result,
     )
@@ -298,7 +505,11 @@ async def sub_agent_submit_result(
     )
 
     # Enqueue result into main session as user_message
-    result_text = f"[Sub-Agent: {sa.description}] 任务{'完成' if body.status == 'completed' else '失败'}\n\n{body.result}"
+    result_text = (
+        f"[Sub-Agent: {description}] "
+        f"任务{'完成' if body.status == 'completed' else '失败'}"
+        f"\n\n{body.result}"
+    )
     from backend.services.dispatcher import PRIORITY_MONITOR_COMPLETE
     await dispatcher.enqueue_message(
         task_id=task_id,
@@ -310,10 +521,7 @@ async def sub_agent_submit_result(
     )
 
     # Kill the subprocess since it's done
-    proc = dispatcher._sub_agent_processes.get(session_id)
-    if proc and proc.returncode is None:
-        proc.kill()
-        await proc.wait()
+    await dispatcher.stop_sub_agent_session_process(session_id)
 
     return {"ok": True, "status": body.status}
 

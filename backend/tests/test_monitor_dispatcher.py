@@ -9,6 +9,9 @@ Current design (replaces the old per-check subprocess loop):
   endpoints, not by the dispatcher; tests for those live at the API level below.
 """
 import asyncio
+import os
+import signal
+import sys
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -67,6 +70,42 @@ def _fake_proc(returncode=0):
     proc.wait = AsyncMock(return_value=returncode)
     proc.kill = MagicMock()
     return proc
+
+
+def _pid_is_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    stat_path = f"/proc/{pid}/stat"
+    try:
+        with open(stat_path, encoding="utf-8") as stat_file:
+            stat = stat_file.read()
+    except (FileNotFoundError, PermissionError):
+        return True
+    close_paren = stat.rfind(")")
+    state = stat[close_paren + 2:].split()[0] if close_paren >= 0 else ""
+    return state != "Z"
+
+
+async def _wait_for_pid_file(path, timeout: float = 2.0) -> int:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if path.exists():
+            return int(path.read_text(encoding="utf-8"))
+        await asyncio.sleep(0.01)
+    raise AssertionError("Timed out waiting for auxiliary child PID")
+
+
+async def _wait_until_not_running(pid: int, timeout: float = 2.0) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
+        if not _pid_is_running(pid):
+            return
+        await asyncio.sleep(0.02)
+    assert not _pid_is_running(pid), f"Process {pid} is still running"
 
 
 # === Prompt building ===
@@ -167,6 +206,84 @@ async def test_start_monitor_session(dispatcher):
         pass
 
 
+@pytest.mark.asyncio
+async def test_auxiliary_admission_is_closed_before_shutdown_snapshot(dispatcher):
+    dispatcher._shutting_down = True
+    dispatcher._sub_agent_tasks = {}
+
+    with pytest.raises(RuntimeError, match="monitor admission is closed"):
+        dispatcher.start_monitor_session(MagicMock(id=91))
+    with pytest.raises(RuntimeError, match="sub-agent admission is closed"):
+        dispatcher.start_sub_agent_session(MagicMock(id=92))
+
+    assert 91 not in dispatcher._monitor_tasks
+    assert 92 not in dispatcher._sub_agent_tasks
+
+
+@pytest.mark.asyncio
+async def test_stop_aux_refreshes_process_registered_during_spawn_cancel(
+    dispatcher,
+):
+    process = _fake_proc(returncode=None)
+    process_map = {}
+    task_map = {}
+
+    async def spawn_window():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            # `_settle_aux_process_spawn` returns the exact handle only after
+            # the caller cancellation; registration therefore happens here.
+            process_map[93] = process
+            raise
+
+    lifecycle = asyncio.create_task(spawn_window())
+    task_map[93] = lifecycle
+    await asyncio.sleep(0)
+
+    async def terminate(candidate):
+        assert candidate is process
+        candidate.returncode = -9
+
+    dispatcher._terminate_aux_process = AsyncMock(side_effect=terminate)
+    with patch.object(
+        GlobalDispatcher, "_aux_process_group_alive", return_value=False
+    ):
+        await dispatcher._stop_aux_session(93, task_map, process_map)
+
+    dispatcher._terminate_aux_process.assert_awaited_once_with(process)
+    assert 93 not in process_map
+
+
+@pytest.mark.asyncio
+async def test_stop_aux_timeout_retains_lifecycle_evidence(dispatcher):
+    release = asyncio.Event()
+
+    async def ignores_first_cancellation():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await release.wait()
+
+    lifecycle = asyncio.create_task(ignores_first_cancellation())
+    task_map = {94: lifecycle}
+    process_map = {}
+    await asyncio.sleep(0)
+    try:
+        with pytest.raises(RuntimeError, match="did not stop"):
+            await dispatcher._stop_aux_session(
+                94,
+                task_map,
+                process_map,
+                lifecycle_timeout=0.01,
+            )
+        assert task_map[94] is lifecycle
+        assert not lifecycle.done()
+    finally:
+        release.set()
+        await asyncio.wait_for(lifecycle, timeout=1)
+
+
 # === Lifecycle: persistent subprocess state transitions ===
 
 
@@ -217,6 +334,174 @@ async def test_lifecycle_completed_by_subagent(dispatcher, db_factory, mock_broa
 
 
 @pytest.mark.asyncio
+async def test_normal_parent_exit_kills_residual_monitor_group(
+    dispatcher, db_factory
+):
+    """A clean CLI parent exit cannot leave its tool child running."""
+    _, ms_id = await _seed_task_and_monitor(db_factory)
+    proc = _fake_proc(returncode=0)
+    group_alive = True
+    signals = []
+
+    async def wait_and_complete():
+        async with db_factory() as db:
+            await db.execute(
+                update(MonitorSession)
+                .where(MonitorSession.id == ms_id)
+                .values(status="completed")
+            )
+            await db.commit()
+        return 0
+
+    proc.wait = AsyncMock(side_effect=wait_and_complete)
+
+    async def launch_and_register(**kwargs):
+        dispatcher._monitor_processes[ms_id] = proc
+        return proc
+
+    def kill_group(pid, sig):
+        nonlocal group_alive
+        assert pid == proc.pid
+        if sig == 0:
+            if group_alive:
+                return None
+            raise ProcessLookupError
+        assert sig == signal.SIGKILL
+        signals.append(sig)
+        group_alive = False
+
+    with (
+        patch.object(
+            dispatcher,
+            "_launch_monitor_agent",
+            side_effect=launch_and_register,
+        ),
+        patch("backend.services.dispatcher.os.killpg", side_effect=kill_group),
+    ):
+        await dispatcher._monitor_session_lifecycle(ms_id)
+
+    assert signals == [signal.SIGKILL]
+    assert ms_id not in dispatcher._monitor_processes
+
+
+@pytest.mark.asyncio
+async def test_failed_group_proof_retains_aux_process_evidence(dispatcher):
+    proc = _fake_proc(returncode=0)
+    dispatcher._monitor_processes[71] = proc
+
+    with (
+        patch.object(
+            dispatcher,
+            "_terminate_aux_process",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("cannot prove"),
+        ),
+        patch.object(
+            GlobalDispatcher,
+            "_aux_process_group_alive",
+            return_value=True,
+        ),
+    ):
+        delayed = await dispatcher._finalize_aux_lifecycle_process(
+            session_id=71,
+            process=proc,
+            process_map=dispatcher._monitor_processes,
+        )
+
+    assert delayed is None
+    assert dispatcher._monitor_processes[71] is proc
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process groups only")
+@pytest.mark.parametrize("map_kind", ["monitor", "sub-agent"])
+async def test_aux_spawn_cancellation_settles_registers_and_reaps(
+    dispatcher, tmp_path, map_kind
+):
+    """Cancellation inside spawn cannot lose the exact child group handle."""
+    pid_file = tmp_path / f"{map_kind}-child.pid"
+    log_path = tmp_path / f"{map_kind}.log"
+    process_map = {}
+    log_map = {}
+    captured = {}
+    spawned = asyncio.Event()
+    release_spawn = asyncio.Event()
+    real_create_subprocess_exec = asyncio.create_subprocess_exec
+
+    script = """
+import pathlib
+import subprocess
+import sys
+import time
+
+child = subprocess.Popen(
+    [sys.executable, "-c", "import time; time.sleep(30)"],
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+pathlib.Path(sys.argv[1]).write_text(str(child.pid), encoding="utf-8")
+time.sleep(30)
+"""
+    cmd = [sys.executable, "-c", script, str(pid_file)]
+
+    async def delayed_spawn(*args, **kwargs):
+        process = await real_create_subprocess_exec(*args, **kwargs)
+        captured["process"] = process
+        spawned.set()
+        await release_spawn.wait()
+        return process
+
+    launch = None
+    child_pid = None
+    try:
+        with patch(
+            "backend.services.dispatcher.asyncio.create_subprocess_exec",
+            side_effect=delayed_spawn,
+        ):
+            launch = asyncio.create_task(
+                dispatcher._launch_registered_aux_process(
+                    cmd=cmd,
+                    cwd=str(tmp_path),
+                    env=dict(os.environ),
+                    log_path=log_path,
+                    session_id=81,
+                    process_map=process_map,
+                    log_map=log_map,
+                )
+            )
+            await spawned.wait()
+            child_pid = await _wait_for_pid_file(pid_file)
+            launch.cancel()
+            await asyncio.sleep(0)
+            assert not launch.done()
+            release_spawn.set()
+            with pytest.raises(asyncio.CancelledError):
+                await launch
+
+        assert captured["process"].returncode is not None
+        await _wait_until_not_running(child_pid)
+        assert process_map == {}
+        assert log_map == {}
+    finally:
+        release_spawn.set()
+        if launch is not None and not launch.done():
+            launch.cancel()
+            await asyncio.gather(launch, return_exceptions=True)
+        process = captured.get("process")
+        if process is not None and process.returncode is None:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            await process.wait()
+        if child_pid is not None and _pid_is_running(child_pid):
+            try:
+                os.kill(child_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+@pytest.mark.asyncio
 async def test_lifecycle_abnormal_exit_marks_failed(dispatcher, db_factory, mock_broadcaster):
     """Process exits without mark_complete → session marked failed + broadcast."""
     task_id, ms_id = await _seed_task_and_monitor(db_factory)
@@ -246,23 +531,36 @@ async def test_lifecycle_timeout_kills_process(dispatcher, db_factory, mock_broa
 
     proc = _fake_proc(returncode=None)
 
-    async def fake_wait_for(coro, timeout=None):
-        coro.close()
+    async def time_out():
         raise asyncio.TimeoutError
 
-    killed = []
+    proc.wait = AsyncMock(side_effect=time_out)
+    group_alive = True
+    signals = []
 
-    def kill():
+    def kill_group(pid, sig):
+        nonlocal group_alive
+        assert pid == proc.pid
+        if sig == 0:
+            if group_alive:
+                return None
+            raise ProcessLookupError
+        signals.append(sig)
+        group_alive = False
         proc.returncode = -9
-        killed.append(True)
 
-    proc.kill = MagicMock(side_effect=kill)
-
-    with patch.object(dispatcher, "_launch_monitor_agent", new_callable=AsyncMock, return_value=proc), \
-         patch("backend.services.dispatcher.asyncio.wait_for", fake_wait_for):
+    with (
+        patch.object(
+            dispatcher,
+            "_launch_monitor_agent",
+            new_callable=AsyncMock,
+            return_value=proc,
+        ),
+        patch("backend.services.dispatcher.os.killpg", side_effect=kill_group),
+    ):
         await dispatcher._monitor_session_lifecycle(ms_id)
 
-    assert killed, "process should be killed on timeout"
+    assert signals, "process group should be killed on timeout"
 
     async with db_factory() as db:
         ms = await db.get(MonitorSession, ms_id)
@@ -280,20 +578,32 @@ async def test_lifecycle_cancelled(dispatcher, db_factory, mock_broadcaster):
         await asyncio.sleep(9999)
 
     proc.wait = AsyncMock(side_effect=hang)
-    killed = []
+    group_alive = True
+    signals = []
 
-    def kill():
+    def kill_group(pid, sig):
+        nonlocal group_alive
+        assert pid == proc.pid
+        if sig == 0:
+            if group_alive:
+                return None
+            raise ProcessLookupError
+        signals.append(sig)
+        group_alive = False
         proc.returncode = -9
-        proc.wait = AsyncMock(return_value=-9)
-        killed.append(True)
-
-    proc.kill = MagicMock(side_effect=kill)
 
     async def launch_and_register(**kwargs):
         dispatcher._monitor_processes[ms_id] = proc
         return proc
 
-    with patch.object(dispatcher, "_launch_monitor_agent", side_effect=launch_and_register):
+    with (
+        patch.object(
+            dispatcher,
+            "_launch_monitor_agent",
+            side_effect=launch_and_register,
+        ),
+        patch("backend.services.dispatcher.os.killpg", side_effect=kill_group),
+    ):
         lifecycle_task = asyncio.create_task(dispatcher._monitor_session_lifecycle(ms_id))
         await asyncio.sleep(0.1)
         lifecycle_task.cancel()
@@ -302,7 +612,7 @@ async def test_lifecycle_cancelled(dispatcher, db_factory, mock_broadcaster):
         except asyncio.CancelledError:
             pass
 
-    assert killed, "subprocess should be killed on cancellation"
+    assert signals, "subprocess group should be killed on cancellation"
     assert ms_id not in dispatcher._monitor_tasks
     assert ms_id not in dispatcher._monitor_processes
 
@@ -349,6 +659,7 @@ def _mock_main_dispatcher():
     d.broadcaster = MagicMock()
     d.broadcaster.broadcast = AsyncMock()
     d.enqueue_message = AsyncMock()
+    d.stop_monitor_session_process = AsyncMock()
     d._monitor_processes = {}
     return d
 

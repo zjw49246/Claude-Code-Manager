@@ -3,7 +3,7 @@ import json
 import logging
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models.pr_monitor import MonitoredRepo, PRReview
@@ -215,71 +215,110 @@ async def check_and_update_review(
 
     if review.status in ("approved", "merged", "commented", "error", "superseded"):
         return
+    expected_status = review.status
+    expected_task_id = review.task_id
+    pr_number = review.pr_number
+
+    async def commit_exact_result(**values) -> bool:
+        """Commit only while synchronize has not replaced this review."""
+
+        predicates = [
+            PRReview.id == pr_review_id,
+            PRReview.status == expected_status,
+            (
+                PRReview.task_id.is_(None)
+                if expected_task_id is None
+                else PRReview.task_id == expected_task_id
+            ),
+        ]
+        changed = await db.execute(
+            update(PRReview).where(*predicates).values(**values)
+        )
+        if not changed.rowcount:
+            await db.rollback()
+            logger.info(
+                "Discarding stale PR review result for review %s / task %s",
+                pr_review_id,
+                expected_task_id,
+            )
+            return False
+        await db.commit()
+        return True
 
     pr_info = None
     for attempt in (1, 2):
         try:
-            pr_info = await _gh_pr_view(review.pr_number, repo_full_name)
+            pr_info = await _gh_pr_view(pr_number, repo_full_name)
             break
         except GhError as e:
             if e.is_auth:
                 logger.error("gh authentication error while checking PR status: %s", e)
-                review.status = "error"
-                review.review_summary = (
-                    f"gh authentication error (run `gh auth login` for the backend user): {e}"
+                await commit_exact_result(
+                    status="error",
+                    review_summary=(
+                        "gh authentication error (run `gh auth login` for "
+                        f"the backend user): {e}"
+                    ),
+                    completed_at=datetime.utcnow(),
                 )
-                review.completed_at = datetime.utcnow()
-                await db.commit()
                 return
             if attempt == 1:
                 logger.warning("gh pr view failed (attempt 1/2), retrying: %s", e)
                 await asyncio.sleep(GH_RETRY_DELAY_SECONDS)
                 continue
             logger.error("Failed to check PR status after retry: %s", e)
-            review.status = "error"
-            review.review_summary = f"Failed to check PR status (network/other, after 1 retry): {e}"
-            review.completed_at = datetime.utcnow()
-            await db.commit()
+            await commit_exact_result(
+                status="error",
+                review_summary=(
+                    "Failed to check PR status (network/other, after 1 "
+                    f"retry): {e}"
+                ),
+                completed_at=datetime.utcnow(),
+            )
             return
 
     state = pr_info.get("state", "").upper()
     merged_at = pr_info.get("mergedAt")
 
     if merged_at:
-        review.status = "merged"
-        review.action_taken = "approved_merged"
+        new_status = "merged"
+        action_taken = "approved_merged"
     elif state == "CLOSED":
-        review.status = "error"
-        review.action_taken = "error"
+        new_status = "error"
+        action_taken = "error"
     else:
         reviews = pr_info.get("reviews", [])
         if reviews:
             latest = reviews[-1]
             review_state = latest.get("state", "")
             if review_state == "APPROVED":
-                review.status = "approved"
-                review.action_taken = "lgtm_comment"
+                new_status = "approved"
+                action_taken = "lgtm_comment"
             elif review_state == "CHANGES_REQUESTED":
-                review.status = "commented"
-                review.action_taken = "review_comments"
+                new_status = "commented"
+                action_taken = "review_comments"
             else:
-                review.status = "approved"
-                review.action_taken = "lgtm_comment"
+                new_status = "approved"
+                action_taken = "lgtm_comment"
         else:
-            review.status = "approved"
-            review.action_taken = "lgtm_comment"
+            new_status = "approved"
+            action_taken = "lgtm_comment"
 
-    review.completed_at = datetime.utcnow()
-    review.review_summary = f"PR state: {state}, merged: {bool(merged_at)}"
-    await db.commit()
+    if not await commit_exact_result(
+        status=new_status,
+        action_taken=action_taken,
+        completed_at=datetime.utcnow(),
+        review_summary=f"PR state: {state}, merged: {bool(merged_at)}",
+    ):
+        return
 
     try:
         from backend.main import broadcaster
         await broadcaster.broadcast("pr-monitor", {
             "type": "review_updated",
-            "review_id": review.id,
-            "status": review.status,
-            "action_taken": review.action_taken,
+            "review_id": pr_review_id,
+            "status": new_status,
+            "action_taken": action_taken,
         })
     except Exception:
         logger.debug("WebSocket broadcast failed (non-critical)")

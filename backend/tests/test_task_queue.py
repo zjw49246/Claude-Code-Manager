@@ -1,13 +1,16 @@
 """Tests for TaskQueue — priority ordering, dequeue, status transitions."""
 import asyncio
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from backend.database import Base
+from backend.models.instance import Instance
+from backend.models.log_entry import LogEntry
 from backend.models.task import Task
-from backend.services.task_queue import TaskQueue
+from backend.services.task_queue import TaskQueue, task_generation_fence
 
 
 @pytest_asyncio.fixture
@@ -157,6 +160,116 @@ async def test_retry_increments_count(queue):
 
 
 @pytest.mark.asyncio
+async def test_owned_completion_cannot_overwrite_cancelled_task(queue):
+    task = await queue.create(title="owned", description="d", target_repo="/tmp")
+    task_id = task.id
+    claimed = await queue.dequeue(instance_id=7)
+    assert claimed is not None
+    assert await queue.cancel(task_id) is not None
+
+    changed = await queue.mark_completed(task_id, instance_id=7)
+
+    assert changed is False
+    queue.db.expire_all()
+    assert (await queue.get(task_id)).status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_retry_rejects_active_task_without_expected_generation(queue):
+    task = await queue.create(title="active", description="d", target_repo="/tmp")
+    task_id = task.id
+    claimed = await queue.dequeue(instance_id=3)
+    assert claimed is not None
+
+    assert await queue.retry(task_id) is None
+    queue.db.expire_all()
+    current = await queue.get(task_id)
+    assert current.status == "in_progress"
+    assert current.instance_id == 3
+
+
+@pytest.mark.asyncio
+async def test_owned_retry_is_cas_and_releases_instance_claim(queue):
+    task = await queue.create(title="retry", description="d", target_repo="/tmp")
+    claimed = await queue.dequeue(instance_id=4)
+    assert claimed is not None
+
+    assert await queue.retry(
+        task.id,
+        expected_statuses=("in_progress", "executing"),
+        instance_id=99,
+    ) is None
+    retried = await queue.retry(
+        task.id,
+        expected_statuses=("in_progress", "executing"),
+        instance_id=4,
+    )
+
+    assert retried is not None
+    assert retried.status == "pending"
+    assert retried.instance_id is None
+    assert retried.retry_count == 1
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_transitions_reject_same_slot_retry_aba(queue):
+    """Every Ralph result transition must fence retry_count/start generation."""
+
+    instance = Instance(name="same-slot-lifecycle")
+    queue.db.add(instance)
+    await queue.db.commit()
+    task = await queue.create(
+        title="old lifecycle",
+        description="d",
+        status="pending",
+    )
+    old = await queue.dequeue(instance_id=instance.id)
+    assert old is not None
+    task_id = old.id
+    instance_id = instance.id
+    old_generation = task_generation_fence(old)
+
+    await queue.mark_status(task_id, "failed")
+    assert await queue.retry(task_id) is not None
+    replacement = await queue.dequeue(instance_id=instance_id)
+    assert replacement is not None
+    assert replacement.retry_count == old_generation[0] + 1
+
+    assert not await queue.mark_completed(
+        task_id,
+        instance_id=instance_id,
+        generation_fence=old_generation,
+    )
+    assert not await queue.mark_failed(
+        task_id,
+        "late old failure",
+        instance_id=instance_id,
+        generation_fence=old_generation,
+    )
+    assert not await queue.defer(
+        task_id,
+        "late old defer",
+        instance_id=instance_id,
+        generation_fence=old_generation,
+    )
+    assert (
+        await queue.retry(
+            task_id,
+            expected_statuses=("in_progress", "executing"),
+            instance_id=instance_id,
+            generation_fence=old_generation,
+        )
+        is None
+    )
+
+    queue.db.expire_all()
+    current = await queue.db.get(Task, task_id)
+    assert current.status == "in_progress"
+    assert current.retry_count == 1
+    assert current.instance_id == instance_id
+
+
+@pytest.mark.asyncio
 async def test_defer_returns_active_task_without_consuming_retry_budget(queue):
     task = await queue.create(title="t", description="d", target_repo="/tmp")
     task_id = task.id
@@ -216,12 +329,429 @@ async def test_delete_conflict_task(queue):
 
 
 @pytest.mark.asyncio
+async def test_delete_worker_mirror_requires_remote_confirmation(queue):
+    task = await queue.create(
+        title="remote",
+        description="d",
+        target_repo="/tmp",
+        worker_id=91,
+    )
+    task_id = task.id
+
+    assert await queue.delete(task_id) is False
+    queue.db.expire_all()
+    assert await queue.db.get(Task, task_id) is not None
+
+
+@pytest.mark.asyncio
 async def test_delete_running_task_rejected(queue):
     """Should NOT be able to delete in_progress tasks."""
     task = await queue.create(title="t", description="d", target_repo="/tmp")
     _ = await queue.dequeue()  # sets to in_progress
     result = await queue.delete(task.id)
     assert result is False
+
+
+@pytest.mark.asyncio
+async def test_delete_task_preserves_possible_live_orphan_owner(queue):
+    """A failed task is durable evidence while its persisted PID may live."""
+    task = await queue.create(title="orphan", description="d")
+    task.status = "failed"
+    instance = Instance(
+        name="orphan-slot",
+        status="error",
+        pid=32101,
+        current_task_id=task.id,
+    )
+    queue.db.add(instance)
+    await queue.db.flush()
+    task.instance_id = instance.id
+    await queue.db.commit()
+    task_id, instance_id = task.id, instance.id
+
+    with patch("backend.services.task_queue.os.kill", return_value=None):
+        assert await queue.delete(task_id) is False
+
+    queue.db.expire_all()
+    task = await queue.db.get(Task, task_id)
+    instance = await queue.db.get(Instance, instance_id)
+    assert task.status == "failed"
+    assert task.instance_id == instance_id
+    assert instance.pid == 32101
+    assert instance.current_task_id == task_id
+
+
+@pytest.mark.asyncio
+async def test_delete_task_preserves_reaped_parent_with_live_generation(queue):
+    """Manager process-group/consumer evidence outranks a parent returncode."""
+
+    import backend.main
+
+    task = await queue.create(title="live descendants", description="d")
+    task.status = "failed"
+    instance = Instance(
+        name="live-descendant-slot",
+        status="error",
+        pid=None,
+        current_task_id=task.id,
+    )
+    queue.db.add(instance)
+    await queue.db.flush()
+    task.instance_id = instance.id
+    await queue.db.commit()
+    task_id = task.id
+    instance_id = instance.id
+
+    manager = MagicMock()
+    manager.is_running.return_value = True
+    manager.processes = {instance_id: MagicMock(returncode=0)}
+    with patch.object(backend.main, "instance_manager", manager):
+        assert await queue.delete(task_id) is False
+
+    manager.is_running.assert_called_with(instance_id)
+    queue.db.expire_all()
+    task = await queue.db.get(Task, task_id)
+    instance = await queue.db.get(Instance, instance_id)
+    assert task is not None
+    assert task.instance_id == instance_id
+    assert instance.current_task_id == task_id
+
+
+@pytest.mark.asyncio
+async def test_delete_task_rejects_live_dispatcher_lifecycle_after_parent_exit(
+    queue,
+):
+    """Merge/evaluator cleanup remains active after the model parent exits."""
+
+    import backend.main
+
+    task = await queue.create(title="live dispatcher lifecycle", description="d")
+    task.status = "completed"
+    instance = Instance(
+        name="dispatcher-lifecycle-slot",
+        status="error",
+        pid=None,
+        current_task_id=task.id,
+    )
+    queue.db.add(instance)
+    await queue.db.flush()
+    task.instance_id = instance.id
+    await queue.db.commit()
+    task_id = task.id
+    instance_id = instance.id
+
+    release = asyncio.Event()
+    lifecycle = asyncio.create_task(release.wait())
+    try:
+        with (
+            patch.object(
+                backend.main.dispatcher,
+                "_running_tasks",
+                {instance_id: lifecycle},
+            ),
+            patch.object(
+                backend.main.instance_manager,
+                "is_running",
+                return_value=False,
+            ),
+        ):
+            assert await queue.delete(task_id) is False
+    finally:
+        release.set()
+        await lifecycle
+
+    queue.db.expire_all()
+    assert await queue.db.get(Task, task_id) is not None
+    instance = await queue.db.get(Instance, instance_id)
+    assert instance.current_task_id == task_id
+
+
+@pytest.mark.asyncio
+async def test_delete_task_rejects_unreaped_goal_evaluator(queue):
+    """A retained evaluator process remains part of the Task lifecycle."""
+
+    task = await queue.create(title="live evaluator", description="d")
+    task.status = "failed"
+    await queue.db.commit()
+    task_id = task.id
+
+    with patch(
+        "backend.services.goal_evaluator."
+        "has_unreaped_goal_evaluator_for_task",
+        return_value=True,
+    ):
+        assert await queue.delete(task_id) is False
+
+    queue.db.expire_all()
+    assert await queue.db.get(Task, task_id) is not None
+
+
+@pytest.mark.asyncio
+async def test_delete_task_locks_task_then_instance_then_children(queue):
+    """Lifecycle mutations share one DB row-lock order across endpoints."""
+
+    from backend.models.monitor_session import MonitorSession
+
+    task = await queue.create(title="lock order", description="d")
+    task.status = "completed"
+    instance = Instance(
+        name="lock-order-slot",
+        status="error",
+        current_task_id=task.id,
+    )
+    queue.db.add(instance)
+    await queue.db.flush()
+    task.instance_id = instance.id
+    monitor = MonitorSession(
+        task_id=task.id,
+        description="finished child",
+        status="completed",
+    )
+    queue.db.add(monitor)
+    await queue.db.commit()
+
+    lock_order: list[str] = []
+    original_execute = queue.db.execute
+
+    async def track_locks(statement, *args, **kwargs):
+        table = getattr(statement, "table", None)
+        if (
+            getattr(statement, "is_update", False)
+            and getattr(table, "name", None) == "tasks"
+            and not lock_order
+        ):
+            lock_order.append("tasks")
+        elif getattr(statement, "_for_update_arg", None) is not None:
+            froms = statement.get_final_froms()
+            if froms:
+                lock_order.append(froms[0].name)
+        return await original_execute(statement, *args, **kwargs)
+
+    with patch.object(
+        queue.db,
+        "execute",
+        new=AsyncMock(side_effect=track_locks),
+    ):
+        assert await queue.delete(task.id) is True
+
+    assert lock_order[0] == "tasks"
+    instance_positions = [
+        index for index, name in enumerate(lock_order) if name == "instances"
+    ]
+    child_position = lock_order.index("sub_agent_sessions")
+    assert instance_positions
+    assert max(instance_positions) < child_position
+
+
+@pytest.mark.asyncio
+async def test_delete_task_rejects_running_auxiliary_session(queue):
+    """Completed main turns may still own a live monitor/sub-agent."""
+
+    from backend.models.monitor_session import MonitorSession
+
+    task = await queue.create(title="active monitor", description="d")
+    task.status = "completed"
+    monitor = MonitorSession(
+        task_id=task.id,
+        description="keep watching",
+        status="running",
+    )
+    queue.db.add(monitor)
+    await queue.db.commit()
+    task_id = task.id
+    monitor_id = monitor.id
+
+    assert await queue.delete(task_id) is False
+
+    queue.db.expire_all()
+    assert await queue.db.get(Task, task_id) is not None
+    monitor = await queue.db.get(MonitorSession, monitor_id)
+    assert monitor is not None
+    assert monitor.status == "running"
+
+
+@pytest.mark.asyncio
+async def test_delete_task_preserves_orphan_when_pid_probe_is_denied(queue):
+    """Permission/unknown PID probes fail closed without losing evidence."""
+    task = await queue.create(title="orphan-denied", description="d")
+    task.status = "failed"
+    instance = Instance(
+        name="orphan-denied-slot",
+        status="error",
+        pid=32102,
+        current_task_id=task.id,
+    )
+    queue.db.add(instance)
+    await queue.db.flush()
+    task.instance_id = instance.id
+    await queue.db.commit()
+    task_id, instance_id = task.id, instance.id
+
+    with patch(
+        "backend.services.task_queue.os.kill",
+        side_effect=PermissionError("not permitted"),
+    ):
+        assert await queue.delete(task_id) is False
+
+    queue.db.expire_all()
+    assert await queue.db.get(Task, task_id) is not None
+    instance = await queue.db.get(Instance, instance_id)
+    assert instance.pid == 32102
+    assert instance.current_task_id == task_id
+
+
+@pytest.mark.asyncio
+async def test_delete_task_detaches_definitively_dead_orphan(queue):
+    """ESRCH permits an exact owner detach followed by task deletion."""
+    task = await queue.create(title="orphan-dead", description="d")
+    task.status = "failed"
+    instance = Instance(
+        name="orphan-dead-slot",
+        status="error",
+        pid=32103,
+        current_task_id=task.id,
+    )
+    queue.db.add(instance)
+    await queue.db.flush()
+    task.instance_id = instance.id
+    await queue.db.commit()
+    task_id, instance_id = task.id, instance.id
+
+    with patch(
+        "backend.services.task_queue.os.kill",
+        side_effect=ProcessLookupError,
+    ):
+        assert await queue.delete(task_id) is True
+
+    queue.db.expire_all()
+    assert await queue.db.get(Task, task_id) is None
+    instance = await queue.db.get(Instance, instance_id)
+    assert instance.status == "error"
+    assert instance.pid is None
+    assert instance.current_task_id is None
+
+
+@pytest.mark.asyncio
+async def test_delete_task_loses_cas_to_concurrent_retry_without_data_loss(
+    db_factory,
+):
+    """A retry between owner inspection and DELETE must preserve the Task/logs."""
+
+    async with db_factory() as db:
+        task = Task(
+            title="delete retry race",
+            description="work",
+            status="completed",
+        )
+        db.add(task)
+        await db.flush()
+        log = LogEntry(
+            task_id=task.id,
+            event_type="message",
+            role="assistant",
+            content="keep me",
+        )
+        db.add(log)
+        await db.commit()
+        task_id = task.id
+        log_id = log.id
+
+        queue = TaskQueue(db)
+        original_execute = db.execute
+        retried = False
+
+        async def execute_with_retry(statement, *args, **kwargs):
+            nonlocal retried
+            table = getattr(statement, "table", None)
+            if (
+                not retried
+                and getattr(statement, "is_update", False)
+                and getattr(table, "name", None) == "tasks"
+            ):
+                retried = True
+                async with db_factory() as other_db:
+                    assert await TaskQueue(other_db).retry(task_id) is not None
+            return await original_execute(statement, *args, **kwargs)
+
+        with patch.object(
+            db,
+            "execute",
+            new=AsyncMock(side_effect=execute_with_retry),
+        ):
+            assert await queue.delete(task_id) is False
+
+    assert retried
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+        log = await db.get(LogEntry, log_id)
+        assert task is not None
+        assert task.status == "pending"
+        assert log is not None
+        assert log.content == "keep me"
+
+
+@pytest.mark.asyncio
+async def test_delete_task_rejects_retry_then_same_terminal_status_aba(
+    db_factory,
+):
+    """Returning to the observed status cannot hide a newer retry generation."""
+
+    async with db_factory() as db:
+        task = Task(
+            title="delete full ABA",
+            description="work",
+            status="completed",
+        )
+        db.add(task)
+        await db.flush()
+        log = LogEntry(
+            task_id=task.id,
+            event_type="message",
+            role="assistant",
+            content="new generation history",
+        )
+        db.add(log)
+        await db.commit()
+        task_id = task.id
+        log_id = log.id
+
+        queue = TaskQueue(db)
+        original_execute = db.execute
+        raced = False
+
+        async def execute_with_full_aba(statement, *args, **kwargs):
+            nonlocal raced
+            table = getattr(statement, "table", None)
+            if (
+                not raced
+                and getattr(statement, "is_update", False)
+                and getattr(table, "name", None) == "tasks"
+            ):
+                raced = True
+                async with db_factory() as other_db:
+                    other_queue = TaskQueue(other_db)
+                    assert await other_queue.retry(task_id) is not None
+                    assert await other_queue.mark_completed(
+                        task_id,
+                        expected_statuses=("pending",),
+                    )
+            return await original_execute(statement, *args, **kwargs)
+
+        with patch.object(
+            db,
+            "execute",
+            new=AsyncMock(side_effect=execute_with_full_aba),
+        ):
+            assert await queue.delete(task_id) is False
+
+    assert raced
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+        log = await db.get(LogEntry, log_id)
+        assert task is not None
+        assert task.status == "completed"
+        assert task.retry_count == 1
+        assert log is not None
 
 
 @pytest.mark.asyncio

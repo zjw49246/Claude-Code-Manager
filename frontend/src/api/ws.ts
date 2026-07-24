@@ -1,16 +1,21 @@
 type WsHandler = (data: { channel: string; data: Record<string, unknown> }) => void;
 type ReconnectHandler = () => void;
+type ConnectionHandler = (connected: boolean) => void;
+type SubscriptionHandler = (channels: string[]) => void;
 
 export class WsClient {
   private ws: WebSocket | null = null;
   private channels: string[] = [];
   private handlers: WsHandler[] = [];
   private reconnectHandlers: ReconnectHandler[] = [];
+  private connectionHandlers: ConnectionHandler[] = [];
+  private subscriptionHandlers: SubscriptionHandler[] = [];
   private retryDelay = 1000;
   private maxDelay = 30000;
   private url: string;
   private destroyed = false;
   private hasConnectedOnce = false;
+  private connected = false;
 
   constructor(url: string) {
     this.url = url;
@@ -36,12 +41,17 @@ export class WsClient {
     this.ws.onmessage = (e) => {
       try {
         const msg = JSON.parse(e.data);
+        if (msg.action === 'subscribed' && Array.isArray(msg.channels)) {
+          this.setConnectionState(true);
+          this.subscriptionHandlers.forEach((handler) => handler(msg.channels));
+        }
         if (msg.channel) {
           this.handlers.forEach((h) => h(msg));
         }
       } catch { /* ignore */ }
     };
     this.ws.onclose = () => {
+      this.setConnectionState(false);
       if (this.destroyed) return;
       setTimeout(() => this.connect(), this.retryDelay);
       this.retryDelay = Math.min(this.retryDelay * 2, this.maxDelay);
@@ -69,8 +79,29 @@ export class WsClient {
     };
   }
 
+  onConnectionChange(handler: ConnectionHandler) {
+    this.connectionHandlers.push(handler);
+    return () => {
+      this.connectionHandlers = this.connectionHandlers.filter((h) => h !== handler);
+    };
+  }
+
+  onSubscribed(handler: SubscriptionHandler) {
+    this.subscriptionHandlers.push(handler);
+    return () => {
+      this.subscriptionHandlers = this.subscriptionHandlers.filter((h) => h !== handler);
+    };
+  }
+
+  private setConnectionState(connected: boolean) {
+    if (this.connected === connected) return;
+    this.connected = connected;
+    this.connectionHandlers.forEach((handler) => handler(connected));
+  }
+
   close() {
     this.destroyed = true;
+    this.setConnectionState(false);
     this.ws?.close();
     this.ws = null;
   }

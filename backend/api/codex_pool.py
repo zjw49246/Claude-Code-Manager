@@ -21,6 +21,10 @@ from pydantic import BaseModel
 
 from backend.api.deps import require_admin
 from backend.services.codex_app_server import CodexAppServerBusyError
+from backend.services.process_safety import (
+    UnsafeProcessGroupError,
+    require_safe_process_group_id,
+)
 
 router = APIRouter(prefix="/api/codex-pool", tags=["codex-pool"])
 logger = logging.getLogger(__name__)
@@ -751,10 +755,18 @@ async def _stop_unfinished_login_process(
     was_unfinished = True
     try:
         pid = getattr(proc, "pid", None)
-        if isinstance(pid, int) and pid > 0 and hasattr(os, "killpg"):
-            os.killpg(pid, signal.SIGKILL)
+        if hasattr(os, "killpg"):
+            process_group_id = require_safe_process_group_id(
+                pid,
+                context=f"Codex {operation} wrapper",
+            )
+            os.killpg(process_group_id, signal.SIGKILL)
         else:
             proc.kill()
+    except UnsafeProcessGroupError as exc:
+        raise LoginProcessNotTerminal(
+            f"Codex {operation} wrapper has an unsafe process identity"
+        ) from exc
     except ProcessLookupError:
         pass
     except Exception:

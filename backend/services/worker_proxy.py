@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from weakref import WeakKeyDictionary
 
 import httpx
 from fastapi import HTTPException
@@ -24,12 +25,35 @@ logger = logging.getLogger(__name__)
 
 # (worker_id, manager_project_id) -> Lock，防并发 task 重复建项目
 _project_locks: dict[tuple[int, int], asyncio.Lock] = {}
+_task_operation_locks: WeakKeyDictionary[
+    asyncio.AbstractEventLoop,
+    dict[int, asyncio.Lock],
+] = WeakKeyDictionary()
+
+
+def get_task_operation_lock(task_id: int) -> asyncio.Lock:
+    """Return the process-wide operation lock for one Task on this event loop.
+
+    Task migration and every Manager→Worker mutation must use the same lock.
+    Keeping the registry at module scope avoids two independently constructed
+    service objects accidentally creating different locks.  The event-loop key
+    keeps async test loops isolated and lets completed loops be collected.
+    """
+
+    loop = asyncio.get_running_loop()
+    locks = _task_operation_locks.setdefault(loop, {})
+    return locks.setdefault(task_id, asyncio.Lock())
 
 
 class WorkerProxy:
     def __init__(self, db_factory, relay):
         self.db_factory = db_factory
         self.relay = relay
+
+    def task_operation_lock(self, task_id: int) -> asyncio.Lock:
+        """Serialize remote operations that can create/mutate one Worker task."""
+
+        return get_task_operation_lock(task_id)
 
     @staticmethod
     def _api(worker: Worker, path: str) -> str:
@@ -158,6 +182,10 @@ class WorkerProxy:
     # ------------------------------------------------------------------
 
     async def forward_task_to_worker(self, task: Task):
+        async with self.task_operation_lock(task.id):
+            return await self._forward_task_to_worker_locked(task)
+
+    async def _forward_task_to_worker_locked(self, task: Task):
         worker = await self.get_worker(task.worker_id)
         if not worker or worker.status != "ready":
             raise RuntimeError(
@@ -214,7 +242,46 @@ class WorkerProxy:
     # 通用操作代理（设计 §6.4）
     # ------------------------------------------------------------------
 
-    async def proxy_to_worker(self, task: Task, method: str, path: str, body=None):
+    async def proxy_to_worker(
+        self,
+        task: Task,
+        method: str,
+        path: str,
+        body=None,
+        *,
+        require_json: bool = False,
+        allow_task_absent: bool = False,
+        operation_lock_held: bool = False,
+    ):
+        if operation_lock_held:
+            return await self._proxy_to_worker_locked(
+                task,
+                method,
+                path,
+                body,
+                require_json=require_json,
+                allow_task_absent=allow_task_absent,
+            )
+        async with self.task_operation_lock(task.id):
+            return await self._proxy_to_worker_locked(
+                task,
+                method,
+                path,
+                body,
+                require_json=require_json,
+                allow_task_absent=allow_task_absent,
+            )
+
+    async def _proxy_to_worker_locked(
+        self,
+        task: Task,
+        method: str,
+        path: str,
+        body=None,
+        *,
+        require_json: bool,
+        allow_task_absent: bool,
+    ):
         worker = await self.require_ready_worker(task.worker_id)
         await self.relay.subscribe_task(worker, task.id)
         async with httpx.AsyncClient(timeout=60) as c:
@@ -244,6 +311,16 @@ class WorkerProxy:
                 f"内部 Worker 认证失败（远端 HTTP {r.status_code}），"
                 "请重试 Worker 引导以同步认证凭据",
             )
+        if allow_task_absent and r.status_code == 404:
+            try:
+                missing = r.json()
+            except Exception:
+                missing = None
+            if (
+                isinstance(missing, dict)
+                and missing.get("detail") == "Task not found"
+            ):
+                return {"ok": True, "already_deleted": True}
         if not 200 <= r.status_code < 300:
             raise HTTPException(
                 502,
@@ -251,5 +328,10 @@ class WorkerProxy:
             )
         try:
             return r.json()
-        except Exception:
+        except Exception as exc:
+            if require_json:
+                raise HTTPException(
+                    502,
+                    f"Worker {worker.name} returned an invalid confirmation",
+                ) from exc
             return {"ok": True}

@@ -20,7 +20,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+from backend.services.process_safety import require_safe_process_group_id
+
 logger = logging.getLogger(__name__)
+
+_APP_SERVER_GRACEFUL_SHUTDOWN_TIMEOUT = 5.0
+_APP_SERVER_TERM_SHUTDOWN_TIMEOUT = 5.0
+_APP_SERVER_KILL_SHUTDOWN_TIMEOUT = 5.0
+_APP_SERVER_GROUP_POLL_INTERVAL = 0.05
 
 
 class CodexAppServerError(RuntimeError):
@@ -115,7 +122,12 @@ class CodexTurnProcess:
             await self._interrupt()
         except Exception:
             logger.exception("Codex app-server turn interrupt failed")
-            self.finish(130, "Codex turn interrupt failed")
+            # A failed RPC says nothing about the real server-side turn.  In
+            # particular, marking this adapter terminal would let
+            # InstanceManager release the Task/Instance claim while Codex may
+            # still be executing.  Keep the process active so its caller
+            # retries/escalates and retains exact generation evidence.
+            return
 
 
 @dataclass
@@ -144,6 +156,10 @@ class CodexAppServer:
         self.request_timeout = request_timeout
         self.codex_home = normalize_codex_home(codex_home)
         self._process: asyncio.subprocess.Process | None = None
+        # On POSIX, app-server is launched as its own session leader.  Keep
+        # the exact process identity—not just its numeric PID—so a stale
+        # shutdown can never signal a replacement generation after PID reuse.
+        self._process_group_process: asyncio.subprocess.Process | None = None
         self._reader_task: asyncio.Task | None = None
         self._stderr_task: asyncio.Task | None = None
         self._pending: dict[int, asyncio.Future] = {}
@@ -152,7 +168,8 @@ class CodexAppServer:
         self._stderr_lines: deque[str] = deque(maxlen=100)
         self._request_id = 0
         self._write_lock = asyncio.Lock()
-        self._start_lock = asyncio.Lock()
+        self._lifecycle_lock = asyncio.Lock()
+        self._shutdown_requested = False
         # App-server keeps completed threads loaded in memory.  The registry
         # uses this set to restart an idle target server before a migrated
         # rollout is resumed there again, avoiding stale in-memory history.
@@ -161,6 +178,10 @@ class CodexAppServer:
     @property
     def is_alive(self) -> bool:
         return self._process is not None and self._process.returncode is None
+
+    @property
+    def shutdown_requested(self) -> bool:
+        return self._shutdown_requested
 
     @property
     def pid(self) -> int:
@@ -181,16 +202,36 @@ class CodexAppServer:
         return thread_id in self._known_threads
 
     async def ensure_started(self) -> None:
+        if self._shutdown_requested:
+            raise CodexAppServerBusyError(
+                f"Codex app-server is shutting down: {self.codex_home}"
+            )
         if self.is_alive:
             return
-        async with self._start_lock:
+        async with self._lifecycle_lock:
+            if self._shutdown_requested:
+                raise CodexAppServerBusyError(
+                    f"Codex app-server is shutting down: {self.codex_home}"
+                )
             if self.is_alive:
                 return
-            # Do not let a replacement process start while the previous
-            # reader is still failing its pending requests/turns.  Otherwise
-            # the stale reader could clear contexts belonging to the new PID.
-            if self._reader_task and not self._reader_task.done():
-                await self._reader_task
+            # A dead leader may still have descendants in the independent
+            # app-server process group and keep stdout open.  Stop that exact
+            # generation before waiting on its readers, or the reader wait can
+            # hold this lifecycle lock forever and prevent shutdown itself.
+            if self._process is not None:
+                await self._shutdown_locked()
+            elif any(
+                task is not None and not task.done()
+                for task in (self._reader_task, self._stderr_task)
+            ):
+                raise CodexAppServerError(
+                    "Codex app-server reader remains without process evidence"
+                )
+            if self._shutdown_requested:
+                raise CodexAppServerBusyError(
+                    f"Codex app-server is shutting down: {self.codex_home}"
+                )
             await self._start()
 
     async def read_rate_limits(self) -> dict[str, Any]:
@@ -217,17 +258,23 @@ class CodexAppServer:
         }
         env["CODEX_HOME"] = self.codex_home
         started = time.perf_counter()
+        spawn_kwargs: dict[str, Any] = {
+            "stdin": asyncio.subprocess.PIPE,
+            "stdout": asyncio.subprocess.PIPE,
+            "stderr": asyncio.subprocess.PIPE,
+            "env": env,
+            "limit": 10 * 1024 * 1024,
+        }
+        if os.name == "posix":
+            spawn_kwargs["start_new_session"] = True
         self._process = await asyncio.create_subprocess_exec(
             self.binary,
             "app-server",
             "--stdio",
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-            limit=10 * 1024 * 1024,
+            **spawn_kwargs,
         )
         process = self._process
+        self._process_group_process = process if os.name == "posix" else None
         self._reader_task = asyncio.create_task(self._read_loop(process))
         self._stderr_task = asyncio.create_task(self._stderr_loop(process))
         try:
@@ -244,7 +291,16 @@ class CodexAppServer:
             )
             await self._notify("initialized", {})
         except BaseException:
-            await self.shutdown()
+            # ``_start`` runs under the lifecycle lock, so use the locked
+            # helper instead of re-entering public ``shutdown``.
+            try:
+                await self._shutdown_locked()
+            except BaseException:
+                # The transport did not initialize and its process generation
+                # could not be proven gone.  Never let ``is_alive`` make a
+                # later caller reuse this uninitialized server object.
+                self._shutdown_requested = True
+                raise
             raise
         logger.info(
             "Codex app-server ready pid=%s home=%s startup_ms=%.1f",
@@ -765,22 +821,122 @@ class CodexAppServer:
             normalized["text"] = "\n".join(str(piece) for piece in pieces if piece)
         return normalized
 
-    async def shutdown(self) -> None:
+    def _managed_process_group_id(
+        self,
+        process: asyncio.subprocess.Process,
+    ) -> int | None:
+        """Return the exact signal-safe PGID created for this generation."""
+
+        if (
+            os.name != "posix"
+            or self._process_group_process is not process
+        ):
+            return None
+        return require_safe_process_group_id(
+            getattr(process, "pid", None),
+            context=f"Codex app-server home {self.codex_home}",
+        )
+
+    def _process_group_alive(
+        self,
+        process: asyncio.subprocess.Process,
+    ) -> bool:
+        process_group_id = self._managed_process_group_id(process)
+        if process_group_id is None:
+            return False
+        try:
+            os.killpg(process_group_id, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            # Inability to signal is not proof that the group disappeared.
+            return True
+
+    def _signal_process_generation(
+        self,
+        process: asyncio.subprocess.Process,
+        sig: signal.Signals,
+    ) -> None:
+        process_group_id = self._managed_process_group_id(process)
+        try:
+            if process_group_id is not None:
+                os.killpg(process_group_id, sig)
+            elif sig == signal.SIGTERM:
+                process.terminate()
+            elif sig == signal.SIGKILL:
+                process.kill()
+            else:
+                process.send_signal(sig)
+        except ProcessLookupError:
+            # Exit may race the signal.  The bounded verification below is the
+            # authority for whether the full generation is actually gone.
+            return
+
+    async def _wait_process_generation(
+        self,
+        process: asyncio.subprocess.Process,
+        timeout: float,
+    ) -> None:
+        """Wait until both the app-server leader and its POSIX group are gone."""
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        if process.returncode is None:
+            await asyncio.wait_for(
+                asyncio.shield(process.wait()),
+                timeout=max(0.01, timeout),
+            )
+        while self._process_group_alive(process):
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            await asyncio.sleep(
+                min(_APP_SERVER_GROUP_POLL_INTERVAL, remaining)
+            )
+
+    async def _shutdown_locked(self) -> None:
+        """Stop one generation while ``_lifecycle_lock`` is held."""
+
         process = self._process
         if not process:
             return
         if process.stdin:
-            process.stdin.close()
-        if process.returncode is None:
             try:
-                await asyncio.wait_for(process.wait(), timeout=5)
+                process.stdin.close()
+            except Exception:
+                logger.exception(
+                    "Failed to close Codex app-server stdin home=%s",
+                    self.codex_home,
+                )
+
+        try:
+            await self._wait_process_generation(
+                process,
+                _APP_SERVER_GRACEFUL_SHUTDOWN_TIMEOUT,
+            )
+        except asyncio.TimeoutError:
+            self._signal_process_generation(process, signal.SIGTERM)
+            try:
+                await self._wait_process_generation(
+                    process,
+                    _APP_SERVER_TERM_SHUTDOWN_TIMEOUT,
+                )
             except asyncio.TimeoutError:
-                process.terminate()
+                self._signal_process_generation(process, signal.SIGKILL)
                 try:
-                    await asyncio.wait_for(process.wait(), timeout=5)
-                except asyncio.TimeoutError:
-                    process.kill()
-                    await process.wait()
+                    await self._wait_process_generation(
+                        process,
+                        _APP_SERVER_KILL_SHUTDOWN_TIMEOUT,
+                    )
+                except asyncio.TimeoutError as exc:
+                    # Do not clear the process/tasks: callers and the
+                    # registry need that evidence to remain fail-closed.
+                    raise CodexAppServerError(
+                        "Codex app-server process group survived SIGKILL "
+                        f"for home {self.codex_home}"
+                    ) from exc
+
         for task in (self._reader_task, self._stderr_task):
             if task and not task.done():
                 task.cancel()
@@ -790,8 +946,20 @@ class CodexAppServer:
         )
         if self._process is process:
             self._process = None
+        if self._process_group_process is process:
+            self._process_group_process = None
         self._reader_task = None
         self._stderr_task = None
+
+    async def shutdown(self) -> None:
+        """Permanently stop and verify this server object's process group."""
+
+        # Publish the close intent before waiting for the lifecycle barrier.
+        # A start already inside the barrier will be stopped after it exits;
+        # one queued behind it will observe this flag and cannot spawn later.
+        self._shutdown_requested = True
+        async with self._lifecycle_lock:
+            await self._shutdown_locked()
 
 
 class CodexAppServerRegistry:
@@ -823,6 +991,7 @@ class CodexAppServerRegistry:
         # it, a failed first request could remove the successful second
         # request's owner because both routes contain the same home value.
         self._starting_threads: dict[str, object] = {}
+        self._shutdown_requested = False
         self._lock = asyncio.Lock()
 
     async def start_turn(
@@ -837,6 +1006,10 @@ class CodexAppServerRegistry:
         start_token: object | None = None
 
         async with self._lock:
+            if self._shutdown_requested:
+                raise CodexAppServerBusyError(
+                    "Codex app-server registry is shutting down"
+                )
             if home in self._draining:
                 raise CodexAppServerBusyError(
                     f"Codex account app-server is draining: {home}"
@@ -902,6 +1075,10 @@ class CodexAppServerRegistry:
                 admitted = True
             return process, thread_id
         except BaseException:
+            if getattr(server, "shutdown_requested", False):
+                async with self._lock:
+                    if self._servers.get(home) is server:
+                        self._draining.add(home)
             if process is not None and not admitted:
                 async def _abort_cancelled_admission() -> None:
                     await self.abort_unclaimed_turn(
@@ -1034,6 +1211,10 @@ class CodexAppServerRegistry:
 
         home = normalize_codex_home(codex_home)
         async with self._lock:
+            if self._shutdown_requested:
+                raise CodexAppServerBusyError(
+                    "Codex app-server registry is shutting down"
+                )
             if home in self._draining:
                 raise CodexAppServerBusyError(
                     f"Codex account app-server is draining: {home}"
@@ -1050,6 +1231,12 @@ class CodexAppServerRegistry:
 
         try:
             return await server.read_rate_limits()
+        except BaseException:
+            if getattr(server, "shutdown_requested", False):
+                async with self._lock:
+                    if self._servers.get(home) is server:
+                        self._draining.add(home)
+            raise
         finally:
             # Cancellation must not leak the home reservation and make future
             # relogin/delete operations report a permanent busy state.
@@ -1130,13 +1317,11 @@ class CodexAppServerRegistry:
 
         try:
             if restart_server is not None:
-                try:
-                    await restart_server.shutdown()
-                finally:
-                    async with self._lock:
-                        if self._servers.get(target) is restart_server:
-                            self._servers.pop(target, None)
-                        self._draining.discard(target)
+                await restart_server.shutdown()
+                async with self._lock:
+                    if self._servers.get(target) is restart_server:
+                        self._servers.pop(target, None)
+                    self._draining.discard(target)
 
             async with self._lock:
                 owner = self._thread_owners.get(thread_id)
@@ -1298,18 +1483,56 @@ class CodexAppServerRegistry:
 
     async def shutdown(self) -> None:
         async with self._lock:
+            self._shutdown_requested = True
             servers = list(self._servers.items())
             self._draining.update(self._servers)
         results = await asyncio.gather(
             *(server.shutdown() for _, server in servers),
             return_exceptions=True,
         )
+        failures: list[tuple[str, BaseException]] = []
+        successful_homes: set[str] = set()
         for (home, _), result in zip(servers, results):
-            if isinstance(result, Exception):
-                logger.error("Failed to stop Codex app-server home=%s: %s", home, result)
+            if isinstance(result, BaseException):
+                failures.append((home, result))
+                logger.error(
+                    "Failed to stop Codex app-server home=%s: %s",
+                    home,
+                    result,
+                )
+            else:
+                successful_homes.add(home)
+
         async with self._lock:
-            self._servers.clear()
-            self._thread_owners.clear()
-            self._rebindings.clear()
-            self._starting.clear()
-            self._draining.clear()
+            for home, server in servers:
+                if home not in successful_homes:
+                    # Preserve both route and draining evidence for a process
+                    # generation whose termination could not be proven.
+                    if self._servers.get(home) is server:
+                        self._draining.add(home)
+                    continue
+                if self._servers.get(home) is server:
+                    self._servers.pop(home, None)
+                for thread_id, owner in list(self._thread_owners.items()):
+                    if owner == home:
+                        self._thread_owners.pop(thread_id, None)
+                self._starting.pop(home, None)
+                self._draining.discard(home)
+
+            # In the normal quiescent shutdown path every server in the
+            # registry was part of this snapshot.  Clear the remaining
+            # coordination-only state.  If another server appeared
+            # concurrently, retain its evidence instead of orphaning it.
+            if not failures and not self._servers:
+                self._thread_owners.clear()
+                self._rebindings.clear()
+                self._starting.clear()
+                self._starting_threads.clear()
+                self._draining.clear()
+
+        if failures:
+            homes = ", ".join(home for home, _ in failures)
+            raise CodexAppServerError(
+                "Failed to stop Codex app-server transport(s); "
+                f"left draining for: {homes}"
+            ) from failures[0][1]

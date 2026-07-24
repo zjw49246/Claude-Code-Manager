@@ -1,8 +1,12 @@
 """Tests for GlobalDispatcher — task dispatch and lifecycle management."""
 import asyncio
+import os
+import signal
+import sys
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.services.dispatcher import GlobalDispatcher
 from backend.models.instance import Instance
@@ -13,8 +17,30 @@ def _make_dispatcher(db_factory):
     """Create a GlobalDispatcher with mocked dependencies."""
     instance_manager = MagicMock()
     instance_manager.launch = AsyncMock(return_value=12345)
+    instance_manager.kill_process_generation = AsyncMock(return_value=True)
+    instance_manager.stop = AsyncMock(return_value=True)
     instance_manager.processes = {}
     instance_manager._tasks = {}
+    lifecycle_locks: dict[int, asyncio.Lock] = {}
+    instance_manager._instance_lifecycle_lock = MagicMock(
+        side_effect=lambda instance_id: lifecycle_locks.setdefault(
+            instance_id, asyncio.Lock()
+        )
+    )
+    instance_manager.is_running = MagicMock(
+        side_effect=lambda instance_id: (
+            (
+                (process := instance_manager.processes.get(instance_id))
+                is not None
+                and getattr(process, "returncode", None) is None
+            )
+            or (
+                (consumer := instance_manager._tasks.get(instance_id))
+                is not None
+                and not consumer.done()
+            )
+        )
+    )
     instance_manager.wait_for_output_consumer = AsyncMock()
     # Model the real InstanceManager interface used by failure classification.
     instance_manager.pty_mode_enabled = False
@@ -35,6 +61,48 @@ def _make_dispatcher(db_factory):
         broadcaster=broadcaster,
     )
     return dispatcher
+
+
+async def _run_claimed_lifecycle(
+    dispatcher: GlobalDispatcher,
+    db_factory,
+    instance_id: int,
+    task: Task,
+):
+    """Mirror TaskQueue.dequeue's durable owner claim for lifecycle tests."""
+    from sqlalchemy import update
+
+    async with db_factory() as db:
+        claimed = await db.execute(
+            update(Task)
+            .where(Task.id == task.id)
+            .values(status="in_progress", instance_id=instance_id)
+        )
+        assert claimed.rowcount == 1
+        await db.commit()
+    task.status = "in_progress"
+    task.instance_id = instance_id
+    await dispatcher._run_task_lifecycle(instance_id, task)
+
+
+async def _claim_mode_lifecycle(
+    db_factory,
+    instance_id: int,
+    task: Task,
+):
+    """Seed the durable dequeue owner before directly testing a mode handler."""
+    from sqlalchemy import update
+
+    async with db_factory() as db:
+        claimed = await db.execute(
+            update(Task)
+            .where(Task.id == task.id)
+            .values(status="in_progress", instance_id=instance_id)
+        )
+        assert claimed.rowcount == 1
+        await db.commit()
+    task.status = "in_progress"
+    task.instance_id = instance_id
 
 
 @pytest.mark.asyncio
@@ -58,6 +126,22 @@ async def test_pause_dispatching_does_not_stop_dispatcher(db_factory):
 
     d.resume_dispatching()
     assert d.status()["paused"] is False
+
+
+@pytest.mark.asyncio
+async def test_old_worker_callback_cannot_remove_replacement(db_factory):
+    d = _make_dispatcher(db_factory)
+    old = asyncio.create_task(asyncio.sleep(0))
+    replacement = asyncio.create_task(asyncio.sleep(0))
+    key = "worker-42"
+    d._running_tasks[key] = replacement
+
+    d._remove_running_task_if_same(key, old)
+    assert d._running_tasks[key] is replacement
+
+    await asyncio.gather(old, replacement)
+    d._remove_running_task_if_same(key, replacement)
+    assert key not in d._running_tasks
 
 
 @pytest.mark.asyncio
@@ -197,13 +281,72 @@ async def test_lifecycle_success(db_factory):
     mock_proc.wait = AsyncMock(return_value=0)
     d.instance_manager.processes = {inst_id: mock_proc}
 
-    await d._run_task_lifecycle(inst_id, task_obj)
+    await _run_claimed_lifecycle(d, db_factory, inst_id, task_obj)
 
     async with db_factory() as db:
         t = await db.get(Task, task_obj.id)
         assert t.status == "completed"
 
     assert d.broadcaster.broadcast.await_count >= 2
+
+
+@pytest.mark.asyncio
+async def test_stale_lifecycle_cannot_claim_same_task_and_instance_after_retry(
+    db_factory,
+):
+    """retry_count/start time fence a same-task, same-slot lifecycle ABA."""
+
+    from datetime import datetime, timedelta
+
+    d = _make_dispatcher(db_factory)
+    old_started_at = datetime.utcnow() - timedelta(minutes=2)
+    replacement_started_at = datetime.utcnow()
+
+    async with db_factory() as db:
+        instance = Instance(name="same-slot-retry")
+        task = Task(
+            title="old generation",
+            description="must not launch",
+            target_repo="/repo",
+            status="in_progress",
+            retry_count=0,
+            started_at=old_started_at,
+        )
+        db.add_all([instance, task])
+        await db.flush()
+        task.instance_id = instance.id
+        await db.commit()
+        await db.refresh(task)
+        stale_task = task
+        task_id = task.id
+        instance_id = instance.id
+
+    async with db_factory() as db:
+        replaced = await db.execute(
+            update(Task)
+            .where(Task.id == task_id)
+            .values(
+                status="in_progress",
+                retry_count=1,
+                instance_id=instance_id,
+                started_at=replacement_started_at,
+                completed_at=None,
+            )
+        )
+        assert replaced.rowcount == 1
+        await db.commit()
+
+    stale_generation = d._task_lifecycle_generation(stale_task)
+    assert await d._task_claim_is_active(stale_generation) is False
+    await d._run_task_lifecycle(instance_id, stale_task)
+
+    d.instance_manager.launch.assert_not_awaited()
+    async with db_factory() as db:
+        current = await db.get(Task, task_id)
+        assert current.status == "in_progress"
+        assert current.retry_count == 1
+        assert current.instance_id == instance_id
+        assert current.started_at == replacement_started_at
 
 
 @pytest.mark.asyncio
@@ -233,7 +376,7 @@ async def test_lifecycle_proactive_switch_is_pty_only(
     process = MagicMock(returncode=0, wait=AsyncMock(return_value=0))
     d.instance_manager.processes = {inst.id: process}
 
-    await d._run_task_lifecycle(inst.id, task)
+    await _run_claimed_lifecycle(d, db_factory, inst.id, task)
 
     assert d.instance_manager._try_proactive_pool_switch.await_count == expected_switches
     assert d.instance_manager.clear_pty_rate_limit.call_count == expected_switches
@@ -263,7 +406,7 @@ async def test_lifecycle_failure_retry(db_factory):
     mock_proc.wait = AsyncMock(return_value=1)
     d.instance_manager.processes = {inst_id: mock_proc}
 
-    await d._run_task_lifecycle(inst_id, task_obj)
+    await _run_claimed_lifecycle(d, db_factory, inst_id, task_obj)
 
     async with db_factory() as db:
         t = await db.get(Task, task_obj.id)
@@ -293,7 +436,7 @@ async def test_lifecycle_failure_max_retries(db_factory):
     mock_proc.wait = AsyncMock(return_value=1)
     d.instance_manager.processes = {inst_id: mock_proc}
 
-    await d._run_task_lifecycle(inst_id, task_obj)
+    await _run_claimed_lifecycle(d, db_factory, inst_id, task_obj)
 
     async with db_factory() as db:
         t = await db.get(Task, task_obj.id)
@@ -317,7 +460,7 @@ async def test_lifecycle_exception(db_factory):
         inst_id = inst.id
         task_obj = task
 
-    await d._run_task_lifecycle(inst_id, task_obj)
+    await _run_claimed_lifecycle(d, db_factory, inst_id, task_obj)
 
     async with db_factory() as db:
         t = await db.get(Task, task_obj.id)
@@ -364,7 +507,7 @@ async def test_fresh_codex_all_accounts_cooling_defers_without_retry_budget(
         task_id = task.id
         task_obj = task
 
-    await d._run_task_lifecycle(inst_id, task_obj)
+    await _run_claimed_lifecycle(d, db_factory, inst_id, task_obj)
 
     async with db_factory() as db:
         deferred = await db.get(Task, task_id)
@@ -409,7 +552,7 @@ async def test_fresh_codex_maintenance_busy_defers_without_retry_budget(
         task_id = task.id
         task_obj = task
 
-    await d._run_task_lifecycle(inst_id, task_obj)
+    await _run_claimed_lifecycle(d, db_factory, inst_id, task_obj)
 
     async with db_factory() as db:
         deferred = await db.get(Task, task_id)
@@ -446,7 +589,7 @@ async def test_permanent_codex_routing_error_still_fails_fresh_task(db_factory):
         task_id = task.id
         task_obj = task
 
-    await d._run_task_lifecycle(inst_id, task_obj)
+    await _run_claimed_lifecycle(d, db_factory, inst_id, task_obj)
 
     async with db_factory() as db:
         failed = await db.get(Task, task_id)
@@ -477,7 +620,7 @@ async def test_plan_phase(db_factory):
     mock_proc.wait = AsyncMock(return_value=0)
     d.instance_manager.processes = {inst_id: mock_proc}
 
-    await d._run_task_lifecycle(inst_id, task_obj)
+    await _run_claimed_lifecycle(d, db_factory, inst_id, task_obj)
 
     async with db_factory() as db:
         t = await db.get(Task, task_obj.id)
@@ -513,7 +656,7 @@ async def test_lifecycle_prompt_includes_images(db_factory):
     mock_proc.wait = AsyncMock(return_value=0)
     d.instance_manager.processes = {inst_id: mock_proc}
 
-    await d._run_task_lifecycle(inst_id, task_obj)
+    await _run_claimed_lifecycle(d, db_factory, inst_id, task_obj)
 
     # Check that launch was called with a prompt containing the image paths
     call_kwargs = d.instance_manager.launch.call_args
@@ -548,7 +691,7 @@ async def test_lifecycle_prompt_no_images(db_factory):
     mock_proc.wait = AsyncMock(return_value=0)
     d.instance_manager.processes = {inst_id: mock_proc}
 
-    await d._run_task_lifecycle(inst_id, task_obj)
+    await _run_claimed_lifecycle(d, db_factory, inst_id, task_obj)
 
     call_kwargs = d.instance_manager.launch.call_args
     prompt_used = call_kwargs.kwargs.get("prompt") or call_kwargs[1].get("prompt")
@@ -615,7 +758,11 @@ async def test_loop_done_after_one_iteration(db_factory, tmp_path):
     d.instance_manager.launch = AsyncMock(side_effect=launch_and_write)
     d.instance_manager.processes = {inst_id: mock_proc}
 
-    await d._run_loop_lifecycle(inst_id, task_obj, str(tmp_path))
+    await _claim_mode_lifecycle(db_factory, inst_id, task_obj)
+
+    await d._run_loop_lifecycle(
+        inst_id, task_obj, d._task_lifecycle_generation(task_obj), str(tmp_path)
+    )
 
     async with db_factory() as db:
         t = await db.get(Task, task_obj.id)
@@ -659,7 +806,11 @@ async def test_loop_iteration_passes_pool_config_dir(db_factory, tmp_path):
     d.instance_manager.launch = AsyncMock(side_effect=launch_and_write)
     d.instance_manager.processes = {inst_id: mock_proc}
 
-    await d._run_loop_lifecycle(inst_id, task_obj, str(tmp_path))
+    await _claim_mode_lifecycle(db_factory, inst_id, task_obj)
+
+    await d._run_loop_lifecycle(
+        inst_id, task_obj, d._task_lifecycle_generation(task_obj), str(tmp_path)
+    )
 
     # Pool was consulted, and its choice flowed into the launch.
     d._resolve_resume_config_dir.assert_awaited()
@@ -702,7 +853,11 @@ async def test_loop_continue_then_done(db_factory, tmp_path):
     d.instance_manager.launch = AsyncMock(side_effect=launch_and_write)
     d.instance_manager.processes = {inst_id: mock_proc}
 
-    await d._run_loop_lifecycle(inst_id, task_obj, str(tmp_path))
+    await _claim_mode_lifecycle(db_factory, inst_id, task_obj)
+
+    await d._run_loop_lifecycle(
+        inst_id, task_obj, d._task_lifecycle_generation(task_obj), str(tmp_path)
+    )
 
     assert call_count["n"] == 2
     async with db_factory() as db:
@@ -741,7 +896,11 @@ async def test_loop_abort_on_signal(db_factory, tmp_path):
     d.instance_manager.launch = AsyncMock(side_effect=launch_and_abort)
     d.instance_manager.processes = {inst_id: mock_proc}
 
-    await d._run_loop_lifecycle(inst_id, task_obj, str(tmp_path))
+    await _claim_mode_lifecycle(db_factory, inst_id, task_obj)
+
+    await d._run_loop_lifecycle(
+        inst_id, task_obj, d._task_lifecycle_generation(task_obj), str(tmp_path)
+    )
 
     async with db_factory() as db:
         t = await db.get(Task, task_obj.id)
@@ -772,7 +931,11 @@ async def test_loop_abort_on_missing_signal(db_factory, tmp_path):
     # launch does NOT write a signal file
     d.instance_manager.processes = {inst_id: mock_proc}
 
-    await d._run_loop_lifecycle(inst_id, task_obj, str(tmp_path))
+    await _claim_mode_lifecycle(db_factory, inst_id, task_obj)
+
+    await d._run_loop_lifecycle(
+        inst_id, task_obj, d._task_lifecycle_generation(task_obj), str(tmp_path)
+    )
 
     async with db_factory() as db:
         t = await db.get(Task, task_obj.id)
@@ -812,7 +975,11 @@ async def test_loop_max_iterations_exceeded(db_factory, tmp_path):
     d.instance_manager.launch = AsyncMock(side_effect=launch_and_continue)
     d.instance_manager.processes = {inst_id: mock_proc}
 
-    await d._run_loop_lifecycle(inst_id, task_obj, str(tmp_path))
+    await _claim_mode_lifecycle(db_factory, inst_id, task_obj)
+
+    await d._run_loop_lifecycle(
+        inst_id, task_obj, d._task_lifecycle_generation(task_obj), str(tmp_path)
+    )
 
     # Should have run exactly 2 iterations (iteration 0 and 1), then stopped
     assert call_count["n"] == 2
@@ -870,7 +1037,11 @@ async def test_loop_cancelled_between_iterations(db_factory, tmp_path):
     d.instance_manager.launch = AsyncMock(side_effect=launch_continue_then_cancel)
     d.instance_manager.processes = {inst_id: mock_proc}
 
-    await d._run_loop_lifecycle(inst_id, task_obj, str(tmp_path))
+    await _claim_mode_lifecycle(db_factory, inst_id, task_obj)
+
+    await d._run_loop_lifecycle(
+        inst_id, task_obj, d._task_lifecycle_generation(task_obj), str(tmp_path)
+    )
 
     # loop stopped — launch called exactly once, task remains cancelled
     assert d.instance_manager.launch.await_count == 1
@@ -1034,7 +1205,11 @@ async def test_loop_lifecycle_anchors_total_from_first_signal(db_factory, tmp_pa
     d.instance_manager.launch = AsyncMock(side_effect=launch_capture_prompt)
     d.instance_manager.processes = {inst_id: mock_proc}
 
-    await d._run_loop_lifecycle(inst_id, task_obj, str(tmp_path))
+    await _claim_mode_lifecycle(db_factory, inst_id, task_obj)
+
+    await d._run_loop_lifecycle(
+        inst_id, task_obj, d._task_lifecycle_generation(task_obj), str(tmp_path)
+    )
 
     assert call_count["n"] == 3
 
@@ -1099,7 +1274,11 @@ async def test_loop_lifecycle_anchor_survives_missing_progress(db_factory, tmp_p
     d.instance_manager.launch = AsyncMock(side_effect=launch_capture)
     d.instance_manager.processes = {inst_id: mock_proc}
 
-    await d._run_loop_lifecycle(inst_id, task_obj, str(tmp_path))
+    await _claim_mode_lifecycle(db_factory, inst_id, task_obj)
+
+    await d._run_loop_lifecycle(
+        inst_id, task_obj, d._task_lifecycle_generation(task_obj), str(tmp_path)
+    )
 
     # Third prompt should still have anchored_total=8 even though second signal had no progress
     assert "已完成数/8" in prompts_sent[2]
@@ -1143,7 +1322,11 @@ async def test_loop_lifecycle_non_numeric_progress_no_anchor(db_factory, tmp_pat
     d.instance_manager.launch = AsyncMock(side_effect=launch_capture)
     d.instance_manager.processes = {inst_id: mock_proc}
 
-    await d._run_loop_lifecycle(inst_id, task_obj, str(tmp_path))
+    await _claim_mode_lifecycle(db_factory, inst_id, task_obj)
+
+    await d._run_loop_lifecycle(
+        inst_id, task_obj, d._task_lifecycle_generation(task_obj), str(tmp_path)
+    )
 
     # No anchoring happened — still using generic hint
     assert "已完成数/总数" in prompts_sent[1]
@@ -1273,7 +1456,11 @@ async def test_must_complete_rejects_premature_done(db_factory, tmp_path):
     d.instance_manager.launch = AsyncMock(side_effect=launch_side)
     d.instance_manager.processes = {inst_id: mock_proc}
 
-    await d._run_loop_lifecycle(inst_id, task_obj, str(tmp_path))
+    await _claim_mode_lifecycle(db_factory, inst_id, task_obj)
+
+    await d._run_loop_lifecycle(
+        inst_id, task_obj, d._task_lifecycle_generation(task_obj), str(tmp_path)
+    )
 
     # Should have run 4 iterations: iter0(continue), iter1(done→rejected), iter2(continue), iter3(done→accepted)
     assert call_count["n"] == 4
@@ -1320,7 +1507,11 @@ async def test_must_complete_accepts_done_when_complete(db_factory, tmp_path):
     d.instance_manager.launch = AsyncMock(side_effect=launch_side)
     d.instance_manager.processes = {inst_id: mock_proc}
 
-    await d._run_loop_lifecycle(inst_id, task_obj, str(tmp_path))
+    await _claim_mode_lifecycle(db_factory, inst_id, task_obj)
+
+    await d._run_loop_lifecycle(
+        inst_id, task_obj, d._task_lifecycle_generation(task_obj), str(tmp_path)
+    )
 
     assert call_count["n"] == 2
     async with db_factory() as db:
@@ -1360,7 +1551,11 @@ async def test_must_complete_done_unparseable_progress_accepted(db_factory, tmp_
     d.instance_manager.launch = AsyncMock(side_effect=launch_side)
     d.instance_manager.processes = {inst_id: mock_proc}
 
-    await d._run_loop_lifecycle(inst_id, task_obj, str(tmp_path))
+    await _claim_mode_lifecycle(db_factory, inst_id, task_obj)
+
+    await d._run_loop_lifecycle(
+        inst_id, task_obj, d._task_lifecycle_generation(task_obj), str(tmp_path)
+    )
 
     async with db_factory() as db:
         t = await db.get(Task, task_obj.id)
@@ -1399,7 +1594,11 @@ async def test_must_complete_max_iterations_fail_message(db_factory, tmp_path):
     d.instance_manager.launch = AsyncMock(side_effect=launch_side)
     d.instance_manager.processes = {inst_id: mock_proc}
 
-    await d._run_loop_lifecycle(inst_id, task_obj, str(tmp_path))
+    await _claim_mode_lifecycle(db_factory, inst_id, task_obj)
+
+    await d._run_loop_lifecycle(
+        inst_id, task_obj, d._task_lifecycle_generation(task_obj), str(tmp_path)
+    )
 
     async with db_factory() as db:
         t = await db.get(Task, task_obj.id)
@@ -1451,7 +1650,11 @@ async def test_must_complete_plan_captured_and_updated(db_factory, tmp_path):
     d.instance_manager.launch = AsyncMock(side_effect=launch_side)
     d.instance_manager.processes = {inst_id: mock_proc}
 
-    await d._run_loop_lifecycle(inst_id, task_obj, str(tmp_path))
+    await _claim_mode_lifecycle(db_factory, inst_id, task_obj)
+
+    await d._run_loop_lifecycle(
+        inst_id, task_obj, d._task_lifecycle_generation(task_obj), str(tmp_path)
+    )
 
     assert call_count["n"] == 3
 
@@ -1509,7 +1712,11 @@ async def test_must_complete_plan_persists_when_not_updated(db_factory, tmp_path
     d.instance_manager.launch = AsyncMock(side_effect=launch_side)
     d.instance_manager.processes = {inst_id: mock_proc}
 
-    await d._run_loop_lifecycle(inst_id, task_obj, str(tmp_path))
+    await _claim_mode_lifecycle(db_factory, inst_id, task_obj)
+
+    await d._run_loop_lifecycle(
+        inst_id, task_obj, d._task_lifecycle_generation(task_obj), str(tmp_path)
+    )
 
     # Third prompt: still has the original plan since second signal didn't update it
     assert "原始计划" in prompts_sent[2]
@@ -1543,7 +1750,7 @@ async def test_lifecycle_routes_to_loop(db_factory, tmp_path):
         inst_id = inst.id
         task_obj = task
 
-    await d._run_task_lifecycle(inst_id, task_obj)
+    await _run_claimed_lifecycle(d, db_factory, inst_id, task_obj)
     assert loop_called["called"]
 
 
@@ -1590,7 +1797,11 @@ async def test_loop_resume_fix_on_missing_signal(db_factory, tmp_path):
     d.instance_manager.launch = AsyncMock(side_effect=launch_side_effect)
     d.instance_manager.processes = {inst_id: mock_proc}
 
-    await d._run_loop_lifecycle(inst_id, task_obj, str(tmp_path))
+    await _claim_mode_lifecycle(db_factory, inst_id, task_obj)
+
+    await d._run_loop_lifecycle(
+        inst_id, task_obj, d._task_lifecycle_generation(task_obj), str(tmp_path)
+    )
 
     # Should have launched twice: once for the iteration, once for the resume fix
     assert call_count["n"] == 2
@@ -1627,7 +1838,11 @@ async def test_loop_resume_fix_no_session_id_aborts(db_factory, tmp_path):
     # launch never writes a signal file
     d.instance_manager.processes = {inst_id: mock_proc}
 
-    await d._run_loop_lifecycle(inst_id, task_obj, str(tmp_path))
+    await _claim_mode_lifecycle(db_factory, inst_id, task_obj)
+
+    await d._run_loop_lifecycle(
+        inst_id, task_obj, d._task_lifecycle_generation(task_obj), str(tmp_path)
+    )
 
     # No session → resume fix skipped → retry path (max_retries=2, retry_count starts at 0)
     async with db_factory() as db:
@@ -1662,7 +1877,11 @@ async def test_loop_resume_fix_still_fails_aborts(db_factory, tmp_path):
     # Neither iteration nor resume fix writes the signal
     d.instance_manager.processes = {inst_id: mock_proc}
 
-    await d._run_loop_lifecycle(inst_id, task_obj, str(tmp_path))
+    await _claim_mode_lifecycle(db_factory, inst_id, task_obj)
+
+    await d._run_loop_lifecycle(
+        inst_id, task_obj, d._task_lifecycle_generation(task_obj), str(tmp_path)
+    )
 
     async with db_factory() as db:
         t = await db.get(Task, task_obj.id)
@@ -1703,7 +1922,11 @@ async def test_loop_abort_triggers_retry_when_retries_remain(db_factory, tmp_pat
     d.instance_manager.launch = AsyncMock(side_effect=launch_and_abort)
     d.instance_manager.processes = {inst_id: mock_proc}
 
-    await d._run_loop_lifecycle(inst_id, task_obj, str(tmp_path))
+    await _claim_mode_lifecycle(db_factory, inst_id, task_obj)
+
+    await d._run_loop_lifecycle(
+        inst_id, task_obj, d._task_lifecycle_generation(task_obj), str(tmp_path)
+    )
 
     async with db_factory() as db:
         t = await db.get(Task, task_obj.id)
@@ -1742,7 +1965,11 @@ async def test_loop_abort_marks_failed_when_retries_exhausted(db_factory, tmp_pa
     d.instance_manager.launch = AsyncMock(side_effect=launch_and_abort)
     d.instance_manager.processes = {inst_id: mock_proc}
 
-    await d._run_loop_lifecycle(inst_id, task_obj, str(tmp_path))
+    await _claim_mode_lifecycle(db_factory, inst_id, task_obj)
+
+    await d._run_loop_lifecycle(
+        inst_id, task_obj, d._task_lifecycle_generation(task_obj), str(tmp_path)
+    )
 
     async with db_factory() as db:
         t = await db.get(Task, task_obj.id)
@@ -1786,7 +2013,11 @@ async def test_loop_cancel_during_iteration_stops_cleanly(db_factory, tmp_path):
     d.instance_manager.launch = AsyncMock(side_effect=launch_and_cancel)
     d.instance_manager.processes = {inst_id: mock_proc}
 
-    await d._run_loop_lifecycle(inst_id, task_obj, str(tmp_path))
+    await _claim_mode_lifecycle(db_factory, inst_id, task_obj)
+
+    await d._run_loop_lifecycle(
+        inst_id, task_obj, d._task_lifecycle_generation(task_obj), str(tmp_path)
+    )
 
     # Task should remain cancelled, not overwritten to failed
     async with db_factory() as db:
@@ -1818,7 +2049,7 @@ async def test_auto_task_total_completed_incremented_once(db_factory):
     mock_proc.wait = AsyncMock(return_value=0)
     d.instance_manager.processes = {inst_id: mock_proc}
 
-    await d._run_task_lifecycle(inst_id, task_obj)
+    await _run_claimed_lifecycle(d, db_factory, inst_id, task_obj)
 
     async with db_factory() as db:
         i = await db.get(Instance, inst_id)
@@ -1859,7 +2090,11 @@ async def test_loop_task_total_completed_incremented_once_on_done(db_factory, tm
     d.instance_manager.launch = AsyncMock(side_effect=launch_two_iters)
     d.instance_manager.processes = {inst_id: mock_proc}
 
-    await d._run_loop_lifecycle(inst_id, task_obj, str(tmp_path))
+    await _claim_mode_lifecycle(db_factory, inst_id, task_obj)
+
+    await d._run_loop_lifecycle(
+        inst_id, task_obj, d._task_lifecycle_generation(task_obj), str(tmp_path)
+    )
 
     async with db_factory() as db:
         i = await db.get(Instance, inst_id)
@@ -1897,7 +2132,11 @@ async def test_loop_total_completed_not_incremented_on_abort(db_factory, tmp_pat
     d.instance_manager.launch = AsyncMock(side_effect=launch_and_abort)
     d.instance_manager.processes = {inst_id: mock_proc}
 
-    await d._run_loop_lifecycle(inst_id, task_obj, str(tmp_path))
+    await _claim_mode_lifecycle(db_factory, inst_id, task_obj)
+
+    await d._run_loop_lifecycle(
+        inst_id, task_obj, d._task_lifecycle_generation(task_obj), str(tmp_path)
+    )
 
     async with db_factory() as db:
         i = await db.get(Instance, inst_id)
@@ -1918,6 +2157,8 @@ async def test_resume_fix_signal_passes_loop_iteration(db_factory, tmp_path):
         await db.refresh(inst)
         await db.refresh(task)
         task.session_id = "sess-iter"
+        task.status = "executing"
+        task.instance_id = inst.id
         await db.commit()
         await db.refresh(task)
         inst_id = inst.id
@@ -1936,7 +2177,15 @@ async def test_resume_fix_signal_passes_loop_iteration(db_factory, tmp_path):
     d.instance_manager.launch = AsyncMock(side_effect=fix_launch)
     d.instance_manager.processes = {inst_id: mock_proc}
 
-    result = await d._resume_fix_signal(inst_id, task_obj, str(tmp_path), signal_path, iteration=3, git_env={})
+    result = await d._resume_fix_signal(
+        inst_id,
+        task_obj,
+        d._task_lifecycle_generation(task_obj),
+        str(tmp_path),
+        signal_path,
+        iteration=3,
+        git_env={},
+    )
 
     call_kwargs = d.instance_manager.launch.call_args
     loop_iter_used = call_kwargs.kwargs.get("loop_iteration") or call_kwargs[1].get("loop_iteration")
@@ -1960,6 +2209,8 @@ async def test_resume_fix_signal_timeout_returns_abort(db_factory, tmp_path):
         await db.refresh(inst)
         await db.refresh(task)
         task.session_id = "sess-timeout"
+        task.status = "executing"
+        task.instance_id = inst.id
         await db.commit()
         await db.refresh(task)
         inst_id = inst.id
@@ -1980,9 +2231,24 @@ async def test_resume_fix_signal_timeout_returns_abort(db_factory, tmp_path):
     mock_proc.kill = MagicMock()
     d.instance_manager.launch = AsyncMock(side_effect=hang_and_kill)
     d.instance_manager.processes = {inst_id: mock_proc}
+    async def kill_generation(_instance_id, process):
+        process.kill()
+        process.returncode = -9
+        return True
+    d.instance_manager.kill_process_generation = AsyncMock(
+        side_effect=kill_generation
+    )
 
     # Signal file is NOT written (process timed out before writing)
-    result = await d._resume_fix_signal(inst_id, task_obj, str(tmp_path), signal_path, iteration=0, git_env={})
+    result = await d._resume_fix_signal(
+        inst_id,
+        task_obj,
+        d._task_lifecycle_generation(task_obj),
+        str(tmp_path),
+        signal_path,
+        iteration=0,
+        git_env={},
+    )
 
     assert result.get("action") == "abort"
     assert mock_proc.kill.called
@@ -2025,7 +2291,11 @@ async def test_resume_fix_not_called_for_explicit_abort(db_factory, tmp_path):
     d.instance_manager.launch = AsyncMock(side_effect=launch_and_explicit_abort)
     d.instance_manager.processes = {inst_id: mock_proc}
 
-    await d._run_loop_lifecycle(inst_id, task_obj, str(tmp_path))
+    await _claim_mode_lifecycle(db_factory, inst_id, task_obj)
+
+    await d._run_loop_lifecycle(
+        inst_id, task_obj, d._task_lifecycle_generation(task_obj), str(tmp_path)
+    )
 
     assert not resume_fix_called["called"]
     async with db_factory() as db:
@@ -2059,7 +2329,7 @@ async def test_lifecycle_prompt_empty_image_paths(db_factory):
     mock_proc.wait = AsyncMock(return_value=0)
     d.instance_manager.processes = {inst_id: mock_proc}
 
-    await d._run_task_lifecycle(inst_id, task_obj)
+    await _run_claimed_lifecycle(d, db_factory, inst_id, task_obj)
 
     call_kwargs = d.instance_manager.launch.call_args
     prompt_used = call_kwargs.kwargs.get("prompt") or call_kwargs[1].get("prompt")
@@ -2090,7 +2360,7 @@ async def test_lifecycle_passes_effort_level_from_task(db_factory):
     mock_proc.wait = AsyncMock(return_value=0)
     d.instance_manager.processes = {inst_id: mock_proc}
 
-    await d._run_task_lifecycle(inst_id, task_obj)
+    await _run_claimed_lifecycle(d, db_factory, inst_id, task_obj)
 
     call_kwargs = d.instance_manager.launch.call_args.kwargs
     assert call_kwargs["effort_level"] == "max"
@@ -2120,7 +2390,7 @@ async def test_lifecycle_falls_back_to_default_effort(db_factory):
     with patch("backend.services.dispatcher.settings") as mock_settings:
         mock_settings.default_effort = "medium"
         mock_settings.task_timeout_seconds = 1800
-        await d._run_task_lifecycle(inst_id, task_obj)
+        await _run_claimed_lifecycle(d, db_factory, inst_id, task_obj)
 
     call_kwargs = d.instance_manager.launch.call_args.kwargs
     assert call_kwargs["effort_level"] == "medium"
@@ -2165,7 +2435,10 @@ async def test_goal_achieved_after_one_turn(db_factory):
     from backend.services.goal_evaluator import GoalEvalResult
     with patch("backend.services.goal_evaluator.GoalEvaluator.evaluate",
                return_value=GoalEvalResult(achieved=True, reason="all tests pass")):
-        await d._run_goal_lifecycle(inst_id, task_obj, "/repo")
+        await _claim_mode_lifecycle(db_factory, inst_id, task_obj)
+        await d._run_goal_lifecycle(
+            inst_id, task_obj, d._task_lifecycle_generation(task_obj), "/repo"
+        )
 
     async with db_factory() as db:
         t = await db.get(Task, task_obj.id)
@@ -2205,7 +2478,10 @@ async def test_goal_turn_passes_pool_config_dir(db_factory):
     from backend.services.goal_evaluator import GoalEvalResult
     with patch("backend.services.goal_evaluator.GoalEvaluator.evaluate",
                return_value=GoalEvalResult(achieved=True, reason="done")):
-        await d._run_goal_lifecycle(inst_id, task_obj, "/repo")
+        await _claim_mode_lifecycle(db_factory, inst_id, task_obj)
+        await d._run_goal_lifecycle(
+            inst_id, task_obj, d._task_lifecycle_generation(task_obj), "/repo"
+        )
 
     d._resolve_resume_config_dir.assert_awaited()
     # turn 0 launches a fresh session → resolver called with None
@@ -2267,7 +2543,10 @@ async def test_codex_goal_evaluator_rotates_without_consuming_extra_turn(
             evaluator_error,
             GoalEvalResult(achieved=True, reason="done"),
         ]
-        await d._run_goal_lifecycle(inst_id, task_obj, "/repo")
+        await _claim_mode_lifecycle(db_factory, inst_id, task_obj)
+        await d._run_goal_lifecycle(
+            inst_id, task_obj, d._task_lifecycle_generation(task_obj), "/repo"
+        )
 
     assert d.instance_manager.launch.await_count == 1
     assert evaluate.await_count == 2
@@ -2311,14 +2590,21 @@ async def test_goal_lifecycle_retry_resumes_persisted_turn_and_session(db_factor
         "backend.services.goal_evaluator.GoalEvaluator.evaluate",
         return_value=GoalEvalResult(achieved=True, reason="now complete"),
     ):
-        await d._run_goal_lifecycle(inst_id, task_obj, "/repo")
+        await _claim_mode_lifecycle(db_factory, inst_id, task_obj)
+        expected_generation = d._task_lifecycle_generation(task_obj)
+        await d._run_goal_lifecycle(
+            inst_id, task_obj, expected_generation, "/repo"
+        )
 
     launch_kwargs = d.instance_manager.launch.await_args.kwargs
     assert launch_kwargs["resume_session_id"] == "sess-goal-persisted"
     assert launch_kwargs["loop_iteration"] == 2
     assert "two checks remain" in launch_kwargs["prompt"]
     d._resolve_resume_config_dir.assert_awaited_once_with(
-        "sess-goal-persisted", "claude", task_id=task_obj.id,
+        "sess-goal-persisted",
+        "claude",
+        task_id=task_obj.id,
+        expected_generation=expected_generation,
     )
     async with db_factory() as db:
         persisted = await db.get(Task, task_obj.id)
@@ -2361,7 +2647,10 @@ async def test_goal_evaluation_error_requeues_without_advancing_turn(db_factory)
             stderr="temporary evaluator failure",
         ),
     ):
-        await d._run_goal_lifecycle(inst_id, task_obj, "/repo")
+        await _claim_mode_lifecycle(db_factory, inst_id, task_obj)
+        await d._run_goal_lifecycle(
+            inst_id, task_obj, d._task_lifecycle_generation(task_obj), "/repo"
+        )
 
     async with db_factory() as db:
         persisted = await db.get(Task, task_obj.id)
@@ -2403,7 +2692,10 @@ async def test_goal_achieved_after_multiple_turns(db_factory):
 
     with patch("backend.services.goal_evaluator.GoalEvaluator.evaluate",
                side_effect=eval_side_effect):
-        await d._run_goal_lifecycle(inst_id, task_obj, "/repo")
+        await _claim_mode_lifecycle(db_factory, inst_id, task_obj)
+        await d._run_goal_lifecycle(
+            inst_id, task_obj, d._task_lifecycle_generation(task_obj), "/repo"
+        )
 
     assert call_count["n"] == 3
     async with db_factory() as db:
@@ -2436,7 +2728,10 @@ async def test_goal_max_turns_exceeded(db_factory):
     from backend.services.goal_evaluator import GoalEvalResult
     with patch("backend.services.goal_evaluator.GoalEvaluator.evaluate",
                return_value=GoalEvalResult(achieved=False, reason="tests still failing")):
-        await d._run_goal_lifecycle(inst_id, task_obj, "/repo")
+        await _claim_mode_lifecycle(db_factory, inst_id, task_obj)
+        await d._run_goal_lifecycle(
+            inst_id, task_obj, d._task_lifecycle_generation(task_obj), "/repo"
+        )
 
     async with db_factory() as db:
         t = await db.get(Task, task_obj.id)
@@ -2482,7 +2777,10 @@ async def test_goal_cancelled_between_turns(db_factory):
 
     with patch("backend.services.goal_evaluator.GoalEvaluator.evaluate",
                side_effect=eval_and_cancel):
-        await d._run_goal_lifecycle(inst_id, task_obj, "/repo")
+        await _claim_mode_lifecycle(db_factory, inst_id, task_obj)
+        await d._run_goal_lifecycle(
+            inst_id, task_obj, d._task_lifecycle_generation(task_obj), "/repo"
+        )
 
     assert eval_count["n"] == 1
     async with db_factory() as db:
@@ -2521,7 +2819,11 @@ async def test_goal_cancelled_during_execution(db_factory):
     d.instance_manager.launch = AsyncMock(side_effect=launch_and_cancel)
     d.instance_manager.processes = {inst_id: mock_proc}
 
-    await d._run_goal_lifecycle(inst_id, task_obj, "/repo")
+    await _claim_mode_lifecycle(db_factory, inst_id, task_obj)
+
+    await d._run_goal_lifecycle(
+            inst_id, task_obj, d._task_lifecycle_generation(task_obj), "/repo"
+        )
 
     async with db_factory() as db:
         t = await db.get(Task, task_obj.id)
@@ -2575,7 +2877,10 @@ async def test_goal_uses_resume_on_subsequent_turns(db_factory):
 
     with patch("backend.services.goal_evaluator.GoalEvaluator.evaluate",
                side_effect=eval_twice):
-        await d._run_goal_lifecycle(inst_id, task_obj, "/repo")
+        await _claim_mode_lifecycle(db_factory, inst_id, task_obj)
+        await d._run_goal_lifecycle(
+            inst_id, task_obj, d._task_lifecycle_generation(task_obj), "/repo"
+        )
 
     assert len(launch_calls) == 2
     # First call: no resume_session_id
@@ -2608,7 +2913,10 @@ async def test_goal_broadcasts_evaluation_events(db_factory):
     from backend.services.goal_evaluator import GoalEvalResult
     with patch("backend.services.goal_evaluator.GoalEvaluator.evaluate",
                return_value=GoalEvalResult(achieved=True, reason="done")):
-        await d._run_goal_lifecycle(inst_id, task_obj, "/repo")
+        await _claim_mode_lifecycle(db_factory, inst_id, task_obj)
+        await d._run_goal_lifecycle(
+            inst_id, task_obj, d._task_lifecycle_generation(task_obj), "/repo"
+        )
 
     # Check broadcasts
     broadcast_calls = d.broadcaster.broadcast.call_args_list
@@ -2653,7 +2961,10 @@ async def test_goal_total_completed_incremented_once(db_factory):
 
     with patch("backend.services.goal_evaluator.GoalEvaluator.evaluate",
                side_effect=eval_multi):
-        await d._run_goal_lifecycle(inst_id, task_obj, "/repo")
+        await _claim_mode_lifecycle(db_factory, inst_id, task_obj)
+        await d._run_goal_lifecycle(
+            inst_id, task_obj, d._task_lifecycle_generation(task_obj), "/repo"
+        )
 
     async with db_factory() as db:
         i = await db.get(Instance, inst_id)
@@ -2684,7 +2995,10 @@ async def test_goal_total_completed_not_incremented_on_failure(db_factory):
     from backend.services.goal_evaluator import GoalEvalResult
     with patch("backend.services.goal_evaluator.GoalEvaluator.evaluate",
                return_value=GoalEvalResult(achieved=False, reason="nope")):
-        await d._run_goal_lifecycle(inst_id, task_obj, "/repo")
+        await _claim_mode_lifecycle(db_factory, inst_id, task_obj)
+        await d._run_goal_lifecycle(
+            inst_id, task_obj, d._task_lifecycle_generation(task_obj), "/repo"
+        )
 
     async with db_factory() as db:
         i = await db.get(Instance, inst_id)
@@ -2718,7 +3032,7 @@ async def test_lifecycle_routes_to_goal(db_factory):
         inst_id = inst.id
         task_obj = task
 
-    await d._run_task_lifecycle(inst_id, task_obj)
+    await _run_claimed_lifecycle(d, db_factory, inst_id, task_obj)
     assert goal_called["called"]
 
 
@@ -2857,7 +3171,11 @@ async def test_loop_deleted_between_iterations(db_factory, tmp_path):
     d.instance_manager.launch = AsyncMock(side_effect=launch_continue_then_delete)
     d.instance_manager.processes = {inst_id: mock_proc}
 
-    await d._run_loop_lifecycle(inst_id, task_obj, str(tmp_path))
+    await _claim_mode_lifecycle(db_factory, inst_id, task_obj)
+
+    await d._run_loop_lifecycle(
+        inst_id, task_obj, d._task_lifecycle_generation(task_obj), str(tmp_path)
+    )
 
     # loop stopped — launch called exactly once
     assert d.instance_manager.launch.await_count == 1
@@ -2903,7 +3221,10 @@ async def test_goal_deleted_between_turns(db_factory):
 
     with patch("backend.services.goal_evaluator.GoalEvaluator.evaluate",
                side_effect=eval_and_delete):
-        await d._run_goal_lifecycle(inst_id, task_obj, "/repo")
+        await _claim_mode_lifecycle(db_factory, inst_id, task_obj)
+        await d._run_goal_lifecycle(
+            inst_id, task_obj, d._task_lifecycle_generation(task_obj), "/repo"
+        )
 
     assert eval_count["n"] == 1
     async with db_factory() as db:
@@ -2941,7 +3262,11 @@ async def test_goal_deleted_during_execution(db_factory):
     d.instance_manager.launch = AsyncMock(side_effect=launch_and_delete)
     d.instance_manager.processes = {inst_id: mock_proc}
 
-    await d._run_goal_lifecycle(inst_id, task_obj, "/repo")
+    await _claim_mode_lifecycle(db_factory, inst_id, task_obj)
+
+    await d._run_goal_lifecycle(
+            inst_id, task_obj, d._task_lifecycle_generation(task_obj), "/repo"
+        )
 
     assert d.instance_manager.launch.await_count == 1
     async with db_factory() as db:
@@ -2986,7 +3311,11 @@ async def _run_two_iteration_loop(d, db_factory, tmp_path, *, pty_enabled):
     d.instance_manager.pty_mode_enabled = pty_enabled
     d.instance_manager.release_pty_session = AsyncMock()
 
-    await d._run_loop_lifecycle(inst_id, task_obj, str(tmp_path))
+    await _claim_mode_lifecycle(db_factory, inst_id, task_obj)
+
+    await d._run_loop_lifecycle(
+        inst_id, task_obj, d._task_lifecycle_generation(task_obj), str(tmp_path)
+    )
     return launches, d
 
 
@@ -3161,21 +3490,118 @@ class TestResolveTimeout:
             def kill(self):
                 self.killed = True
         p = FakeProc()
-        await d._wait_process(p, t, "test")
+        d.instance_manager = MagicMock()
+        async def kill_generation(_instance_id, process):
+            process.kill()
+            return True
+        d.instance_manager.kill_process_generation = AsyncMock(
+            side_effect=kill_generation
+        )
+        await d._wait_process(p, t, "test", instance_id=1)
         assert p.killed is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group semantics")
+async def test_wait_process_timeout_reaps_descendant_with_inherited_pipes(
+    db_factory, tmp_path,
+):
+    """A timed-out CLI turn must not leave a tool child holding its pipes."""
+    from backend.services.instance_manager import InstanceManager
+
+    child_pid_path = tmp_path / "timeout-child.pid"
+    script = (
+        "import pathlib,subprocess,sys,time; "
+        "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']); "
+        "pathlib.Path(sys.argv[1]).write_text(str(p.pid)); "
+        "time.sleep(30)"
+    )
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        script,
+        str(child_pid_path),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
+    )
+    manager = InstanceManager(
+        db_factory, MagicMock(broadcast=AsyncMock())
+    )
+    instance_id = 991_001
+    manager.processes[instance_id] = process
+    manager._process_groups[instance_id] = process
+    d = _make_dispatcher(db_factory)
+    d.instance_manager = manager
+    task = MagicMock(id=77, timeout_hours=0.00005)
+
+    try:
+        for _ in range(100):
+            if child_pid_path.exists():
+                break
+            await asyncio.sleep(0.01)
+        assert child_pid_path.exists()
+        await asyncio.wait_for(
+            d._wait_process(
+                process, task, "real timeout", instance_id=instance_id
+            ),
+            timeout=7,
+        )
+        assert process.returncode is not None
+        assert not manager._process_group_alive(instance_id, process)
+    finally:
+        if process.returncode is None or manager._process_group_alive(
+            instance_id, process
+        ):
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        if process.returncode is None:
+            await asyncio.wait_for(process.wait(), timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_shutdown_cancels_and_reaps_auxiliary_lifecycles(db_factory):
+    d = _make_dispatcher(db_factory)
+    monitor_lifecycle = asyncio.create_task(asyncio.Event().wait())
+    sub_agent_lifecycle = asyncio.create_task(asyncio.Event().wait())
+    monitor_process = MagicMock(pid=101, returncode=None)
+    sub_agent_process = MagicMock(pid=102, returncode=None)
+    d._monitor_tasks[1] = monitor_lifecycle
+    d._monitor_processes[1] = monitor_process
+    d._sub_agent_tasks[2] = sub_agent_lifecycle
+    d._sub_agent_processes[2] = sub_agent_process
+
+    async def terminate(process):
+        process.returncode = -9
+
+    d._terminate_aux_process = AsyncMock(side_effect=terminate)
+    await d.shutdown()
+
+    assert monitor_lifecycle.done()
+    assert sub_agent_lifecycle.done()
+    assert {call.args[0] for call in d._terminate_aux_process.await_args_list} == {
+        monitor_process,
+        sub_agent_process,
+    }
 
 
 @pytest.mark.asyncio
 async def test_create_task_fills_default_model_and_effort(client):
     """创建任务不指定 model/effort → 自动填入全局默认值。"""
     from backend.config import settings
-    resp = await client.post("/api/tasks", json={
-        "title": "T", "description": "d", "target_repo": "/tmp",
-    })
+    with (
+        patch.object(settings, "default_provider", "codex"),
+        patch.object(settings, "default_codex_model", "gpt-5.6-sol"),
+    ):
+        resp = await client.post("/api/tasks", json={
+            "title": "T", "description": "d", "target_repo": "/tmp",
+        })
     assert resp.status_code == 201
     data = resp.json()
-    assert data["provider"] == settings.default_provider == "codex"
-    assert data["model"] == settings.default_codex_model == "gpt-5.6-sol"
+    assert data["provider"] == "codex"
+    assert data["model"] == "gpt-5.6-sol"
     assert data["effort_level"] == settings.default_effort
 
 
@@ -3204,6 +3630,7 @@ async def test_mode_turn_retries_same_native_session_after_codex_rotation(db_fac
     d._collect_failure_output = AsyncMock(
         return_value="You've hit your usage limit for codex"
     )
+    d._task_claim_is_active = AsyncMock(return_value=True)
     d._check_rate_limit_and_rotate = AsyncMock(return_value={
         "config_dir": "/tmp/codex-b",
         "session_id": "thread-1",
@@ -3222,6 +3649,7 @@ async def test_mode_turn_retries_same_native_session_after_codex_rotation(db_fac
     exit_code, home = await d._launch_mode_turn_with_rotation(
         7,
         task,
+        MagicMock(),
         "/repo",
         {},
         prompt="mode prompt",
@@ -3251,6 +3679,7 @@ async def test_successful_mode_turn_returns_home_after_proactive_switch(db_facto
     manager.get_config_dir = MagicMock(return_value="/tmp/codex-after-switch")
     d.instance_manager = manager
     d._wait_process = AsyncMock()
+    d._task_claim_is_active = AsyncMock(return_value=True)
     task = MagicMock(
         id=43,
         model="gpt-5.6-sol",
@@ -3264,6 +3693,7 @@ async def test_successful_mode_turn_returns_home_after_proactive_switch(db_facto
     exit_code, home = await d._launch_mode_turn_with_rotation(
         7,
         task,
+        MagicMock(),
         "/repo",
         {},
         prompt="goal prompt",
@@ -3313,6 +3743,7 @@ async def test_codex_mode_turn_does_not_timeout_output_consumer(
     )
     d.instance_manager = manager
     d._wait_process = AsyncMock()
+    d._task_claim_is_active = AsyncMock(return_value=True)
     task = MagicMock(
         id=44,
         model="gpt-5.6-sol",
@@ -3331,6 +3762,7 @@ async def test_codex_mode_turn_does_not_timeout_output_consumer(
     exit_code, home = await d._launch_mode_turn_with_rotation(
         7,
         task,
+        MagicMock(),
         "/repo",
         {},
         prompt="goal prompt",
@@ -3401,6 +3833,182 @@ async def test_instance_contention_requeues_exact_message(db_factory, monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_spawn_oserror_requeues_exact_queued_message(
+    db_factory, monkeypatch,
+):
+    """A proven pre-spawn failure must never acknowledge and lose chat text."""
+    import backend.services.dispatcher as disp_mod
+
+    monkeypatch.setattr(disp_mod, "CODEX_ROUTING_RETRY_DELAY", 0)
+    d, _id1, _id2, task_id, msg = await _setup_queued_msg_two_idle(
+        db_factory, monkeypatch
+    )
+    launched = asyncio.Event()
+    seen_prompts: list[str] = []
+
+    async def fail_once_then_launch(**kwargs):
+        seen_prompts.append(kwargs["prompt"])
+        if len(seen_prompts) == 1:
+            raise OSError("agent binary missing")
+        launched.set()
+
+    d.instance_manager.launch = AsyncMock(side_effect=fail_once_then_launch)
+    q = d._get_task_queue(task_id)
+    await q.put(msg)
+    worker = asyncio.create_task(d._task_queue_consumer(task_id))
+    d._task_queue_workers[task_id] = worker
+    try:
+        await asyncio.wait_for(launched.wait(), timeout=2)
+        assert seen_prompts == [msg.prompt, msg.prompt]
+    finally:
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_stale_codex_lifecycle_cannot_defer_new_instance_owner(db_factory):
+    d = _make_dispatcher(db_factory)
+    async with db_factory() as db:
+        old_instance = Instance(name="old-owner")
+        new_instance = Instance(name="new-owner")
+        db.add_all([old_instance, new_instance])
+        await db.flush()
+        task = Task(
+            title="reused-task",
+            description="d",
+            status="executing",
+            instance_id=old_instance.id,
+        )
+        db.add(task)
+        await db.commit()
+        stale_generation = d._task_lifecycle_generation(task)
+        await db.execute(
+            update(Task)
+            .where(Task.id == task.id)
+            .values(instance_id=new_instance.id)
+        )
+        await db.commit()
+        task_id = task.id
+        new_instance_id = new_instance.id
+
+    await d._defer_codex_routing_task(
+        stale_generation,
+        "stale account cooldown",
+    )
+
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+        assert task.status == "executing"
+    assert task.instance_id == new_instance_id
+    assert task_id not in d._codex_routing_not_before
+
+
+@pytest.mark.asyncio
+async def test_codex_binding_merge_preserves_supersede_metadata(db_factory):
+    d = _make_dispatcher(db_factory)
+    async with db_factory() as db:
+        task = Task(
+            title="binding-merge",
+            status="cancelled",
+            metadata_={
+                "pr_review_id": 17,
+                "pr_review_superseded": True,
+            },
+        )
+        db.add(task)
+        await db.commit()
+        task_id = task.id
+
+    assert await d._set_codex_task_binding(task_id, "codex-4")
+
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+        assert task.metadata_ == {
+            "pr_review_id": 17,
+            "pr_review_superseded": True,
+            "codex_account_id": "codex-4",
+        }
+
+
+@pytest.mark.asyncio
+async def test_stale_codex_binding_cas_cannot_write_reclaimed_generation(
+    db_factory,
+):
+    d = _make_dispatcher(db_factory)
+    async with db_factory() as db:
+        instance = Instance(name="binding-reclaim")
+        db.add(instance)
+        await db.flush()
+        task = Task(
+            title="binding-reclaim",
+            status="executing",
+            retry_count=0,
+            instance_id=instance.id,
+            metadata_={"pr_review_id": 18},
+        )
+        db.add(task)
+        await db.commit()
+        old_generation = d._task_lifecycle_generation(task)
+        await db.execute(
+            update(Task)
+            .where(Task.id == task.id)
+            .values(retry_count=1)
+        )
+        await db.commit()
+        task_id = task.id
+
+    assert not await d._set_codex_task_binding(
+        task_id,
+        "codex-5",
+        expected_generation=old_generation,
+    )
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+        assert task.retry_count == 1
+        assert task.metadata_ == {"pr_review_id": 18}
+
+
+@pytest.mark.asyncio
+async def test_duck_lifecycle_fence_can_persist_codex_binding(db_factory):
+    from types import SimpleNamespace
+
+    d = _make_dispatcher(db_factory)
+    async with db_factory() as db:
+        instance = Instance(name="duck-binding")
+        db.add(instance)
+        await db.flush()
+        task = Task(
+            title="duck-binding",
+            status="executing",
+            instance_id=instance.id,
+            metadata_={},
+        )
+        db.add(task)
+        await db.commit()
+        fence = SimpleNamespace(
+            task_id=task.id,
+            worker_id=task.worker_id,
+            shared_from_id=task.shared_from_id,
+            status=None,
+            retry_count=task.retry_count,
+            instance_id=task.instance_id,
+            started_at=task.started_at,
+            completed_at=task.completed_at,
+        )
+        task_id = task.id
+
+    assert await d._set_codex_task_binding(
+        task_id,
+        "codex-duck",
+        expected_generation=fence,
+    )
+    async with db_factory() as db:
+        assert (await db.get(Task, task_id)).metadata_ == {
+            "codex_account_id": "codex-duck"
+        }
+
+
+@pytest.mark.asyncio
 async def test_long_turn_does_not_respawn_consumer(db_factory, monkeypatch):
     """A turn longer than the stuck-threshold must NOT trip the watchdog into
     respawning the consumer.
@@ -3455,14 +4063,13 @@ async def test_long_turn_does_not_respawn_consumer(db_factory, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_watchdog_respawn_keeps_live_worker(db_factory, monkeypatch):
-    """When the watchdog DOES respawn the consumer, the cancelled consumer's
-    cleanup must not evict the freshly-registered worker.
+    """Watchdog replacement waits for and outlives old-consumer cleanup.
 
     Regression for prod task #728: the old `finally` popped
     `_task_queue_workers[task_id]` unconditionally, erasing the new consumer's
-    registration so a later enqueue spawned a *second* live consumer → two
-    concurrent `--resume`. The guard only deregisters when the dict still points
-    at the exiting task.
+    registration so a later enqueue spawned a *second* live consumer.  The
+    replacement handoff now remains registered until the old worker is fully
+    cancelled, then atomically installs the sole successor.
     """
     import backend.services.dispatcher as disp_mod
     # Negative threshold → any _ensure_queue_worker on an existing worker treats
@@ -3485,21 +4092,66 @@ async def test_watchdog_respawn_keeps_live_worker(db_factory, monkeypatch):
     c1 = d._task_queue_workers[1]
 
     started.clear()
-    # Forces watchdog: cancels c1, spawns c2, registers c2.
+    # Forces watchdog: register a handoff which cancels/awaits c1 before c2.
     await d.enqueue_message(1, "second")
-    c2 = d._task_queue_workers[1]
-    assert c2 is not c1
+    handoff = d._task_queue_workers[1]
+    assert handoff is not c1
+    assert getattr(handoff, "_ccm_queue_worker_handoff", False)
 
-    # Let c1's cancellation + finally run and c2 begin processing "second".
+    # Let c1's cancellation + finally run, then the handoff can install c2.
     release.set()
     await asyncio.wait_for(started.wait(), 1)
     await asyncio.sleep(0.05)
+    c2 = d._task_queue_workers[1]
 
     # The live worker registration must survive c1's cleanup.
-    assert d._task_queue_workers.get(1) is c2
+    assert c2 is not handoff
     assert not c2.done()
 
     c2.cancel()
+
+
+@pytest.mark.asyncio
+async def test_watchdog_never_starts_replacement_before_old_cleanup(
+    db_factory, monkeypatch,
+):
+    import backend.services.dispatcher as disp_mod
+
+    monkeypatch.setattr(disp_mod, "QUEUE_STUCK_THRESHOLD", -1)
+    d = _make_dispatcher(db_factory)
+    first_started = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    second_started = asyncio.Event()
+    calls = 0
+
+    async def fake_process(_task_id, _msg):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            first_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cleanup_started.set()
+                await release_cleanup.wait()
+                raise
+        second_started.set()
+
+    d._process_queued_message = fake_process
+    await d.enqueue_message(1, "first")
+    await asyncio.wait_for(first_started.wait(), 1)
+    await d.enqueue_message(1, "second")
+    await asyncio.wait_for(cleanup_started.wait(), 1)
+    await asyncio.sleep(0)
+    assert not second_started.is_set()
+
+    release_cleanup.set()
+    await asyncio.wait_for(second_started.wait(), 1)
+    worker = d._task_queue_workers.get(1)
+    if worker is not None:
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
 
 
 # === Instance contention: queued-message must not steal a claimed instance (task #676) ===
@@ -3641,6 +4293,138 @@ async def test_pause_wins_after_queued_resume_preparation_before_launch(
 
 
 @pytest.mark.asyncio
+async def test_task_status_publication_fence_rejects_reclaimed_generation(
+    db_factory,
+):
+    """A committed newer retry wins before an old status event is published."""
+
+    d = _make_dispatcher(db_factory)
+    async with db_factory() as db:
+        task = Task(title="publication-race", status="completed")
+        db.add(task)
+        await db.commit()
+        await db.refresh(task)
+        task_id = task.id
+        old_generation = d._task_status_generation(task)
+
+    original_execute = AsyncSession.execute
+    injected = False
+
+    async def execute_after_reclaim(session, statement, *args, **kwargs):
+        nonlocal injected
+        if (
+            not injected
+            and getattr(getattr(statement, "table", None), "name", None)
+            == "tasks"
+        ):
+            injected = True
+            await original_execute(
+                session,
+                update(Task)
+                .where(Task.id == task_id)
+                .values(
+                    status="pending",
+                    retry_count=old_generation.retry_count + 1,
+                    instance_id=None,
+                    started_at=None,
+                    completed_at=None,
+                ),
+            )
+            # Model the competing retry committing before the publication
+            # fence obtains its row lock.
+            await session.commit()
+        return await original_execute(
+            session, statement, *args, **kwargs
+        )
+
+    with patch.object(
+        AsyncSession,
+        "execute",
+        new=execute_after_reclaim,
+    ):
+        published = await d._broadcast_task_status_generation(
+            old_generation
+        )
+
+    assert injected
+    assert published is False
+    d.broadcaster.broadcast.assert_not_awaited()
+    async with db_factory() as db:
+        current = await db.get(Task, task_id)
+        assert current.status == "pending"
+        assert current.retry_count == old_generation.retry_count + 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["retry", "complete", "fail"])
+async def test_owned_mode_publication_cannot_cross_new_generation(
+    db_factory,
+    operation,
+):
+    """Every mode terminal/retry helper publishes only its resulting claim."""
+
+    d = _make_dispatcher(db_factory)
+    async with db_factory() as db:
+        instance = Instance(name=f"mode-{operation}")
+        db.add(instance)
+        await db.flush()
+        task = Task(
+            title=f"mode-{operation}",
+            status="executing",
+            instance_id=instance.id,
+            retry_count=0,
+            max_retries=2,
+        )
+        db.add(task)
+        await db.commit()
+        task_id, instance_id = task.id, instance.id
+        lifecycle_generation = d._task_lifecycle_generation(task)
+
+    real_publish = d._broadcast_task_status_generation
+
+    async def reclaim_before_publication(generation, **kwargs):
+        async with db_factory() as db:
+            await db.execute(
+                update(Task)
+                .where(Task.id == task_id)
+                .values(
+                    status="in_progress",
+                    retry_count=Task.retry_count + 1,
+                    instance_id=instance_id,
+                    completed_at=None,
+                )
+            )
+            await db.commit()
+        return await real_publish(generation, **kwargs)
+
+    d._broadcast_task_status_generation = AsyncMock(
+        side_effect=reclaim_before_publication
+    )
+
+    if operation == "retry":
+        changed = await d._retry_or_fail_mode_task(
+            lifecycle_generation,
+            "retry",
+        )
+        assert changed == "pending"
+    elif operation == "complete":
+        assert await d._complete_owned_task(lifecycle_generation)
+    else:
+        assert await d._fail_owned_task(
+            lifecycle_generation,
+            "failed",
+        )
+
+    async with db_factory() as db:
+        current = await db.get(Task, task_id)
+        assert current.status == "in_progress"
+        expected_retry_count = 2 if operation == "retry" else 1
+        assert current.retry_count == expected_retry_count
+        assert current.instance_id == instance_id
+    d.broadcaster.broadcast.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_queued_codex_busy_launch_rolls_back_status_and_temp_skills(
     db_factory, monkeypatch,
 ):
@@ -3666,12 +4450,194 @@ async def test_queued_codex_busy_launch_rolls_back_status_and_temp_skills(
     with pytest.raises(CodexAppServerBusyError):
         await d._process_queued_message(task_id, msg)
 
+    routing_generation = (
+        d._resolve_resume_config_dir.await_args.kwargs[
+            "expected_generation"
+        ]
+    )
+    assert routing_generation.task_id == task_id
+    assert routing_generation.status == "completed"
+
     async with db_factory() as db:
         task = await db.get(Task, task_id)
         assert task.status == "completed"
         assert task.enabled_skills == {"base": True}
     assert msg.source_logged is True
     assert not d._launching_instances
+
+
+@pytest.mark.asyncio
+async def test_uncertain_queued_launch_cannot_fail_new_retry_generation(
+    db_factory,
+    monkeypatch,
+):
+    """A launch error belongs only to the exact executing claim it started."""
+
+    d, _id1, _id2, task_id, msg = await _setup_queued_msg_two_idle(
+        db_factory, monkeypatch
+    )
+
+    async def replace_claim_then_fail(**kwargs):
+        inst_id = kwargs["instance_id"]
+        d.instance_manager.processes[inst_id] = MagicMock(returncode=None)
+        async with db_factory() as db:
+            await db.execute(
+                update(Task)
+                .where(Task.id == task_id)
+                .values(retry_count=Task.retry_count + 1)
+            )
+            await db.commit()
+        raise RuntimeError("spawn result uncertain")
+
+    d.instance_manager.launch = AsyncMock(
+        side_effect=replace_claim_then_fail
+    )
+
+    with pytest.raises(RuntimeError, match="spawn result uncertain"):
+        await d._process_queued_message(task_id, msg)
+
+    async with db_factory() as db:
+        current = await db.get(Task, task_id)
+        assert current.status == "executing"
+        assert current.retry_count == 1
+    assert not any(
+        call.args[1].get("new_status") == "failed"
+        for call in d.broadcaster.broadcast.await_args_list
+        if len(call.args) > 1 and isinstance(call.args[1], dict)
+    )
+
+
+@pytest.mark.asyncio
+async def test_pty_finalizer_cannot_complete_or_exit_new_retry_generation(
+    db_factory,
+    monkeypatch,
+):
+    """Old PTY finally events are suppressed after a concurrent retry."""
+
+    d, _id1, _id2, task_id, msg = await _setup_queued_msg_two_idle(
+        db_factory, monkeypatch
+    )
+    d.instance_manager.pty_mode_enabled = True
+
+    async def replace_claim_before_finally(**_kwargs):
+        async with db_factory() as db:
+            await db.execute(
+                update(Task)
+                .where(Task.id == task_id)
+                .values(retry_count=Task.retry_count + 1)
+            )
+            await db.commit()
+
+    d.instance_manager.launch = AsyncMock(
+        side_effect=replace_claim_before_finally
+    )
+
+    await d._process_queued_message(task_id, msg)
+
+    async with db_factory() as db:
+        current = await db.get(Task, task_id)
+        assert current.status == "executing"
+        assert current.retry_count == 1
+    payloads = [
+        call.args[1]
+        for call in d.broadcaster.broadcast.await_args_list
+        if len(call.args) > 1 and isinstance(call.args[1], dict)
+    ]
+    assert not any(
+        payload.get("new_status") == "completed"
+        for payload in payloads
+    )
+    assert not any(
+        payload.get("event_type") == "process_exit"
+        for payload in payloads
+    )
+
+
+@pytest.mark.asyncio
+async def test_cancelled_queued_pty_launch_restores_skills_without_completion(
+    db_factory,
+    monkeypatch,
+):
+    d, _id1, _id2, task_id, msg = await _setup_queued_msg_two_idle(
+        db_factory, monkeypatch
+    )
+    d.instance_manager.pty_mode_enabled = True
+    msg.command_skills = {"temporary": True}
+    launch_started = asyncio.Event()
+    never_finish = asyncio.Event()
+
+    async def blocked_launch(**_kwargs):
+        launch_started.set()
+        await never_finish.wait()
+
+    d.instance_manager.launch = AsyncMock(side_effect=blocked_launch)
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+        task.status = "completed"
+        task.enabled_skills = {"base": True}
+        await db.commit()
+
+    queued_turn = asyncio.create_task(
+        d._process_queued_message(task_id, msg)
+    )
+    await asyncio.wait_for(launch_started.wait(), timeout=1)
+    queued_turn.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await queued_turn
+
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+        assert task.status == "executing"
+        assert task.enabled_skills == {"base": True}
+    assert not d._launching_instances
+    assert not d._instance_claim_owners
+    assert not d._chat_launch_admission_lock.locked()
+    payloads = [
+        call.args[1]
+        for call in d.broadcaster.broadcast.await_args_list
+        if len(call.args) > 1 and isinstance(call.args[1], dict)
+    ]
+    assert not any(
+        payload.get("new_status") == "completed"
+        or payload.get("event_type") == "process_exit"
+        for payload in payloads
+    )
+
+
+@pytest.mark.asyncio
+async def test_queued_pty_wait_failure_never_synthesizes_success(
+    db_factory,
+    monkeypatch,
+):
+    d, _id1, _id2, task_id, msg = await _setup_queued_msg_two_idle(
+        db_factory, monkeypatch
+    )
+    d.instance_manager.pty_mode_enabled = True
+
+    async def launch_with_process(**kwargs):
+        d.instance_manager.processes[kwargs["instance_id"]] = MagicMock(
+            returncode=None
+        )
+
+    d.instance_manager.launch = AsyncMock(side_effect=launch_with_process)
+    d._wait_process = AsyncMock(side_effect=RuntimeError("turn wait failed"))
+
+    with pytest.raises(RuntimeError, match="turn wait failed"):
+        await d._process_queued_message(task_id, msg)
+
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+        assert task.status == "executing"
+    payloads = [
+        call.args[1]
+        for call in d.broadcaster.broadcast.await_args_list
+        if len(call.args) > 1 and isinstance(call.args[1], dict)
+    ]
+    assert not any(
+        payload.get("new_status") == "completed"
+        or payload.get("event_type") == "process_exit"
+        for payload in payloads
+    )
 
 
 @pytest.mark.asyncio
@@ -3795,21 +4761,18 @@ async def test_concurrent_task_consumers_reserve_distinct_idle_instances(
         idle_ids = {inst1.id, inst2.id}
         task_ids = (task1.id, task2.id)
 
-    # Force both old-code consumers to pause after SELECT and before its late
-    # set.add(). With atomic reservation, the second SELECT already excludes
-    # the first consumer's instance, so the launch IDs stay distinct.
-    both_resolving = asyncio.Event()
-    resolve_count = 0
+    d._resolve_resume_config_dir = AsyncMock(return_value=None)
 
-    async def resolve_config(*_args, **_kwargs):
-        nonlocal resolve_count
-        resolve_count += 1
-        if resolve_count == 2:
-            both_resolving.set()
-        await both_resolving.wait()
-        return None
+    async def launch_and_persist_slot(**kwargs):
+        async with db_factory() as db:
+            await db.execute(
+                update(Instance)
+                .where(Instance.id == kwargs["instance_id"])
+                .values(status="running")
+            )
+            await db.commit()
 
-    d._resolve_resume_config_dir = AsyncMock(side_effect=resolve_config)
+    d.instance_manager.launch = AsyncMock(side_effect=launch_and_persist_slot)
     msgs = [
         QueuedMessage(
             priority=PRIORITY_USER,
@@ -3838,6 +4801,285 @@ async def test_concurrent_task_consumers_reserve_distinct_idle_instances(
 
 
 @pytest.mark.asyncio
+async def test_queued_busy_detects_terminal_parent_consumer_and_fresh_lifecycle(
+    db_factory,
+):
+    """Busy is exact durable owner + process/consumer/fresh lifecycle state."""
+    d = _make_dispatcher(db_factory)
+    async with db_factory() as db:
+        task = Task(
+            title="busy owner",
+            description="d",
+            status="executing",
+            session_id="session-1",
+        )
+        db.add(task)
+        await db.flush()
+        instance = Instance(
+            name="busy-owner",
+            status="running",
+            pid=99123,
+            current_task_id=task.id,
+        )
+        db.add(instance)
+        await db.flush()
+        task.instance_id = instance.id
+        await db.commit()
+        task_id, instance_id = task.id, instance.id
+
+    terminal_parent = MagicMock(returncode=0)
+    consumer = asyncio.create_task(asyncio.Event().wait())
+    d.instance_manager.processes[instance_id] = terminal_parent
+    d.instance_manager._tasks[instance_id] = consumer
+    d.instance_manager._consumer_records = {
+        instance_id: MagicMock(
+            process=terminal_parent,
+            task=consumer,
+            task_id=task_id,
+        )
+    }
+    try:
+        async with db_factory() as db:
+            assert await d._queued_task_has_live_generation(db, task_id)
+
+        consumer.cancel()
+        await asyncio.gather(consumer, return_exceptions=True)
+        d.instance_manager._tasks.pop(instance_id, None)
+        d.instance_manager.processes.pop(instance_id, None)
+        d.instance_manager._consumer_records.pop(instance_id, None)
+
+        lifecycle = asyncio.create_task(asyncio.Event().wait())
+        d._running_tasks[instance_id] = lifecycle
+        try:
+            async with db_factory() as db:
+                assert await d._queued_task_has_live_generation(db, task_id)
+        finally:
+            lifecycle.cancel()
+            await asyncio.gather(lifecycle, return_exceptions=True)
+    finally:
+        if not consumer.done():
+            consumer.cancel()
+            await asyncio.gather(consumer, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_queued_message_waits_for_terminal_output_consumer(
+    db_factory, monkeypatch,
+):
+    """A parent exit cannot let the next native-session message overlap cleanup."""
+    d, id1, _id2, task_id, msg = await _setup_queued_msg_two_idle(
+        db_factory, monkeypatch
+    )
+    release_consumer = asyncio.Event()
+    terminal_parent = MagicMock(returncode=0)
+    consumer = asyncio.create_task(release_consumer.wait())
+    d.instance_manager.processes[id1] = terminal_parent
+    d.instance_manager._tasks[id1] = consumer
+    d.instance_manager._consumer_records = {
+        id1: MagicMock(
+            process=terminal_parent,
+            task=consumer,
+            task_id=task_id,
+        )
+    }
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+        instance = await db.get(Instance, id1)
+        task.instance_id = id1
+        # The consumer has already cleared reusable-slot metadata but still
+        # owns final rollout/account bookkeeping for this exact task.
+        instance.status = "idle"
+        instance.pid = None
+        instance.current_task_id = None
+        await db.commit()
+
+    real_sleep = asyncio.sleep
+
+    async def fast_sleep(delay):
+        await real_sleep(0.01 if delay == 2 else 0)
+
+    monkeypatch.setattr("backend.services.dispatcher.asyncio.sleep", fast_sleep)
+    queued = asyncio.create_task(d._process_queued_message(task_id, msg))
+    try:
+        await real_sleep(0.05)
+        d.instance_manager.launch.assert_not_awaited()
+        release_consumer.set()
+        await consumer
+        d.instance_manager._tasks.pop(id1, None)
+        d.instance_manager.processes.pop(id1, None)
+        d.instance_manager._consumer_records.pop(id1, None)
+        await asyncio.wait_for(queued, timeout=1)
+    finally:
+        if not queued.done():
+            queued.cancel()
+            await asyncio.gather(queued, return_exceptions=True)
+        if not consumer.done():
+            consumer.cancel()
+            await asyncio.gather(consumer, return_exceptions=True)
+
+    d.instance_manager.launch.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_queued_owner_cas_race_retries_exact_message(
+    db_factory, monkeypatch,
+):
+    """Owner drift after refresh loses the CAS and requeues the same object."""
+    from sqlalchemy import update
+    from backend.services.dispatcher import QueuedMessagePrelaunchError
+
+    d, _id1, id2, task_id, msg = await _setup_queued_msg_two_idle(
+        db_factory, monkeypatch
+    )
+    original_execute = AsyncSession.execute
+    injected = False
+    attempts = 0
+    launched = asyncio.Event()
+
+    original_process = d._process_queued_message
+
+    async def counted_process(current_task_id, current_msg):
+        nonlocal attempts
+        attempts += 1
+        try:
+            return await original_process(current_task_id, current_msg)
+        except QueuedMessagePrelaunchError:
+            raise
+
+    async def launch_once(**_kwargs):
+        launched.set()
+
+    async def execute_with_owner_race(session, statement, *args, **kwargs):
+        nonlocal injected
+        table = getattr(statement, "table", None)
+        if (
+            not injected
+            and getattr(table, "name", None) == "tasks"
+        ):
+            injected = True
+            await original_execute(
+                session,
+                update(Task)
+                .where(Task.id == task_id)
+                .values(instance_id=id2),
+            )
+        return await original_execute(session, statement, *args, **kwargs)
+
+    d._process_queued_message = counted_process
+    d.instance_manager.launch = AsyncMock(side_effect=launch_once)
+    q = d._get_task_queue(task_id)
+    await q.put(msg)
+    with (
+        patch.object(AsyncSession, "execute", new=execute_with_owner_race),
+        patch("backend.services.dispatcher.CODEX_ROUTING_RETRY_DELAY", 0),
+    ):
+        worker = asyncio.create_task(d._task_queue_consumer(task_id))
+        d._task_queue_workers[task_id] = worker
+        try:
+            await asyncio.wait_for(launched.wait(), timeout=2)
+        finally:
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+
+    assert injected
+    assert attempts >= 2
+    assert d.instance_manager.launch.await_count == 1
+    assert msg.prompt == "hi"
+
+
+@pytest.mark.asyncio
+async def test_queued_recovery_cas_cannot_revive_concurrent_cancel(
+    db_factory, monkeypatch,
+):
+    import backend.api.tasks as tasks_mod
+    from sqlalchemy import update
+    from backend.services.dispatcher import QueuedMessagePrelaunchError
+
+    d, _id1, _id2, task_id, msg = await _setup_queued_msg_two_idle(
+        db_factory, monkeypatch
+    )
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+        task.status = "failed"
+        task.last_cwd = "/repo"
+        await db.commit()
+
+    async def cancel_during_clone(source_task_id, db):
+        assert source_task_id == task_id
+        await db.execute(
+            update(Task)
+            .where(Task.id == task_id)
+            .values(status="cancelled", retry_count=1)
+        )
+        await db.commit()
+        return {"session_id": "cloned-but-superseded", "last_cwd": "/repo"}
+
+    monkeypatch.setattr(tasks_mod, "_clone_session", cancel_during_clone)
+    with pytest.raises(QueuedMessagePrelaunchError, match="recovery generation"):
+        await d._process_queued_message(task_id, msg)
+
+    d.instance_manager.launch.assert_not_awaited()
+    assert msg.prompt == "hi"
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+        assert task.status == "cancelled"
+        assert task.retry_count == 1
+        assert task.session_id == "sess-1"
+
+
+@pytest.mark.asyncio
+async def test_queued_message_never_launches_locally_after_worker_migration(
+    db_factory, monkeypatch,
+):
+    from backend.models.log_entry import LogEntry
+
+    d, _id1, _id2, task_id, msg = await _setup_queued_msg_two_idle(
+        db_factory, monkeypatch
+    )
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+        task.worker_id = 77
+        await db.commit()
+
+    await d._process_queued_message(task_id, msg)
+
+    d.instance_manager.launch.assert_not_awaited()
+    async with db_factory() as db:
+        notices = (
+            await db.execute(
+                select(LogEntry).where(
+                    LogEntry.task_id == task_id,
+                    LogEntry.event_type == "system_event",
+                )
+            )
+        ).scalars().all()
+    assert any("迁移到远程" in (notice.content or "") for notice in notices)
+
+
+@pytest.mark.asyncio
+async def test_requeued_compaction_message_can_start_without_old_session(
+    db_factory, monkeypatch,
+):
+    d, _id1, _id2, task_id, msg = await _setup_queued_msg_two_idle(
+        db_factory, monkeypatch
+    )
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+        task.session_id = None
+        task.status = "in_progress"
+        await db.commit()
+    msg.allow_new_session = True
+    msg.prompt = "[summary]\n\n[new]\ncontinue"
+
+    await d._process_queued_message(task_id, msg)
+
+    d.instance_manager.launch.assert_awaited_once()
+    assert (
+        d.instance_manager.launch.await_args.kwargs["resume_session_id"] is None
+    )
+
+
+@pytest.mark.asyncio
 async def test_failed_codex_task_reuses_present_native_thread(db_factory, monkeypatch):
     """A failed turn must not clone/replace a valid Codex rollout."""
     import backend.api.tasks as tasks_mod
@@ -3857,6 +5099,986 @@ async def test_failed_codex_task_reuses_present_native_thread(db_factory, monkey
 
     clone.assert_not_awaited()
     assert d.instance_manager.launch.await_args.kwargs["resume_session_id"] == "sess-1"
+
+
+@pytest.mark.asyncio
+async def test_idle_instance_reservation_is_atomic_across_queued_consumers(
+    db_factory,
+):
+    d = _make_dispatcher(db_factory)
+    async with db_factory() as db:
+        db.add(Instance(name="only-slot"))
+        await db.commit()
+
+    async def reserve():
+        async with db_factory() as db:
+            return await d._reserve_idle_instance(db)
+
+    first, second = await asyncio.gather(
+        reserve(), reserve()
+    )
+
+    winners = [item for item in (first, second) if item[0] is not None]
+    assert len(winners) == 1
+    instance, token = winners[0]
+    assert d._launching_instances == {instance.id}
+    await d._release_instance_reservation(instance.id, token)
+    assert not d._launching_instances
+
+
+@pytest.mark.asyncio
+async def test_idle_allocator_enforces_lowered_cap_without_killing_running(
+    db_factory,
+):
+    import backend.services.dispatcher as dispatcher_mod
+
+    d = _make_dispatcher(db_factory)
+    async with db_factory() as db:
+        running = Instance(name="running", status="running", pid=123)
+        db.add(running)
+        db.add_all([
+            Instance(name="legacy-idle-1"),
+            Instance(name="legacy-idle-2"),
+        ])
+        await db.commit()
+        await db.refresh(running)
+
+    with patch.object(dispatcher_mod.settings, "max_concurrent_instances", 1):
+        async with db_factory() as db:
+            assert await d._reserve_idle_instance(db) == (None, None)
+
+    async with db_factory() as db:
+        assert (await db.get(Instance, running.id)).status == "running"
+        assert (await db.get(Instance, running.id)).pid == 123
+
+
+@pytest.mark.asyncio
+async def test_active_local_instance_ids_excludes_distributed_worker_keys(
+    db_factory,
+):
+    """Worker string keys must never reach integer Instance SQL predicates."""
+    d = _make_dispatcher(db_factory)
+    local = asyncio.get_running_loop().create_future()
+    remote = asyncio.get_running_loop().create_future()
+    d._running_tasks[2] = local
+    d._running_tasks["worker-99"] = remote
+    try:
+        assert d._active_local_instance_ids() == {2}
+    finally:
+        local.cancel()
+        remote.cancel()
+
+
+@pytest.mark.asyncio
+async def test_abort_task_queue_cancels_message_already_removed_by_get(db_factory):
+    """stop-session cannot let an in-flight admission launch afterwards."""
+    d = _make_dispatcher(db_factory)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    reached_launch = asyncio.Event()
+
+    async def paused_process(_task_id, _msg):
+        started.set()
+        await release.wait()
+        reached_launch.set()
+
+    d._process_queued_message = paused_process
+    await d.enqueue_message(11, "exact user text", source="user")
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    cleared = await d.abort_task_queue(11)
+    release.set()
+    await asyncio.sleep(0)
+
+    assert cleared == 0  # item was already held by the consumer
+    assert not reached_launch.is_set()
+    assert 11 not in d._task_queue_workers
+
+
+@pytest.mark.asyncio
+async def test_abort_task_queue_timeout_retains_worker_evidence(db_factory):
+    from backend.services.dispatcher import TaskQueueAbortTimeoutError
+
+    d = _make_dispatcher(db_factory)
+    release = asyncio.Event()
+
+    async def ignores_first_cancellation():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await release.wait()
+
+    worker = asyncio.create_task(ignores_first_cancellation())
+    d._task_queue_workers[12] = worker
+    await asyncio.sleep(0)
+    try:
+        with pytest.raises(TaskQueueAbortTimeoutError, match="did not stop"):
+            await d.abort_task_queue(12, timeout=0.01)
+        assert d._task_queue_workers[12] is worker
+        assert not worker.done()
+    finally:
+        release.set()
+        await asyncio.wait_for(worker, timeout=1)
+        if d._task_queue_workers.get(12) is worker:
+            d._task_queue_workers.pop(12, None)
+
+
+@pytest.mark.asyncio
+async def test_capacity_race_requeues_exact_queued_message(db_factory):
+    from backend.services.dispatcher import (
+        InstanceAlreadyRunningError,
+        QueuedMessage,
+        PRIORITY_USER,
+    )
+    import time
+
+    d = _make_dispatcher(db_factory)
+    msg = QueuedMessage(
+        priority=PRIORITY_USER,
+        timestamp=time.monotonic(),
+        prompt="do not drop this exact text",
+        source="user",
+    )
+    q = d._get_task_queue(33)
+    await q.put(msg)
+    seen: list[QueuedMessage] = []
+    processed = asyncio.Event()
+
+    async def race_then_succeed(_task_id, current):
+        seen.append(current)
+        if len(seen) == 1:
+            raise InstanceAlreadyRunningError("slot was claimed")
+        processed.set()
+
+    d._process_queued_message = race_then_succeed
+    with patch("backend.services.dispatcher.CODEX_ROUTING_RETRY_DELAY", 0):
+        worker = asyncio.create_task(d._task_queue_consumer(33))
+        d._task_queue_workers[33] = worker
+        await asyncio.wait_for(processed.wait(), timeout=1)
+        worker.cancel()
+        await asyncio.gather(worker, return_exceptions=True)
+
+    assert seen == [msg, msg]
+    assert seen[1].prompt == "do not drop this exact text"
+
+
+@pytest.mark.asyncio
+async def test_fresh_lifecycle_capacity_race_releases_task_claim(db_factory):
+    from backend.services.dispatcher import InstanceAlreadyRunningError
+
+    d = _make_dispatcher(db_factory)
+    d.instance_manager.launch = AsyncMock(
+        side_effect=InstanceAlreadyRunningError("slot already claimed")
+    )
+    d.instance_manager._instance_lifecycle_lock = MagicMock(
+        return_value=asyncio.Lock()
+    )
+    async with db_factory() as db:
+        inst = Instance(name="race-slot")
+        task = Task(title="race", description="d", status="pending")
+        db.add_all([inst, task])
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id, task_id, task_obj = inst.id, task.id, task
+
+    await _run_claimed_lifecycle(d, db_factory, inst_id, task_obj)
+
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+        assert task.status == "pending"
+        assert task.instance_id is None
+        assert task.retry_count == 0
+
+
+@pytest.mark.asyncio
+async def test_superseded_lifecycle_cannot_reclaim_cancelled_then_retried_task(
+    db_factory,
+):
+    """An old coroutine must not launch after cancel → retry clears its claim."""
+    from backend.services.task_queue import TaskQueue
+
+    d = _make_dispatcher(db_factory)
+    lifecycle_entered = asyncio.Event()
+    release_lifecycle = asyncio.Event()
+
+    async def hold_initial_broadcast(_channel, payload):
+        if (
+            payload.get("event") == "status_change"
+            and payload.get("old_status") == "pending"
+            and payload.get("new_status") == "in_progress"
+        ):
+            lifecycle_entered.set()
+            await release_lifecycle.wait()
+
+    d.broadcaster.broadcast.side_effect = hold_initial_broadcast
+    async with db_factory() as db:
+        instance = Instance(name="superseded-slot")
+        task = Task(
+            title="superseded",
+            description="d",
+            status="in_progress",
+        )
+        db.add_all([instance, task])
+        await db.flush()
+        task.instance_id = instance.id
+        await db.commit()
+        instance_id, task_id, task_obj = instance.id, task.id, task
+
+    lifecycle = asyncio.create_task(
+        d._run_task_lifecycle(instance_id, task_obj)
+    )
+    await asyncio.wait_for(lifecycle_entered.wait(), timeout=1)
+    async with db_factory() as db:
+        queue = TaskQueue(db)
+        assert await queue.cancel(task_id) is not None
+        assert await queue.retry(task_id) is not None
+
+    release_lifecycle.set()
+    await asyncio.wait_for(lifecycle, timeout=1)
+
+    d.instance_manager.launch.assert_not_awaited()
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+        assert task.status == "pending"
+        assert task.instance_id is None
+
+
+@pytest.mark.asyncio
+async def test_stale_mode_entry_cannot_reclaim_cancelled_then_retried_task(
+    db_factory,
+):
+    from backend.services.task_queue import TaskQueue
+
+    d = _make_dispatcher(db_factory)
+    async with db_factory() as db:
+        instance = Instance(name="stale-mode-slot")
+        task = Task(
+            title="stale mode",
+            description="d",
+            mode="loop",
+            status="in_progress",
+        )
+        db.add_all([instance, task])
+        await db.flush()
+        task.instance_id = instance.id
+        await db.commit()
+        instance_id, task_id = instance.id, task.id
+        lifecycle_generation = d._task_lifecycle_generation(task)
+
+    async with db_factory() as db:
+        queue = TaskQueue(db)
+        assert await queue.cancel(task_id) is not None
+        assert await queue.retry(task_id) is not None
+
+    assert not await d._ensure_owned_executing(lifecycle_generation)
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+        assert task.status == "pending"
+        assert task.instance_id is None
+
+
+@pytest.mark.asyncio
+async def test_old_lifecycle_cannot_finalize_same_task_same_slot_reclaim(
+    db_factory,
+):
+    """ensure/retry/complete/fail all reject cancel->retry->same-slot ABA."""
+
+    from datetime import datetime
+
+    d = _make_dispatcher(db_factory)
+    async with db_factory() as db:
+        instance = Instance(name="same-slot-finalizers")
+        db.add(instance)
+        await db.flush()
+        task = Task(
+            title="old-finalizer",
+            status="executing",
+            retry_count=0,
+            max_retries=2,
+            instance_id=instance.id,
+        )
+        db.add(task)
+        await db.commit()
+        old_generation = d._task_lifecycle_generation(task)
+        replacement_started_at = datetime.utcnow()
+        await db.execute(
+            update(Task)
+            .where(Task.id == task.id)
+            .values(
+                retry_count=1,
+                started_at=replacement_started_at,
+            )
+        )
+        await db.commit()
+        task_id = task.id
+
+    assert not await d._ensure_owned_executing(old_generation)
+    assert (
+        await d._retry_or_fail_mode_task(old_generation, "stale retry")
+        is None
+    )
+    assert not await d._complete_owned_task(
+        old_generation,
+        count_completion=True,
+    )
+    assert not await d._fail_owned_task(old_generation, "stale failure")
+
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+        instance = await db.get(Instance, old_generation.instance_id)
+        assert task.status == "executing"
+        assert task.retry_count == 1
+        assert task.started_at == replacement_started_at
+        assert instance.total_tasks_completed == 0
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_double_cancel_waits_for_reset_before_registry_pop(
+    db_factory,
+):
+    d = _make_dispatcher(db_factory)
+    async with db_factory() as db:
+        instance = Instance(name="shielded-final-reset")
+        task = Task(
+            title="shielded-final-reset",
+            description="done",
+            target_repo="/repo",
+        )
+        db.add_all([instance, task])
+        await db.commit()
+        await db.refresh(instance)
+        await db.refresh(task)
+        await db.execute(
+            update(Task)
+            .where(Task.id == task.id)
+            .values(status="in_progress", instance_id=instance.id)
+        )
+        await db.commit()
+        task.status = "in_progress"
+        task.instance_id = instance.id
+        instance_id = instance.id
+
+    process = MagicMock(returncode=0, wait=AsyncMock(return_value=0))
+    d.instance_manager.processes[instance_id] = process
+    reset_entered = asyncio.Event()
+    release_reset = asyncio.Event()
+
+    async def blocked_reset(*_args, **_kwargs):
+        reset_entered.set()
+        await release_reset.wait()
+
+    d._reset_instance_if_stale = AsyncMock(side_effect=blocked_reset)
+    lifecycle = asyncio.create_task(
+        d._run_task_lifecycle(instance_id, task)
+    )
+    d._running_tasks[instance_id] = lifecycle
+    await asyncio.wait_for(reset_entered.wait(), timeout=1)
+
+    lifecycle.cancel()
+    await asyncio.sleep(0)
+    lifecycle.cancel()
+    await asyncio.sleep(0)
+    assert d._running_tasks.get(instance_id) is lifecycle
+
+    release_reset.set()
+    with pytest.raises(asyncio.CancelledError):
+        await lifecycle
+    assert instance_id not in d._running_tasks
+    d._reset_instance_if_stale.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_supersede_marker_blocks_all_lifecycle_finalizers(db_factory):
+    d = _make_dispatcher(db_factory)
+    async with db_factory() as db:
+        instance = Instance(name="superseded-finalizers")
+        db.add(instance)
+        await db.flush()
+        task = Task(
+            title="superseded-finalizers",
+            status="executing",
+            instance_id=instance.id,
+            metadata_={"pr_review_superseded": True},
+        )
+        db.add(task)
+        await db.commit()
+        generation = d._task_lifecycle_generation(task)
+        task_id = task.id
+
+    assert not await d._ensure_owned_executing(generation)
+    assert await d._retry_or_fail_mode_task(generation, "blocked") is None
+    assert not await d._complete_owned_task(generation)
+    assert not await d._fail_owned_task(generation, "blocked")
+    async with db_factory() as db:
+        assert (await db.get(Task, task_id)).status == "executing"
+
+
+@pytest.mark.asyncio
+async def test_stale_pr_failure_cannot_overwrite_superseded_review(db_factory):
+    from backend.models.pr_monitor import MonitoredRepo, PRReview
+
+    d = _make_dispatcher(db_factory)
+    async with db_factory() as db:
+        task = Task(title="old-review", metadata_={})
+        repo = MonitoredRepo(
+            repo_full_name="owner/repo-stale-failure",
+            webhook_secret="secret",
+        )
+        db.add_all([task, repo])
+        await db.flush()
+        review = PRReview(
+            repo_id=repo.id,
+            pr_number=7,
+            pr_title="old",
+            pr_author="author",
+            pr_url="https://example.test/pr/7",
+            task_id=task.id,
+            status="superseded",
+        )
+        db.add(review)
+        await db.flush()
+        task.metadata_ = {"pr_review_id": review.id}
+        await db.commit()
+        review_id = review.id
+
+    await d._handle_pr_review_failure(task, "late failure")
+
+    async with db_factory() as db:
+        review = await db.get(PRReview, review_id)
+        assert review.status == "superseded"
+        assert review.action_taken is None
+    d.broadcaster.broadcast.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_pause_preserves_live_lifecycle_and_process(
+    db_factory,
+):
+    """Runtime Stop is admission pause; the current turn finishes normally."""
+    d = _make_dispatcher(db_factory)
+    turn_started = asyncio.Event()
+    finish_turn = asyncio.Event()
+
+    class Process:
+        pid = 4321
+        returncode = None
+
+        async def wait(self):
+            turn_started.set()
+            await finish_turn.wait()
+            self.returncode = 0
+            return 0
+
+    process = Process()
+    async with db_factory() as db:
+        inst = Instance(name="pause-slot")
+        task = Task(title="pause-task", description="d", status="pending")
+        db.add_all([inst, task])
+        await db.commit()
+        await db.refresh(inst)
+        await db.refresh(task)
+        inst_id, task_id = inst.id, task.id
+        task.status = "in_progress"
+        task.instance_id = inst_id
+        await db.commit()
+        task_obj = task
+
+    d.instance_manager.processes[inst_id] = process
+    d.instance_manager._instance_lifecycle_lock = MagicMock(
+        return_value=asyncio.Lock()
+    )
+    lifecycle = asyncio.create_task(
+        d._run_task_lifecycle(inst_id, task_obj)
+    )
+    d._running_tasks[inst_id] = lifecycle
+    await asyncio.wait_for(turn_started.wait(), timeout=1)
+
+    d._running = True
+    d._dispatch_task = asyncio.create_task(asyncio.sleep(60))
+    d._curator_task = asyncio.create_task(asyncio.sleep(60))
+    d.instance_manager.stop = AsyncMock()
+    await d.stop()
+
+    assert not lifecycle.done()
+    assert d._running_tasks[inst_id] is lifecycle
+    assert process.returncode is None
+    d.instance_manager.stop.assert_not_awaited()
+
+    finish_turn.set()
+    await asyncio.wait_for(lifecycle, timeout=1)
+    assert inst_id not in d._running_tasks
+    async with db_factory() as db:
+        assert (await db.get(Task, task_id)).status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_pause_then_start_preserves_manager_owned_claim(db_factory):
+    """Restarting admission in-process must not recover or duplicate live work."""
+    d = _make_dispatcher(db_factory)
+    process = MagicMock(returncode=None, pid=777)
+    consumer = asyncio.create_task(asyncio.sleep(60))
+
+    async with db_factory() as db:
+        task = Task(title="live", description="d", status="executing")
+        db.add(task)
+        await db.flush()
+        inst = Instance(
+            name="live-slot",
+            status="running",
+            pid=777,
+            current_task_id=task.id,
+        )
+        db.add(inst)
+        await db.flush()
+        task.instance_id = inst.id
+        await db.commit()
+        inst_id, task_id = inst.id, task.id
+
+    d.instance_manager.processes[inst_id] = process
+    d.instance_manager._tasks[inst_id] = consumer
+    existing_lifecycle = asyncio.create_task(asyncio.sleep(60))
+    d._running_tasks[inst_id] = existing_lifecycle
+    d._running = True
+    d._dispatch_task = asyncio.create_task(asyncio.sleep(60))
+    d._curator_task = asyncio.create_task(asyncio.sleep(60))
+    await d.stop()
+
+    d._dispatch_loop = AsyncMock(side_effect=lambda: None)
+    d._curator_loop = AsyncMock(side_effect=lambda: None)
+    d._ensure_instances = AsyncMock()
+    await d.start()
+    await asyncio.sleep(0)
+
+    async with db_factory() as db:
+        assert (await db.get(Instance, inst_id)).status == "running"
+        task = await db.get(Task, task_id)
+        assert task.status == "executing"
+        assert task.instance_id == inst_id
+    assert d._running_tasks[inst_id] is existing_lifecycle
+
+    existing_lifecycle.cancel()
+    consumer.cancel()
+    await asyncio.gather(
+        existing_lifecycle, consumer, return_exceptions=True
+    )
+    await d.stop()
+
+
+@pytest.mark.asyncio
+async def test_start_cleanup_failure_rolls_back_running_and_is_retryable(
+    db_factory,
+):
+    d = _make_dispatcher(db_factory)
+    d._cleanup_stale_state = AsyncMock(
+        side_effect=[RuntimeError("temporary database failure"), None]
+    )
+    d._ensure_instances = AsyncMock()
+    d._dispatch_loop = AsyncMock()
+    d._curator_loop = AsyncMock()
+
+    with pytest.raises(RuntimeError, match="temporary database failure"):
+        await d.start()
+    assert d.is_running is False
+
+    await d.start()
+    await asyncio.sleep(0)
+    assert d.is_running is True
+    assert d._cleanup_stale_state.await_count == 2
+    await d.stop()
+
+
+@pytest.mark.asyncio
+async def test_start_reconciliation_fences_queued_chat_spawn(
+    db_factory, monkeypatch,
+):
+    """No queued child may spawn after cleanup's ownership snapshot."""
+    d, _id1, _id2, task_id, msg = await _setup_queued_msg_two_idle(
+        db_factory, monkeypatch
+    )
+    cleanup_started = asyncio.Event()
+    release_cleanup = asyncio.Event()
+    cleanup_finished = asyncio.Event()
+    launch_seen = asyncio.Event()
+
+    async def held_cleanup():
+        cleanup_started.set()
+        await release_cleanup.wait()
+        cleanup_finished.set()
+
+    async def launch_after_cleanup(**_kwargs):
+        assert cleanup_finished.is_set()
+        launch_seen.set()
+
+    d._cleanup_stale_state = AsyncMock(side_effect=held_cleanup)
+    d._ensure_instances = AsyncMock()
+    d._dispatch_loop = AsyncMock()
+    d._curator_loop = AsyncMock()
+    d.instance_manager.launch = AsyncMock(side_effect=launch_after_cleanup)
+
+    starter = asyncio.create_task(d.start())
+    queued = None
+    try:
+        await asyncio.wait_for(cleanup_started.wait(), timeout=1)
+        queued = asyncio.create_task(d._process_queued_message(task_id, msg))
+        await asyncio.sleep(0)
+        d.instance_manager.launch.assert_not_awaited()
+
+        release_cleanup.set()
+        await asyncio.wait_for(starter, timeout=1)
+        await asyncio.wait_for(queued, timeout=1)
+        assert launch_seen.is_set()
+    finally:
+        release_cleanup.set()
+        for task in (starter, queued):
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        if d.is_running:
+            await d.stop()
+
+
+@pytest.mark.asyncio
+async def test_start_waits_for_inflight_queued_admission_before_snapshot(
+    db_factory, monkeypatch,
+):
+    """An already-admitted queued spawn becomes visible before cleanup scans."""
+    d, _id1, _id2, task_id, msg = await _setup_queued_msg_two_idle(
+        db_factory, monkeypatch
+    )
+    routing_started = asyncio.Event()
+    release_routing = asyncio.Event()
+    launch_seen = asyncio.Event()
+    cleanup_seen = asyncio.Event()
+
+    async def held_routing(*_args, **_kwargs):
+        routing_started.set()
+        await release_routing.wait()
+        return None
+
+    async def launch_before_cleanup(**_kwargs):
+        launch_seen.set()
+
+    async def cleanup_after_launch():
+        assert launch_seen.is_set()
+        cleanup_seen.set()
+
+    d._resolve_resume_config_dir = AsyncMock(side_effect=held_routing)
+    d.instance_manager.launch = AsyncMock(side_effect=launch_before_cleanup)
+    d._cleanup_stale_state = AsyncMock(side_effect=cleanup_after_launch)
+    d._ensure_instances = AsyncMock()
+    d._dispatch_loop = AsyncMock()
+    d._curator_loop = AsyncMock()
+
+    queued = asyncio.create_task(d._process_queued_message(task_id, msg))
+    starter = None
+    try:
+        await asyncio.wait_for(routing_started.wait(), timeout=1)
+        starter = asyncio.create_task(d.start())
+        await asyncio.sleep(0)
+        d._cleanup_stale_state.assert_not_awaited()
+
+        release_routing.set()
+        await asyncio.wait_for(queued, timeout=1)
+        await asyncio.wait_for(starter, timeout=1)
+        assert cleanup_seen.is_set()
+    finally:
+        release_routing.set()
+        for task in (queued, starter):
+            if task is not None and not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        if d.is_running:
+            await d.stop()
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_shutdown_quiesces_before_reaping_generations(
+    db_factory,
+):
+    d = _make_dispatcher(db_factory)
+    d._running = True
+    d._dispatch_task = asyncio.create_task(asyncio.sleep(60))
+    d._curator_task = asyncio.create_task(asyncio.sleep(60))
+    lifecycle = asyncio.create_task(asyncio.sleep(60))
+    d._running_tasks[4] = lifecycle
+
+    queue_started = asyncio.Event()
+
+    async def held_message(_task_id, _msg):
+        queue_started.set()
+        await asyncio.sleep(60)
+
+    d._process_queued_message = held_message
+    await d.enqueue_message(22, "held")
+    await asyncio.wait_for(queue_started.wait(), timeout=1)
+
+    d.instance_manager.processes[4] = MagicMock(returncode=None)
+    async def stop_generation(instance_id, **_kwargs):
+        d.instance_manager.processes.pop(instance_id, None)
+        return True
+
+    d.instance_manager.stop = AsyncMock(side_effect=stop_generation)
+
+    await d.shutdown()
+
+    assert lifecycle.cancelled()
+    assert 22 not in d._task_queue_workers
+    d.instance_manager.stop.assert_awaited_once_with(
+        4,
+        expected_task_id=None,
+        expected_pid=None,
+        expected_started_at=None,
+        task_status="pending",
+        terminal_consumer_timeout=10,
+        consumer_cancel_timeout=5,
+    )
+    assert not d._running_tasks
+    with pytest.raises(RuntimeError, match="shutting down"):
+        await d.enqueue_message(22, "too late")
+    with pytest.raises(RuntimeError, match="shutting down"):
+        await d.start()
+
+
+@pytest.mark.asyncio
+async def test_dispatcher_stop_timeout_retains_producer_task(db_factory):
+    d = _make_dispatcher(db_factory)
+    d._running = True
+    release = asyncio.Event()
+
+    async def ignores_first_cancellation():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await release.wait()
+
+    producer = asyncio.create_task(ignores_first_cancellation())
+    d._dispatch_task = producer
+    await asyncio.sleep(0)
+    try:
+        with pytest.raises(RuntimeError, match="dispatch loop"):
+            await d.stop(timeout=0.01)
+        assert d._dispatch_task is producer
+        assert not producer.done()
+    finally:
+        release.set()
+        await asyncio.wait_for(producer, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_shutdown_queue_timeout_still_reaps_manager_generation(
+    db_factory,
+):
+    from backend.services.dispatcher import TaskQueueAbortTimeoutError
+
+    d = _make_dispatcher(db_factory)
+    d.stop = AsyncMock()
+    d._task_queue_workers = {10: MagicMock(), 11: MagicMock()}
+
+    async def abort(task_id):
+        if task_id == 10:
+            raise TaskQueueAbortTimeoutError("stubborn queue")
+        return 0
+
+    d.abort_task_queue = AsyncMock(side_effect=abort)
+    process = MagicMock(pid=8810, returncode=None)
+    d.instance_manager.processes[8] = process
+
+    async def reap(instance_id, **_kwargs):
+        assert instance_id == 8
+        process.returncode = -9
+        d.instance_manager.processes.pop(instance_id, None)
+        return True
+
+    d.instance_manager.stop = AsyncMock(side_effect=reap)
+    d.instance_manager._generation_reap_confirmed = MagicMock(
+        side_effect=lambda _instance_id, candidate: (
+            candidate.returncode is not None
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="queue cleanup failed"):
+        await d.shutdown()
+
+    assert d.abort_task_queue.await_count == 2
+    d.instance_manager.stop.assert_awaited_once()
+    assert 8 not in d.instance_manager.processes
+
+
+@pytest.mark.asyncio
+async def test_shutdown_lifecycle_timeout_still_reaps_exact_generation(
+    db_factory, monkeypatch
+):
+    d = _make_dispatcher(db_factory)
+    d.stop = AsyncMock()
+    release = asyncio.Event()
+
+    async def ignores_first_cancellation():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await release.wait()
+
+    lifecycle = asyncio.create_task(ignores_first_cancellation())
+    d._running_tasks[9] = lifecycle
+    process = MagicMock(pid=9909, returncode=None)
+    d.instance_manager.processes[9] = process
+
+    async def reap(instance_id, **_kwargs):
+        assert instance_id == 9
+        process.returncode = -9
+        d.instance_manager.processes.pop(instance_id, None)
+        return True
+
+    d.instance_manager.stop = AsyncMock(side_effect=reap)
+    d.instance_manager._generation_reap_confirmed = MagicMock(
+        side_effect=lambda _instance_id, candidate: (
+            candidate.returncode is not None
+        )
+    )
+    monkeypatch.setattr(
+        "backend.services.dispatcher.SHUTDOWN_LIFECYCLE_CANCEL_TIMEOUT",
+        0.01,
+    )
+    await asyncio.sleep(0)
+    try:
+        with pytest.raises(RuntimeError, match="ignored cancellation"):
+            await d.shutdown()
+        d.instance_manager.stop.assert_awaited_once()
+        assert 9 not in d.instance_manager.processes
+        assert d._running_tasks[9] is lifecycle
+    finally:
+        release.set()
+        await asyncio.wait_for(lifecycle, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_shutdown_returns_process_free_prelaunch_claim_to_pending(
+    db_factory,
+):
+    d = _make_dispatcher(db_factory)
+    routing_started = asyncio.Event()
+
+    async def hold_routing(*_args, **_kwargs):
+        routing_started.set()
+        await asyncio.sleep(60)
+
+    d._resolve_resume_config_dir = AsyncMock(side_effect=hold_routing)
+    async with db_factory() as db:
+        instance = Instance(name="prelaunch-shutdown")
+        task = Task(
+            title="prelaunch",
+            description="d",
+            status="in_progress",
+        )
+        db.add_all([instance, task])
+        await db.flush()
+        task.instance_id = instance.id
+        await db.commit()
+        instance_id, task_id, task_obj = instance.id, task.id, task
+
+    lifecycle = asyncio.create_task(
+        d._run_task_lifecycle(instance_id, task_obj)
+    )
+    d._running_tasks[instance_id] = lifecycle
+    await asyncio.wait_for(routing_started.wait(), timeout=1)
+
+    await d.shutdown()
+
+    assert lifecycle.cancelled()
+    d.instance_manager.launch.assert_not_awaited()
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+        assert task.status == "pending"
+        assert task.instance_id is None
+
+
+@pytest.mark.asyncio
+async def test_shutdown_failed_reap_preserves_live_task_owner(db_factory):
+    """A failed stop must never expose a live generation as pending work."""
+    d = _make_dispatcher(db_factory)
+    async with db_factory() as db:
+        task = Task(title="live shutdown", description="d", status="executing")
+        db.add(task)
+        await db.flush()
+        instance = Instance(
+            name="live-shutdown",
+            status="running",
+            pid=81234,
+            current_task_id=task.id,
+        )
+        db.add(instance)
+        await db.flush()
+        task.instance_id = instance.id
+        await db.commit()
+        instance_id, task_id = instance.id, task.id
+
+    process = MagicMock(pid=81234, returncode=None)
+    d.instance_manager.processes[instance_id] = process
+    d.instance_manager.stop = AsyncMock(
+        side_effect=RuntimeError("cannot prove process exit")
+    )
+    d.instance_manager._generation_reap_confirmed = MagicMock(
+        side_effect=lambda _instance_id, expected: expected.returncode is not None
+    )
+
+    async def kill_exact(_instance_id, expected, **_kwargs):
+        assert expected is process
+        expected.returncode = -9
+        return True
+
+    d.instance_manager.kill_process_generation = AsyncMock(
+        side_effect=kill_exact
+    )
+    lifecycle = asyncio.create_task(asyncio.sleep(60))
+    d._running_tasks[instance_id] = lifecycle
+
+    await d.shutdown()
+
+    assert lifecycle.cancelled()
+    d.instance_manager.kill_process_generation.assert_awaited_once_with(
+        instance_id,
+        process,
+        timeout=5,
+    )
+    d.instance_manager.stop.assert_awaited_once_with(
+        instance_id,
+        expected_task_id=task_id,
+        expected_pid=81234,
+        expected_started_at=instance.started_at,
+        task_status="pending",
+        terminal_consumer_timeout=10,
+        consumer_cancel_timeout=5,
+    )
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+        instance = await db.get(Instance, instance_id)
+        assert task.status == "executing"
+        assert task.instance_id == instance_id
+        assert instance.status == "running"
+        assert instance.pid == 81234
+        assert instance.current_task_id == task_id
+
+
+@pytest.mark.asyncio
+async def test_shutdown_fails_explicitly_when_exact_generation_survives(
+    db_factory,
+):
+    d = _make_dispatcher(db_factory)
+    process = MagicMock(pid=81_235, returncode=None)
+    d.instance_manager.processes[5] = process
+    d.instance_manager.stop = AsyncMock(
+        side_effect=RuntimeError("DB owner unavailable")
+    )
+    d.instance_manager._generation_reap_confirmed = MagicMock(return_value=False)
+    d.instance_manager.kill_process_generation = AsyncMock(
+        side_effect=RuntimeError("SIGKILL proof failed")
+    )
+
+    with pytest.raises(RuntimeError, match="exact process generation survived"):
+        await d.shutdown()
+
+    assert d.instance_manager.processes[5] is process
 
 
 @pytest.mark.asyncio
@@ -3931,7 +6153,7 @@ async def test_queued_codex_message_waits_for_replacement_turn_chain(
             first_consumer()
         )
 
-    async def fake_wait(process, _task, _label):
+    async def fake_wait(process, _task, _label, **_kwargs):
         if process is first:
             first_waited.set()
         elif process is second:
@@ -4046,6 +6268,6 @@ async def test_lifecycle_backfills_agents_md(db_factory, tmp_path):
     mock_proc.wait = AsyncMock(return_value=0)
     d.instance_manager.processes = {inst_id: mock_proc}
 
-    await d._run_task_lifecycle(inst_id, task_obj)
+    await _run_claimed_lifecycle(d, db_factory, inst_id, task_obj)
 
     assert (tmp_path / "AGENTS.md").exists()
