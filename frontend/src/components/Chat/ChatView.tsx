@@ -1167,7 +1167,7 @@ export function ChatView({ task, projects, onBack, onTaskUpdated, inline }: Chat
                   />
                 </div>
                 <p className="text-xs text-gray-500">
-                  将使用 Opus 4.6 分析对话历史，提取关键步骤、踩坑点和验证方法。可多次蒸馏，每次指定不同侧重点。
+                  将使用当前 Task 的 {providerLabel} 分析对话历史，提取关键步骤、踩坑点和验证方法。可多次蒸馏，每次指定不同侧重点。
                 </p>
                 <div className="flex justify-end">
                   <button

@@ -30,6 +30,61 @@ async def test_chat_history_empty(client):
     assert resp.json() == []
 
 
+@pytest.mark.asyncio
+async def test_codex_task_distill_routes_to_codex_provider(
+    client, session_factory,
+):
+    from backend.models.log_entry import LogEntry
+
+    create_resp = await client.post("/api/tasks", json={
+        "title": "Codex distill",
+        "description": "d",
+        "target_repo": "/tmp",
+        "provider": "codex",
+    })
+    task_id = create_resp.json()["id"]
+    async with session_factory() as db:
+        task = await db.get(Task, task_id)
+        task.metadata_ = {"codex_account_id": "codex-2"}
+        db.add(LogEntry(
+            instance_id=1,
+            task_id=task_id,
+            event_type="user_message",
+            role="user",
+            content="fix the bug",
+            is_error=False,
+        ))
+        await db.commit()
+
+    sentinel_pool = object()
+    with (
+        patch("backend.main.codex_pool", sentinel_pool),
+        patch(
+            "backend.services.skill_distill.distill_task_conversation",
+            new=AsyncMock(return_value={
+                "provider": "codex",
+                "model": "gpt-test",
+                "content": "# Skill",
+            }),
+        ) as distill,
+    ):
+        resp = await client.post(
+            f"/api/tasks/{task_id}/distill",
+            json={"custom_instruction": "focus on tests"},
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["provider"] == "codex"
+    assert resp.json()["model"] == "gpt-test"
+    assert resp.json()["content"] == "# Skill"
+    kwargs = distill.await_args.kwargs
+    assert kwargs["provider"] == "codex"
+    assert kwargs["codex_pool"] is sentinel_pool
+    assert kwargs["codex_account_id"] == "codex-2"
+    assert kwargs["custom_instruction"] == "focus on tests"
+    assert "fix the bug" in kwargs["conversation"]
+
+
 async def _create_task_with_tools(client, session_factory):
     """Helper: create task + insert tool_use/tool_result log entries."""
     from backend.models.log_entry import LogEntry
