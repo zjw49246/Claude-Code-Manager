@@ -724,7 +724,7 @@ async def distill_task(
     if not conversation.strip():
         raise HTTPException(400, "No conversation history to distill")
 
-    from backend.main import codex_pool
+    from backend.main import codex_pool, instance_manager
     from backend.services.skill_distill import (
         CodexDistillAccountUnavailableError,
         TaskDistillError,
@@ -744,6 +744,7 @@ async def distill_task(
             custom_instruction=body.custom_instruction,
             codex_pool=codex_pool,
             codex_account_id=(task.metadata_ or {}).get("codex_account_id"),
+            instance_manager=instance_manager,
         )
     except TaskDistillTimeoutError as exc:
         raise HTTPException(504, str(exc)) from exc

@@ -120,7 +120,10 @@ def _build_task_distill_command(provider: str, model: str) -> list[str]:
             "exec",
             "--json",
             "--skip-git-repo-check",
-            "--dangerously-bypass-approvals-and-sandbox",
+            "--sandbox",
+            "read-only",
+            "--ignore-user-config",
+            "--ignore-rules",
             "--ephemeral",
         ]
         if model and model != "default":
@@ -192,6 +195,17 @@ async def _terminate_task_distill_process(process) -> None:
         logger.exception("Failed to reap task distill process")
 
 
+async def _shielded_terminate_task_distill_process(process) -> None:
+    """Kill and reap even if the request task receives another cancellation."""
+    cleanup = asyncio.create_task(_terminate_task_distill_process(process))
+    while not cleanup.done():
+        try:
+            await asyncio.shield(cleanup)
+        except asyncio.CancelledError:
+            continue
+    await cleanup
+
+
 async def distill_task_conversation(
     *,
     title: str,
@@ -200,6 +214,7 @@ async def distill_task_conversation(
     custom_instruction: str | None = None,
     codex_pool=None,
     codex_account_id: str | None = None,
+    instance_manager=None,
 ) -> dict:
     """Generate a reusable skill card with the task's configured provider."""
     provider = (provider or "claude").lower()
@@ -224,13 +239,12 @@ async def distill_task_conversation(
         for key, value in os.environ.items()
         if key.upper() not in ("CLAUDECODE", "CLAUDE_CODE")
     }
+    codex_home = None
     if provider == "codex":
         codex_home = _select_codex_distill_home(
             codex_pool,
             bound_account_id=codex_account_id,
         )
-        if codex_home:
-            env["CODEX_HOME"] = codex_home
     elif "CLAUDE_CONFIG_DIR" not in env:
         try:
             from backend.services.claude_pool import pool
@@ -251,37 +265,66 @@ async def distill_task_conversation(
                     break
 
     cmd = _build_task_distill_command(provider, model)
-    process = None
-    try:
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-            # Avoid loading the source task's CLAUDE.md/AGENTS.md. Distill only
-            # needs the transcript supplied on stdin.
-            cwd=tempfile.gettempdir(),
-        )
-        stdout, stderr = await asyncio.wait_for(
-            process.communicate(input=prompt.encode("utf-8")),
-            timeout=TASK_DISTILL_TIMEOUT_SECONDS,
-        )
-    except asyncio.TimeoutError as exc:
-        await _terminate_task_distill_process(process)
-        raise TaskDistillTimeoutError(
-            "Distillation timed out (5min)",
-            provider=provider,
-        ) from exc
-    except TaskDistillError:
-        raise
-    except Exception as exc:
-        await _terminate_task_distill_process(process)
-        raise TaskDistillError(
-            f"Distillation process failed: {exc}",
-            provider=provider,
-            stderr=str(exc),
-        ) from exc
+
+    async def run_process() -> tuple[object, bytes, bytes]:
+        process = None
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                env=env,
+                # Avoid loading the source task's CLAUDE.md/AGENTS.md. Distill
+                # only needs the transcript supplied on stdin.
+                cwd=tempfile.gettempdir(),
+            )
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(input=prompt.encode("utf-8")),
+                timeout=TASK_DISTILL_TIMEOUT_SECONDS,
+            )
+            return process, stdout, stderr
+        except asyncio.CancelledError:
+            await _shielded_terminate_task_distill_process(process)
+            raise
+        except asyncio.TimeoutError as exc:
+            await _terminate_task_distill_process(process)
+            raise TaskDistillTimeoutError(
+                "Distillation timed out (5min)",
+                provider=provider,
+            ) from exc
+        except TaskDistillError:
+            raise
+        except Exception as exc:
+            await _terminate_task_distill_process(process)
+            raise TaskDistillError(
+                f"Distillation process failed: {exc}",
+                provider=provider,
+                stderr=str(exc),
+            ) from exc
+
+    if provider == "codex":
+        if instance_manager is None:
+            raise CodexDistillAccountUnavailableError(
+                "Codex home admission is unavailable for distillation",
+                provider="codex",
+            )
+        from backend.services.codex_app_server import CodexAppServerBusyError
+
+        try:
+            async with instance_manager.codex_home_exec_guard(
+                codex_home
+            ) as admitted_home:
+                env["CODEX_HOME"] = admitted_home
+                process, stdout, stderr = await run_process()
+        except CodexAppServerBusyError as exc:
+            raise CodexDistillAccountUnavailableError(
+                "Codex account is busy or under maintenance",
+                provider="codex",
+                stderr=str(exc),
+            ) from exc
+    else:
+        process, stdout, stderr = await run_process()
 
     raw = stdout.decode("utf-8", errors="replace")
     stderr_text = stderr.decode("utf-8", errors="replace")

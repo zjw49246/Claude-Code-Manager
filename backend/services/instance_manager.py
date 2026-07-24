@@ -4,6 +4,7 @@ import logging
 import os
 import re
 import signal
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -104,6 +105,11 @@ class InstanceManager:
         self._codex_home_maintenance: set[str] = set()
         self._codex_home_locks: dict[str, asyncio.Lock] = {}
         self._codex_exec_homes: dict[int, str] = {}
+        # Non-task Codex subprocesses (currently task distillation) share the
+        # same credential-home maintenance barrier as normal exec turns.
+        # Count by canonical home because they do not own a reusable Instance
+        # slot and therefore cannot safely be represented in _codex_exec_homes.
+        self._codex_ephemeral_home_users: dict[str, int] = {}
 
         # PTY persistent-session backend (claude provider only).
         # Runtime-switchable: env USE_PTY_MODE is the boot default, the
@@ -666,6 +672,40 @@ class InstanceManager:
             self._codex_home_locks[codex_home] = lock
         return lock
 
+    @asynccontextmanager
+    async def codex_home_exec_guard(self, codex_home: str | None):
+        """Reserve one CODEX_HOME for an external ephemeral Codex process.
+
+        Admission and maintenance use the same per-home lock. Maintenance
+        therefore either reserves the home first and rejects this process, or
+        observes the active user and fails busy before touching credentials.
+        The synchronous finalizer cannot be interrupted by task cancellation.
+        """
+
+        from backend.services.codex_app_server import (
+            CodexAppServerBusyError,
+            normalize_codex_home,
+        )
+
+        home = normalize_codex_home(codex_home)
+        home_lock = self._codex_home_lock(home)
+        async with home_lock:
+            if home in self._codex_home_maintenance:
+                raise CodexAppServerBusyError(
+                    f"Codex account is under maintenance: {home}"
+                )
+            self._codex_ephemeral_home_users[home] = (
+                self._codex_ephemeral_home_users.get(home, 0) + 1
+            )
+        try:
+            yield home
+        finally:
+            remaining = self._codex_ephemeral_home_users.get(home, 0) - 1
+            if remaining > 0:
+                self._codex_ephemeral_home_users[home] = remaining
+            else:
+                self._codex_ephemeral_home_users.pop(home, None)
+
     async def _launch_codex_app_server(
         self,
         *,
@@ -934,6 +974,10 @@ class InstanceManager:
             if home in self._codex_home_maintenance:
                 raise CodexAppServerBusyError(
                     f"Codex account is already under maintenance: {home}"
+                )
+            if self._codex_ephemeral_home_users.get(home, 0):
+                raise CodexAppServerBusyError(
+                    f"Codex account still has an active ephemeral exec: {home}"
                 )
             if require_idle:
                 for instance_id, exec_home in self._codex_exec_homes.items():
