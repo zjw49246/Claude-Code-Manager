@@ -16,6 +16,8 @@ from backend.services.pr_review_service import (
 
 PR_DATA = {
     "number": 7,
+    "head_sha": "abc123",
+    "delivery_id": "delivery-7",
     "title": "Fix bug",
     "author": "alice",
     "url": "https://github.com/owner/repo/pull/7",
@@ -75,6 +77,8 @@ async def test_create_pr_review_task_happy_path(db_session, repo):
     assert review.id is not None
     assert review.status == "reviewing"
     assert review.pr_number == 7
+    assert review.head_sha == "abc123"
+    assert review.delivery_id == "delivery-7"
     assert review.task_id is not None
 
     task = await db_session.get(Task, review.task_id)
