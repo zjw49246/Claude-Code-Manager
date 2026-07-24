@@ -8,6 +8,20 @@ from pathlib import Path
 import scripts.auto_login as auto_login
 
 
+def test_configured_login_display_uses_ccm_value_without_display(monkeypatch):
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.setenv("CCM_XVFB_DISPLAY", ":123")
+
+    assert auto_login.configured_login_display() == ":123"
+
+
+def test_configured_login_display_prefers_explicit_display(monkeypatch):
+    monkeypatch.setenv("DISPLAY", ":124")
+    monkeypatch.setenv("CCM_XVFB_DISPLAY", ":123")
+
+    assert auto_login.configured_login_display() == ":124"
+
+
 def test_detect_claude_mailbox_provider():
     assert auto_login.detect_login_method("user@onet.pl") == "onet"
     assert auto_login.detect_login_method("user@GAZETA.PL") == "gazeta"
