@@ -136,6 +136,23 @@ cd frontend && npx tsc --noEmit
 | `test_login_invalid_token` | 错误 token 返回 401 |
 | `test_login_missing_token_field` | 空 body 返回 422 |
 
+#### `test_login_runtime.py` — 自动登录浏览器运行时
+
+| 测试 | 验证内容 |
+|------|---------|
+| `test_claude_and_codex_pool_share_one_login_lock` | Claude/Codex Pool 使用同一个进程内登录锁 |
+| `test_login_child_environment_uses_configured_isolated_runtime` | display、CDP 端口和磁盘临时目录按环境隔离 |
+| `test_resource_guard_rejects_low_available_memory` | 可用内存不足时在 Chrome 启动前 fail-fast |
+| `test_xauthority_cookie_is_private_and_not_exposed_in_argv` | Xauthority 为 0600，cookie 仅经 stdin 传递 |
+| `test_cached_xvfb_is_polled_before_reuse` | 缓存的 Xvfb 必须先 `poll()` 再复用 |
+| `test_ready_xvfb_from_sibling_process_is_reused_without_popen` | 同 display 的健康 Xvfb 可安全共享 |
+| `test_foreign_x_socket_is_not_killed_or_replaced` | 无法认证的外部 X server fail-closed，不执行 `pkill` |
+| `test_xvfb_start_waits_for_real_display_readiness` | 启动后必须通过实际 display 探测才能放行 Chrome |
+
+`test_codex_login_mailbox.py` 还覆盖 authorize 页面 45 秒超时只重试一次并附带
+内存/load 诊断；`test_cdp_login_mailbox.py` 覆盖 Claude Chrome 使用隔离 CDP
+端口和磁盘 profile，且只回收自己启动的进程。
+
 #### `test_api_projects.py` — 项目 API
 
 | 测试 | 验证内容 |

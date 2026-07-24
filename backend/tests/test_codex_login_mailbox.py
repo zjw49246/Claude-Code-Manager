@@ -79,6 +79,62 @@ def test_detect_mail_provider():
     assert codex_login.detect_mail_provider("user@israelmail.com") == "171mail"
 
 
+async def test_authorize_navigation_retries_one_timeout(monkeypatch):
+    class NavigationTimeout(Exception):
+        pass
+
+    class Page:
+        def __init__(self):
+            self.calls = 0
+
+        async def goto(self, *_args, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise NavigationTimeout("slow")
+
+    page = Page()
+    logs: list[str] = []
+    monkeypatch.setattr(codex_login.asyncio, "sleep", AsyncMock())
+    monkeypatch.setattr(
+        codex_login,
+        "_host_diagnostic",
+        lambda: "mem_available_mb=77, load1=12.16",
+    )
+
+    await codex_login._navigate_authorize_page(
+        page,
+        "https://auth.openai.com/oauth/authorize?redacted",
+        logs,
+        timeout_error=NavigationTimeout,
+    )
+
+    assert page.calls == 2
+    assert logs == [
+        "Authorize navigation timeout attempt=1/2 "
+        "(mem_available_mb=77, load1=12.16)",
+    ]
+
+
+async def test_authorize_navigation_stops_after_limited_retries(monkeypatch):
+    class NavigationTimeout(Exception):
+        pass
+
+    page = SimpleNamespace(goto=AsyncMock(side_effect=NavigationTimeout("slow")))
+    logs: list[str] = []
+    monkeypatch.setattr(codex_login.asyncio, "sleep", AsyncMock())
+
+    with pytest.raises(NavigationTimeout):
+        await codex_login._navigate_authorize_page(
+            page,
+            "https://auth.openai.com/oauth/authorize?redacted",
+            logs,
+            timeout_error=NavigationTimeout,
+        )
+
+    assert page.goto.await_count == 2
+    assert len(logs) == 2
+
+
 def test_codex_login_output_redacts_complete_oauth_authorize_url(caplog):
     authorize_url = (
         "https://auth.openai.com/oauth/authorize?client_id=public-client"
@@ -2474,36 +2530,13 @@ async def test_delete_rejects_unmanaged_home_before_mutating_account(
     assert auth_path.read_text() == "oauth-secret"
 
 
-async def test_xvfb_uses_private_xauthority_cookie(monkeypatch, tmp_path):
-    monkeypatch.setattr(codex_pool_api.Path, "home", lambda: tmp_path)
-    monkeypatch.setattr(codex_pool_api.asyncio, "sleep", AsyncMock())
-    monkeypatch.setenv("DISPLAY", ":previous")
-    monkeypatch.setenv("XAUTHORITY", "/tmp/previous-xauthority")
-    run = Mock()
-    xvfb_proc = SimpleNamespace(returncode=None)
-    popen = Mock(return_value=xvfb_proc)
-    monkeypatch.setattr(subprocess, "run", run)
-    monkeypatch.setattr(subprocess, "Popen", popen)
-    monkeypatch.setattr(codex_pool_api, "_xvfb_proc", None)
-    monkeypatch.setattr(codex_pool_api, "_xvfb_auth_path", None)
+async def test_xvfb_uses_shared_login_runtime(monkeypatch):
+    runtime = object()
+    ensure = AsyncMock(return_value=runtime)
+    monkeypatch.setattr(codex_pool_api, "ensure_login_runtime", ensure)
 
-    await codex_pool_api._ensure_xvfb()
-
-    command = popen.call_args.args[0]
-    assert "-ac" not in command
-    assert command[command.index("-auth") + 1] == str(
-        tmp_path / ".codex-pool" / "xvfb.auth"
-    )
-    assert os.environ["XAUTHORITY"] == command[command.index("-auth") + 1]
-    assert (tmp_path / ".codex-pool" / "xvfb.auth").stat().st_mode & 0o777 == 0o600
-    xauth_call = next(
-        call for call in run.call_args_list if call.args[0][0] == "xauth"
-    )
-    assert xauth_call.args[0] == [
-        "xauth", "-f", str(tmp_path / ".codex-pool" / "xvfb.auth"),
-    ]
-    assert "MIT-MAGIC-COOKIE-1" in xauth_call.kwargs["input"]
-    assert xauth_call.kwargs["check"] is True
+    assert await codex_pool_api._ensure_xvfb() is runtime
+    ensure.assert_awaited_once()
 
 
 async def test_add_account_rejects_when_password_and_token_are_both_empty():
@@ -2861,6 +2894,7 @@ async def test_successful_login_replaces_auth_and_removes_backup(monkeypatch, tm
     playwright_package = ModuleType("playwright")
     playwright_async_api = ModuleType("playwright.async_api")
     playwright_async_api.async_playwright = lambda: _FakePlaywrightContextManager()
+    playwright_async_api.TimeoutError = TimeoutError
     playwright_package.async_api = playwright_async_api
     monkeypatch.setitem(sys.modules, "playwright", playwright_package)
     monkeypatch.setitem(sys.modules, "playwright.async_api", playwright_async_api)
