@@ -228,6 +228,39 @@ class _OtpPage:
         return None
 
 
+class _EmptyPasswordField:
+    async def input_value(self):
+        return ""
+
+
+class _EmailCodeAction:
+    def __init__(self):
+        self.clicked = False
+
+    async def is_visible(self):
+        return True
+
+    async def inner_text(self):
+        return "Continue with a one-time code"
+
+    async def get_attribute(self, _name: str):
+        return None
+
+    async def click(self):
+        self.clicked = True
+
+
+class _SingleLocator:
+    def __init__(self, candidate):
+        self.candidate = candidate
+
+    async def count(self):
+        return 1
+
+    def nth(self, _index: int):
+        return self.candidate
+
+
 class _PersistentOtpField:
     def __init__(self):
         self.values: list[str] = []
@@ -290,6 +323,106 @@ async def test_password_only_login_waits_for_user_otp_and_continues(monkeypatch,
     manual_reader.read_code.assert_awaited_once()
     assert otp_field.value == "123456"
     poll.assert_not_awaited()
+
+
+async def test_email_only_login_switches_to_code_and_waits_for_user_otp(
+    monkeypatch, tmp_path,
+):
+    auth_path = tmp_path / "auth.json"
+    password_field = _EmptyPasswordField()
+    otp_field = _OtpField(auth_path)
+    manual_reader = SimpleNamespace(read_code=AsyncMock(return_value="123456"))
+    state = {"email_code": False}
+
+    async def first_visible(_page, selector: str):
+        if selector == codex_login.PASSWORD_SELECTOR and not state["email_code"]:
+            return password_field
+        if selector == codex_login.OTP_SELECTOR and state["email_code"]:
+            return otp_field
+        return None
+
+    async def switch_to_email_code(_page, _logs):
+        state["email_code"] = True
+        return True
+
+    switch = AsyncMock(side_effect=switch_to_email_code)
+    monkeypatch.setattr(codex_login, "_first_visible", first_visible)
+    monkeypatch.setattr(codex_login, "_switch_to_email_code", switch)
+    monkeypatch.setattr(codex_login, "_click_continue", AsyncMock(return_value=True))
+
+    await codex_login._run_state_machine(
+        _OtpPage(),
+        "email-only@163.com",
+        "",
+        "",
+        1,
+        auth_path,
+        [],
+        "mailcatcher",
+        "attempt-email-only",
+        manual_reader,
+    )
+
+    switch.assert_awaited_once()
+    manual_reader.read_code.assert_awaited_once()
+    assert otp_field.value == "123456"
+
+
+async def test_switch_to_email_code_recognizes_one_time_code_action(monkeypatch):
+    action = _EmailCodeAction()
+    page = _OtpPage()
+    page.locator = lambda _selector: _SingleLocator(action)
+
+    async def first_visible(_page, selector: str):
+        if selector == codex_login.OTP_SELECTOR and action.clicked:
+            return object()
+        if selector == codex_login.PASSWORD_SELECTOR and not action.clicked:
+            return _EmptyPasswordField()
+        return None
+
+    monkeypatch.setattr(codex_login, "_first_visible", first_visible)
+    logs: list[str] = []
+
+    switched = await codex_login._switch_to_email_code(page, logs)
+
+    assert switched is True
+    assert action.clicked is True
+    assert "one-time code" in logs[0]
+
+
+async def test_email_only_login_reports_when_openai_requires_password(
+    monkeypatch, tmp_path,
+):
+    async def first_visible(_page, selector: str):
+        if selector == codex_login.PASSWORD_SELECTOR:
+            return _EmptyPasswordField()
+        return None
+
+    monkeypatch.setattr(codex_login, "_first_visible", first_visible)
+    monkeypatch.setattr(
+        codex_login,
+        "_switch_to_email_code",
+        AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr(
+        codex_login,
+        "_visible_action_labels",
+        AsyncMock(return_value=["Continue"]),
+    )
+
+    with pytest.raises(RuntimeError, match="provide the OpenAI password"):
+        await codex_login._run_state_machine(
+            _OtpPage(),
+            "password-required@example.com",
+            "",
+            "",
+            1,
+            tmp_path / "auth.json",
+            [],
+            "171mail",
+            "attempt-password-required",
+            SimpleNamespace(read_code=AsyncMock()),
+        )
 
 
 async def test_visible_otp_form_waits_for_delayed_auth_without_new_challenge(
@@ -390,6 +523,24 @@ async def test_login_input_reader_consumes_credentials_then_otp_on_same_stream(
 
     assert code == "123456"
     assert reader._reader is stream
+
+
+async def test_login_input_reader_accepts_email_only_initialization():
+    attempt_id = "attempt-email-only"
+    stream = asyncio.StreamReader()
+    stream.feed_data((json.dumps({
+        "type": "credentials",
+        "attempt_id": attempt_id,
+        "token": "",
+        "password": "",
+    }) + "\n").encode())
+    reader = codex_login._ManualOtpReader()
+    reader._reader = stream
+
+    token, password = await reader.read_credentials(attempt_id=attempt_id)
+
+    assert token == ""
+    assert password == ""
 
 
 class _OtpStdin:
@@ -2506,15 +2657,43 @@ async def test_xvfb_uses_private_xauthority_cookie(monkeypatch, tmp_path):
     assert xauth_call.kwargs["check"] is True
 
 
-async def test_add_account_rejects_when_password_and_token_are_both_empty():
-    with pytest.raises(HTTPException) as exc_info:
-        await codex_pool_api.codex_add_account(
-            _admin_request(),
-            codex_pool_api.AddCodexAccountRequest(email="missing@example.com"),
-        )
+async def test_add_account_accepts_email_without_token_or_password(monkeypatch):
+    captured: dict[str, object] = {}
+    pool = SimpleNamespace(_accounts=[], reload=lambda: None, _quota_cache=None)
+    manager = _maintenance_manager()
+    proc = _BlockingProcess()
 
-    assert exc_info.value.status_code == 400
-    assert "至少填写一项" in str(exc_info.value.detail)
+    async def create_process(*cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        return proc
+
+    monkeypatch.setattr(codex_pool_api, "_get_pool", lambda: pool)
+    monkeypatch.setattr(codex_pool_api, "_get_instance_manager", lambda: manager)
+    monkeypatch.setattr(codex_pool_api, "_ensure_xvfb", AsyncMock())
+    monkeypatch.setattr(codex_pool_api.asyncio, "create_subprocess_exec", create_process)
+    monkeypatch.setattr(codex_pool_api, "_login_lock", asyncio.Lock())
+    codex_pool_api._add_state.clear()
+
+    result = await codex_pool_api.codex_add_account(
+        _admin_request(),
+        codex_pool_api.AddCodexAccountRequest(email="email-only@163.com"),
+    )
+
+    assert result["status"] == "running"
+    assert "--credentials-stdin" in captured["cmd"]
+    assert json.loads(proc.stdin.writes[0]) == {
+        "type": "credentials",
+        "attempt_id": result["attempt_id"],
+        "token": "",
+        "password": "",
+    }
+
+    proc.finished.set()
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    manager.end_codex_app_server_home_maintenance.assert_awaited_once()
+    assert not codex_pool_api._login_lock.locked()
 
 
 async def test_relogin_accepts_saved_password_without_mailbox_token(monkeypatch, tmp_path):
@@ -2554,6 +2733,45 @@ async def test_relogin_accepts_saved_password_without_mailbox_token(monkeypatch,
         account.codex_home, require_idle=True,
     )
     manager.end_codex_app_server_home_maintenance.assert_awaited_once_with(account.codex_home)
+    assert not codex_pool_api._login_lock.locked()
+
+
+async def test_relogin_accepts_email_only_account(monkeypatch, tmp_path):
+    manager = _maintenance_manager()
+    account, _pool = _prepare_relogin_account(monkeypatch, tmp_path, manager)
+    credential_path = tmp_path / ".codex-pool" / "email_tokens.json"
+    credential_path.write_text(json.dumps({
+        account.email: {
+            "token": "",
+            "provider": "mailcom",
+            "password": "",
+        },
+    }))
+    captured: dict[str, object] = {}
+    proc = _FinishedProcess()
+
+    async def create_process(*cmd, **kwargs):
+        captured["cmd"] = cmd
+        captured["kwargs"] = kwargs
+        return proc
+
+    monkeypatch.setattr(codex_pool_api.asyncio, "create_subprocess_exec", create_process)
+
+    result = await codex_pool_api.codex_relogin(_admin_request(), account.id)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert result["ok"] is True
+    assert result["status"] == "running"
+    assert json.loads(proc.stdin.writes[0]) == {
+        "type": "credentials",
+        "attempt_id": result["attempt_id"],
+        "token": "",
+        "password": "",
+    }
+    manager.end_codex_app_server_home_maintenance.assert_awaited_once_with(
+        account.codex_home,
+    )
     assert not codex_pool_api._login_lock.locked()
 
 

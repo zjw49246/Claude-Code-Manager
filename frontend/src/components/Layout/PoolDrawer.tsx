@@ -509,7 +509,6 @@ function AddCodexAccountModal({ onClose, onAdded }: { onClose: () => void; onAdd
         : '171mail';
   const activeMethod = loginMethod || detectedMethod;
   const usesMailCatcher = activeMethod !== '171mail';
-  const hasCredential = Boolean(token.trim() || password);
   const loginActive = Boolean(loginState && ACTIVE_CODEX_LOGIN_STATUSES.has(loginState.status));
 
   useEffect(() => {
@@ -552,7 +551,7 @@ function AddCodexAccountModal({ onClose, onAdded }: { onClose: () => void; onAdd
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!email.trim() || !hasCredential) return;
+    if (!email.trim()) return;
     setSubmitting(true);
     try {
       const state = await api.codexPoolAddAccount({
@@ -627,7 +626,7 @@ function AddCodexAccountModal({ onClose, onAdded }: { onClose: () => void; onAdd
             <label htmlFor="codex-openai-password" className="block text-xs text-gray-400 mb-1">OpenAI 密码（可选）</label>
             <input id="codex-openai-password" type="password" className="w-full bg-gray-700 text-foreground text-xs rounded px-2.5 py-1.5 outline-none focus:ring-1 focus:ring-emerald-500"
               value={password} onChange={e => setPassword(e.target.value)} placeholder="有密码时优先使用密码登录" disabled={loginActive} />
-            <p className="mt-1 text-[11px] text-gray-500">Token 和 OpenAI 密码至少填写一项；仅填密码时，如 OpenAI 要求验证码，可在这里人工输入后继续。登录成功后凭据会以 0600 权限保存在 CCM 服务器，用于自动重新登录；删除账号时一并清除。</p>
+            <p className="mt-1 text-[11px] text-gray-500">Token 和密码都可不填：CCM 会尝试切换到 OpenAI 邮箱验证码，并在这里等你输入 6 位码；若账号只提供密码登录，会提示补密码重试。只有实际填写的长期凭据才会以 0600 权限保存在 CCM 服务器；验证码不会保存。</p>
           </div>
           {loginState?.status === 'running' && <p className="text-xs text-blue-400">登录中… 请等待（可能需要 1-3 分钟）</p>}
           {loginState?.status === 'awaiting_otp' && <CodexOtpPrompt state={loginState} onSubmit={submitOtp} />}
@@ -637,7 +636,7 @@ function AddCodexAccountModal({ onClose, onAdded }: { onClose: () => void; onAdd
           {(loginState?.status === 'failed' || loginState?.status === 'expired') && <p className="text-xs text-red-400 break-all">{loginState.detail || '登录失败'}</p>}
           <div className="flex justify-end gap-2 pt-1">
             <button type="button" disabled={loginActive} onClick={onClose} className="px-3 py-1.5 text-xs text-gray-300 hover:text-white disabled:opacity-40">取消</button>
-            <button type="submit" disabled={submitting || loginActive || !email.trim() || !hasCredential}
+            <button type="submit" disabled={submitting || loginActive || !email.trim()}
               className="px-3 py-1.5 text-xs bg-emerald-600 text-white rounded hover:bg-emerald-500 disabled:opacity-50">
               {loginActive ? '登录中…' : '添加'}
             </button>

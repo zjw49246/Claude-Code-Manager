@@ -1501,11 +1501,6 @@ async def codex_relogin(request: Request, account_id: str):
         acc.email,
         tokens_path=_credential_store_path(pool),
     )
-    if not receiver_token and not openai_password:
-        raise HTTPException(
-            status_code=400,
-            detail=f"No saved mailbox token or OpenAI password for {acc.email}. Add the account again first.",
-        )
     if mail_provider and mail_provider not in MAIL_PROVIDERS:
         raise HTTPException(status_code=400, detail=f"Unsupported saved mailbox provider: {mail_provider}")
 
@@ -1805,8 +1800,6 @@ async def codex_add_account(request: Request, body: AddCodexAccountRequest):
     receiver_token = body.token.strip()
     if not email:
         raise HTTPException(400, "email 必填")
-    if not receiver_token and not body.password:
-        raise HTTPException(400, "接码 token 和 OpenAI 密码至少填写一项")
     login_method = body.login_method.strip().lower()
     if login_method and login_method not in MAIL_PROVIDERS:
         raise HTTPException(400, f"Unsupported login_method: {body.login_method}")

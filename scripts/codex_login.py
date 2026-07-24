@@ -250,8 +250,10 @@ async def _first_visible(page, selectors: str):
 async def _switch_to_email_code(page, logs: list[str]) -> bool:
     """Switch OpenAI password screen to passwordless email-code login."""
     pattern = re.compile(
-        r"continue with (?:email )?code|use (?:an? )?(?:email )?code|"
-        r"email me a code|log in with (?:an? )?(?:one[- ]time )?code|"
+        r"continue with (?:an? )?(?:(?:email|one[- ]time|login) )?code|"
+        r"use (?:an? )?(?:(?:email|one[- ]time|login) )?code|"
+        r"email me (?:an? )?(?:login )?code|"
+        r"log in with (?:an? )?(?:one[- ]time )?code|"
         r"sign in with (?:an? )?(?:one[- ]time )?code|"
         r"try another (?:way|method)",
         re.I,
@@ -350,7 +352,7 @@ def _write_private_json(path: Path, data: dict) -> None:
 
 
 class _ManualOtpReader:
-    """Read initialization credentials and human OTPs over one stdin pipe."""
+    """Read login initialization and human OTPs over one stdin pipe."""
 
     def __init__(self) -> None:
         self._reader: asyncio.StreamReader | None = None
@@ -373,7 +375,7 @@ class _ManualOtpReader:
         attempt_id: str,
         timeout_s: int = INPUT_INIT_TIMEOUT,
     ) -> tuple[str, str]:
-        """Read the first, in-memory-only credentials message from the parent."""
+        """Read the first, in-memory-only login initialization message."""
         reader = await self._ensure_reader()
         try:
             raw = await asyncio.wait_for(reader.readline(), timeout=timeout_s)
@@ -394,8 +396,6 @@ class _ManualOtpReader:
         password = payload.get("password", "")
         if not isinstance(token, str) or not isinstance(password, str):
             raise RuntimeError("Invalid login credentials message")
-        if not token and not password:
-            raise RuntimeError("Login credentials message is empty")
         return token, password
 
     async def read_code(
