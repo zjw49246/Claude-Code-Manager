@@ -188,13 +188,19 @@ async def shared_chat(
 
     # Enqueue
     from backend.main import dispatcher
-    from backend.services.dispatcher import PRIORITY_USER
-    await dispatcher.enqueue_message(
-        task_id=task_id,
-        prompt=body.message,
-        priority=PRIORITY_USER,
-        source="shared",
-    )
+    from backend.services.dispatcher import PRIORITY_USER, TaskStartPausedError
+    try:
+        await dispatcher.enqueue_message(
+            task_id=task_id,
+            prompt=body.message,
+            priority=PRIORITY_USER,
+            source="shared",
+        )
+    except TaskStartPausedError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="服务即将重启，消息未进入执行队列，请重连后重试",
+        ) from exc
 
     return {"ok": True, "queued": True}
 

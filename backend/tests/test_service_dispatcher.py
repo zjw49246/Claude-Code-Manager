@@ -47,6 +47,20 @@ async def test_status_not_running(db_factory):
 
 
 @pytest.mark.asyncio
+async def test_pause_dispatching_does_not_stop_dispatcher(db_factory):
+    d = _make_dispatcher(db_factory)
+    d._running = True
+
+    await d.pause_dispatching()
+
+    assert d.status()["running"] is True
+    assert d.status()["paused"] is True
+
+    d.resume_dispatching()
+    assert d.status()["paused"] is False
+
+
+@pytest.mark.asyncio
 async def test_start_sets_running(db_factory):
     """start() sets _running=True and creates dispatch task."""
     d = _make_dispatcher(db_factory)
@@ -3018,7 +3032,7 @@ async def test_clear_task_queue_drops_pending_messages(db_factory):
             prompt=f"msg {i}", source="user",
         ))
 
-    cleared = dispatcher.clear_task_queue(1)
+    cleared = await dispatcher.clear_task_queue(1)
 
     assert cleared == 3
     assert q.empty()
@@ -3028,7 +3042,85 @@ async def test_clear_task_queue_drops_pending_messages(db_factory):
 async def test_clear_task_queue_no_queue_returns_zero(db_factory):
     """clear_task_queue on a task with no queue is a no-op returning 0."""
     dispatcher = _make_dispatcher(db_factory)
-    assert dispatcher.clear_task_queue(999) == 0
+    assert await dispatcher.clear_task_queue(999) == 0
+
+
+@pytest.mark.asyncio
+async def test_clear_cancels_message_dequeued_before_inflight_registration(
+    db_factory,
+):
+    """A stop-session clear invalidates the consumer's unclaimed handoff."""
+    dispatcher = _make_dispatcher(db_factory)
+    process_message = AsyncMock()
+    dispatcher._process_queued_message = process_message
+
+    claim_started = asyncio.Event()
+    release_claim = asyncio.Event()
+    claim_finished = asyncio.Event()
+    original_claim = dispatcher._claim_dequeued_message
+
+    async def delayed_claim(task_id, msg):
+        claim_started.set()
+        await release_claim.wait()
+        claimed = await original_claim(task_id, msg)
+        claim_finished.set()
+        return claimed
+
+    dispatcher._claim_dequeued_message = AsyncMock(side_effect=delayed_claim)
+
+    await dispatcher.enqueue_message(1, "cancel after dequeue")
+    await asyncio.wait_for(claim_started.wait(), timeout=1)
+
+    cleared = await dispatcher.clear_task_queue(1)
+    assert cleared == 1
+    assert await dispatcher.pending_task_start_ids() == set()
+
+    release_claim.set()
+    await asyncio.wait_for(claim_finished.wait(), timeout=1)
+    await asyncio.sleep(0)
+
+    process_message.assert_not_awaited()
+    worker = dispatcher._task_queue_workers.get(1)
+    if worker and not worker.done():
+        worker.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker
+
+
+@pytest.mark.asyncio
+async def test_clear_preserves_registered_inflight_message_blocker(db_factory):
+    """Queue clearing cannot hide work that already owns an in-flight claim."""
+    dispatcher = _make_dispatcher(db_factory)
+    process_started = asyncio.Event()
+    release_process = asyncio.Event()
+
+    async def process_message(_task_id, _msg):
+        process_started.set()
+        await release_process.wait()
+
+    dispatcher._process_queued_message = AsyncMock(side_effect=process_message)
+
+    await dispatcher.enqueue_message(1, "already in flight")
+    await asyncio.wait_for(process_started.wait(), timeout=1)
+
+    cleared = await dispatcher.clear_task_queue(1)
+
+    assert cleared == 0
+    assert dispatcher._task_queue_inflight == {1: 1}
+    assert await dispatcher.pending_task_start_ids() == {1}
+
+    release_process.set()
+    for _ in range(20):
+        if not await dispatcher.pending_task_start_ids():
+            break
+        await asyncio.sleep(0.01)
+    assert await dispatcher.pending_task_start_ids() == set()
+
+    worker = dispatcher._task_queue_workers.get(1)
+    if worker and not worker.done():
+        worker.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker
 
 
 class TestResolveTimeout:
@@ -3423,6 +3515,102 @@ async def _setup_queued_msg_two_idle(db_factory, monkeypatch):
         prompt="hi", source="user",
     )
     return d, id1, id2, task_id, msg
+
+
+@pytest.mark.asyncio
+async def test_queued_resume_waits_at_maintenance_gate_and_stays_blocking(
+    db_factory, monkeypatch,
+):
+    d, _id1, _id2, task_id, _msg = await _setup_queued_msg_two_idle(
+        db_factory, monkeypatch
+    )
+    launched = asyncio.Event()
+
+    async def launch(**_kwargs):
+        launched.set()
+        return 12345
+
+    d.instance_manager.launch = AsyncMock(side_effect=launch)
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+        task.status = "completed"
+        await db.commit()
+    await d.pause_dispatching()
+    await d.enqueue_message(task_id, "continue", source="monitor:complete")
+
+    await asyncio.sleep(0.05)
+    assert not launched.is_set()
+    assert await d.pending_task_start_ids() == {task_id}
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+        assert task.status == "completed"
+
+    d.resume_dispatching()
+    await asyncio.wait_for(launched.wait(), timeout=1)
+
+    for _ in range(20):
+        if not await d.pending_task_start_ids():
+            break
+        await asyncio.sleep(0.01)
+    assert await d.pending_task_start_ids() == set()
+
+    worker = d._task_queue_workers.get(task_id)
+    if worker and not worker.done():
+        worker.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker
+
+
+@pytest.mark.asyncio
+async def test_pause_wins_after_queued_resume_preparation_before_launch(
+    db_factory, monkeypatch,
+):
+    """Late admission closes the exact preparation -> executing race."""
+    d, _id1, _id2, task_id, _msg = await _setup_queued_msg_two_idle(
+        db_factory, monkeypatch
+    )
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+        task.status = "completed"
+        await db.commit()
+
+    preparation_reached = asyncio.Event()
+    release_preparation = asyncio.Event()
+    launched = asyncio.Event()
+
+    async def resolve(*_args, **_kwargs):
+        preparation_reached.set()
+        await release_preparation.wait()
+        return None
+
+    async def launch(**_kwargs):
+        launched.set()
+        return 12345
+
+    d._resolve_resume_config_dir = AsyncMock(side_effect=resolve)
+    d.instance_manager.launch = AsyncMock(side_effect=launch)
+    await d.enqueue_message(task_id, "continue")
+    await asyncio.wait_for(preparation_reached.wait(), timeout=1)
+
+    await d.pause_dispatching()
+    release_preparation.set()
+    await asyncio.sleep(0.05)
+
+    assert not launched.is_set()
+    assert await d.pending_task_start_ids() == {task_id}
+    async with d.maintenance_shutdown_guard() as pending_ids:
+        assert pending_ids == {task_id}
+    async with db_factory() as db:
+        task = await db.get(Task, task_id)
+        assert task.status == "completed"
+
+    d.resume_dispatching()
+    await asyncio.wait_for(launched.wait(), timeout=1)
+    worker = d._task_queue_workers.get(task_id)
+    if worker and not worker.done():
+        worker.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker
 
 
 @pytest.mark.asyncio

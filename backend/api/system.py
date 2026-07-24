@@ -105,7 +105,7 @@ async def start_update(req: UpdateRequest):
         raise HTTPException(status_code=400, detail="Invalid branch name")
     svc = _get_update_service()
     if req.dry_run:
-        return await svc.dry_run(branch=req.branch)
+        return await svc.dry_run(branch=req.branch, force=req.force)
     result = await svc.start_update(
         skip_frontend_build=req.skip_frontend_build,
         force=req.force,

@@ -9,6 +9,7 @@ from backend.models.instance import Instance
 from backend.models.task import Task
 from backend.config import settings
 from backend.services.instance_manager import InstanceManager
+from backend.services.dispatcher import TaskStartPausedError
 from backend.services.task_queue import TaskQueue
 from backend.services.ws_broadcaster import WebSocketBroadcaster
 
@@ -268,9 +269,15 @@ class RalphLoop:
             task = None
             try:
                 # Dequeue next task
-                async with self.db_factory() as db:
-                    queue = TaskQueue(db)
-                    task = await queue.dequeue(instance_id=instance_id)
+                from backend.main import dispatcher
+                try:
+                    async with dispatcher.task_start_guard():
+                        async with self.db_factory() as db:
+                            queue = TaskQueue(db)
+                            task = await queue.dequeue(instance_id=instance_id)
+                except TaskStartPausedError:
+                    await dispatcher.wait_until_resumed()
+                    continue
 
                 if not task:
                     await asyncio.sleep(5)

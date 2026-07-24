@@ -129,20 +129,41 @@ async def run_task_on_instance(
         if (task_provider or "claude").lower() == "codex":
             resume_session_id = task.session_id
 
+    from backend.services.dispatcher import TaskStartPausedError
     from backend.services.instance_manager import InstanceAlreadyRunningError
+    previous_task_state = None
+    if task is not None:
+        previous_task_state = (task.status, task.completed_at, task.instance_id)
     try:
-        pid = await instance_manager.launch(
-            instance_id=instance_id,
-            prompt=actual_prompt,
-            task_id=task_id,
-            cwd=cwd,
-            model=task_model,
-            provider=task_provider,
-            thinking_budget=task_thinking,
-            effort_level=task_effort,
-            resume_session_id=resume_session_id,
-            config_dir=config_dir,
-        )
+        async with dispatcher.task_start_guard():
+            if task is not None:
+                task.status = "executing"
+                task.completed_at = None
+                task.instance_id = instance_id
+                await db.commit()
+            try:
+                pid = await instance_manager.launch(
+                    instance_id=instance_id,
+                    prompt=actual_prompt,
+                    task_id=task_id,
+                    cwd=cwd,
+                    model=task_model,
+                    provider=task_provider,
+                    thinking_budget=task_thinking,
+                    effort_level=task_effort,
+                    resume_session_id=resume_session_id,
+                    config_dir=config_dir,
+                )
+            except Exception:
+                if task is not None and previous_task_state is not None:
+                    task.status, task.completed_at, task.instance_id = previous_task_state
+                    await db.commit()
+                raise
+    except TaskStartPausedError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="系统正在准备更新或回滚，暂时不能启动新任务",
+        ) from exc
     except InstanceAlreadyRunningError as exc:
         # The earlier is_running check is only a fast path.  launch performs
         # the atomic admission check after all route/session awaits.

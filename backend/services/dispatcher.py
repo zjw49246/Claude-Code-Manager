@@ -7,6 +7,7 @@ import re
 import shutil
 import tempfile
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -104,11 +105,19 @@ class CodexAccountRoutingError(RuntimeError):
         self.retry_after = retry_after
 
 
+class TaskStartPausedError(RuntimeError):
+    """A new task turn reached the admission gate during maintenance."""
+
+
 @dataclass(order=True)
 class QueuedMessage:
     priority: int
     timestamp: float = field(compare=True)
     prompt: str = field(compare=False)
+    # Queue clears advance a per-task generation. A consumer that has already
+    # dequeued this object but has not registered it as in-flight can then
+    # recognize that stop-session cancelled the handoff.
+    queue_generation: int = field(compare=False, default=0)
     source: str = field(compare=False, default="user")
     user_message_text: str | None = field(compare=False, default=None)
     command_skills: dict | None = field(compare=False, default=None)
@@ -288,6 +297,15 @@ class GlobalDispatcher:
         # New tasks wake the loop immediately.  The 2s timeout remains as a
         # safety poll for tasks inserted by legacy/direct DB paths.
         self._dispatch_wakeup = asyncio.Event()
+        # Self-update maintenance gate: pause new claims without cancelling any
+        # lifecycle that is already running. Every path that can turn idle work
+        # into active Task work must cross this lock and persist its active
+        # status before releasing it.
+        self._dispatch_claim_lock = asyncio.Lock()
+        self._dispatch_paused = False
+        self._maintenance_shutdown_committed = False
+        self._dispatch_resumed = asyncio.Event()
+        self._dispatch_resumed.set()
         self._running_tasks: dict[int, asyncio.Task] = {}  # instance_id -> lifecycle task
         # Instances mid-launch by the queued-message path. Their DB status is
         # still "idle" until launch() flips it to "running", so without an
@@ -309,6 +327,18 @@ class GlobalDispatcher:
         self._task_queues: dict[int, asyncio.PriorityQueue] = {}
         self._task_queue_workers: dict[int, asyncio.Task] = {}
         self._task_queue_activity: dict[int, float] = {}
+        # A queued or currently-consumed resume is task work even before its DB
+        # status becomes executing. Keeping it as a maintenance blocker avoids
+        # restarting after accepting a chat/monitor message but before launch.
+        self._pending_task_starts: set[int] = set()
+        # A queue item stops contributing to qsize() as soon as a consumer
+        # dequeues it. Track consumers separately so clearing the remaining
+        # queue cannot erase the blocker for work already in preparation.
+        self._task_queue_inflight: dict[int, int] = {}
+        # Cancellation generation for the dequeue -> in-flight handoff window.
+        # Entries intentionally outlive empty queues: deleting one could make a
+        # stale dequeued message's old generation look current again.
+        self._task_queue_generations: dict[int, int] = {}
         # Fresh lifecycle tasks waiting for a Codex account cooldown or
         # maintenance window. TaskQueue excludes them without consuming retry
         # budget, while unrelated pending tasks can still use idle instances.
@@ -351,6 +381,60 @@ class GlobalDispatcher:
     def wake(self) -> None:
         """Wake the task dispatcher after a pending task is committed."""
         self._dispatch_wakeup.set()
+
+    async def pause_dispatching(self) -> None:
+        """Close task-start admission while allowing active tasks to finish.
+
+        Taking the same lock as every start path waits for any in-flight claim
+        to persist ``in_progress``/``executing`` before this method returns.
+        """
+        async with self._dispatch_claim_lock:
+            self._dispatch_paused = True
+            self._maintenance_shutdown_committed = False
+            self._dispatch_resumed.clear()
+        self._dispatch_wakeup.set()
+
+    def resume_dispatching(self) -> None:
+        """Resume task claims after a cancelled or completed maintenance run."""
+        self._dispatch_paused = False
+        self._maintenance_shutdown_committed = False
+        self._dispatch_resumed.set()
+        self._dispatch_wakeup.set()
+
+    @asynccontextmanager
+    async def task_start_guard(self):
+        """Admit one new Task start and serialize it with maintenance.
+
+        The caller must commit the Task's active status before leaving the
+        context. A paused caller retries after ``wait_until_resumed`` instead
+        of launching work in the shutdown window.
+        """
+        async with self._dispatch_claim_lock:
+            if self._dispatch_paused:
+                raise TaskStartPausedError("task starts are paused for maintenance")
+            yield
+
+    async def wait_until_resumed(self) -> None:
+        await self._dispatch_resumed.wait()
+
+    async def pending_task_start_ids(self) -> set[int]:
+        """Return queued/in-flight resume task IDs under the admission lock."""
+        async with self._dispatch_claim_lock:
+            return set(self._pending_task_starts)
+
+    @asynccontextmanager
+    async def maintenance_shutdown_guard(self):
+        """Hold task admission closed across the final check and stop spawn."""
+        async with self._dispatch_claim_lock:
+            if not self._dispatch_paused:
+                raise RuntimeError("maintenance shutdown requires paused dispatching")
+            yield set(self._pending_task_starts)
+
+    def commit_maintenance_shutdown(self) -> None:
+        """Seal admission after the final check while the guard is held."""
+        if not self._dispatch_paused or not self._dispatch_claim_lock.locked():
+            raise RuntimeError("shutdown commit must hold paused task admission")
+        self._maintenance_shutdown_committed = True
 
     async def _cleanup_stale_state(self):
         """Reset instances and tasks stuck in active states after a crash/restart."""
@@ -431,6 +515,7 @@ class GlobalDispatcher:
     def status(self) -> dict:
         return {
             "running": self._running,
+            "paused": self._dispatch_paused,
             "active_tasks": {
                 iid: not t.done() for iid, t in self._running_tasks.items()
             },
@@ -618,11 +703,19 @@ class GlobalDispatcher:
         while self._running:
             try:
                 self._dispatch_wakeup.clear()
+                if self._dispatch_paused:
+                    try:
+                        await asyncio.wait_for(self._dispatch_wakeup.wait(), timeout=2)
+                    except asyncio.TimeoutError:
+                        pass
+                    continue
                 # Top up idle workers before looking for capacity
                 await self._ensure_min_idle_instances()
 
                 # 路径 1：分布式 Worker task —— 不消耗本地 instance，直接转发
-                await self._dispatch_worker_tasks()
+                async with self._dispatch_claim_lock:
+                    if not self._dispatch_paused:
+                        await self._dispatch_worker_tasks()
 
                 # Find idle instances
                 async with self.db_factory() as db:
@@ -640,17 +733,20 @@ class GlobalDispatcher:
                     if instance.id in self._launching_instances:
                         continue
 
-                    async with self.db_factory() as db:
-                        queue = TaskQueue(db)
-                        now = time.monotonic()
-                        self._codex_routing_not_before = {
-                            task_id: deadline
-                            for task_id, deadline in self._codex_routing_not_before.items()
-                            if deadline > now
-                        }
-                        task = await queue.dequeue(
-                            exclude_ids=set(self._codex_routing_not_before)
-                        )
+                    async with self._dispatch_claim_lock:
+                        if self._dispatch_paused:
+                            break
+                        async with self.db_factory() as db:
+                            queue = TaskQueue(db)
+                            now = time.monotonic()
+                            self._codex_routing_not_before = {
+                                task_id: deadline
+                                for task_id, deadline in self._codex_routing_not_before.items()
+                                if deadline > now
+                            }
+                            task = await queue.dequeue(
+                                exclude_ids=set(self._codex_routing_not_before)
+                            )
 
                     if not task:
                         continue  # No matching task for this instance, try next
@@ -3464,9 +3560,11 @@ class GlobalDispatcher:
     ):
         """Enqueue a message for the main agent of a task.
 
-        Messages are processed serially by a per-task consumer.
+        Messages are processed serially by a per-task consumer. Registration
+        shares the task-start gate with self-update: if maintenance has already
+        paused launches, the message becomes a blocker and is retained until
+        the update cancels its restart and resumes dispatching.
         """
-        q = self._get_task_queue(task_id)
         msg = QueuedMessage(
             priority=priority,
             timestamp=time.monotonic(),
@@ -3477,33 +3575,73 @@ class GlobalDispatcher:
             model_override=model_override,
             monitor_session_id=monitor_session_id,
         )
-        await q.put(msg)
-        self._ensure_queue_worker(task_id)
+        async with self._dispatch_claim_lock:
+            if self._maintenance_shutdown_committed:
+                raise TaskStartPausedError("service shutdown has already been committed")
+            msg.queue_generation = self._task_queue_generations.get(task_id, 0)
+            q = self._get_task_queue(task_id)
+            await q.put(msg)
+            self._pending_task_starts.add(task_id)
+            self._ensure_queue_worker(task_id)
         logger.info(
             f"Enqueued message for task {task_id}: source={source} priority={priority} "
             f"queue_depth={q.qsize()}"
         )
 
-    def clear_task_queue(self, task_id: int) -> int:
+    async def clear_task_queue(self, task_id: int) -> int:
         """Drop all pending queued messages for a task (used on interrupt).
 
         Returns the number of messages discarded. The message currently being
         processed (if any) is not affected — callers stop the process separately.
         """
-        q = self._task_queues.get(task_id)
-        if not q:
-            return 0
-        cleared = 0
-        while True:
-            try:
-                q.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-            q.task_done()
-            cleared += 1
+        async with self._dispatch_claim_lock:
+            self._task_queue_generations[task_id] = (
+                self._task_queue_generations.get(task_id, 0) + 1
+            )
+            q = self._task_queues.get(task_id)
+            if q is None:
+                self._pending_task_starts.discard(task_id)
+                return 0
+            # q.get() removes an item before the consumer can acquire the
+            # admission lock to register it as in-flight. In that state the
+            # queue is empty but pending still records the accepted message.
+            # Advancing the generation above cancels that handoff; count it so
+            # stop-session reports a successful clear instead of a false 400.
+            cancelled_handoff = (
+                q.empty()
+                and task_id in self._pending_task_starts
+                and not self._task_queue_inflight.get(task_id, 0)
+            )
+            cleared = 0
+            while True:
+                try:
+                    q.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                q.task_done()
+                cleared += 1
+            if q.empty() and not self._task_queue_inflight.get(task_id, 0):
+                self._pending_task_starts.discard(task_id)
+            if cancelled_handoff:
+                cleared += 1
         if cleared:
             logger.info(f"Cleared {cleared} pending queued message(s) for task {task_id} on interrupt")
         return cleared
+
+    async def _claim_dequeued_message(
+        self,
+        task_id: int,
+        msg: QueuedMessage,
+    ) -> bool:
+        """Register a dequeued message unless a queue clear invalidated it."""
+        async with self._dispatch_claim_lock:
+            if msg.queue_generation != self._task_queue_generations.get(task_id, 0):
+                return False
+            self._task_queue_inflight[task_id] = (
+                self._task_queue_inflight.get(task_id, 0) + 1
+            )
+            self._pending_task_starts.add(task_id)
+            return True
 
     async def _queue_heartbeat(self, task_id: int):
         """Continuously mark a task's queue consumer as alive.
@@ -3544,7 +3682,29 @@ class GlobalDispatcher:
                     break
 
                 try:
-                    await self._process_queued_message(task_id, msg)
+                    claimed = await self._claim_dequeued_message(task_id, msg)
+                except BaseException:
+                    q.task_done()
+                    raise
+                if not claimed:
+                    q.task_done()
+                    logger.info(
+                        "Discarded cancelled queued-message handoff for task %s",
+                        task_id,
+                    )
+                    continue
+                try:
+                    while True:
+                        await self.wait_until_resumed()
+                        try:
+                            await self._process_queued_message(task_id, msg)
+                            break
+                        except TaskStartPausedError:
+                            # Maintenance won the late admission race after the
+                            # consumer had already prepared this turn. Keep the
+                            # exact message in hand and retry only after the
+                            # updater cancels its restart and reopens the gate.
+                            continue
                 except Exception as exc:
                     from backend.services.codex_app_server import (
                         CodexAppServerBusyError,
@@ -3575,6 +3735,14 @@ class GlobalDispatcher:
                         )
                 finally:
                     q.task_done()
+                    async with self._dispatch_claim_lock:
+                        inflight = self._task_queue_inflight.get(task_id, 0) - 1
+                        if inflight > 0:
+                            self._task_queue_inflight[task_id] = inflight
+                        else:
+                            self._task_queue_inflight.pop(task_id, None)
+                        if q.empty() and inflight <= 0:
+                            self._pending_task_starts.discard(task_id)
         finally:
             hb_task.cancel()
             # Only deregister if THIS task is still the registered worker. The
@@ -3584,8 +3752,10 @@ class GlobalDispatcher:
             # *second* live consumer → two concurrent `--resume` (task #728).
             if self._task_queue_workers.get(task_id) is asyncio.current_task():
                 self._task_queue_workers.pop(task_id, None)
-            if q.empty():
-                self._task_queues.pop(task_id, None)
+            async with self._dispatch_claim_lock:
+                if q.empty() and not self._task_queue_inflight.get(task_id, 0):
+                    self._pending_task_starts.discard(task_id)
+                    self._task_queues.pop(task_id, None)
 
     async def _process_queued_message(self, task_id: int, msg: QueuedMessage):
         """Resume main agent session with a queued message."""
@@ -3857,24 +4027,27 @@ class GlobalDispatcher:
                     broadcast_data["monitor_session_id"] = msg.monitor_session_id
                 await self.broadcaster.broadcast(f"task:{task_id}", broadcast_data)
 
-            status_before_launch = task.status
-            completed_at_before_launch = task.completed_at
-            task.status = "executing"
-            task.completed_at = None
-            await db.commit()
-            if msg.source and (
-                msg.source.startswith("monitor:")
-                or msg.source.startswith("sub-agent:")
-            ):
-                msg.source_logged = True
+            # The status transition is the admission commit point. Maintenance
+            # takes this same lock before its final blocker query, so it either
+            # sees this task as executing or prevents the launch entirely.
+            async with self.task_start_guard():
+                status_before_launch = task.status
+                completed_at_before_launch = task.completed_at
+                task.status = "executing"
+                task.completed_at = None
+                await db.commit()
+                if msg.source and (
+                    msg.source.startswith("monitor:")
+                    or msg.source.startswith("sub-agent:")
+                ):
+                    msg.source_logged = True
 
-            # Claim the instance across the launch window: launch() only flips
-            # its DB status to "running" once the PTY session is fully spawned,
-            # so until then both the dispatch loop and other queued-message
-            # launches must treat it as taken (prod task #676). Released in
-            # finally so a failed launch can't leak the claim and wedge the
-            # instance out of the dispatch pool forever.
-            self._launching_instances.add(inst_id)
+                # Claim the instance before releasing admission: launch() only
+                # flips its DB status to running once the process is spawned.
+                self._launching_instances.add(inst_id)
+
+            # Released in finally so a failed launch cannot leak the instance
+            # claim and wedge it out of the dispatch pool forever.
             try:
                 await self.instance_manager.launch(**launch_kwargs)
             except Exception:

@@ -10,17 +10,26 @@ import shutil
 import subprocess
 import sys
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy import select
+
+from backend.models.instance import Instance
+from backend.models.task import Task
+from backend.services.git_info import git_head_commit
 from backend.services.ws_broadcaster import WebSocketBroadcaster
 
 logger = logging.getLogger(__name__)
 
 WS_CHANNEL = "system_update"
 MAX_BACKUPS = 5
+ACTIVE_TASK_STATUSES = ("in_progress", "executing")
+DRY_RUN_CACHE_SECONDS = 30.0
+DRY_RUN_ERROR_CACHE_SECONDS = 5.0
 
 
 @dataclass
@@ -143,12 +152,35 @@ def _resolve_db_path(project_dir: str) -> Path:
 
 
 class UpdateService:
-    def __init__(self, broadcaster: WebSocketBroadcaster, port: int, project_dir: str):
+    def __init__(
+        self,
+        broadcaster: WebSocketBroadcaster,
+        port: int,
+        project_dir: str,
+        db_factory: Any | None = None,
+        dispatcher: Any | None = None,
+        running_commit: str | None = None,
+    ):
         self.broadcaster = broadcaster
         self.port = port
         self.project_dir = project_dir
+        self.db_factory = db_factory
+        self.dispatcher = dispatcher
+        # Capture the version loaded by this process exactly once.  Reading
+        # HEAD later only tells us what is on disk after a manual git pull.
+        self._running_commit = (
+            running_commit.strip()
+            if running_commit is not None
+            else git_head_commit(project_dir)
+        )
         self.db_path = _resolve_db_path(project_dir)
         self._lock = asyncio.Lock()
+        # Serialize admission of update and rollback operations. ``_lock``
+        # protects the long-running pipeline itself, but a newly scheduled
+        # pipeline has not necessarily acquired it when start_update returns.
+        self._operation_lock = asyncio.Lock()
+        self._dry_run_lock = asyncio.Lock()
+        self._dry_run_cache: dict[str, tuple[float, dict[str, Any]]] = {}
         self._current: UpdateState | None = None
         self._status_file = Path(f"/tmp/ccm-update-status-{port}.json")
         from backend.config import settings
@@ -233,67 +265,259 @@ class UpdateService:
             return self._current.to_dict()
         return {"status": "idle"}
 
-    async def _needs_restart(self) -> bool:
-        """Check if the running service is older than the code on disk."""
+    async def _get_active_tasks(self) -> list[dict[str, Any]]:
+        """Return tasks that would be interrupted by a service restart."""
+        if self.db_factory is None:
+            return []
+        async with self.db_factory() as db:
+            rows = (await db.execute(
+                select(Task.id, Task.title, Task.status)
+                .where(Task.status.in_(ACTIVE_TASK_STATUSES))
+                .order_by(Task.id.asc())
+            )).all()
+        return [
+            {"id": row.id, "title": row.title, "status": row.status}
+            for row in rows
+        ]
+
+    async def _get_running_taskless_instances(self) -> list[dict[str, Any]]:
+        """Return prompt-only instance runs that have no active Task row.
+
+        ``POST /api/instances/{id}/run?prompt=...`` persists the instance as
+        running with ``current_task_id=NULL``.  The launch is real work even
+        though it cannot appear in the Task-status query, so maintenance must
+        treat it as a blocker until InstanceManager marks the slot idle again.
+        """
+        if self.db_factory is None:
+            return []
+        async with self.db_factory() as db:
+            rows = (await db.execute(
+                select(Instance.id, Instance.name, Instance.status)
+                .where(
+                    Instance.status == "running",
+                    Instance.current_task_id.is_(None),
+                )
+                .order_by(Instance.id.asc())
+            )).all()
+        return [
+            {
+                "id": row.id,
+                "instance_id": row.id,
+                "title": f"实例 {row.name}（未关联任务）",
+                "status": "running_instance",
+                "kind": "instance",
+            }
+            for row in rows
+        ]
+
+    async def _get_blocking_tasks(
+        self,
+        pending_task_ids: set[int] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Combine running tasks, taskless instances, and pending resumes."""
+        active_tasks = await self._get_active_tasks()
+        taskless_instances = await self._get_running_taskless_instances()
+        active_ids = {task["id"] for task in active_tasks}
+        if pending_task_ids is None:
+            if self.dispatcher is None or not hasattr(
+                self.dispatcher, "pending_task_start_ids"
+            ):
+                pending_task_ids = set()
+            else:
+                pending_task_ids = await self.dispatcher.pending_task_start_ids()
+        queued_ids = set(pending_task_ids) - active_ids
+        if not queued_ids:
+            return active_tasks + taskless_instances
+
+        if self.db_factory is None:
+            queued_tasks = [
+                {"id": task_id, "title": f"Task {task_id}", "status": "queued_resume"}
+                for task_id in sorted(queued_ids)
+            ]
+        else:
+            async with self.db_factory() as db:
+                rows = (await db.execute(
+                    select(Task.id, Task.title)
+                    .where(Task.id.in_(queued_ids))
+                    .order_by(Task.id.asc())
+                )).all()
+            found = {row.id for row in rows}
+            queued_tasks = [
+                {"id": row.id, "title": row.title, "status": "queued_resume"}
+                for row in rows
+            ]
+            queued_tasks.extend(
+                {"id": task_id, "title": f"Task {task_id}", "status": "queued_resume"}
+                for task_id in sorted(queued_ids - found)
+            )
+        return active_tasks + queued_tasks + taskless_instances
+
+    @staticmethod
+    def _blocker_payload(active_tasks: list[dict[str, Any]]) -> dict[str, Any]:
+        return {
+            "update_blocked": bool(active_tasks),
+            "active_task_count": len(active_tasks),
+            "active_tasks": active_tasks,
+        }
+
+    async def _pause_dispatching(self) -> None:
+        if self.dispatcher is not None:
+            await self.dispatcher.pause_dispatching()
+
+    def _resume_dispatching(self) -> None:
+        if self.dispatcher is not None:
+            self.dispatcher.resume_dispatching()
+
+    @asynccontextmanager
+    async def _maintenance_shutdown_guard(self):
+        if self.dispatcher is not None and hasattr(
+            self.dispatcher, "maintenance_shutdown_guard"
+        ):
+            async with self.dispatcher.maintenance_shutdown_guard() as pending_ids:
+                yield pending_ids
+        else:
+            yield set()
+
+    async def _commit_shutdown_if_idle(self, action) -> list[dict[str, Any]]:
+        """Atomically recheck blockers and synchronously schedule shutdown.
+
+        All user-visible broadcasts and grace sleeps must happen before this
+        helper. There is intentionally no await between the successful blocker
+        query and ``action()`` while task-start admission is held closed.
+        """
+        async with self._maintenance_shutdown_guard() as pending_ids:
+            blockers = await self._get_blocking_tasks(set(pending_ids))
+            if blockers:
+                return blockers
+            if self.dispatcher is not None and hasattr(
+                self.dispatcher, "commit_maintenance_shutdown"
+            ):
+                self.dispatcher.commit_maintenance_shutdown()
+            action()
+            return []
+
+    async def _resolve_remote(self, branch: str) -> str:
+        """Use the branch's configured tracking remote, falling back to origin."""
+        result = await self._run_cmd(
+            ["git", "config", "--get", f"branch.{branch}.remote"]
+        )
+        remote = result["stdout"].strip() if result["returncode"] == 0 else ""
+        return remote if remote and remote != "." else "origin"
+
+    async def _disk_commit(self) -> str:
+        result = await self._run_cmd(["git", "rev-parse", "HEAD"])
+        if result["returncode"] == 0:
+            return result["stdout"].strip()
+        deploy_commit = Path(self.project_dir) / ".deploy_commit"
         try:
-            scope = self._systemd_scope()
-            if not scope:
-                return False
-            result = await self._run_cmd(
-                self._systemctl_cmd(scope) + ["show", self._service_name,
-                 "-p", "ActiveEnterTimestamp", "--value"],
+            return deploy_commit.read_text().strip()
+        except OSError:
+            return ""
+
+    async def _needs_restart(self, disk_commit: str | None = None) -> bool:
+        """Check whether disk code differs from the version loaded in memory."""
+        try:
+            current_disk_commit = disk_commit or await self._disk_commit()
+            return bool(
+                self._running_commit
+                and current_disk_commit
+                and self._running_commit != current_disk_commit
             )
-            ts_str = result["stdout"].strip()
-            if not ts_str:
-                return False
-            from email.utils import parsedate_to_datetime
-            try:
-                service_started = datetime.fromisoformat(ts_str)
-            except ValueError:
-                service_started = parsedate_to_datetime(ts_str)
-            commit_result = await self._run_cmd(
-                ["git", "log", "-1", "--format=%cI"],
-            )
-            commit_ts = commit_result["stdout"].strip()
-            if not commit_ts:
-                return False
-            commit_time = datetime.fromisoformat(commit_ts)
-            if service_started.tzinfo is None:
-                service_started = service_started.replace(tzinfo=timezone.utc)
-            if commit_time.tzinfo is None:
-                commit_time = commit_time.replace(tzinfo=timezone.utc)
-            return commit_time > service_started
         except Exception:
             logger.debug("_needs_restart check failed", exc_info=True)
             return False
 
-    async def dry_run(self, branch: str | None = None) -> dict[str, Any]:
+    async def _deployment_base_commit(self, disk_commit: str) -> str:
+        """Include manually pulled changes in deployment analysis and rollback."""
+        if not self._running_commit or self._running_commit == disk_commit:
+            return disk_commit
+        result = await self._run_cmd(
+            ["git", "merge-base", "--is-ancestor", self._running_commit, disk_commit]
+        )
+        return self._running_commit if result["returncode"] == 0 else disk_commit
+
+    async def _cached_version_check(
+        self,
+        target_branch: str,
+        *,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """Coalesce concurrent fetches and briefly reuse their version result."""
+        now = time.monotonic()
+        cached = self._dry_run_cache.get(target_branch)
+        if not force and cached and cached[0] > now:
+            return dict(cached[1])
+
+        async with self._dry_run_lock:
+            now = time.monotonic()
+            cached = self._dry_run_cache.get(target_branch)
+            if not force and cached and cached[0] > now:
+                return dict(cached[1])
+
+            result = await self._check_remote_updates(target_branch)
+            ttl = DRY_RUN_ERROR_CACHE_SECONDS if result.get("error") else DRY_RUN_CACHE_SECONDS
+            expires_at = time.monotonic() + ttl
+            self._dry_run_cache = {
+                key: value
+                for key, value in self._dry_run_cache.items()
+                if value[0] > now
+            }
+            self._dry_run_cache[target_branch] = (expires_at, dict(result))
+            return result
+
+    async def dry_run(
+        self,
+        branch: str | None = None,
+        *,
+        force: bool = False,
+    ) -> dict[str, Any]:
         """Check for available updates without applying them."""
         target_branch = branch or "main"
-        refspec = f"+refs/heads/{target_branch}:refs/remotes/origin/{target_branch}"
-        result = await self._run_cmd(["git", "fetch", "origin", refspec], timeout=60)
+        version_result = await self._cached_version_check(target_branch, force=force)
+        active_tasks = await self._get_blocking_tasks()
+        return {**version_result, **self._blocker_payload(active_tasks)}
+
+    async def _check_remote_updates(self, target_branch: str) -> dict[str, Any]:
+        """Fetch and compare versions; caller handles caching and task blockers."""
+        remote = await self._resolve_remote(target_branch)
+        remote_ref = f"{remote}/{target_branch}"
+        refspec = f"+refs/heads/{target_branch}:refs/remotes/{remote}/{target_branch}"
+        # Local restart detection must not depend on network availability.  A
+        # manual pull changes disk HEAD even when the later fetch fails.
+        head = await self._disk_commit()
+        needs_restart = await self._needs_restart(head)
+        result = await self._run_cmd(["git", "fetch", remote, refspec], timeout=60)
         if result["returncode"] != 0:
-            return {"has_updates": False, "error": result["stderr"]}
-
-        head = (await self._run_cmd(["git", "rev-parse", "HEAD"]))["stdout"].strip()
-        origin = (await self._run_cmd(["git", "rev-parse", f"origin/{target_branch}"]))["stdout"].strip()
-
-        if head == origin:
-            needs_restart = await self._needs_restart()
             return {
                 "has_updates": False,
                 "needs_restart": needs_restart,
+                "manual_update_detected": needs_restart,
+                "remote": remote,
                 "current_commit": head[:7],
-                "latest_commit": origin[:7],
+                "running_commit": self._running_commit[:7],
+                "error": result["stderr"],
+            }
+
+        remote_head = (await self._run_cmd(["git", "rev-parse", remote_ref]))["stdout"].strip()
+
+        if head == remote_head:
+            return {
+                "has_updates": False,
+                "needs_restart": needs_restart,
+                "manual_update_detected": needs_restart,
+                "remote": remote,
+                "current_commit": head[:7],
+                "running_commit": self._running_commit[:7],
+                "latest_commit": remote_head[:7],
             }
 
         diff_output = (await self._run_cmd(
-            ["git", "log", "--oneline", f"{head}..{origin}"]
+            ["git", "log", "--oneline", f"{head}..{remote_head}"]
         ))["stdout"].strip()
         commits = [line for line in diff_output.split("\n") if line.strip()]
 
         diff_files = (await self._run_cmd(
-            ["git", "diff", "--name-only", f"{head}..{origin}"]
+            ["git", "diff", "--name-only", f"{head}..{remote_head}"]
         ))["stdout"].strip()
         files = [f for f in diff_files.split("\n") if f.strip()]
 
@@ -302,15 +526,19 @@ class UpdateService:
         has_package_changes = "frontend/package.json" in files
 
         return {
-            "has_updates": True,
+            "has_updates": bool(commits),
+            "needs_restart": needs_restart,
+            "manual_update_detected": needs_restart,
             "branch": target_branch,
+            "remote": remote,
             "commits_behind": len(commits),
             "has_new_migrations": len(migration_files) > 0,
             "migration_count": len(migration_files),
             "has_frontend_changes": len(frontend_files) > 0,
             "has_package_changes": has_package_changes,
             "current_commit": head[:7],
-            "latest_commit": origin[:7],
+            "running_commit": self._running_commit[:7],
+            "latest_commit": remote_head[:7],
             "commit_messages": [c.split(" ", 1)[-1] if " " in c else c for c in commits[:20]],
         }
 
@@ -320,48 +548,125 @@ class UpdateService:
         force: bool = False,
         branch: str | None = None,
     ) -> dict[str, Any]:
-        if self._lock.locked():
-            if self._current:
-                return {"error": "更新正在进行中", "update_id": self._current.update_id}
-            return {"error": "更新正在进行中"}
+        async with self._operation_lock:
+            if self._lock.locked() or (
+                self._current and self._current.status in ("running", "restarting")
+            ):
+                if self._current:
+                    return {"error": "更新正在进行中", "update_id": self._current.update_id}
+                return {"error": "更新正在进行中"}
 
-        update_id = f"upd_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
-        state = UpdateState(
-            update_id=update_id,
-            status="running",
-            started_at=datetime.now(timezone.utc).isoformat(),
-            steps=[StepInfo(name=n) for n in STEP_NAMES],
-        )
-        self._current = state
+            # Freeze new claims before checking the DB.  Existing tasks are
+            # never cancelled; callers retry after they finish.
+            await self._pause_dispatching()
+            try:
+                try:
+                    active_tasks = await self._get_blocking_tasks()
+                except Exception as exc:
+                    self._resume_dispatching()
+                    logger.exception("Unable to verify active tasks before update")
+                    return {"error": f"无法确认当前任务状态，已取消更新: {exc}"}
+                if active_tasks:
+                    self._resume_dispatching()
+                    return {
+                        "error": f"当前有 {len(active_tasks)} 个任务正在运行，请等待任务完成后再更新",
+                        **self._blocker_payload(active_tasks),
+                    }
 
-        asyncio.create_task(
-            self._run_pipeline(state, skip_frontend_build=skip_frontend_build, force=force, branch=branch)
-        )
-        return {"update_id": update_id, "status": "started"}
+                update_id = f"upd_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+                state = UpdateState(
+                    update_id=update_id,
+                    status="running",
+                    started_at=datetime.now(timezone.utc).isoformat(),
+                    steps=[StepInfo(name=n) for n in STEP_NAMES],
+                )
+                self._current = state
+
+                asyncio.create_task(
+                    self._run_pipeline(state, skip_frontend_build=skip_frontend_build, force=force, branch=branch)
+                )
+                return {"update_id": update_id, "status": "started"}
+            except asyncio.CancelledError:
+                # Request disconnects and service shutdown can cancel admission
+                # after pause_dispatching() has closed the gate but before the
+                # background pipeline owns cleanup. Never leave task starts
+                # paused when no maintenance operation was admitted.
+                self._resume_dispatching()
+                raise
 
     async def rollback(self) -> dict[str, Any]:
         """Manual rollback to previous version."""
-        if not self._current or not self._current.old_commit:
-            return {"error": "没有可回滚的更新记录"}
-        if self._lock.locked():
-            return {"error": "有操作正在进行中"}
+        async with self._operation_lock:
+            rollback_state = self._current
+            if not rollback_state or not rollback_state.old_commit:
+                return {"error": "没有可回滚的更新记录"}
+            if self._lock.locked() or rollback_state.status in (
+                "running",
+                "restarting",
+            ):
+                return {"error": "有操作正在进行中"}
 
-        old_commit = self._current.old_commit
-        backup_file = self._current.backup_file
+            # Capture the exact rollback record while operation admission is
+            # reserved. No concurrent start_update/rollback may replace
+            # self._current between this validation and the shutdown decision.
+            old_commit = rollback_state.old_commit
+            backup_file = rollback_state.backup_file
 
-        async with self._lock:
-            await self._broadcast("step_update", step="rollback", status="running", message="正在回滚...")
+            await self._pause_dispatching()
+            try:
+                try:
+                    active_tasks = await self._get_blocking_tasks()
+                except Exception as exc:
+                    self._resume_dispatching()
+                    logger.exception("Unable to verify active tasks before rollback")
+                    return {"error": f"无法确认当前任务状态，已取消回滚: {exc}"}
+                if active_tasks:
+                    self._resume_dispatching()
+                    return {
+                        "error": f"当前有 {len(active_tasks)} 个任务正在运行，请等待任务完成后再回滚",
+                        **self._blocker_payload(active_tasks),
+                    }
 
-            # Never restore the SQLite file while this process still holds open
-            # connections — a later write/checkpoint through the live connection
-            # corrupts the restored DB (2026-07-16 test-env rollback incident).
-            # The script stops the service (systemctl or kill, per deployment)
-            # BEFORE touching the DB, then resets code and starts it again.
-            self._write_status_file("restarting", "正在停服回滚...", old_commit=old_commit)
-            await self._broadcast("restarting", message="服务即将停止进行回滚，请等待自动重连...")
-            await asyncio.sleep(1)
-            self._spawn_update_script("rollback", old_commit, backup_file or "")
-            return {"status": "rolling_back", "old_commit": old_commit}
+                async with self._lock:
+                    await self._broadcast("step_update", step="rollback", status="running", message="正在回滚...")
+
+                    # Never restore the SQLite file while this process still holds open
+                    # connections — a later write/checkpoint through the live connection
+                    # corrupts the restored DB (2026-07-16 test-env rollback incident).
+                    # The script stops the service (systemctl or kill, per deployment)
+                    # BEFORE touching the DB, then resets code and starts it again.
+                    await self._broadcast("restarting", message="服务即将停止进行回滚，请等待自动重连...")
+                    await asyncio.sleep(1)
+
+                    def spawn_rollback() -> None:
+                        # Identity validation documents the invariant even for
+                        # future writers that might mutate _current outside the
+                        # operation admission API.
+                        if self._current is not rollback_state:
+                            raise RuntimeError("rollback state changed during admission")
+                        rollback_state.status = "restarting"
+                        self._write_status_file(
+                            "restarting", "正在停服回滚...", old_commit=old_commit
+                        )
+                        self._spawn_update_script("rollback", old_commit, backup_file or "")
+
+                    blockers = await self._commit_shutdown_if_idle(spawn_rollback)
+                    if blockers:
+                        self._resume_dispatching()
+                        return {
+                            "error": (
+                                f"回滚期间出现了 {len(blockers)} 个待处理任务，"
+                                "已取消停服；请等待任务完成后重试"
+                            ),
+                            **self._blocker_payload(blockers),
+                        }
+                    return {"status": "rolling_back", "old_commit": old_commit}
+            except asyncio.CancelledError:
+                self._resume_dispatching()
+                raise
+            except Exception:
+                self._resume_dispatching()
+                raise
 
     # ---- Pipeline implementation ----
 
@@ -381,6 +686,9 @@ class UpdateService:
                 state.completed_at = datetime.now(timezone.utc).isoformat()
                 await self._broadcast("update_failed", message=str(e))
                 logger.exception("Update pipeline failed")
+            finally:
+                if state.status != "restarting":
+                    self._resume_dispatching()
 
     async def _pipeline_inner(
         self,
@@ -390,6 +698,7 @@ class UpdateService:
         branch: str | None = None,
     ):
         target_branch = branch or "main"
+        remote = await self._resolve_remote(target_branch)
         has_new_migrations = False
         has_frontend_changes = False
         has_package_changes = False
@@ -397,7 +706,8 @@ class UpdateService:
         # Step 1: check clean → git pull
         step = state.steps[0]
         await self._start_step(step)
-        state.old_commit = (await self._run_cmd(["git", "rev-parse", "HEAD"]))["stdout"].strip()
+        disk_commit = await self._disk_commit()
+        state.old_commit = await self._deployment_base_commit(disk_commit)
 
         # Auto-stash local changes before pulling
         status_result = await self._run_cmd(["git", "status", "--porcelain"])
@@ -415,8 +725,8 @@ class UpdateService:
         # updating to a feature branch for testing)
         current_branch = (await self._run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"]))["stdout"].strip()
         if current_branch != target_branch:
-            refspec = f"+refs/heads/{target_branch}:refs/remotes/origin/{target_branch}"
-            fetch_result = await self._run_cmd(["git", "fetch", "origin", refspec], timeout=60, step=step)
+            refspec = f"+refs/heads/{target_branch}:refs/remotes/{remote}/{target_branch}"
+            fetch_result = await self._run_cmd(["git", "fetch", remote, refspec], timeout=60, step=step)
             if fetch_result["returncode"] != 0:
                 if stashed:
                     await self._run_cmd(["git", "stash", "pop"])
@@ -424,7 +734,7 @@ class UpdateService:
                 return
             # Create or reset local branch to match remote
             checkout_result = await self._run_cmd(
-                ["git", "checkout", "-B", target_branch, f"origin/{target_branch}"], step=step
+                ["git", "checkout", "-B", target_branch, f"{remote}/{target_branch}"], step=step
             )
             if checkout_result["returncode"] != 0:
                 if stashed:
@@ -433,7 +743,7 @@ class UpdateService:
                 return
             await self._broadcast("log_line", step="git_pull", log=f"已切换到分支 {target_branch}", status="running")
 
-        result = await self._run_cmd(["git", "pull", "--rebase", "origin", target_branch], timeout=60, step=step)
+        result = await self._run_cmd(["git", "pull", "--rebase", remote, target_branch], timeout=60, step=step)
         if result["returncode"] != 0:
             if stashed:
                 await self._run_cmd(["git", "stash", "pop"])
@@ -571,12 +881,22 @@ class UpdateService:
             await self._complete_step(step)
 
         # Steps 8-10: migration path vs fast path
+        active_tasks = await self._get_blocking_tasks()
+        if active_tasks:
+            step = state.steps[7]
+            await self._start_step(step)
+            await self._fail_step(
+                step,
+                state,
+                f"更新期间启动了 {len(active_tasks)} 个任务，已取消重启；请等待任务完成后重试",
+            )
+            return
         if has_new_migrations:
             await self._migration_path(state)
         else:
             await self._fast_restart_path(state)
 
-    async def _migration_path(self, state: UpdateState):
+    async def _migration_path(self, state: UpdateState) -> bool:
         """Has new migrations: launch external script that survives our own stop (steps 8-10)."""
         step8 = state.steps[7]
         step9 = state.steps[8]
@@ -589,12 +909,22 @@ class UpdateService:
 
         await self._broadcast("step_update", step="stop_service", status="running",
                               message="即将停服进行数据库迁移...")
+        await self._broadcast("restarting", message="服务即将停止进行迁移，请等待自动重连...")
         await asyncio.sleep(1)
 
-        self._spawn_update_script("migrate", state.old_commit, state.backup_file)
+        def spawn_migration() -> None:
+            state.status = "restarting"
+            self._spawn_update_script("migrate", state.old_commit, state.backup_file)
 
-        state.status = "restarting"
-        await self._broadcast("restarting", message="服务即将停止进行迁移，请等待自动重连...")
+        blockers = await self._commit_shutdown_if_idle(spawn_migration)
+        if blockers:
+            await self._fail_step(
+                step8,
+                state,
+                f"停服前出现了 {len(blockers)} 个待处理任务，已取消重启；请等待任务完成后重试",
+            )
+            return False
+        return True
 
     def _spawn_update_script(self, mode: str, old_commit: str, backup_file: str):
         """Launch update_migrate.sh so it survives this service being stopped."""
@@ -651,7 +981,7 @@ class UpdateService:
                 env=env,
             )
 
-    async def _fast_restart_path(self, state: UpdateState):
+    async def _fast_restart_path(self, state: UpdateState) -> bool:
         """No migration: skip steps 8-9, do nohup restart for step 10."""
         state.steps[7].status = "skipped"
         state.steps[7].message = "无新迁移"
@@ -664,17 +994,28 @@ class UpdateService:
         step10.status = "running"
         step10.started_at = datetime.now(timezone.utc).isoformat()
 
-        self._write_status_file(
-            "restarting", "正在重启服务...",
-            old_commit=state.old_commit,
-            new_commit=state.new_commit,
-            backup_file=state.backup_file,
-        )
-
         await self._broadcast("restarting", message="服务即将重启，请等待自动重连...")
         await asyncio.sleep(1)
 
-        self._restart_service()
+        def restart_service() -> None:
+            state.status = "restarting"
+            self._write_status_file(
+                "restarting", "正在重启服务...",
+                old_commit=state.old_commit,
+                new_commit=state.new_commit,
+                backup_file=state.backup_file,
+            )
+            self._restart_service()
+
+        blockers = await self._commit_shutdown_if_idle(restart_service)
+        if blockers:
+            await self._fail_step(
+                step10,
+                state,
+                f"重启前出现了 {len(blockers)} 个待处理任务，已取消重启；请等待任务完成后重试",
+            )
+            return False
+        return True
 
     # ---- Helpers ----
 

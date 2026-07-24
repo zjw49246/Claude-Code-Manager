@@ -148,15 +148,21 @@ async def send_chat_message(
 
     # Enqueue for serial processing (replaces direct launch)
     from backend.main import dispatcher
-    from backend.services.dispatcher import PRIORITY_USER
-    await dispatcher.enqueue_message(
-        task_id=task_id,
-        prompt=prompt,
-        priority=PRIORITY_USER,
-        source="user",
-        command_skills=command_skills,
-        model_override=body.model,
-    )
+    from backend.services.dispatcher import PRIORITY_USER, TaskStartPausedError
+    try:
+        await dispatcher.enqueue_message(
+            task_id=task_id,
+            prompt=prompt,
+            priority=PRIORITY_USER,
+            source="user",
+            command_skills=command_skills,
+            model_override=body.model,
+        )
+    except TaskStartPausedError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="服务即将重启，消息未进入执行队列，请重连后重试",
+        ) from exc
 
     return {"ok": True, "queued": True, "session_id": task.session_id}
 
