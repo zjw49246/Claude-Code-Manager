@@ -21,6 +21,12 @@ from pydantic import BaseModel
 
 from backend.api.deps import require_admin
 from backend.services.codex_app_server import CodexAppServerBusyError
+from backend.services.login_runtime import (
+    LoginRuntimeError,
+    ensure_login_runtime,
+    login_child_environment,
+    login_lock,
+)
 from backend.services.process_safety import (
     UnsafeProcessGroupError,
     require_safe_process_group_id,
@@ -32,7 +38,7 @@ logger = logging.getLogger(__name__)
 # Background task state
 _relogin_state: dict[str, dict] = {}
 _add_state: dict[str, dict] = {}
-_login_lock = asyncio.Lock()
+_login_lock = login_lock
 _login_attempts: dict[str, dict] = {}
 ACTIVE_LOGIN_STATUSES = {
     "running", "awaiting_otp", "verifying_otp", "finalizing",
@@ -1556,7 +1562,7 @@ async def codex_relogin(request: Request, account_id: str):
             *cmd,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-            env={**os.environ, "DISPLAY": ":99", "PYTHONUNBUFFERED": "1"},
+            env=login_child_environment(extra={"PYTHONUNBUFFERED": "1"}),
             start_new_session=True,
         )
         await _send_login_credentials(
@@ -1651,55 +1657,11 @@ class AddCodexAccountRequest(BaseModel):
     login_method: str = ""
 
 
-_xvfb_proc = None
-_xvfb_auth_path: Path | None = None
-
-
 async def _ensure_xvfb():
-    global _xvfb_proc, _xvfb_auth_path
-    if _xvfb_proc is not None and _xvfb_proc.returncode is None:
-        if _xvfb_auth_path is not None:
-            os.environ["XAUTHORITY"] = str(_xvfb_auth_path)
-        return
-    import subprocess as _sp
-    _sp.run(["pkill", "-f", "Xvfb :99"], capture_output=True)
-    await asyncio.sleep(0.5)
-
-    auth_dir = Path.home() / ".codex-pool"
-    auth_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(auth_dir, 0o700)
-    _xvfb_auth_path = auth_dir / "xvfb.auth"
-    _xvfb_auth_path.unlink(missing_ok=True)
-    open_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    if hasattr(os, "O_NOFOLLOW"):
-        open_flags |= os.O_NOFOLLOW
-    descriptor = os.open(
-        _xvfb_auth_path,
-        open_flags,
-        0o600,
-    )
-    os.close(descriptor)
-    os.chmod(_xvfb_auth_path, 0o600)
-    _sp.run(
-        ["xauth", "-f", str(_xvfb_auth_path)],
-        input=(
-            "add :99 MIT-MAGIC-COOKIE-1 "
-            f"{secrets.token_hex(16)}\n"
-        ),
-        text=True,
-        check=True,
-        capture_output=True,
-    )
-    _xvfb_proc = _sp.Popen(
-        [
-            "Xvfb", ":99", "-screen", "0", "1920x1080x24",
-            "-nolisten", "tcp", "-auth", str(_xvfb_auth_path),
-        ],
-        stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
-    )
-    os.environ["DISPLAY"] = ":99"
-    os.environ["XAUTHORITY"] = str(_xvfb_auth_path)
-    await asyncio.sleep(1)
+    try:
+        return await ensure_login_runtime()
+    except LoginRuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 async def _watch_add(
@@ -1915,7 +1877,7 @@ async def codex_add_account(request: Request, body: AddCodexAccountRequest):
             *cmd,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-            env={**os.environ, "DISPLAY": ":99", "PYTHONUNBUFFERED": "1"},
+            env=login_child_environment(extra={"PYTHONUNBUFFERED": "1"}),
             start_new_session=True,
         )
         await _send_login_credentials(

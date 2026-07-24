@@ -99,6 +99,12 @@ EMAIL_TOKENS_FILE = POOL_DIR / "email_tokens.json"
 ACCOUNTS_FILE = POOL_DIR / "accounts.json"
 
 
+def configured_login_display() -> str | None:
+    """Resolve the display supplied by CCM or a standalone caller."""
+
+    return os.environ.get("DISPLAY") or os.environ.get("CCM_XVFB_DISPLAY")
+
+
 # ---------------------------------------------------------------------------
 # Cookie parsing
 # ---------------------------------------------------------------------------
@@ -335,9 +341,16 @@ async def _mailcatcher_browser_login(email: str, mail_token: str, oauth_url: str
     """
     import subprocess as _sp
 
-    CDP_PORT = 9222
+    CDP_PORT = int(os.environ.get("CCM_LOGIN_CDP_PORT", "9222"))
+    display = configured_login_display()
+    if not display:
+        logger.error(
+            "DISPLAY not set — use xvfb-run or configure CCM_XVFB_DISPLAY",
+        )
+        return None
     CF_CHECKBOX_X, CF_CHECKBOX_Y = 257, 476
     chrome_proc = None
+    profile_dir: Path | None = None
 
     JS_SET_INPUT = """(function(){{var inputs=[...document.querySelectorAll('input[type={type}]')].filter(i=>i.offsetParent!==null);if(!inputs.length)return 'no {type} input';var inp=inputs[0];var s=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;s.call(inp,'{value}');inp.dispatchEvent(new Event('input',{{bubbles:true}}));inp.dispatchEvent(new Event('change',{{bubbles:true}}));return 'set'}})()"""
     JS_CLICK_BTN = """(function(){{var btns=[...document.querySelectorAll('button')].filter(b=>b.offsetParent!==null);for(var b of btns){{var t=b.textContent.trim();if({condition}){{b.click();return 'clicked:'+t}}}}return 'no match'}})()"""
@@ -360,7 +373,7 @@ async def _mailcatcher_browser_login(email: str, mail_token: str, oauth_url: str
         return None
 
     async def xdotool_click(x, y):
-        proc = await asyncio.create_subprocess_exec("xdotool", "mousemove", str(x), str(y), "click", "1", env={**os.environ, "DISPLAY": os.environ.get("DISPLAY", ":99")}, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+        proc = await asyncio.create_subprocess_exec("xdotool", "mousemove", str(x), str(y), "click", "1", env={**os.environ, "DISPLAY": display}, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
         await proc.wait()
 
     async def handle_cf(ws, context, timeout=60):
@@ -378,22 +391,19 @@ async def _mailcatcher_browser_login(email: str, mail_token: str, oauth_url: str
     try:
         import websockets as _ws
 
-        # DISPLAY 由调用方提供（xvfb-run 或手动 export）
-        if not os.environ.get("DISPLAY"):
-            logger.error("DISPLAY not set — 需要在 xvfb-run 下运行或手动 export DISPLAY=:99")
-            return None
-
-        _sp.run(["pkill", "-f", "chrome.*remote-debugging-port"], capture_output=True)
-        await asyncio.sleep(1)
-
         chrome_bin = _sp.run(["bash", "-c", "command -v google-chrome 2>/dev/null || command -v chromium-browser 2>/dev/null"], capture_output=True, text=True).stdout.strip()
         if not chrome_bin:
             logger.error("Chrome not found")
             return None
 
-        profile_dir = f"/tmp/chrome-cdp-login-{email.split('@')[0]}"
-        os.makedirs(profile_dir, exist_ok=True)
-        chrome_proc = _sp.Popen([chrome_bin, "--no-sandbox", "--disable-gpu", "--disable-software-rasterizer", "--no-first-run", "--no-default-browser-check", "--disable-extensions", f"--window-size=1365,900", f"--remote-debugging-port={CDP_PORT}", f"--user-data-dir={profile_dir}", "about:blank"], stdout=_sp.DEVNULL, stderr=_sp.DEVNULL, env={**os.environ, "DISPLAY": os.environ.get("DISPLAY", ":99")})
+        temp_root = Path(
+            os.environ.get("CCM_LOGIN_TMPDIR", "/tmp"),
+        ).expanduser()
+        temp_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        profile_dir = temp_root / f"chrome-cdp-login-{os.getpid()}"
+        shutil.rmtree(profile_dir, ignore_errors=True)
+        profile_dir.mkdir(mode=0o700)
+        chrome_proc = _sp.Popen([chrome_bin, "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", "--disable-software-rasterizer", "--no-first-run", "--no-default-browser-check", "--disable-extensions", f"--window-size=1365,900", f"--remote-debugging-port={CDP_PORT}", f"--user-data-dir={profile_dir}", "about:blank"], stdout=_sp.DEVNULL, stderr=_sp.DEVNULL, env={**os.environ, "DISPLAY": display})
         await asyncio.sleep(4)
         logger.info("Chrome launched pid=%d", chrome_proc.pid)
 
@@ -529,6 +539,8 @@ async def _mailcatcher_browser_login(email: str, mail_token: str, oauth_url: str
         if chrome_proc:
             chrome_proc.kill()
             chrome_proc.wait()
+        if profile_dir is not None:
+            shutil.rmtree(profile_dir, ignore_errors=True)
 
 
 # ---------------------------------------------------------------------------

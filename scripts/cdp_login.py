@@ -6,7 +6,26 @@ from urllib.parse import parse_qs, urlparse
 import httpx, websockets
 
 MAILCATCHER = "https://mail.claude-code-manager.com"
-CDP_PORT = 9222
+
+
+def _cdp_port() -> int:
+    raw = os.environ.get("CCM_LOGIN_CDP_PORT", "9222")
+    port = int(raw)
+    if not 1 <= port <= 65535:
+        raise ValueError(f"invalid CCM_LOGIN_CDP_PORT: {port}")
+    return port
+
+
+def _login_temp_dir() -> Path:
+    path = Path(
+        os.environ.get("CCM_LOGIN_TMPDIR", tempfile.gettempdir()),
+    ).expanduser()
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return path
+
+
+def _diagnostic_path(name: str) -> str:
+    return str(_login_temp_dir() / name)
 
 
 def _mail_timestamp(data: dict) -> float | None:
@@ -91,7 +110,10 @@ async def cdp_eval(ws, expr, timeout=10):
 def _ensure_display(env: dict) -> dict:
     """Ensure DISPLAY is set for Xvfb."""
     if not env.get("DISPLAY"):
-        return {**env, "DISPLAY": ":99"}
+        return {
+            **env,
+            "DISPLAY": os.environ.get("CCM_XVFB_DISPLAY", ":99"),
+        }
     return env
 
 async def cdp_screenshot(ws, path, timeout=10):
@@ -179,12 +201,14 @@ class _LoginResources:
         self.chrome = None
         self.chrome_stderr = None
         self.temporary_auth_dir: Path | None = None
+        self.chrome_profile_dir: Path | None = None
 
     def cleanup(self) -> None:
         chrome, self.chrome = self.chrome, None
         cli, self.cli = self.cli, None
         chrome_stderr, self.chrome_stderr = self.chrome_stderr, None
         temporary_auth_dir, self.temporary_auth_dir = self.temporary_auth_dir, None
+        chrome_profile_dir, self.chrome_profile_dir = self.chrome_profile_dir, None
         _stop_process(chrome)
         _stop_process(cli)
         if chrome_stderr is not None:
@@ -194,6 +218,8 @@ class _LoginResources:
                 pass
         if temporary_auth_dir is not None:
             shutil.rmtree(temporary_auth_dir, ignore_errors=True)
+        if chrome_profile_dir is not None:
+            shutil.rmtree(chrome_profile_dir, ignore_errors=True)
 
 
 def _commit_temporary_credentials(source_dir: Path, target_dir: Path) -> None:
@@ -267,23 +293,25 @@ async def _cdp_login(email: str, token: str, config_dir: str, oauth_url: str = "
             return None
         print(f"  Preflight OAuth URL ({len(oauth_url)} chars)")
 
-    # 1. Kill old chrome and clean profile
-    subprocess.run(["pkill", "-f", "chrome.*remote-debugging"], capture_output=True)
-    await asyncio.sleep(2)
-    subprocess.run(["pkill", "-9", "-f", "chrome.*remote-debugging"], capture_output=True)
-    await asyncio.sleep(1)
-    shutil.rmtree("/tmp/chrome-test-login", ignore_errors=True)
+    # 1. Launch Chrome with a profile owned by this wrapper.  Never pkill by
+    # command pattern: production/test and Claude/Codex may share one host.
+    cdp_port = _cdp_port()
+    temp_root = _login_temp_dir()
+    profile_dir = temp_root / f"chrome-claude-login-{os.getpid()}"
+    shutil.rmtree(profile_dir, ignore_errors=True)
+    profile_dir.mkdir(mode=0o700)
+    resources.chrome_profile_dir = profile_dir
 
     # 2. Launch Chrome (fresh profile)
     # --disable-dev-shm-usage 必带：小机型（t3.medium 等）/dev/shm 太小，
     # 不加会让渲染进程因共享内存不足直接崩溃 → CDP 9222 端口起不来，
     # 后面连 http://127.0.0.1:9222/json 报 ConnectError（登录整段失败）。
     chrome_env = _ensure_display(dict(os.environ))
-    resources.chrome_stderr = open("/tmp/chrome-cdp-stderr.log", "w")
+    resources.chrome_stderr = open(temp_root / "chrome-cdp-stderr.log", "w")
     chrome = subprocess.Popen(["google-chrome", "--no-sandbox", "--disable-gpu",
         "--disable-dev-shm-usage", "--disable-software-rasterizer",
         "--no-first-run", "--disable-extensions", "--window-size=1365,900",
-        f"--remote-debugging-port={CDP_PORT}", "--user-data-dir=/tmp/chrome-test-login",
+        f"--remote-debugging-port={cdp_port}", f"--user-data-dir={profile_dir}",
         "about:blank"], stdout=subprocess.DEVNULL,
         stderr=resources.chrome_stderr, env=chrome_env)
     resources.chrome = chrome
@@ -298,7 +326,7 @@ async def _cdp_login(email: str, token: str, config_dir: str, oauth_url: str = "
             return None
         try:
             async with httpx.AsyncClient() as c:
-                r = await c.get(f"http://127.0.0.1:{CDP_PORT}/json", timeout=3)
+                r = await c.get(f"http://127.0.0.1:{cdp_port}/json", timeout=3)
                 tabs = r.json()
                 break
         except Exception:
@@ -339,7 +367,7 @@ async def _cdp_login(email: str, token: str, config_dir: str, oauth_url: str = "
                 await asyncio.sleep(2)
             print(f"  Email: {r}")
             if r != "set":
-                await cdp_screenshot(ws, "/tmp/cdp_login_no_email.png")
+                await cdp_screenshot(ws, _diagnostic_path("cdp_login_no_email.png"))
                 print("  Email input did not appear")
                 return None
             await asyncio.sleep(0.5)
@@ -356,7 +384,7 @@ async def _cdp_login(email: str, token: str, config_dir: str, oauth_url: str = "
                 await asyncio.sleep(2)
             print(f"  Button: {r}")
             if not str(r).startswith("clicked:"):
-                await cdp_screenshot(ws, "/tmp/cdp_login_no_continue.png")
+                await cdp_screenshot(ws, _diagnostic_path("cdp_login_no_continue.png"))
                 print("  Continue button not found")
                 return None
             await asyncio.sleep(3)
@@ -388,7 +416,7 @@ async def _cdp_login(email: str, token: str, config_dir: str, oauth_url: str = "
             print(f"  After magic link: {(await cdp_eval(ws, 'document.location.href') or '')[:60]}")
             ml_text = await cdp_eval(ws, "document.body?.innerText?.substring(0,700)") or ""
             print(f"  Magic-link page text: {ml_text}")
-            await cdp_screenshot(ws, "/tmp/cdp_magiclink.png")
+            await cdp_screenshot(ws, _diagnostic_path("cdp_magiclink.png"))
 
             # 8. Launch CLI
             # A timed-out/killed `claude auth login` can leave this directory
@@ -434,7 +462,7 @@ async def _cdp_login(email: str, token: str, config_dir: str, oauth_url: str = "
                 if _retry == 0:
                     page_text = await cdp_eval(ws, "document.body?.innerText?.substring(0,500)") or ""
                     print(f"  Page text: {page_text[:200]}")
-                    await cdp_screenshot(ws, "/tmp/cdp_oauth.png")
+                    await cdp_screenshot(ws, _diagnostic_path("cdp_oauth.png"))
                 org = await cdp_eval(ws, JS_ORG)
                 if org:
                     break

@@ -156,6 +156,35 @@ async def test_chrome_early_exit_is_reaped_and_stderr_is_closed(monkeypatch, tmp
 
 
 @pytest.mark.asyncio
+async def test_chrome_uses_configured_port_and_disk_profile(monkeypatch, tmp_path):
+    chrome = FakeProcess(running=False)
+    chrome_stderr = io.StringIO()
+    popen_calls = []
+
+    def fake_popen(command, **kwargs):
+        popen_calls.append((command, kwargs))
+        return chrome
+
+    login_tmp = tmp_path / "disk-login-tmp"
+    monkeypatch.setenv("CCM_LOGIN_TMPDIR", str(login_tmp))
+    monkeypatch.setenv("CCM_LOGIN_CDP_PORT", "9322")
+    monkeypatch.setattr(login_module.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(login_module.asyncio, "sleep", _no_sleep)
+    monkeypatch.setattr(login_module, "open", lambda *_a, **_k: chrome_stderr, raising=False)
+
+    result = await login_module.cdp_login(
+        "user@example.com", "query-token", str(tmp_path / "account")
+    )
+
+    assert result is None
+    command = popen_calls[0][0]
+    assert "--remote-debugging-port=9322" in command
+    profile_arg = next(arg for arg in command if arg.startswith("--user-data-dir="))
+    assert profile_arg.startswith(f"--user-data-dir={login_tmp}/")
+    assert not any(part == "pkill" for part in command)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("tabs", [[], [{"type": "service_worker"}]])
 async def test_missing_page_tab_reaps_chrome_and_closes_stderr(
     monkeypatch, tmp_path, tabs

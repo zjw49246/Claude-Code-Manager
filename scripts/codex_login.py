@@ -52,6 +52,8 @@ MANUAL_OTP_TIMEOUT = 600
 MAX_OTP_ATTEMPTS = 3
 INPUT_INIT_TIMEOUT = 30
 LOGIN_EVENT_PREFIX = "CCM_CODEX_LOGIN_EVENT:"
+AUTHORIZE_NAVIGATION_TIMEOUT_MS = 45_000
+AUTHORIZE_NAVIGATION_ATTEMPTS = 2
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 AUTHORIZE_URL_RE = re.compile(r"(https://auth\.openai\.com/oauth/authorize\S+)")
@@ -86,6 +88,52 @@ OTP_ERROR_RE = re.compile(
     r"too many (?:verification )?attempts)",
     re.I,
 )
+
+
+def _host_diagnostic() -> str:
+    available_mb = "unknown"
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+            if line.startswith("MemAvailable:"):
+                available_mb = str(int(line.split()[1]) // 1024)
+                break
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        load_one = f"{os.getloadavg()[0]:.2f}"
+    except OSError:
+        load_one = "unknown"
+    return f"mem_available_mb={available_mb}, load1={load_one}"
+
+
+async def _navigate_authorize_page(
+    page,
+    auth_url: str,
+    logs: list[str],
+    *,
+    timeout_error: type[Exception],
+) -> None:
+    """Retry one navigation timeout while preserving actionable diagnostics."""
+
+    for attempt in range(1, AUTHORIZE_NAVIGATION_ATTEMPTS + 1):
+        try:
+            await page.goto(
+                auth_url,
+                timeout=AUTHORIZE_NAVIGATION_TIMEOUT_MS,
+                wait_until="domcontentloaded",
+            )
+            return
+        except timeout_error:
+            logs.append(
+                "Authorize navigation timeout "
+                f"attempt={attempt}/{AUTHORIZE_NAVIGATION_ATTEMPTS} "
+                f"({_host_diagnostic()})",
+            )
+            if attempt >= AUTHORIZE_NAVIGATION_ATTEMPTS:
+                raise
+            await asyncio.sleep(2)
+
+
 CONTINUE_BUTTON_TEXTS = (
     "Continue", "Verify", "Next", "Log in", "Sign in",
     "Authorize", "Allow", "Approve", "Confirm",
@@ -653,7 +701,10 @@ async def codex_login(
 
         # 3. Drive browser
         try:
-            from playwright.async_api import async_playwright
+            from playwright.async_api import (
+                TimeoutError as PlaywrightTimeoutError,
+                async_playwright,
+            )
         except ImportError:
             return {"ok": False, "error": "playwright not installed", "logs": logs}
 
@@ -674,7 +725,12 @@ async def codex_login(
                 )
                 page = await context.new_page()
                 logs.append("Navigating to authorize URL")
-                await page.goto(auth_url, timeout=45000, wait_until="domcontentloaded")
+                await _navigate_authorize_page(
+                    page,
+                    auth_url,
+                    logs,
+                    timeout_error=PlaywrightTimeoutError,
+                )
                 await _run_state_machine(
                     page, email, password, token_171, timeout, auth_path, logs, mail_provider,
                     attempt_id, manual_otp_reader,

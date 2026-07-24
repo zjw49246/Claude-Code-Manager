@@ -17,13 +17,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
 from backend.models.global_settings import GlobalSettings
+from backend.services.login_runtime import (
+    LoginRuntimeError,
+    ensure_login_runtime,
+    login_child_environment,
+    login_lock,
+)
 
 router = APIRouter(prefix="/api/pool", tags=["pool"])
 
 # 重新登录后台任务状态：account_id -> {"status": running|success|failed, ...}
 _relogin_state: dict[str, dict] = {}
-# 全局登录锁：Chrome CDP 绑定固定端口(9222)，同时只能跑一个 auto_login
-_login_lock = asyncio.Lock()
+# Claude/Codex 自动登录共用同一个浏览器运行时锁。
+_login_lock = login_lock
 
 
 def _get_pool():
@@ -139,14 +145,18 @@ async def relogin_account(request: Request, account_id: str):
             "Token 刷新失败，且找不到浏览器（auto_login 需要系统 Google Chrome）。"
             "安装 google-chrome-stable 或 .login-venv/bin/python3 -m playwright install chromium"
         ))
-    await _ensure_xvfb()
     await _login_lock.acquire()
-    script = root / "scripts" / "auto_login.py"
-    proc = await asyncio.create_subprocess_exec(
-        str(login_py), str(script), "--email", acc.email, "--config-dir", acc.config_dir,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-        env={**os.environ, "DISPLAY": ":99", "PYTHONUNBUFFERED": "1"},
-    )
+    try:
+        await _ensure_xvfb()
+        script = root / "scripts" / "auto_login.py"
+        proc = await asyncio.create_subprocess_exec(
+            str(login_py), str(script), "--email", acc.email, "--config-dir", acc.config_dir,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            env=login_child_environment(extra={"PYTHONUNBUFFERED": "1"}),
+        )
+    except BaseException:
+        _login_lock.release()
+        raise
     _relogin_state[account_id] = {"status": "running", "started_at": time.time()}
     # _watch_relogin 负责在进程结束后 release lock
     asyncio.get_running_loop().create_task(_watch_relogin(account_id, proc))
@@ -203,23 +213,11 @@ class AddAccountRequest(BaseModel):
     login_method: str = ""  # 171mail | mailcom | onet | gazeta | "" (auto-detect)
 
 
-# 全局 Xvfb：所有 auto_login 共享一个 display
-_xvfb_proc = None
-
 async def _ensure_xvfb():
-    global _xvfb_proc
-    if _xvfb_proc is not None and _xvfb_proc.returncode is None:
-        return  # 已在跑
-    import subprocess as _sp
-    # 杀掉可能残留的旧 Xvfb
-    _sp.run(["pkill", "-f", "Xvfb :99"], capture_output=True)
-    await asyncio.sleep(0.5)
-    _xvfb_proc = _sp.Popen(
-        ["Xvfb", ":99", "-screen", "0", "1920x1080x24", "-nolisten", "tcp", "-ac"],
-        stdout=_sp.DEVNULL, stderr=_sp.DEVNULL,
-    )
-    os.environ["DISPLAY"] = ":99"
-    await asyncio.sleep(1)
+    try:
+        return await ensure_login_runtime()
+    except LoginRuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 # 后台 add 状态：key = email -> {"status": running|success|failed, ...}
@@ -227,19 +225,22 @@ _add_state: dict[str, dict] = {}
 
 
 async def _watch_add(email: str, proc: asyncio.subprocess.Process):
-    out, _ = await proc.communicate()
-    tail = (out or b"").decode("utf-8", errors="replace")[-5000:]
-    _add_state[email] = {
-        "status": "success" if proc.returncode == 0 else "failed",
-        "detail": tail,
-        "finished_at": time.time(),
-    }
-    if proc.returncode == 0:
-        try:
-            _get_pool().reload()
-            _get_pool()._usage_cache = None
-        except Exception:
-            pass
+    try:
+        out, _ = await proc.communicate()
+        tail = (out or b"").decode("utf-8", errors="replace")[-5000:]
+        _add_state[email] = {
+            "status": "success" if proc.returncode == 0 else "failed",
+            "detail": tail,
+            "finished_at": time.time(),
+        }
+        if proc.returncode == 0:
+            try:
+                _get_pool().reload()
+                _get_pool()._usage_cache = None
+            except Exception:
+                pass
+    finally:
+        _login_lock.release()
 
 
 @router.post("/add")
@@ -255,6 +256,11 @@ async def add_account(request: Request, body: AddAccountRequest):
     state = _add_state.get(email)
     if state and state.get("status") == "running":
         return {"ok": True, "status": "running"}
+    if _login_lock.locked():
+        raise HTTPException(
+            status_code=409,
+            detail="另一个 Claude/Codex 账号正在登录中，请等待完成后再试",
+        )
 
     root = Path(__file__).resolve().parents[2]
     login_py = root / ".venv" / "bin" / "python3"
@@ -278,9 +284,6 @@ async def add_account(request: Request, body: AddAccountRequest):
         Path.home() / f".claude-{account_id}"
     )
 
-    # 确保有 Xvfb 在跑（Chrome CDP 需要 display）
-    await _ensure_xvfb()
-
     cmd = [
         str(login_py), str(script),
         "--email", email,
@@ -291,11 +294,17 @@ async def add_account(request: Request, body: AddAccountRequest):
     ]
     if body.login_method in ("171mail", "mailcom", "onet", "gazeta"):
         cmd.extend(["--login-method", body.login_method])
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-        env={**os.environ, "DISPLAY": ":99", "PYTHONUNBUFFERED": "1"},
-    )
+    await _login_lock.acquire()
+    try:
+        await _ensure_xvfb()
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            env=login_child_environment(extra={"PYTHONUNBUFFERED": "1"}),
+        )
+    except BaseException:
+        _login_lock.release()
+        raise
     _add_state[email] = {"status": "running", "started_at": time.time(), "account_id": account_id}
     asyncio.get_running_loop().create_task(_watch_add(email, proc))
     return {"ok": True, "status": "running", "account_id": account_id}
