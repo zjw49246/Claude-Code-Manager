@@ -70,7 +70,14 @@ export function LoginPage({ onLogin }: LoginPageProps) {
           });
           if (meRes.ok) {
             const meData = await meRes.json();
-            if (meData.user) localStorage.setItem('cc_user', JSON.stringify(meData.user));
+            if (meData.user) {
+              localStorage.setItem('cc_user', JSON.stringify(meData.user));
+            } else if (meData.role) {
+              localStorage.setItem('cc_user', JSON.stringify({
+                name: meData.auth_type === 'none' ? 'Local Admin' : 'Admin',
+                role: meData.role,
+              }));
+            }
           }
         } catch {}
         onLogin();

@@ -102,31 +102,34 @@ function App() {
     }
 
     const base = getApiBase();
-    // Check if auth is required
+    // Health is public. Use the identity endpoint as the protected probe so
+    // ordinary members do not need access to the admin-only Instance module.
     fetch(`${base}/api/system/health`)
       .then((res) => {
         if (res.ok) {
-          // Health is public, now check if auth is needed by trying a protected endpoint
           const token = getToken();
-          return fetch(`${base}/api/instances`, {
+          return fetch(`${base}/api/auth/me`, {
             headers: token ? { Authorization: `Bearer ${token}` } : {},
           });
         }
         throw new Error('Server unreachable');
       })
-      .then((res) => {
+      .then(async (res) => {
         if (res.ok) {
-          setAuthenticated(true);
-          // Ensure cc_user is populated (token login may not have set it)
-          const ccUser = JSON.parse(localStorage.getItem('cc_user') || '{}');
-          if (!ccUser.name) {
-            const token = getToken();
-            fetch(`${base}/api/auth/me`, {
-              headers: token ? { Authorization: `Bearer ${token}` } : {},
-            }).then(r => r.ok ? r.json() : null).then(d => {
-              if (d?.user) localStorage.setItem('cc_user', JSON.stringify(d.user));
-            }).catch(() => {});
+          // Reuse the probe response to refresh the cached identity. Token and
+          // no-auth deployments may legitimately have no user object.
+          const data = await res.json();
+          if (data?.user) {
+            localStorage.setItem('cc_user', JSON.stringify(data.user));
+          } else if (data?.role) {
+            localStorage.setItem('cc_user', JSON.stringify({
+              name: data.auth_type === 'none' ? 'Local Admin' : 'Admin',
+              role: data.role,
+            }));
           }
+          // AppShell reads the cached identity during render, so authenticate
+          // only after the authoritative response has replaced stale state.
+          setAuthenticated(true);
         }
       })
       .catch(() => {

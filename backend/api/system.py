@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.api.deps import require_admin
 from backend.config import settings
 from backend.database import get_db
 from backend.models.task import Task
@@ -68,14 +69,14 @@ async def skill_usage_report(db: AsyncSession = Depends(get_db)):
     return await get_usage_report(db)
 
 
-@router.post("/skills/curator")
+@router.post("/skills/curator", dependencies=[Depends(require_admin)])
 async def run_skill_curator(db: AsyncSession = Depends(get_db)):
     """Manually trigger curator lifecycle management."""
     from backend.services.skill_curator import run_curator
     return await run_curator(db)
 
 
-@router.post("/skills/distill")
+@router.post("/skills/distill", dependencies=[Depends(require_admin)])
 async def distill_skills(db: AsyncSession = Depends(get_db)):
     """Analyze conversation history and propose new skill candidates."""
     from backend.services.skill_distill import analyze_patterns
@@ -99,7 +100,7 @@ def _get_update_service():
     return update_service
 
 
-@router.post("/update")
+@router.post("/update", dependencies=[Depends(require_admin)])
 async def start_update(req: UpdateRequest):
     if req.branch and not _BRANCH_RE.match(req.branch):
         raise HTTPException(status_code=400, detail="Invalid branch name")
@@ -116,13 +117,13 @@ async def start_update(req: UpdateRequest):
     return result
 
 
-@router.get("/update/status")
+@router.get("/update/status", dependencies=[Depends(require_admin)])
 async def update_status():
     svc = _get_update_service()
     return await svc.get_status()
 
 
-@router.post("/update/rollback")
+@router.post("/update/rollback", dependencies=[Depends(require_admin)])
 async def rollback_update():
     svc = _get_update_service()
     result = await svc.rollback()

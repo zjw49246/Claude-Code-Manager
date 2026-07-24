@@ -9,8 +9,16 @@ from backend.schemas.instance import InstanceCreate, InstanceResponse
 from backend.schemas.log_entry import LogEntryResponse
 from backend.api.deps import require_admin
 
-router = APIRouter(prefix="/api/instances", tags=["instances"])
-dispatcher_router = APIRouter(prefix="/api/dispatcher", tags=["dispatcher"])
+router = APIRouter(
+    prefix="/api/instances",
+    tags=["instances"],
+    dependencies=[Depends(require_admin)],
+)
+dispatcher_router = APIRouter(
+    prefix="/api/dispatcher",
+    tags=["dispatcher"],
+    dependencies=[Depends(require_admin)],
+)
 
 
 @router.get("", response_model=list[InstanceResponse])

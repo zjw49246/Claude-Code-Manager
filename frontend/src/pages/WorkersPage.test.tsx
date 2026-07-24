@@ -32,6 +32,7 @@ vi.mock('../hooks/useWebSocket', () => ({
 }));
 
 import { api } from '../api/client';
+import { useWebSocket } from '../hooks/useWebSocket';
 
 const baseWorker: Worker = {
   id: 1,
@@ -121,6 +122,28 @@ describe('WorkersPage provider-aware accounts', () => {
     localStorage.clear();
     vi.restoreAllMocks();
     vi.clearAllMocks();
+  });
+
+  it('subscribes Worker logs through the owner-scoped channel', async () => {
+    vi.mocked(api.listWorkers).mockResolvedValue([{
+      ...baseWorker,
+      owner_user_id: 1,
+    }]);
+    vi.mocked(api.getWorkerLogs).mockResolvedValue({
+      id: 1,
+      bootstrap_log: '',
+    });
+    const user = userEvent.setup();
+
+    render(<WorkersPage />);
+    await user.click(await screen.findByTitle('日志'));
+
+    await waitFor(() => {
+      expect(useWebSocket).toHaveBeenCalledWith(
+        ['worker:1'],
+        expect.any(Function),
+      );
+    });
   });
 
   it('creates Codex accounts by default and requires an email token for unattended login', async () => {

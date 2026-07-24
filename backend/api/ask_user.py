@@ -12,11 +12,13 @@ from __future__ import annotations
 import asyncio
 import json
 
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, Field
 from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.database import async_session
+from backend.api.deps import require_task_access
+from backend.database import async_session, get_db
 from backend.models.log_entry import LogEntry
 from backend.models.task import Task
 from backend.services.ask_user import ask_user_registry, format_answer_reason
@@ -31,13 +33,18 @@ class AskUserWaitRequest(BaseModel):
     tool_use_id: str | None = None
 
 
+class AskUserAnswerItem(BaseModel):
+    labels: list[str] = Field(default_factory=list, max_length=100)
+    text: str | None = Field(default=None, max_length=4000)
+
+
 class AskUserAnswer(BaseModel):
     # 与 questions 对齐：每项一个回答
-    answers: list[dict]
+    answers: list[AskUserAnswerItem] = Field(max_length=100)
 
 
 @router.post("/ask-user/wait")
-async def ask_user_wait(body: AskUserWaitRequest):
+async def ask_user_wait(body: AskUserWaitRequest, request: Request):
     """hook 脚本调用：登记提问、广播卡片，阻塞直到用户回答或超时。
 
     返回 {answered: true, reason} → hook 用 deny+reason 把答案喂回模型；
@@ -45,6 +52,13 @@ async def ask_user_wait(body: AskUserWaitRequest):
     """
     from backend.config import settings
     from backend.main import broadcaster
+
+    # This endpoint is called by CCM's local hook, which authenticates with the
+    # deployment service token. A user JWT must never be able to impersonate a
+    # model tool call, create a fake prompt card, or receive another user's
+    # answer. No-auth deployments intentionally preserve their open semantics.
+    if settings.auth_token and getattr(request.state, "auth_type", None) != "token":
+        raise HTTPException(403, "Internal hook authentication required")
 
     if not body.questions:
         return {"answered": False, "reason": "no questions"}
@@ -134,8 +148,16 @@ async def ask_user_wait(body: AskUserWaitRequest):
 
 
 @router.get("/tasks/{task_id}/ask-user/pending")
-async def ask_user_pending(task_id: int):
+async def ask_user_pending(
+    task_id: int,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
     """前端重连时回填仍在等待回答的卡片。"""
+    task = await db.get(Task, task_id)
+    if task is None:
+        raise HTTPException(404, "Task not found")
+    await require_task_access(request, task, db)
     pendings = ask_user_registry.list_for_task(task_id)
     return {
         "pending": [
@@ -146,13 +168,25 @@ async def ask_user_pending(task_id: int):
 
 
 @router.get("/ask-user/pending")
-async def ask_user_pending_all():
+async def ask_user_pending_all(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
     """全局：所有仍在等待回答的提问。
 
     前端刷新/重连时回填全局通知，让用户即便不在对应 task 页面也能看到
     哪些任务正在等待回答（避免 WS 卡片 live-only 在刷新后丢失）。
     """
-    pendings = ask_user_registry.list_all()
+    pendings = []
+    for pending in ask_user_registry.list_all():
+        task = await db.get(Task, pending.task_id)
+        if task is None:
+            continue
+        try:
+            await require_task_access(request, task, db)
+        except HTTPException:
+            continue
+        pendings.append(pending)
     return {
         "pending": [
             {
@@ -166,34 +200,48 @@ async def ask_user_pending_all():
 
 
 @router.post("/tasks/{task_id}/ask-user/{request_id}")
-async def ask_user_submit(task_id: int, request_id: str, body: AskUserAnswer):
+async def ask_user_submit(
+    task_id: int,
+    request_id: str,
+    body: AskUserAnswer,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
     """前端卡片回包：把用户的选择 resolve 给阻塞中的 hook。"""
     from backend.main import broadcaster
+
+    task = await db.get(Task, task_id)
+    if task is None:
+        raise HTTPException(404, "Task not found")
+    await require_task_access(request, task, db)
 
     pending = ask_user_registry.get(request_id)
     if pending is None or pending.task_id != task_id:
         raise HTTPException(410, "提问已过期或不存在（hook 侧可能已超时放行）")
 
-    ok = ask_user_registry.resolve(request_id, body.answers)
+    answers = [
+        answer.model_dump(exclude_none=True)
+        for answer in body.answers
+    ]
+    ok = ask_user_registry.resolve(request_id, answers)
     if not ok:
         raise HTTPException(410, "提问已过期或不存在（hook 侧可能已超时放行）")
 
     # 持久化一条人类可读的回答记录（system_event 进 chat 历史）
-    async with async_session() as db:
-        db.add(LogEntry(
-            instance_id=1,
-            task_id=task_id,
-            event_type="system_event",
-            role="system",
-            content=_answer_summary(pending.questions, body.answers),
-            raw_json=json.dumps({"request_id": request_id}, ensure_ascii=False),
-        ))
-        await db.commit()
+    db.add(LogEntry(
+        instance_id=1,
+        task_id=task_id,
+        event_type="system_event",
+        role="system",
+        content=_answer_summary(pending.questions, answers),
+        raw_json=json.dumps({"request_id": request_id}, ensure_ascii=False),
+    ))
+    await db.commit()
 
     await broadcaster.broadcast(f"task:{task_id}", {
         "event_type": "ask_user_resolved",
         "request_id": request_id,
-        "answers": body.answers,
+        "answers": answers,
     })
     # 关掉别的页面上挂着的全局通知
     await broadcaster.broadcast("tasks", {

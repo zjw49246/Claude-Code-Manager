@@ -96,3 +96,13 @@ async def test_no_auth_mode_grants_full_access(client):
     # require_admin 路径：admin-only 端点（修复前 403 "Admin only"）
     resp = await client.post("/api/instances", json={"name": "no-auth-inst"})
     assert resp.status_code == 201
+
+    # The frontend probes this endpoint. No-auth deployments must remain
+    # usable after Instance GET endpoints become administrator-only.
+    resp = await client.get("/api/auth/me")
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "ok": True,
+        "auth_type": "none",
+        "role": "super_admin",
+    }

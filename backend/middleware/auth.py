@@ -23,12 +23,21 @@ class TokenAuthMiddleware(BaseHTTPMiddleware):
         "/api/org/register",
     }
 
-    # System-level paths: non-GET requires admin/super_admin
-    ADMIN_ONLY_PREFIXES = (
+    # Instance state contains process metadata and cross-task output. Unlike
+    # ordinary task resources it has no per-user owner, so reads and writes are
+    # both administrator-only.
+    ADMIN_ONLY_ALL_METHOD_PREFIXES = (
         "/api/instances",
         "/api/dispatcher",
+        "/api/system/update",
+    )
+
+    # Other system-level paths only restrict mutations.
+    ADMIN_ONLY_PREFIXES = (
         "/api/pool",
         "/api/settings",
+        "/api/system/skills/curator",
+        "/api/system/skills/distill",
     )
 
     _admin_user_id: int | None = None
@@ -77,8 +86,31 @@ class TokenAuthMiddleware(BaseHTTPMiddleware):
             from backend.api.auth import decode_jwt
             payload = decode_jwt(token)
             if payload:
-                request.state.user_id = payload.get("user_id")
-                request.state.user_role = payload.get("role", "member")
+                # A JWT role is only a login-time snapshot. Resolve the current
+                # database row on every request so account deletion, disabling,
+                # and role demotion revoke HTTP access immediately instead of
+                # leaving old admin tokens valid until their 30-day expiry.
+                user_id = payload.get("user_id")
+                if (
+                    not isinstance(user_id, int)
+                    or isinstance(user_id, bool)
+                    or user_id <= 0
+                ):
+                    return JSONResponse(
+                        status_code=401,
+                        content={"detail": "Unauthorized"},
+                    )
+                from backend.database import async_session
+                from backend.models.user import User
+                async with async_session() as db:
+                    user = await db.get(User, user_id)
+                if user is None or not user.is_active:
+                    return JSONResponse(
+                        status_code=401,
+                        content={"detail": "Unauthorized"},
+                    )
+                request.state.user_id = user.id
+                request.state.user_role = user.role
                 request.state.auth_type = "jwt"
                 # Sliding refresh: if token expires within threshold, flag for refresh
                 exp = payload.get("exp")
@@ -89,10 +121,16 @@ class TokenAuthMiddleware(BaseHTTPMiddleware):
             else:
                 return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
 
-        # Enforce admin-only on system-level write operations
-        if request.method != "GET":
-            role = getattr(request.state, "user_role", "member")
-            if role not in ("admin", "super_admin"):
+        # Enforce admin-only access to process-wide Instance/Dispatcher state,
+        # and admin-only mutations for the remaining system settings.
+        role = getattr(request.state, "user_role", "member")
+        if role not in ("admin", "super_admin"):
+            if any(
+                path.startswith(prefix)
+                for prefix in self.ADMIN_ONLY_ALL_METHOD_PREFIXES
+            ):
+                return JSONResponse(status_code=403, content={"detail": "Admin only"})
+            if request.method != "GET":
                 for prefix in self.ADMIN_ONLY_PREFIXES:
                     if path.startswith(prefix):
                         return JSONResponse(status_code=403, content={"detail": "Admin only"})

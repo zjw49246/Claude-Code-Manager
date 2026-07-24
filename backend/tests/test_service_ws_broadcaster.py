@@ -1,4 +1,5 @@
 """Tests for WebSocketBroadcaster."""
+import asyncio
 import json
 import pytest
 from unittest.mock import AsyncMock, MagicMock
@@ -62,6 +63,59 @@ async def test_broadcast_sends():
     expected = json.dumps({"channel": "events", "data": {"type": "test"}})
     ws1.send_text.assert_awaited_once_with(expected)
     ws2.send_text.assert_awaited_once_with(expected)
+
+
+@pytest.mark.asyncio
+async def test_broadcast_fans_out_concurrently():
+    """Slow subscribers cost one timeout window, not one per client."""
+    b = WebSocketBroadcaster()
+    ws1 = _make_ws()
+    ws2 = _make_ws()
+    both_started = asyncio.Event()
+    started = 0
+
+    async def held_send(_message):
+        nonlocal started
+        started += 1
+        if started == 2:
+            both_started.set()
+        await both_started.wait()
+
+    ws1.send_text.side_effect = held_send
+    ws2.send_text.side_effect = held_send
+    await b.subscribe(ws1, ["events"])
+    await b.subscribe(ws2, ["events"])
+
+    await asyncio.wait_for(
+        b.broadcast("events", {"type": "test"}),
+        timeout=1,
+    )
+    assert started == 2
+
+
+@pytest.mark.asyncio
+async def test_worker_events_are_mirrored_to_scoped_channel():
+    b = WebSocketBroadcaster()
+    global_ws = _make_ws()
+    owner_ws = _make_ws()
+    await b.subscribe(global_ws, ["workers"])
+    await b.subscribe(owner_ws, ["worker:7"])
+
+    payload = {
+        "event_type": "worker_update",
+        "worker_id": 7,
+        "log_line": "ready\n",
+    }
+    await b.broadcast("workers", payload)
+
+    global_ws.send_text.assert_awaited_once_with(json.dumps({
+        "channel": "workers",
+        "data": payload,
+    }))
+    owner_ws.send_text.assert_awaited_once_with(json.dumps({
+        "channel": "worker:7",
+        "data": payload,
+    }))
 
 
 @pytest.mark.asyncio
