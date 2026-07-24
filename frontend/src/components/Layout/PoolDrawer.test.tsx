@@ -358,10 +358,9 @@ describe('PoolDrawer', () => {
 
       await user.type(screen.getByLabelText('OpenAI 邮箱'), 'password-only@mail.com');
       const addButton = screen.getByRole('button', { name: '添加' });
-      expect(addButton).toBeDisabled();
+      expect(addButton).toBeEnabled();
 
       await user.type(screen.getByLabelText('OpenAI 密码（可选）'), 'openai-password');
-      expect(addButton).toBeEnabled();
       await user.click(addButton);
 
       await waitFor(() => {
@@ -372,6 +371,30 @@ describe('PoolDrawer', () => {
           login_method: undefined,
         });
         expect(screen.getByLabelText('OpenAI 密码（可选）')).toHaveValue('');
+      });
+    });
+
+    it('allows email-only login and leaves OTP entry to the active attempt', async () => {
+      enableCodexPool();
+      vi.mocked(api.codexPoolAddAccount).mockResolvedValue({ ok: true, status: 'running' });
+      const user = userEvent.setup();
+
+      await renderAndWaitForPro();
+      await openDrawer(user);
+      await user.click(screen.getByRole('button', { name: 'Codex' }));
+      await waitFor(() => expect(screen.getByText('Codex Pool')).toBeInTheDocument());
+      await user.click(screen.getByTitle('添加账号'));
+
+      await user.type(screen.getByLabelText('OpenAI 邮箱'), 'email-only@163.com');
+      await user.click(screen.getByRole('button', { name: '添加' }));
+
+      await waitFor(() => {
+        expect(api.codexPoolAddAccount).toHaveBeenCalledWith({
+          email: 'email-only@163.com',
+          token: undefined,
+          password: undefined,
+          login_method: undefined,
+        });
       });
     });
 
