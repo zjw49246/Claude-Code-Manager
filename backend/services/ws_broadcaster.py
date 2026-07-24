@@ -43,29 +43,62 @@ class WebSocketBroadcaster:
             logger.debug("WebSocket send failed: %s", e)
             return False
 
+    async def _broadcast_snapshot(
+        self,
+        subscribers: list[WebSocket],
+        message: str,
+    ) -> None:
+        """Send one snapshot concurrently and evict failed connections."""
+        if not subscribers:
+            return
+        results = await asyncio.gather(*(
+            self._send_with_timeout(ws, message)
+            for ws in subscribers
+        ))
+        dead = [
+            ws
+            for ws, delivered in zip(subscribers, results)
+            if not delivered
+        ]
+        for ws in dead:
+            await self.unsubscribe(ws)
+
     async def broadcast(self, channel: str, data: dict):
         message = json.dumps({"channel": channel, "data": data})
         # 迭代必须用快照：send 是悬挂点，期间并发的 (un)subscribe 会修改活集合
         # → RuntimeError: Set changed size during iteration → API 500
         #（2026-07-16 前端 WS 连环 keepalive 超时断开时命中，create_monitor 被炸出重复 monitor）
         subs = list(self.subscriptions.get(channel, set()))
-        dead = []
-        for ws in subs:
-            if not await self._send_with_timeout(ws, message):
-                dead.append(ws)
-        for ws in dead:
-            await self.unsubscribe(ws)
+        await self._broadcast_snapshot(subs, message)
 
         # Mirror status_change to per-task channel so /ws/shared subscribers see it
         if channel == "tasks" and data.get("event") == "status_change" and data.get("task_id"):
             task_channel = f"task:{data['task_id']}"
             task_msg = json.dumps({"channel": task_channel, "data": data})
-            task_dead = []
-            for ws in list(self.subscriptions.get(task_channel, set())):
-                if not await self._send_with_timeout(ws, task_msg):
-                    task_dead.append(ws)
-            for ws in task_dead:
-                await self.unsubscribe(ws)
+            await self._broadcast_snapshot(
+                list(self.subscriptions.get(task_channel, set())),
+                task_msg,
+            )
+
+        # The global workers channel contains private IPs and bootstrap logs, so
+        # members cannot subscribe to it. Mirror each event to an ACL-checked
+        # worker-specific channel to preserve real-time logs for that owner.
+        worker_id = data.get("worker_id")
+        if (
+            channel == "workers"
+            and isinstance(worker_id, int)
+            and not isinstance(worker_id, bool)
+            and worker_id > 0
+        ):
+            worker_channel = f"worker:{worker_id}"
+            worker_message = json.dumps({
+                "channel": worker_channel,
+                "data": data,
+            })
+            await self._broadcast_snapshot(
+                list(self.subscriptions.get(worker_channel, set())),
+                worker_message,
+            )
 
         # Fire-and-forget share notifications on terminal status changes
         if (

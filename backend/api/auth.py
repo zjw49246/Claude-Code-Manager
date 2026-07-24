@@ -173,6 +173,12 @@ async def get_me(request: Request, db: AsyncSession = Depends(get_db)):
         auth_type = getattr(request.state, "auth_type", None)
         if auth_type == "token":
             return {"ok": True, "auth_type": "token", "role": "admin"}
+        if auth_type == "none":
+            return {
+                "ok": True,
+                "auth_type": "none",
+                "role": "super_admin",
+            }
         raise HTTPException(401, "Not authenticated")
 
     user = await db.get(User, user_id)

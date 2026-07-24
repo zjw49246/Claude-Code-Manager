@@ -356,10 +356,10 @@ function LogsModal({ worker, onClose }: { worker: Worker; onClose: () => void })
       .catch(() => {});
   }, [worker.id]);
 
-  useWebSocket(['workers'], (message) => {
+  useWebSocket([`worker:${worker.id}`], (message) => {
     const data = (message.data || {}) as Record<string, unknown>;
     if (
-      message.channel === 'workers'
+      message.channel === `worker:${worker.id}`
       && data.worker_id === worker.id
       && typeof data.log_line === 'string'
     ) {

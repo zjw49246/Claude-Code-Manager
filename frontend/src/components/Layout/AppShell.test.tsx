@@ -31,6 +31,8 @@ vi.mock('../../config/server', () => ({
   isCapacitor: vi.fn().mockReturnValue(false),
 }));
 
+import { api } from '../../api/client';
+
 function renderShell(page = 'tasks', wide = false) {
   return render(
     <AppShell currentPage={page} onNavigate={() => {}} wide={wide}>
@@ -59,8 +61,49 @@ describe('AppShell layout and z-index architecture', () => {
 
   afterEach(() => {
     cleanup();
+    vi.useRealTimers();
     vi.clearAllMocks();
     localStorage.clear();
+  });
+
+  it('polls the ACL-filtered Worker list for member navigation', async () => {
+    vi.useFakeTimers();
+    localStorage.setItem('cc_user', JSON.stringify({
+      id: 9,
+      name: 'Member',
+      role: 'member',
+    }));
+    vi.mocked(api.listWorkers).mockResolvedValue([]);
+
+    renderShell();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(api.listWorkers).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      vi.advanceTimersByTime(30000);
+      await Promise.resolve();
+    });
+    expect(api.listWorkers).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not expose the process-wide update control to members', () => {
+    localStorage.setItem('cc_user', JSON.stringify({
+      id: 9,
+      name: 'Member',
+      role: 'member',
+    }));
+
+    renderShell();
+
+    expect(screen.queryByTitle('更新并重启')).not.toBeInTheDocument();
+  });
+
+  it('keeps the process-wide update control available to administrators', () => {
+    renderShell();
+
+    expect(screen.getByTitle('更新并重启')).toBeInTheDocument();
   });
 
   describe('header stacking context', () => {

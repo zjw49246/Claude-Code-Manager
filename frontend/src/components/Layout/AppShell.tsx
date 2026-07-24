@@ -96,7 +96,15 @@ export function AppShell({ currentPage, onNavigate, wide, children }: AppShellPr
     }
   }, [isAdmin]);
 
-  useEffect(() => { refreshWorkerStatus(); }, [refreshWorkerStatus]);
+  useEffect(() => {
+    refreshWorkerStatus();
+    if (isAdmin) return;
+    // Members cannot subscribe to the cross-owner global workers channel.
+    // Poll the already ACL-filtered list endpoint so new/revoked assignments
+    // update navigation without requiring a page reload.
+    const timer = window.setInterval(refreshWorkerStatus, 30000);
+    return () => window.clearInterval(timer);
+  }, [isAdmin, refreshWorkerStatus]);
 
   // Refresh nav when worker assignments change
   useWebSocket(['workers'], () => { refreshWorkerStatus(); });
@@ -281,7 +289,7 @@ export function AppShell({ currentPage, onNavigate, wide, children }: AppShellPr
               {ccUser.name && (
                 <span className="text-xs text-gray-400 mr-1 hidden sm:inline">{ccUser.name}</span>
               )}
-              <UpdateButton />
+              {isAdmin && <UpdateButton />}
               {isAdmin && <PoolDrawer />}
               <PrefsMenu isAdmin={isAdmin} />
             </div>
