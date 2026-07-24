@@ -242,6 +242,35 @@ async def test_start_update_fails_closed_when_task_check_errors(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_cancelled_update_admission_reopens_task_start_gate(tmp_path):
+    """A disconnected update request must not leave dispatch paused forever."""
+    dispatcher = MagicMock()
+    dispatcher.pause_dispatching = AsyncMock()
+    dispatcher.resume_dispatching = MagicMock()
+    dispatcher.pending_task_start_ids = AsyncMock(return_value=set())
+    svc = _make_service(tmp_path, dispatcher=dispatcher)
+    checking = asyncio.Event()
+    never_finishes = asyncio.Event()
+
+    async def blocked_task_check():
+        checking.set()
+        await never_finishes.wait()
+        return []
+
+    svc._get_blocking_tasks = AsyncMock(side_effect=blocked_task_check)
+    request_task = asyncio.create_task(svc.start_update())
+    await asyncio.wait_for(checking.wait(), timeout=1)
+
+    request_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await request_task
+
+    dispatcher.pause_dispatching.assert_awaited_once()
+    dispatcher.resume_dispatching.assert_called_once()
+    assert svc._current is None
+
+
+@pytest.mark.asyncio
 async def test_rollback_pauses_and_refuses_active_tasks(tmp_path):
     dispatcher = MagicMock()
     dispatcher.pause_dispatching = AsyncMock()
@@ -263,6 +292,37 @@ async def test_rollback_pauses_and_refuses_active_tasks(tmp_path):
     dispatcher.pause_dispatching.assert_awaited_once()
     dispatcher.resume_dispatching.assert_called_once()
     svc._spawn_update_script.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_rollback_admission_reopens_task_start_gate(tmp_path):
+    """Rollback cancellation before shutdown must release maintenance pause."""
+    dispatcher = MagicMock()
+    dispatcher.pause_dispatching = AsyncMock()
+    dispatcher.resume_dispatching = MagicMock()
+    dispatcher.pending_task_start_ids = AsyncMock(return_value=set())
+    svc = _make_service(tmp_path, dispatcher=dispatcher)
+    svc._current = _make_state()
+    svc._current.status = "completed"
+    checking = asyncio.Event()
+    never_finishes = asyncio.Event()
+
+    async def blocked_task_check():
+        checking.set()
+        await never_finishes.wait()
+        return []
+
+    svc._get_blocking_tasks = AsyncMock(side_effect=blocked_task_check)
+    request_task = asyncio.create_task(svc.rollback())
+    await asyncio.wait_for(checking.wait(), timeout=1)
+
+    request_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await request_task
+
+    dispatcher.pause_dispatching.assert_awaited_once()
+    dispatcher.resume_dispatching.assert_called_once()
+    assert svc._current.status == "completed"
 
 
 @pytest.mark.asyncio

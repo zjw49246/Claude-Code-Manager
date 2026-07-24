@@ -560,31 +560,39 @@ class UpdateService:
             # never cancelled; callers retry after they finish.
             await self._pause_dispatching()
             try:
-                active_tasks = await self._get_blocking_tasks()
-            except Exception as exc:
-                self._resume_dispatching()
-                logger.exception("Unable to verify active tasks before update")
-                return {"error": f"无法确认当前任务状态，已取消更新: {exc}"}
-            if active_tasks:
-                self._resume_dispatching()
-                return {
-                    "error": f"当前有 {len(active_tasks)} 个任务正在运行，请等待任务完成后再更新",
-                    **self._blocker_payload(active_tasks),
-                }
+                try:
+                    active_tasks = await self._get_blocking_tasks()
+                except Exception as exc:
+                    self._resume_dispatching()
+                    logger.exception("Unable to verify active tasks before update")
+                    return {"error": f"无法确认当前任务状态，已取消更新: {exc}"}
+                if active_tasks:
+                    self._resume_dispatching()
+                    return {
+                        "error": f"当前有 {len(active_tasks)} 个任务正在运行，请等待任务完成后再更新",
+                        **self._blocker_payload(active_tasks),
+                    }
 
-            update_id = f"upd_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
-            state = UpdateState(
-                update_id=update_id,
-                status="running",
-                started_at=datetime.now(timezone.utc).isoformat(),
-                steps=[StepInfo(name=n) for n in STEP_NAMES],
-            )
-            self._current = state
+                update_id = f"upd_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}"
+                state = UpdateState(
+                    update_id=update_id,
+                    status="running",
+                    started_at=datetime.now(timezone.utc).isoformat(),
+                    steps=[StepInfo(name=n) for n in STEP_NAMES],
+                )
+                self._current = state
 
-            asyncio.create_task(
-                self._run_pipeline(state, skip_frontend_build=skip_frontend_build, force=force, branch=branch)
-            )
-            return {"update_id": update_id, "status": "started"}
+                asyncio.create_task(
+                    self._run_pipeline(state, skip_frontend_build=skip_frontend_build, force=force, branch=branch)
+                )
+                return {"update_id": update_id, "status": "started"}
+            except asyncio.CancelledError:
+                # Request disconnects and service shutdown can cancel admission
+                # after pause_dispatching() has closed the gate but before the
+                # background pipeline owns cleanup. Never leave task starts
+                # paused when no maintenance operation was admitted.
+                self._resume_dispatching()
+                raise
 
     async def rollback(self) -> dict[str, Any]:
         """Manual rollback to previous version."""
@@ -606,19 +614,19 @@ class UpdateService:
 
             await self._pause_dispatching()
             try:
-                active_tasks = await self._get_blocking_tasks()
-            except Exception as exc:
-                self._resume_dispatching()
-                logger.exception("Unable to verify active tasks before rollback")
-                return {"error": f"无法确认当前任务状态，已取消回滚: {exc}"}
-            if active_tasks:
-                self._resume_dispatching()
-                return {
-                    "error": f"当前有 {len(active_tasks)} 个任务正在运行，请等待任务完成后再回滚",
-                    **self._blocker_payload(active_tasks),
-                }
+                try:
+                    active_tasks = await self._get_blocking_tasks()
+                except Exception as exc:
+                    self._resume_dispatching()
+                    logger.exception("Unable to verify active tasks before rollback")
+                    return {"error": f"无法确认当前任务状态，已取消回滚: {exc}"}
+                if active_tasks:
+                    self._resume_dispatching()
+                    return {
+                        "error": f"当前有 {len(active_tasks)} 个任务正在运行，请等待任务完成后再回滚",
+                        **self._blocker_payload(active_tasks),
+                    }
 
-            try:
                 async with self._lock:
                     await self._broadcast("step_update", step="rollback", status="running", message="正在回滚...")
 
@@ -653,6 +661,9 @@ class UpdateService:
                             **self._blocker_payload(blockers),
                         }
                     return {"status": "rolling_back", "old_commit": old_commit}
+            except asyncio.CancelledError:
+                self._resume_dispatching()
+                raise
             except Exception:
                 self._resume_dispatching()
                 raise
