@@ -1,5 +1,14 @@
 from datetime import datetime
-from sqlalchemy import Integer, String, Text, DateTime, JSON, Boolean, ForeignKey
+from sqlalchemy import (
+    Integer,
+    String,
+    Text,
+    DateTime,
+    JSON,
+    Boolean,
+    ForeignKey,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 from backend.database import Base
 
@@ -26,10 +35,25 @@ class MonitoredRepo(Base):
 
 class PRReview(Base):
     __tablename__ = "pr_reviews"
+    __table_args__ = (
+        UniqueConstraint(
+            "repo_id",
+            "pr_number",
+            "head_sha",
+            name="uq_pr_reviews_repo_pr_head",
+        ),
+        UniqueConstraint(
+            "repo_id",
+            "delivery_id",
+            name="uq_pr_reviews_repo_delivery",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     repo_id: Mapped[int] = mapped_column(Integer, ForeignKey("monitored_repos.id"), index=True, nullable=False)
     pr_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    head_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    delivery_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     pr_title: Mapped[str] = mapped_column(String(500), nullable=False)
     pr_author: Mapped[str] = mapped_column(String(200), nullable=False)
     pr_url: Mapped[str] = mapped_column(String(500), nullable=False)

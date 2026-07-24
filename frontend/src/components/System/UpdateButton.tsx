@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { createPortal } from 'react-dom';
-import { ArrowUpCircle, RefreshCw } from '../icons';
+import { ArrowUpCircle, RefreshCw, X } from '../icons';
 import { api } from '../../api/client';
 import { useWebSocket } from '../../hooks/useWebSocket';
 
@@ -21,6 +21,12 @@ interface UpdateStatusData {
   error?: string;
   current_step?: number;
   total_steps?: number;
+}
+
+interface ActiveTaskSummary {
+  id: number;
+  title: string;
+  status: string;
 }
 
 type Phase = 'idle' | 'checking' | 'confirming' | 'running' | 'restarting' | 'completed' | 'failed';
@@ -46,6 +52,19 @@ const STATUS_ICON: Record<string, string> = {
   skipped: '⏭',
 };
 
+const INITIAL_UPDATE_CHECK_DELAY_MS = 1_000;
+const UPDATE_CHECK_INTERVAL_MS = 60 * 60_000;
+
+function reminderFingerprint(result: Record<string, unknown>): string {
+  if (result.has_updates) return `update:${String(result.latest_commit || '')}`;
+  if (result.needs_restart) return `restart:${String(result.current_commit || '')}`;
+  return '';
+}
+
+function errorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error && error.message ? error.message : fallback;
+}
+
 export function UpdateButton() {
   const [phase, setPhase] = useState<Phase>('idle');
   const [steps, setSteps] = useState<StepInfo[]>([]);
@@ -58,8 +77,15 @@ export function UpdateButton() {
   const [newCommit, setNewCommit] = useState('');
   const [reconnectCount, setReconnectCount] = useState(0);
   const [reconnectSlow, setReconnectSlow] = useState(false);
+  const [autoPrompt, setAutoPrompt] = useState(false);
+  const [updateAvailable, setUpdateAvailable] = useState(false);
+  const [showUpdateNotice, setShowUpdateNotice] = useState(false);
   const reconnectTimer = useRef<ReturnType<typeof setInterval> | null>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
+  const autoCheckInFlightRef = useRef(false);
+  const remindedFingerprintsRef = useRef(new Set<string>());
+  const phaseRef = useRef(phase);
+  phaseRef.current = phase;
 
   const onWsMessage = useCallback((msg: Record<string, unknown>) => {
     const data = msg.data as Record<string, unknown> | undefined;
@@ -88,6 +114,8 @@ export function UpdateButton() {
     }
 
     if (event === 'update_complete') {
+      setUpdateAvailable(false);
+      setShowUpdateNotice(false);
       setPhase('completed');
     }
 
@@ -116,9 +144,6 @@ export function UpdateButton() {
     };
   }, []);
 
-  const phaseRef = useRef(phase);
-  phaseRef.current = phase;
-
   useEffect(() => {
     const onVisible = async () => {
       if (document.visibilityState !== 'visible') return;
@@ -141,6 +166,68 @@ export function UpdateButton() {
     };
     document.addEventListener('visibilitychange', onVisible);
     return () => document.removeEventListener('visibilitychange', onVisible);
+  }, []);
+
+  useEffect(() => {
+    let disposed = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const schedule = (delay: number) => {
+      if (!disposed) timer = setTimeout(runCheck, delay);
+    };
+
+    const runCheck = async () => {
+      if (disposed) return;
+      if (
+        document.visibilityState !== 'visible'
+        || phaseRef.current !== 'idle'
+        || autoCheckInFlightRef.current
+      ) {
+        schedule(UPDATE_CHECK_INTERVAL_MS);
+        return;
+      }
+
+      autoCheckInFlightRef.current = true;
+      try {
+        const status = await api.getUpdateStatus() as UpdateStatusData | undefined;
+        if (status?.status === 'running' || status?.status === 'restarting') return;
+        if (disposed || phaseRef.current !== 'idle') return;
+
+        // Background checks are deliberately dry-run only: they fetch refs and
+        // notify the user, but never pull code or restart the service.
+        const result = await api.startUpdate({ dry_run: true }) as Record<string, unknown> | undefined;
+        if (disposed || phaseRef.current !== 'idle' || !result) return;
+        // A remote fetch error is normally silent, but it must not hide a
+        // locally detected manual pull that still needs a service restart.
+        if (!result.has_updates && !result.needs_restart) {
+          if (!result.error) {
+            setUpdateAvailable(false);
+            setShowUpdateNotice(false);
+          }
+          return;
+        }
+
+        setUpdateAvailable(true);
+        const fingerprint = reminderFingerprint(result);
+        if (fingerprint && !remindedFingerprintsRef.current.has(fingerprint)) {
+          remindedFingerprintsRef.current.add(fingerprint);
+          setDryRunResult(result);
+          setAutoPrompt(true);
+          setShowUpdateNotice(true);
+        }
+      } catch {
+        // Automatic checks stay silent on transient network/git failures.
+      } finally {
+        autoCheckInFlightRef.current = false;
+        schedule(UPDATE_CHECK_INTERVAL_MS);
+      }
+    };
+
+    schedule(INITIAL_UPDATE_CHECK_DELAY_MS);
+    return () => {
+      disposed = true;
+      if (timer) clearTimeout(timer);
+    };
   }, []);
 
   const startReconnectPolling = () => {
@@ -195,19 +282,26 @@ export function UpdateButton() {
 
   const handleCheck = async () => {
     setPhase('checking');
+    setAutoPrompt(false);
+    setShowUpdateNotice(false);
     setError('');
     try {
-      const result = await api.startUpdate({ dry_run: true, branch: branch || undefined });
+      const result = await api.startUpdate({ dry_run: true, force: true, branch: branch || undefined }) as Record<string, unknown>;
+      if (result.error && !result.needs_restart) throw new Error(String(result.error));
+      const fingerprint = reminderFingerprint(result);
+      if (fingerprint) remindedFingerprintsRef.current.add(fingerprint);
       setDryRunResult(result);
+      setUpdateAvailable(Boolean(result.has_updates || result.needs_restart));
       setPhase('confirming');
-    } catch (e: any) {
-      setError(e.message || '检查更新失败');
+    } catch (e: unknown) {
+      setError(errorMessage(e, '检查更新失败'));
       setPhase('failed');
     }
   };
 
   const handleConfirm = async () => {
     setPhase('running');
+    setShowUpdateNotice(false);
     setLogs([]);
     setError('');
 
@@ -223,8 +317,8 @@ export function UpdateButton() {
       if (result.update_id) {
         setOldCommit(result.old_commit || '');
       }
-    } catch (e: any) {
-      setError(e.message || '启动更新失败');
+    } catch (e: unknown) {
+      setError(errorMessage(e, '启动更新失败'));
       setPhase('failed');
     }
   };
@@ -235,8 +329,8 @@ export function UpdateButton() {
       await api.rollbackUpdate();
       startReconnectPolling();
       setPhase('restarting');
-    } catch (e: any) {
-      setError(e.message);
+    } catch (e: unknown) {
+      setError(errorMessage(e, '回滚失败'));
     }
   };
 
@@ -252,18 +346,76 @@ export function UpdateButton() {
     setNewCommit('');
     setReconnectCount(0);
     setReconnectSlow(false);
+    setAutoPrompt(false);
+    setShowUpdateNotice(false);
+  };
+
+  const handleOpenUpdateNotice = () => {
+    setShowUpdateNotice(false);
+    setAutoPrompt(true);
+    setPhase('confirming');
   };
 
   const isModalOpen = phase !== 'idle';
+  const activeTasks = (dryRunResult?.active_tasks || []) as ActiveTaskSummary[];
+  const activeTaskCount = Number(dryRunResult?.active_task_count || activeTasks.length || 0);
+  const updateBlocked = Boolean(dryRunResult?.update_blocked || activeTaskCount > 0);
 
   return (
     <>
+      {showUpdateNotice && dryRunResult && createPortal(
+        <div
+          className="pointer-events-none fixed inset-x-0 top-3 z-[60] flex justify-center px-4"
+          data-testid="update-available-notice"
+          aria-live="polite"
+        >
+          <div
+            className="pointer-events-auto flex w-full max-w-xl items-center gap-3 rounded-lg border border-amber-500/40 bg-gray-900/95 px-4 py-3 shadow-xl backdrop-blur"
+            role="status"
+          >
+            <ArrowUpCircle size={18} className="shrink-0 text-amber-400" />
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-medium text-foreground">
+                {(dryRunResult.needs_restart as boolean) ? '检测到待完成的本地更新' : '发现可用更新'}
+              </p>
+              <p className="mt-0.5 truncate text-xs text-gray-400">
+                {(dryRunResult.needs_restart as boolean)
+                  ? '当前服务仍在运行旧版本，可稍后安全完成部署。'
+                  : `有 ${Number(dryRunResult.commits_behind || 0)} 个新提交可用。`}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={handleOpenUpdateNotice}
+              className="shrink-0 rounded bg-amber-500/15 px-2.5 py-1.5 text-xs font-medium text-amber-300 hover:bg-amber-500/25"
+            >
+              查看详情
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowUpdateNotice(false)}
+              className="shrink-0 rounded p-1 text-gray-500 hover:bg-gray-800 hover:text-gray-300"
+              aria-label="关闭更新提醒"
+            >
+              <X size={15} />
+            </button>
+          </div>
+        </div>,
+        document.body,
+      )}
+
       <button
         onClick={handleCheck}
-        className="p-2 rounded text-gray-400 hover:text-foreground hover:bg-gray-800 transition-colors"
+        className="relative p-2 rounded text-gray-400 hover:text-foreground hover:bg-gray-800 transition-colors"
         title="更新并重启"
       >
         <ArrowUpCircle size={18} />
+        {updateAvailable && (
+          <span
+            data-testid="update-available-dot"
+            className="absolute right-1 top-1 h-2 w-2 rounded-full bg-amber-400 ring-2 ring-gray-900"
+          />
+        )}
       </button>
 
       {isModalOpen && createPortal(
@@ -273,7 +425,9 @@ export function UpdateButton() {
             <div className="flex items-center justify-between px-4 py-3 border-b border-gray-700">
               <h3 className="text-sm font-semibold text-foreground">
                 {phase === 'checking' && '检查更新...'}
-                {phase === 'confirming' && '确认更新'}
+                {phase === 'confirming' && (autoPrompt
+                  ? ((dryRunResult?.needs_restart as boolean) ? '检测到待完成的更新' : '发现可用更新')
+                  : '确认更新')}
                 {phase === 'running' && '更新中...'}
                 {phase === 'restarting' && '重启中...'}
                 {phase === 'completed' && '更新完成'}
@@ -317,16 +471,43 @@ export function UpdateButton() {
                     <p className="text-xs text-amber-400">⚠️ 将从分支 <span className="font-mono">{branch}</span> 更新（非 main）</p>
                   )}
 
+                  {updateBlocked && (
+                    <div className="rounded border border-amber-700/60 bg-amber-950/30 p-3 text-xs text-amber-200" role="alert">
+                      <p className="font-medium">当前有 {activeTaskCount} 个任务正在执行，暂不能更新或重启。</p>
+                      <p className="mt-1 text-amber-300/80">请等待任务完成后点击“重新检查”。系统不会中断这些任务。</p>
+                      {activeTasks.length > 0 && (
+                        <ul className="mt-2 space-y-1 text-amber-300/80">
+                          {activeTasks.slice(0, 5).map(task => (
+                            <li key={task.id}>#{task.id} {task.title || '未命名任务'}（{task.status}）</li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  )}
+
                   {!(dryRunResult.has_updates as boolean) && !(dryRunResult.needs_restart as boolean) ? (
                     <p className="text-sm text-gray-300">已是最新版本，无需更新。</p>
                   ) : !(dryRunResult.has_updates as boolean) && (dryRunResult.needs_restart as boolean) ? (
-                    <p className="text-sm text-yellow-300">代码已是最新，但服务正在运行旧版本，需要重启。</p>
+                    <div className="space-y-1 text-sm text-yellow-300">
+                      <p>检测到磁盘代码已更新，但服务仍在运行旧版本。</p>
+                      <p className="text-xs text-yellow-400/80">继续后会补齐依赖、迁移和前端构建，再安全重启服务。</p>
+                      {Boolean(dryRunResult.error) && (
+                        <p className="text-xs text-yellow-400/80">远端更新检查失败，但不影响完成本地代码的部署和重启。</p>
+                      )}
+                    </div>
                   ) : (
                     <>
                       <div className="text-sm text-gray-300 space-y-1">
                         <p>发现 <span className="text-indigo-400 font-medium">{dryRunResult.commits_behind as number}</span> 个新提交</p>
                         <p className="text-xs text-gray-500">{dryRunResult.current_commit as string} → {dryRunResult.latest_commit as string}</p>
+                        {Boolean(dryRunResult.remote) && (
+                          <p className="text-xs text-gray-600">来源：{dryRunResult.remote as string}/{(dryRunResult.branch as string) || 'main'}</p>
+                        )}
                       </div>
+
+                      {(dryRunResult.needs_restart as boolean) && (
+                        <p className="text-xs text-yellow-400">⚠️ 磁盘上还有尚未加载的手动更新，本次会一并完成部署。</p>
+                      )}
 
                       {(dryRunResult.commit_messages as string[] || []).length > 0 && (
                         <div className="bg-gray-800 rounded p-2 max-h-32 overflow-y-auto">
@@ -448,8 +629,12 @@ export function UpdateButton() {
               {phase === 'confirming' && dryRunResult && ((dryRunResult.has_updates as boolean) || (dryRunResult.needs_restart as boolean)) && (
                 <>
                   <button onClick={handleClose} className="px-3 py-1.5 text-xs rounded bg-gray-800 text-gray-300 hover:bg-gray-700">取消</button>
-                  <button onClick={handleConfirm} className="px-3 py-1.5 text-xs rounded bg-indigo-600 text-white hover:bg-indigo-500">
-                    {(dryRunResult.has_updates as boolean) ? '确认更新' : '重启服务'}
+                  <button
+                    onClick={handleConfirm}
+                    disabled={updateBlocked}
+                    className="px-3 py-1.5 text-xs rounded bg-indigo-600 text-white hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {updateBlocked ? '等待任务完成' : ((dryRunResult.has_updates as boolean) ? '确认更新' : '完成部署并重启')}
                   </button>
                 </>
               )}

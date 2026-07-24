@@ -1,9 +1,16 @@
 """Tests for Instance and Dispatcher API endpoints."""
+from contextlib import asynccontextmanager
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from backend.models.instance import Instance
 from backend.models.log_entry import LogEntry
+
+
+@asynccontextmanager
+async def _open_task_start_guard():
+    yield
 
 
 def _make_mock_instance_manager(is_running_val=False, launch_pid=12345, stop_val=True):
@@ -155,6 +162,9 @@ async def test_run_with_task_id(client):
 
     mock_im = _make_mock_instance_manager(is_running_val=False, launch_pid=111)
     mock_dispatcher = MagicMock()
+    mock_dispatcher.task_start_guard = MagicMock(
+        side_effect=_open_task_start_guard
+    )
     mock_dispatcher._resolve_resume_config_dir = AsyncMock(
         return_value="/pool/claude-2"
     )
@@ -175,6 +185,36 @@ async def test_run_with_task_id(client):
 
 
 @pytest.mark.asyncio
+async def test_run_with_task_id_rejected_during_maintenance(client):
+    from backend.services.dispatcher import TaskStartPausedError
+
+    inst_resp = await client.post("/api/instances", json={"name": "paused-runner"})
+    inst_id = inst_resp.json()["id"]
+    task_resp = await client.post("/api/tasks", json={
+        "title": "Paused", "description": "Do not start", "target_repo": "/tmp",
+    })
+    task_id = task_resp.json()["id"]
+
+    @asynccontextmanager
+    async def paused_guard():
+        raise TaskStartPausedError("maintenance")
+        yield
+
+    mock_im = _make_mock_instance_manager(is_running_val=False)
+    mock_dispatcher = MagicMock()
+    mock_dispatcher._resolve_resume_config_dir = AsyncMock(return_value=None)
+    mock_dispatcher.task_start_guard = MagicMock(side_effect=paused_guard)
+    with (
+        patch("backend.main.instance_manager", mock_im),
+        patch("backend.main.dispatcher", mock_dispatcher),
+    ):
+        resp = await client.post(f"/api/instances/{inst_id}/run?task_id={task_id}")
+
+    assert resp.status_code == 409
+    mock_im.launch.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_run_codex_task_resumes_on_dispatcher_bound_home(client):
     inst_resp = await client.post("/api/instances", json={"name": "codex-task-runner"})
     inst_id = inst_resp.json()["id"]
@@ -189,6 +229,9 @@ async def test_run_codex_task_resumes_on_dispatcher_bound_home(client):
 
     mock_im = _make_mock_instance_manager(is_running_val=False, launch_pid=222)
     mock_dispatcher = MagicMock()
+    mock_dispatcher.task_start_guard = MagicMock(
+        side_effect=_open_task_start_guard
+    )
     mock_dispatcher._resolve_resume_config_dir = AsyncMock(
         return_value="/pool/codex-2"
     )
