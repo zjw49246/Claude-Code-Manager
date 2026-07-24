@@ -2,16 +2,16 @@ import hashlib
 import hmac
 import logging
 import secrets
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import and_, desc, func, or_, select
+from sqlalchemy import and_, desc, func, or_, select, update as sa_update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.config import settings
 from backend.database import get_db
 from backend.models.pr_monitor import MonitoredRepo, PRReview
-from backend.models.task import Task
 from backend.api.deps import get_current_user_id, get_current_user_role
 from backend.schemas.pr_monitor import (
     MonitoredRepoCreate,
@@ -384,18 +384,150 @@ async def github_webhook(request: Request, db: AsyncSession = Depends(get_db)):
     )
     active_reviews = active_result.scalars().all()
 
-    superseded_task_ids = []
     if action == "synchronize":
-        # Mark old reviews as superseded and cancel their tasks
-        for old in active_reviews:
-            old.status = "superseded"
-            if old.task_id:
-                old_task = await db.get(Task, old.task_id)
-                if old_task and old_task.status not in ("completed", "failed"):
-                    old_task.status = "completed"
-                    old_task.error_message = "Superseded by new push"
-                    superseded_task_ids.append(old.task_id)
-                    logger.info("Cancelled task %d (superseded PR review)", old.task_id)
+        # Snapshot scalar review generations before Task termination expires the
+        # session identity map. A review is not declared superseded until every
+        # linked local/Worker Task generation has been safely reaped.
+        active_review_generations = [
+            (old.id, old.task_id, old.status)
+            for old in active_reviews
+        ]
+        if active_review_generations:
+            from backend.services.task_termination import (
+                TaskTerminationResult,
+                TaskTerminationConflict,
+                lock_task_generation,
+                lock_worker_task_generation,
+                task_termination_operation_locks,
+                terminate_authoritative_task_generation,
+            )
+
+            task_ids = {
+                task_id
+                for _review_id, task_id, _status in active_review_generations
+                if task_id is not None
+            }
+            # Worker migration and remote task mutations must remain excluded
+            # until the replacement review commit releases the exact Task row
+            # locks below. Otherwise a remote retry can run before its delayed
+            # Manager mirror update is blocked by our database transaction.
+            async with task_termination_operation_locks(task_ids):
+                termination_results = {}
+                for (
+                    review_id,
+                    old_task_id,
+                    _old_status,
+                ) in active_review_generations:
+                    if (
+                        old_task_id is None
+                        or old_task_id in termination_results
+                    ):
+                        continue
+                    try:
+                        termination_results[old_task_id] = (
+                            await terminate_authoritative_task_generation(
+                                old_task_id,
+                                db,
+                                reason="Superseded by new push",
+                                operation_locks_held=True,
+                            )
+                        )
+                    except TaskTerminationConflict as exc:
+                        await db.rollback()
+                        logger.warning(
+                            "Refused to supersede PR review %d: task %d cleanup "
+                            "was not confirmed: %s",
+                            review_id,
+                            old_task_id,
+                            exc,
+                        )
+                        raise HTTPException(
+                            409,
+                            "Previous PR review task cleanup could not be "
+                            "confirmed; no new review was created",
+                        ) from exc
+
+                # Reacquire every exact resulting generation in stable order
+                # and retain the row + operation locks through replacement
+                # creation. A retry in the post-cleanup window then fails this
+                # webhook rather than reviving the old review alongside its
+                # replacement.
+                for old_task_id in sorted(termination_results):
+                    terminated = termination_results[old_task_id]
+                    if isinstance(terminated, TaskTerminationResult):
+                        locked_task = await lock_task_generation(
+                            old_task_id,
+                            db,
+                            expected_status=terminated.terminal_status,
+                            expected_retry_count=terminated.retry_count,
+                            expected_instance_id=terminated.instance_id,
+                            expected_started_at=terminated.started_at,
+                            expected_completed_at=terminated.completed_at,
+                        )
+                    else:
+                        locked_task = await lock_worker_task_generation(
+                            db,
+                            terminated.resulting,
+                        )
+                    if locked_task is None:
+                        raise HTTPException(
+                            409,
+                            "Previous PR review task started a newer generation; "
+                            "no new review was created",
+                        )
+
+                for (
+                    review_id,
+                    old_task_id,
+                    old_status,
+                ) in active_review_generations:
+                    review_predicates = [
+                        PRReview.id == review_id,
+                        PRReview.status == old_status,
+                        (
+                            PRReview.task_id.is_(None)
+                            if old_task_id is None
+                            else PRReview.task_id == old_task_id
+                        ),
+                    ]
+                    superseded = await db.execute(
+                        sa_update(PRReview)
+                        .where(*review_predicates)
+                        .values(
+                            status="superseded",
+                            completed_at=datetime.utcnow(),
+                        )
+                    )
+                    if not superseded.rowcount:
+                        await db.rollback()
+                        raise HTTPException(
+                            409,
+                            "Previous PR review changed while it was being "
+                            "stopped; no new review was created",
+                        )
+                    if old_task_id is not None:
+                        logger.info(
+                            "Safely stopped task %d (superseded PR review)",
+                            old_task_id,
+                        )
+
+                # Termination commits/expirations invalidate the repo ORM
+                # identity. Keep supersede writes uncommitted and let
+                # replacement creation commit both review generations.
+                await db.refresh(repo)
+                from backend.services.pr_review_service import (
+                    create_pr_review_task,
+                )
+
+                review = await create_pr_review_task(db, repo, {
+                    "number": pr_number,
+                    "head_sha": head_sha,
+                    "delivery_id": delivery_id,
+                    "title": pr_title,
+                    "author": pr_author,
+                    "url": pr_url,
+                })
+                return {"status": "accepted", "review_id": review.id}
     elif active_reviews:
         return {"status": "ignored", "reason": "review already in progress"}
     elif action == "opened":
@@ -445,13 +577,5 @@ async def github_webhook(request: Request, db: AsyncSession = Depends(get_db)):
             )
             return _duplicate_review_response(processed_review, delivery_id)
         raise
-
-    if superseded_task_ids:
-        # 显式 commit：不依赖 create_pr_review_task 内部恰好提交了 superseded
-        # 改动（那个耦合将来加早退路径就断了）；已提交时这里是幂等空操作
-        await db.commit()
-        from backend.services.task_events import broadcast_status_change
-        for tid in superseded_task_ids:
-            await broadcast_status_change(tid, "completed")
 
     return {"status": "accepted", "review_id": review.id}

@@ -5,13 +5,19 @@ import json
 from fastapi import APIRouter, Depends, HTTPException, Request
 from backend.api.deps import require_task_access
 from pydantic import BaseModel
-from sqlalchemy import and_, not_, select, func  # still used by chat history
+from sqlalchemy import and_, not_, select, func, update as sa_update  # still used by chat history
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.database import get_db
 from backend.models.task import Task
 from backend.models.log_entry import LogEntry
 from backend.models.user_skill import UserSkill
+from backend.services.task_queue import task_is_pr_review_superseded
+from backend.services.worker_proxy import get_task_operation_lock
+from backend.services.worker_relay import (
+    worker_task_generation,
+    worker_task_generation_predicates,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +45,11 @@ async def send_chat_message(
     if not task:
         raise HTTPException(404, "Task not found")
     await require_task_access(request, task, db)
+    if task_is_pr_review_superseded(task):
+        raise HTTPException(
+            409,
+            "This PR review task was superseded by a newer push",
+        )
     if task.shared_from_id is not None:
         return await _send_shared_chat(task, body, db)
     if task.worker_id is not None:
@@ -233,93 +244,145 @@ async def _send_worker_chat(task: Task, body: ChatMessage, db: AsyncSession, req
     if body.secret_ids:
         raise HTTPException(400, "Worker task 暂不支持引用 Secrets（Phase 3）")
 
-    # Preserve the sender prefix for the Manager UI, but forward only the raw
-    # user text to the Worker so it never becomes part of the model prompt.
-    model_message = body.message
-    display_content = model_message
-    sender_display_name = None
-    if request:
-        uid = getattr(request.state, "user_id", None)
-        if uid:
-            from backend.models.user import User
-            sender = await db.get(User, uid)
-            if sender:
-                sender_display_name = sender.name
-                display_content = f"[{sender.name}] {model_message}"
+    # Drop the route's read snapshot before waiting for the process-wide lock.
+    # TaskMigrator holds the same lock for its complete copy/rebind workflow.
+    task_id = task.id
+    await db.rollback()
+    async with get_task_operation_lock(task_id):
+        db.expire_all()
+        current = await db.get(Task, task_id)
+        observed = (
+            worker_task_generation(current)
+            if current is not None
+            else None
+        )
+        if observed is None:
+            raise HTTPException(
+                409,
+                "Task moved away from its Worker before chat could be sent",
+            )
+        if task_is_pr_review_superseded(current):
+            raise HTTPException(
+                409,
+                "This PR review task was superseded by a newer push",
+            )
 
-    worker = await worker_proxy.require_ready_worker(task.worker_id)
+        # Preserve the sender prefix for the Manager UI, but forward only the
+        # raw user text so it never becomes part of the model prompt.
+        model_message = body.message
+        display_content = model_message
+        sender_display_name = None
+        if request:
+            uid = getattr(request.state, "user_id", None)
+            if uid:
+                from backend.models.user import User
+                sender = await db.get(User, uid)
+                if sender:
+                    sender_display_name = sender.name
+                    display_content = f"[{sender.name}] {model_message}"
 
-    all_paths = body.file_paths or body.image_paths or []
-    _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
-    attachments = [
-        {
-            "url": f"/api/uploads/{os.path.basename(p)}",
-            "name": os.path.basename(p),
-            "is_error": False,
-            "is_image": os.path.splitext(p)[1].lower() in _IMAGE_EXTS,
-        }
-        for p in all_paths
-    ]
+        worker = await worker_proxy.require_ready_worker(observed.worker_id)
 
-    # 1. Manager DB 存 user_message（日志完整性；relay 会跳过 worker 回传的同条）
-    log_metadata: dict = {"raw_content": model_message}
-    if attachments:
-        log_metadata["attachments"] = attachments
-    if sender_display_name:
-        log_metadata["sender_name"] = sender_display_name
-    db.add(LogEntry(
-        instance_id=None,
-        task_id=task.id,
-        event_type="user_message",
-        role="user",
-        content=display_content,
-        raw_json=json.dumps(log_metadata) if log_metadata else None,
-        is_error=False,
-    ))
-    await db.commit()
+        all_paths = body.file_paths or body.image_paths or []
+        _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+        attachments = [
+            {
+                "url": f"/api/uploads/{os.path.basename(p)}",
+                "name": os.path.basename(p),
+                "is_error": False,
+                "is_image": os.path.splitext(p)[1].lower() in _IMAGE_EXTS,
+            }
+            for p in all_paths
+        ]
 
-    # 2. 广播到 Manager 前端
-    broadcast_data = {
-        "event_type": "user_message",
-        "role": "user",
-        "content": display_content,
-        "raw_content": model_message,
-        "image_paths": body.image_paths or [],
-    }
-    if sender_display_name:
-        broadcast_data["sender_name"] = sender_display_name
-    await broadcaster.broadcast(f"task:{task.id}", broadcast_data)
-
-    # 3. 附件推到 worker 同一路径（worker 上 Claude 用 Read 读）
-    if all_paths:
-        try:
-            await worker_proxy.push_files(worker, all_paths)
-        except Exception as e:
-            raise HTTPException(503, f"附件同步到 Worker 失败: {e}")
-
-    # 4. 确保 relay 订阅（幂等；Manager 重启后已完成 task 不在恢复列表里，
-    #    此时 chat 若不补订阅，worker 的响应事件全丢）
-    await worker_proxy.relay.subscribe_task(worker, task.id)
-
-    # 5. 转发到 Worker CCM（worker 自己做 $command/skill 展开）
-    result = await worker_proxy.proxy_to_worker(
-        task, "POST", f"/api/tasks/{task.id}/chat",
-        body={
-            "message": model_message,
-            "image_paths": body.image_paths,
-            "file_paths": body.file_paths,
-            "model": body.model,
-        },
-    )
-
-    # 6. 同步 session_id（worker instance_manager 广播前 pop 掉了，relay 收不到）
-    if isinstance(result, dict) and result.get("session_id"):
-        task.session_id = result["session_id"]
+        # 1. Persist the display copy only if the exact pre-network Worker
+        # generation is still current.
+        guarded = await db.execute(
+            sa_update(Task)
+            .where(*worker_task_generation_predicates(observed))
+            .values(status=observed.status)
+        )
+        if guarded.rowcount != 1:
+            await db.rollback()
+            raise HTTPException(
+                409,
+                "Task Worker generation changed before chat could be sent",
+            )
+        log_metadata: dict = {"raw_content": model_message}
+        if attachments:
+            log_metadata["attachments"] = attachments
+        if sender_display_name:
+            log_metadata["sender_name"] = sender_display_name
+        db.add(LogEntry(
+            instance_id=None,
+            task_id=current.id,
+            event_type="user_message",
+            role="user",
+            content=display_content,
+            raw_json=json.dumps(log_metadata) if log_metadata else None,
+            is_error=False,
+        ))
         await db.commit()
 
-    if isinstance(result, dict):
-        result["instance_id"] = None  # worker 的 instance_id 对 Manager 无意义
-    return result
+        # 2. Broadcast to the Manager frontend.
+        broadcast_data = {
+            "event_type": "user_message",
+            "role": "user",
+            "content": display_content,
+            "raw_content": model_message,
+            "image_paths": body.image_paths or [],
+        }
+        if sender_display_name:
+            broadcast_data["sender_name"] = sender_display_name
+        await broadcaster.broadcast(f"task:{current.id}", broadcast_data)
+
+        # 3. Push attachments to the same Worker path.
+        if all_paths:
+            try:
+                await worker_proxy.push_files(worker, all_paths)
+            except Exception as e:
+                raise HTTPException(503, f"附件同步到 Worker 失败: {e}")
+
+        # 4. Ensure relay subscription before the remote turn can emit events.
+        await worker_proxy.relay.subscribe_task(worker, current.id)
+
+        # 5. The common operation lock is already held; asking WorkerProxy to
+        # acquire it again would deadlock.
+        result = await worker_proxy.proxy_to_worker(
+            current,
+            "POST",
+            f"/api/tasks/{current.id}/chat",
+            body={
+                "message": model_message,
+                "image_paths": body.image_paths,
+                "file_paths": body.file_paths,
+                "model": body.model,
+            },
+            operation_lock_held=True,
+        )
+
+        # 6. A delayed response can only update the generation that issued the
+        # request.  Even responses without a session id perform a no-op CAS so
+        # reassignment/retry during the network await is reported as conflict.
+        values = {"status": observed.status}
+        if isinstance(result, dict) and result.get("session_id"):
+            values["session_id"] = result["session_id"]
+        changed = await db.execute(
+            sa_update(Task)
+            .where(*worker_task_generation_predicates(observed))
+            .values(**values)
+        )
+        if changed.rowcount != 1:
+            await db.rollback()
+            raise HTTPException(
+                409,
+                "Task Worker assignment or generation changed while chat was in flight",
+            )
+        await db.commit()
+
+        if isinstance(result, dict):
+            result["instance_id"] = None  # Worker instance ids are not Manager ids.
+        return result
 
 
 def _tool_summary(tool_input: str | None) -> str:

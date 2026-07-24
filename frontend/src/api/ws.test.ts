@@ -45,8 +45,9 @@ let mockInstances: MockWebSocket[] = [];
 beforeEach(() => {
   mockInstances = [];
   vi.stubGlobal('WebSocket', class extends MockWebSocket {
-    constructor(_url: string) {
+    constructor(url: string) {
       super();
+      void url;
       mockInstances.push(this);
     }
   });
@@ -60,6 +61,60 @@ afterEach(() => {
 
 describe('WsClient', () => {
   describe('connect and subscribe', () => {
+    it('reports connected only after the server acknowledges the subscription', () => {
+      const client = new WsClient('ws://test');
+      const handler = vi.fn();
+      const subscribed = vi.fn();
+      client.onConnectionChange(handler);
+      client.onSubscribed(subscribed);
+      client.subscribe(['task:1']);
+      client.connect();
+
+      const ws = mockInstances[0];
+      expect(handler).not.toHaveBeenCalled();
+      ws.simulateOpen();
+      expect(handler).not.toHaveBeenCalled();
+      expect(subscribed).not.toHaveBeenCalled();
+
+      ws.simulateMessage({ action: 'subscribed', channels: ['task:1'] });
+      expect(handler).toHaveBeenLastCalledWith(true);
+      expect(subscribed).toHaveBeenCalledWith(['task:1']);
+
+      ws.simulateClose();
+      expect(handler).toHaveBeenLastCalledWith(false);
+    });
+
+    it('unregisters a connection-state handler', () => {
+      const client = new WsClient('ws://test');
+      const handler = vi.fn();
+      const unsubscribe = client.onConnectionChange(handler);
+      client.connect();
+      unsubscribe();
+      mockInstances[0].simulateOpen();
+      mockInstances[0].simulateMessage({
+        action: 'subscribed',
+        channels: [],
+      });
+      expect(handler).not.toHaveBeenCalled();
+    });
+
+    it('unregisters a subscription acknowledgement handler', () => {
+      const client = new WsClient('ws://test');
+      const handler = vi.fn();
+      const unsubscribe = client.onSubscribed(handler);
+      client.subscribe(['task:1']);
+      client.connect();
+      unsubscribe();
+
+      mockInstances[0].simulateOpen();
+      mockInstances[0].simulateMessage({
+        action: 'subscribed',
+        channels: ['task:1'],
+      });
+
+      expect(handler).not.toHaveBeenCalled();
+    });
+
     it('sends subscribe on open when channels were added before connect', () => {
       const client = new WsClient('ws://test');
       client.subscribe(['task:1']);

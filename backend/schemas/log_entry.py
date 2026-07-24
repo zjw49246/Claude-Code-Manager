@@ -11,6 +11,9 @@ class LogEntryResponse(BaseModel):
     role: str | None
     content: str | None
     tool_name: str | None
+    tool_input: str | None
+    tool_output: str | None
+    item_id: str | None
     is_error: bool
     timestamp: datetime
 

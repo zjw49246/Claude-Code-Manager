@@ -281,12 +281,12 @@ class UpdateService:
         ]
 
     async def _get_running_taskless_instances(self) -> list[dict[str, Any]]:
-        """Return prompt-only instance runs that have no active Task row.
+        """Return legacy/taskless instance runs that have no active Task row.
 
-        ``POST /api/instances/{id}/run?prompt=...`` persists the instance as
-        running with ``current_task_id=NULL``.  The launch is real work even
-        though it cannot appear in the Task-status query, so maintenance must
-        treat it as a blocker until InstanceManager marks the slot idle again.
+        The direct-run endpoint is retired, but an upgraded process can still
+        contain one of its generations. The launch is real work even though it
+        cannot appear in the Task-status query, so maintenance must keep
+        treating it as a blocker until InstanceManager marks the slot idle.
         """
         if self.db_factory is None:
             return []

@@ -1,3 +1,4 @@
+import json
 from datetime import datetime
 
 from sqlalchemy import Integer, String, Text, DateTime, Boolean, Index
@@ -27,3 +28,19 @@ class LogEntry(Base):
     is_error: Mapped[bool] = mapped_column(Boolean, default=False)
     loop_iteration: Mapped[int | None] = mapped_column(Integer, nullable=True)  # loop tasks: which iteration produced this entry
     timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    @property
+    def item_id(self) -> str | None:
+        """Extract the public stream correlation id without exposing raw_json."""
+        if not self.raw_json:
+            return None
+        try:
+            payload = json.loads(self.raw_json)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        item = payload.get("item")
+        nested_id = item.get("id") if isinstance(item, dict) else None
+        value = payload.get("item_id") or payload.get("itemId") or nested_id
+        return str(value) if value not in (None, "") else None

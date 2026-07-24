@@ -2,11 +2,14 @@
 
 import asyncio
 import json
+import os
+import signal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from backend.services.process_safety import UnsafeProcessGroupError
 from backend.services.codex_app_server import (
     CodexAppServer,
     CodexAppServerBusyError,
@@ -363,6 +366,284 @@ async def test_turn_process_interrupt_is_nonblocking_and_completes():
     await asyncio.wait_for(interrupted.wait(), timeout=1)
     process.finish(130)
     assert await process.wait() == 130
+
+
+@pytest.mark.asyncio
+async def test_turn_process_failed_interrupt_preserves_active_evidence():
+    interrupt_attempted = asyncio.Event()
+
+    async def interrupt():
+        interrupt_attempted.set()
+        raise CodexAppServerError("interrupt RPC failed")
+
+    process = CodexTurnProcess(4321, interrupt)
+    process.send_signal(signal.SIGINT)
+    await asyncio.wait_for(interrupt_attempted.wait(), timeout=1)
+    await asyncio.sleep(0)
+
+    assert process.returncode is None
+    wait_task = asyncio.create_task(process.wait())
+    await asyncio.sleep(0)
+    assert not wait_task.done()
+
+    # Complete the adapter explicitly so this test does not leave a pending
+    # process waiter; only a real turn terminal event may do this in service.
+    process.finish(1)
+    assert await wait_task == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group contract")
+async def test_app_server_spawn_uses_independent_session(tmp_path):
+    server = CodexAppServer("codex", codex_home=tmp_path / "account")
+    spawn = AsyncMock(side_effect=RuntimeError("synthetic spawn failure"))
+
+    with patch(
+        "backend.services.codex_app_server.asyncio.create_subprocess_exec",
+        spawn,
+    ):
+        with pytest.raises(RuntimeError, match="synthetic spawn failure"):
+            await server._start()
+
+    assert spawn.await_args.kwargs["start_new_session"] is True
+
+
+@pytest.mark.asyncio
+async def test_shutdown_intent_blocks_a_start_already_waiting_on_lifecycle_lock(
+    tmp_path,
+):
+    server = CodexAppServer("codex", codex_home=tmp_path / "account")
+    server._start = AsyncMock()
+    await server._lifecycle_lock.acquire()
+    start = asyncio.create_task(server.ensure_started())
+    await asyncio.sleep(0)
+    shutdown = asyncio.create_task(server.shutdown())
+    await asyncio.sleep(0)
+
+    assert server._shutdown_requested is True
+    server._lifecycle_lock.release()
+    with pytest.raises(CodexAppServerBusyError, match="shutting down"):
+        await start
+    await shutdown
+    server._start.assert_not_awaited()
+
+
+class _ShutdownProcess:
+    def __init__(self, pid: int = 4321) -> None:
+        self.pid = pid
+        self.returncode = None
+        self.stdin = MagicMock()
+        self._exited = asyncio.Event()
+        self.terminate = MagicMock()
+        self.kill = MagicMock()
+        self.send_signal = MagicMock()
+
+    async def wait(self):
+        await self._exited.wait()
+        return self.returncode
+
+    def exit(self, returncode: int) -> None:
+        self.returncode = returncode
+        self._exited.set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group contract")
+async def test_restart_stops_dead_leader_group_before_waiting_on_reader(tmp_path):
+    server = CodexAppServer("codex", codex_home=tmp_path / "account")
+    process = _ShutdownProcess()
+    process.returncode = 1
+    server._process = process
+    server._process_group_process = process
+    server._reader_task = asyncio.create_task(asyncio.Event().wait())
+    server._start = AsyncMock()
+    group_alive = True
+    sent_signals = []
+
+    def killpg(_pid, sig):
+        nonlocal group_alive
+        if sig == 0:
+            if group_alive:
+                return
+            raise ProcessLookupError
+        sent_signals.append(sig)
+        if sig == signal.SIGKILL:
+            group_alive = False
+
+    with (
+        patch.multiple(
+            "backend.services.codex_app_server",
+            _APP_SERVER_GRACEFUL_SHUTDOWN_TIMEOUT=0.001,
+            _APP_SERVER_TERM_SHUTDOWN_TIMEOUT=0.001,
+            _APP_SERVER_KILL_SHUTDOWN_TIMEOUT=0.001,
+            _APP_SERVER_GROUP_POLL_INTERVAL=0.001,
+        ),
+        patch("backend.services.codex_app_server.os.killpg", side_effect=killpg),
+    ):
+        await asyncio.wait_for(server.ensure_started(), timeout=1)
+
+    assert sent_signals == [signal.SIGTERM, signal.SIGKILL]
+    assert server._reader_task is None
+    server._start.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_failed_initialize_cleanup_permanently_gates_server_and_home(
+    tmp_path,
+):
+    home = normalize_codex_home(tmp_path / "account")
+    server = CodexAppServer("codex", codex_home=home)
+    process = _ShutdownProcess()
+    process.stdout = asyncio.StreamReader()
+    process.stderr = asyncio.StreamReader()
+    server._request = AsyncMock(side_effect=RuntimeError("initialize failed"))
+    server._shutdown_locked = AsyncMock(
+        side_effect=CodexAppServerError("cleanup unconfirmed"),
+    )
+
+    with patch(
+        "backend.services.codex_app_server.asyncio.create_subprocess_exec",
+        AsyncMock(return_value=process),
+    ):
+        with pytest.raises(CodexAppServerError, match="cleanup unconfirmed"):
+            await server._start()
+
+    assert server.shutdown_requested is True
+    with pytest.raises(CodexAppServerBusyError, match="shutting down"):
+        await server.ensure_started()
+
+    registry = CodexAppServerRegistry("codex")
+    registry._servers[home] = server
+    with pytest.raises(CodexAppServerBusyError, match="shutting down"):
+        await registry.start_turn(
+            codex_home=home,
+            prompt="work",
+            cwd="/tmp",
+            model=None,
+            effort=None,
+            resume_session_id=None,
+            git_env=None,
+            task_id=1,
+        )
+    assert registry._servers[home] is server
+    assert home in registry._draining
+
+    process.exit(1)
+    process.stdout.feed_eof()
+    process.stderr.feed_eof()
+    for task in (server._reader_task, server._stderr_task):
+        if task and not task.done():
+            task.cancel()
+    await asyncio.gather(
+        *(task for task in (server._reader_task, server._stderr_task) if task),
+        return_exceptions=True,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group contract")
+async def test_app_server_shutdown_terminates_and_verifies_full_process_group(
+    tmp_path,
+):
+    server = CodexAppServer("codex", codex_home=tmp_path / "account")
+    process = _ShutdownProcess()
+    server._process = process
+    server._process_group_process = process
+    group_alive = True
+    sent_signals = []
+
+    def killpg(pid, sig):
+        nonlocal group_alive
+        assert pid == process.pid
+        if sig == 0:
+            if group_alive:
+                return
+            raise ProcessLookupError
+        sent_signals.append(sig)
+        if sig == signal.SIGKILL:
+            group_alive = False
+            process.exit(-signal.SIGKILL)
+
+    with (
+        patch.multiple(
+            "backend.services.codex_app_server",
+            _APP_SERVER_GRACEFUL_SHUTDOWN_TIMEOUT=0.001,
+            _APP_SERVER_TERM_SHUTDOWN_TIMEOUT=0.001,
+            _APP_SERVER_KILL_SHUTDOWN_TIMEOUT=0.001,
+            _APP_SERVER_GROUP_POLL_INTERVAL=0.001,
+        ),
+        patch("backend.services.codex_app_server.os.killpg", side_effect=killpg),
+    ):
+        await server.shutdown()
+
+    assert sent_signals == [signal.SIGTERM, signal.SIGKILL]
+    process.terminate.assert_not_called()
+    process.kill.assert_not_called()
+    assert server._process is None
+    assert server._process_group_process is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group contract")
+async def test_app_server_shutdown_retains_evidence_if_group_survives_sigkill(
+    tmp_path,
+):
+    server = CodexAppServer("codex", codex_home=tmp_path / "account")
+    process = _ShutdownProcess()
+    server._process = process
+    server._process_group_process = process
+    sent_signals = []
+
+    def killpg(_pid, sig):
+        if sig != 0:
+            sent_signals.append(sig)
+            if sig == signal.SIGKILL:
+                # The leader exited, but a descendant still answers the group
+                # liveness probe.
+                process.exit(-signal.SIGKILL)
+
+    with (
+        patch.multiple(
+            "backend.services.codex_app_server",
+            _APP_SERVER_GRACEFUL_SHUTDOWN_TIMEOUT=0.001,
+            _APP_SERVER_TERM_SHUTDOWN_TIMEOUT=0.001,
+            _APP_SERVER_KILL_SHUTDOWN_TIMEOUT=0.001,
+            _APP_SERVER_GROUP_POLL_INTERVAL=0.001,
+        ),
+        patch("backend.services.codex_app_server.os.killpg", side_effect=killpg),
+    ):
+        with pytest.raises(CodexAppServerError, match="survived SIGKILL"):
+            await server.shutdown()
+
+    assert sent_signals == [signal.SIGTERM, signal.SIGKILL]
+    assert server._process is process
+    assert server._process_group_process is process
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process-group contract")
+async def test_app_server_shutdown_rejects_unsafe_process_group(tmp_path):
+    server = CodexAppServer("codex", codex_home=tmp_path / "account")
+    process = _ShutdownProcess(pid=1)
+    server._process = process
+    server._process_group_process = process
+
+    with (
+        patch(
+            "backend.services.codex_app_server."
+            "_APP_SERVER_GRACEFUL_SHUTDOWN_TIMEOUT",
+            0.001,
+        ),
+        patch("backend.services.codex_app_server.os.killpg") as killpg,
+    ):
+        with pytest.raises(UnsafeProcessGroupError, match="unsafe process group"):
+            await server.shutdown()
+
+    killpg.assert_not_called()
+    assert server._process is process
+    assert server._process_group_process is process
+    process.exit(0)
+    await asyncio.sleep(0)
 
 
 @pytest.mark.asyncio
@@ -1027,6 +1308,38 @@ async def test_registry_rebind_reserves_thread_across_target_shutdown(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_registry_rebind_shutdown_failure_keeps_target_draining(tmp_path):
+    class FailingShutdownServer(_RegistryFakeServer):
+        async def shutdown(self):
+            raise RuntimeError("target process group survived")
+
+    registry = CodexAppServerRegistry("codex")
+    source_home = normalize_codex_home(tmp_path / "source")
+    target_home = normalize_codex_home(tmp_path / "target")
+    thread_id = "thread-rebind-failed"
+    source_server = _RegistryFakeServer("codex", codex_home=source_home)
+    target_server = FailingShutdownServer("codex", codex_home=target_home)
+    target_server.known_threads.add(thread_id)
+    registry._servers[source_home] = source_server
+    registry._servers[target_home] = target_server
+    registry._thread_owners[thread_id] = source_home
+
+    with pytest.raises(RuntimeError, match="process group survived"):
+        await registry.rebind_thread(
+            thread_id,
+            source_codex_home=source_home,
+            target_codex_home=target_home,
+        )
+
+    assert registry._servers[target_home] is target_server
+    assert target_home in registry._draining
+    assert registry._thread_owners[thread_id] == source_home
+    assert thread_id not in registry._rebindings
+    with pytest.raises(CodexAppServerBusyError, match="draining"):
+        await registry.start_turn(codex_home=target_home, task_id=2)
+
+
+@pytest.mark.asyncio
 async def test_registry_maintenance_rejects_active_and_blocks_new_turns(
     tmp_path, reset_registry_fake_servers,
 ):
@@ -1152,3 +1465,58 @@ async def test_registry_maintenance_sees_start_rpc_in_flight(tmp_path):
             await registry.begin_home_maintenance(home, require_idle=True)
         release.set()
         await start_task
+
+
+@pytest.mark.asyncio
+async def test_registry_shutdown_failure_keeps_server_and_route_draining(
+    tmp_path,
+):
+    registry = CodexAppServerRegistry("codex")
+    stopped_home = normalize_codex_home(tmp_path / "stopped")
+    failed_home = normalize_codex_home(tmp_path / "failed")
+    stopped_server = SimpleNamespace(shutdown=AsyncMock())
+    failed_server = SimpleNamespace(
+        shutdown=AsyncMock(side_effect=RuntimeError("group survived")),
+    )
+    registry._servers = {
+        stopped_home: stopped_server,
+        failed_home: failed_server,
+    }
+    registry._thread_owners = {
+        "thread-stopped": stopped_home,
+        "thread-failed": failed_home,
+    }
+    registry._starting = {
+        stopped_home: 1,
+        failed_home: 1,
+    }
+
+    with pytest.raises(
+        CodexAppServerError,
+        match="left draining",
+    ) as exc_info:
+        await registry.shutdown()
+
+    assert isinstance(exc_info.value.__cause__, RuntimeError)
+    assert stopped_home not in registry._servers
+    assert stopped_home not in registry._draining
+    assert stopped_home not in registry._starting
+    assert "thread-stopped" not in registry._thread_owners
+    assert registry._servers[failed_home] is failed_server
+    assert failed_home in registry._draining
+    assert registry._starting[failed_home] == 1
+    assert registry._thread_owners["thread-failed"] == failed_home
+    with pytest.raises(CodexAppServerBusyError, match="registry is shutting down"):
+        await registry.start_turn(
+            codex_home=tmp_path / "new-home",
+            task_id=99,
+        )
+
+    # A later successful retry can prove the retained generation gone and
+    # clears the fail-closed evidence normally.
+    failed_server.shutdown = AsyncMock()
+    await registry.shutdown()
+    assert registry._servers == {}
+    assert registry._draining == set()
+    assert registry._starting == {}
+    assert registry._thread_owners == {}

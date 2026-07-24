@@ -1,3 +1,5 @@
+import errno
+import os
 from datetime import datetime
 
 from sqlalchemy import Float, case, delete as sa_delete, func, select, update
@@ -7,6 +9,130 @@ from backend.config import settings
 from backend.models.instance import Instance
 from backend.models.log_entry import LogEntry
 from backend.models.task import Task
+
+
+PR_REVIEW_SUPERSEDED_METADATA_KEY = "pr_review_superseded"
+
+
+def task_retry_not_superseded_predicate():
+    """Return the cross-dialect SQL gate for retrying a PR review Task.
+
+    PR synchronize persists this boolean marker in the same transaction as
+    terminal status and the exact owner snapshot. Keeping the check in the
+    retry UPDATE itself is essential: a request may have read the old terminal
+    row before synchronize acquired the row lock, then resume only after the
+    replacement review committed.
+    """
+
+    return (
+        Task.metadata_[PR_REVIEW_SUPERSEDED_METADATA_KEY]
+        .as_boolean()
+        .is_not(True)
+    )
+
+
+def task_is_pr_review_superseded(task: Task | None) -> bool:
+    return bool(
+        task is not None
+        and (task.metadata_ or {}).get(
+            PR_REVIEW_SUPERSEDED_METADATA_KEY
+        )
+        is True
+    )
+
+
+def persisted_pid_is_definitively_dead(pid: int) -> bool:
+    """Return True only when a signal-free PID probe proves ``ESRCH``.
+
+    A successful ``kill(pid, 0)`` means the process still exists. Permission
+    failures and every other probe error are uncertain, so destructive
+    cleanup must preserve the persisted PID/owner evidence and fail closed.
+    """
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except OSError as exc:
+        return exc.errno == errno.ESRCH
+    except Exception:
+        return False
+    return False
+
+
+TaskGenerationFence = tuple[
+    int,
+    int | None,
+    datetime | None,
+    datetime | None,
+]
+
+TaskDeleteFence = tuple[
+    str,
+    int | None,
+    int,
+    int | None,
+    datetime | None,
+    datetime | None,
+]
+
+
+def task_generation_fence(task: Task) -> TaskGenerationFence:
+    """Capture the mutable fields that distinguish retries of one Task id."""
+
+    return (
+        task.retry_count,
+        task.instance_id,
+        task.started_at,
+        task.completed_at,
+    )
+
+
+def task_delete_fence(task: Task) -> TaskDeleteFence:
+    """Capture every mutable field used to distinguish a deletable mirror."""
+
+    return (
+        task.status,
+        task.worker_id,
+        task.retry_count,
+        task.instance_id,
+        task.started_at,
+        task.completed_at,
+    )
+
+
+def append_task_generation_predicates(
+    predicates: list,
+    generation_fence: TaskGenerationFence | None,
+) -> None:
+    if generation_fence is None:
+        return
+    (
+        expected_retry_count,
+        expected_instance_id,
+        expected_started_at,
+        expected_completed_at,
+    ) = generation_fence
+    predicates.extend(
+        [
+            Task.retry_count == expected_retry_count,
+            (
+                Task.instance_id.is_(None)
+                if expected_instance_id is None
+                else Task.instance_id == expected_instance_id
+            ),
+            (
+                Task.started_at.is_(None)
+                if expected_started_at is None
+                else Task.started_at == expected_started_at
+            ),
+            (
+                Task.completed_at.is_(None)
+                if expected_completed_at is None
+                else Task.completed_at == expected_completed_at
+            ),
+        ]
+    )
 
 
 def _effective_key_expr(auto_sort_on_access: bool = True):
@@ -178,31 +304,246 @@ class TaskQueue:
         await self.db.refresh(task)
         return task
 
-    async def delete(self, task_id: int) -> bool:
+    async def delete(
+        self,
+        task_id: int,
+        *,
+        expected_fence: TaskDeleteFence | None = None,
+        remote_worker_deleted: bool = False,
+    ) -> bool:
         task = await self.get(task_id)
         if not task:
             return False
-        if task.status not in ("pending", "failed", "cancelled", "conflict", "completed"):
+        (
+            observed_status,
+            observed_worker_id,
+            observed_retry_count,
+            observed_instance_id,
+            observed_started_at,
+            observed_completed_at,
+        ) = expected_fence or task_delete_fence(task)
+        if (
+            not remote_worker_deleted
+            and observed_status
+            not in (
+                "pending",
+                "failed",
+                "cancelled",
+                "conflict",
+                "completed",
+            )
+        ):
             return False
-        await self.db.execute(sa_delete(LogEntry).where(LogEntry.task_id == task_id))
-        await self.db.execute(
-            update(Instance)
-            .where(Instance.current_task_id == task_id)
-            .values(current_task_id=None)
+        # A Worker task is authoritative on the remote CCM.  Directly deleting
+        # its Manager mirror would lose the only management handle while the
+        # remote task/process can still exist.  The API opts in only after a
+        # 2xx Worker response with an explicit deletion acknowledgement.
+        if (observed_worker_id is not None) != remote_worker_deleted:
+            return False
+
+        task_predicates = [
+            Task.id == task_id,
+            Task.status == observed_status,
+            (
+                Task.worker_id.is_(None)
+                if observed_worker_id is None
+                else Task.worker_id == observed_worker_id
+            ),
+            Task.retry_count == observed_retry_count,
+            (
+                Task.instance_id.is_(None)
+                if observed_instance_id is None
+                else Task.instance_id == observed_instance_id
+            ),
+            (
+                Task.started_at.is_(None)
+                if observed_started_at is None
+                else Task.started_at == observed_started_at
+            ),
+            (
+                Task.completed_at.is_(None)
+                if observed_completed_at is None
+                else Task.completed_at == observed_completed_at
+            ),
+        ]
+        # Establish the global lifecycle DB lock order at Task first. A no-op
+        # exact UPDATE is both a generation CAS and a current-write lock on
+        # MySQL RR / PostgreSQL; SQLite serializes the following write
+        # transaction. The final DELETE repeats this full fence for ABA safety.
+        guarded = await self.db.execute(
+            update(Task)
+            .where(*task_predicates)
+            .values(status=observed_status)
         )
-        from backend.models.monitor_session import MonitorSession, MonitorCheck
-        ms_ids = (await self.db.execute(
-            select(MonitorSession.id).where(MonitorSession.task_id == task_id)
-        )).scalars().all()
-        if ms_ids:
+        if not guarded.rowcount:
+            await self.db.rollback()
+            return False
+
+        # A failed task may be the only durable identity for an unmanaged
+        # process retained by startup recovery. Never delete that evidence
+        # while any reverse Instance owner may still be alive. A dead PID can
+        # be detached, but only through an exact CAS so a concurrently changed
+        # generation is not erased.
+        result = await self.db.execute(
+            select(Instance)
+            .where(Instance.current_task_id == task_id)
+            .with_for_update()
+        )
+        owner_rows = list(result.scalars().all())
+        runtime_candidate_ids = {instance.id for instance in owner_rows}
+        if observed_instance_id is not None:
+            task_side_instance = (
+                await self.db.execute(
+                    select(Instance)
+                    .where(Instance.id == observed_instance_id)
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if (
+                task_side_instance is None
+                or task_side_instance.current_task_id in (None, task_id)
+            ):
+                runtime_candidate_ids.add(observed_instance_id)
+
+        # PID probes only describe the direct parent. InstanceManager also
+        # tracks process groups, container execs and output consumers, any of
+        # which can remain live after that parent has a returncode.
+        from backend.main import dispatcher, instance_manager
+
+        for instance_id in runtime_candidate_ids:
+            dispatcher_lifecycle = getattr(
+                dispatcher,
+                "_running_tasks",
+                {},
+            ).get(instance_id)
+            if (
+                instance_manager.is_running(instance_id)
+                or (
+                    dispatcher_lifecycle is not None
+                    and not dispatcher_lifecycle.done()
+                )
+            ):
+                await self.db.rollback()
+                return False
+
+        # Goal evaluators run as independent process groups. A cleanup failure
+        # deliberately retains their exact handle until shutdown; deleting the
+        # parent Task meanwhile would make an apparently successful per-task
+        # cleanup hide that surviving process.
+        from backend.services.goal_evaluator import (
+            has_unreaped_goal_evaluator_for_task,
+        )
+
+        if has_unreaped_goal_evaluator_for_task(task_id):
+            await self.db.rollback()
+            return False
+
+        from backend.models.monitor_session import MonitorCheck, MonitorSession
+
+        monitor_rows = list(
+            (
+                await self.db.execute(
+                    select(MonitorSession)
+                    .where(MonitorSession.task_id == task_id)
+                    .with_for_update()
+                )
+            )
+            .scalars()
+            .all()
+        )
+        monitor_ids = {session.id for session in monitor_rows}
+        if (
+            not remote_worker_deleted
+            and any(session.status == "running" for session in monitor_rows)
+        ):
+            await self.db.rollback()
+            return False
+
+        # Auxiliary lifecycle cleanup deliberately retains exact task/process
+        # handles when descendants cannot be proven reaped. Do not erase their
+        # DB parent while that runtime evidence remains.
+        aux_task_maps = (
+            getattr(dispatcher, "_monitor_tasks", {}),
+            getattr(dispatcher, "_sub_agent_tasks", {}),
+        )
+        aux_process_maps = (
+            getattr(dispatcher, "_monitor_processes", {}),
+            getattr(dispatcher, "_sub_agent_processes", {}),
+        )
+        for session_id in monitor_ids:
+            if any(
+                (
+                    runtime_task := task_map.get(session_id)
+                ) is not None
+                and not runtime_task.done()
+                for task_map in aux_task_maps
+            ) or any(
+                session_id in process_map
+                for process_map in aux_process_maps
+            ):
+                await self.db.rollback()
+                return False
+
+        for instance in owner_rows:
+            if instance.pid is None:
+                if instance.status == "running":
+                    await self.db.rollback()
+                    return False
+                continue
+            if (
+                instance.status not in ("error", "stopped")
+                or not persisted_pid_is_definitively_dead(instance.pid)
+            ):
+                await self.db.rollback()
+                return False
+
+        for instance in owner_rows:
+            predicates = [
+                Instance.id == instance.id,
+                Instance.current_task_id == task_id,
+                Instance.status == instance.status,
+            ]
+            if instance.pid is None:
+                predicates.append(Instance.pid.is_(None))
+            else:
+                predicates.append(Instance.pid == instance.pid)
+            predicates.append(
+                Instance.started_at.is_(None)
+                if instance.started_at is None
+                else Instance.started_at == instance.started_at
+            )
+            detached = await self.db.execute(
+                update(Instance)
+                .where(*predicates)
+                .values(current_task_id=None, pid=None)
+            )
+            if not detached.rowcount:
+                await self.db.rollback()
+                return False
+
+        await self.db.execute(sa_delete(LogEntry).where(LogEntry.task_id == task_id))
+        if monitor_ids:
             await self.db.execute(
-                sa_delete(MonitorCheck).where(MonitorCheck.monitor_session_id.in_(ms_ids))
+                sa_delete(MonitorCheck).where(
+                    MonitorCheck.monitor_session_id.in_(monitor_ids)
+                )
             )
             await self.db.execute(
                 sa_delete(MonitorSession).where(MonitorSession.task_id == task_id)
             )
 
-        await self.db.delete(task)
+        # The terminal status and task-side owner observed above are the delete
+        # generation fence. A concurrent retry may move this row to pending and
+        # immediately launch it after our owner SELECT; an ORM ``delete(task)``
+        # would then erase the live generation by primary key alone. Child-row
+        # deletes are in the same transaction, so a lost CAS rolls all of them
+        # back as well.
+        deleted = await self.db.execute(
+            sa_delete(Task).where(*task_predicates)
+        )
+        if not deleted.rowcount:
+            await self.db.rollback()
+            return False
         await self.db.commit()
         return True
 
@@ -233,6 +574,7 @@ class TaskQueue:
                     Task.status == "pending",
                     Task.worker_id.is_(None),
                     Task.shared_from_id.is_(None),
+                    task_retry_not_superseded_predicate(),
                 )
                 .order_by(Task.priority.asc(), Task.created_at.asc())
                 .limit(1)
@@ -259,6 +601,7 @@ class TaskQueue:
                     Task.status == "pending",
                     Task.worker_id.is_(None),
                     Task.shared_from_id.is_(None),
+                    task_retry_not_superseded_predicate(),
                 )
                 .values(**values)
             )
@@ -284,21 +627,61 @@ class TaskQueue:
         )
         await self.db.commit()
 
-    async def mark_completed(self, task_id: int) -> None:
-        await self.db.execute(
+    async def mark_completed(
+        self,
+        task_id: int,
+        *,
+        expected_statuses: tuple[str, ...] = (
+            "pending",
+            "in_progress",
+            "executing",
+        ),
+        instance_id: int | None = None,
+        generation_fence: TaskGenerationFence | None = None,
+    ) -> bool:
+        """Complete an active claim without reviving a cancelled generation."""
+
+        predicates = [
+            Task.id == task_id,
+            Task.status.in_(expected_statuses),
+        ]
+        if instance_id is not None:
+            predicates.append(Task.instance_id == instance_id)
+        append_task_generation_predicates(predicates, generation_fence)
+        result = await self.db.execute(
             update(Task)
-            .where(Task.id == task_id)
+            .where(*predicates)
             .values(status="completed", completed_at=datetime.utcnow(), error_message=None)
         )
         await self.db.commit()
+        return bool(result.rowcount)
 
-    async def mark_failed(self, task_id: int, error: str) -> None:
-        await self.db.execute(
+    async def mark_failed(
+        self,
+        task_id: int,
+        error: str,
+        *,
+        expected_statuses: tuple[str, ...] = (
+            "pending",
+            "in_progress",
+            "executing",
+        ),
+        instance_id: int | None = None,
+        generation_fence: TaskGenerationFence | None = None,
+    ) -> bool:
+        """Fail only the still-active task generation that produced ``error``."""
+
+        predicates = [Task.id == task_id, Task.status.in_(expected_statuses)]
+        if instance_id is not None:
+            predicates.append(Task.instance_id == instance_id)
+        append_task_generation_predicates(predicates, generation_fence)
+        result = await self.db.execute(
             update(Task)
-            .where(Task.id == task_id)
+            .where(*predicates)
             .values(status="failed", error_message=error, completed_at=datetime.utcnow())
         )
         await self.db.commit()
+        return bool(result.rowcount)
 
     async def defer(
         self,
@@ -306,6 +689,7 @@ class TaskQueue:
         reason: str,
         *,
         instance_id: int | None = None,
+        generation_fence: TaskGenerationFence | None = None,
     ) -> bool:
         """Return an active task to pending without consuming retry budget.
 
@@ -320,9 +704,11 @@ class TaskQueue:
         predicate = [
             Task.id == task_id,
             Task.status.in_(("in_progress", "executing")),
+            task_retry_not_superseded_predicate(),
         ]
         if instance_id is not None:
             predicate.append(Task.instance_id == instance_id)
+        append_task_generation_predicates(predicate, generation_fence)
         result = await self.db.execute(
             update(Task)
             .where(*predicate)
@@ -337,25 +723,78 @@ class TaskQueue:
         await self.db.commit()
         return bool(result.rowcount)
 
-    async def retry(self, task_id: int) -> Task | None:
-        task = await self.get(task_id)
-        if not task:
+    async def retry(
+        self,
+        task_id: int,
+        *,
+        expected_statuses: tuple[str, ...] = (
+            "failed",
+            "cancelled",
+            "conflict",
+            "completed",
+            "pending",
+        ),
+        instance_id: int | None = None,
+        generation_fence: TaskGenerationFence | None = None,
+        rollback_on_miss: bool = False,
+    ) -> Task | None:
+        """CAS a retryable task back to pending and release old ownership.
+
+        Automatic lifecycle retries pass their active statuses explicitly.
+        The default is intentionally terminal-only so a stale API/client retry
+        cannot steal a currently executing task.  Clearing ``instance_id`` is
+        essential: it is an active claim, not a trustworthy stop target after
+        a slot has been recycled.
+        """
+
+        predicates = [
+            Task.id == task_id,
+            Task.status.in_(expected_statuses),
+            task_retry_not_superseded_predicate(),
+        ]
+        if instance_id is not None:
+            predicates.append(Task.instance_id == instance_id)
+        append_task_generation_predicates(predicates, generation_fence)
+        result = await self.db.execute(
+            update(Task)
+            .where(*predicates)
+            .values(
+                status="pending",
+                retry_count=Task.retry_count + 1,
+                instance_id=None,
+                error_message=None,
+                started_at=None,
+                completed_at=None,
+            )
+        )
+        if not result.rowcount:
+            if rollback_on_miss:
+                await self.db.rollback()
+            else:
+                # Preserve the historical transaction boundary for ordinary
+                # standalone retries. Callers that staged ownership cleanup
+                # in the same transaction opt into rollback_on_miss.
+                await self.db.commit()
             return None
-        task.status = "pending"
-        task.retry_count += 1
-        task.error_message = None
-        task.started_at = None
-        task.completed_at = None
         await self.db.commit()
-        await self.db.refresh(task)
+        self.db.expire_all()
+        task = await self.get(task_id)
+        if task is not None:
+            await self.db.refresh(task)
         return task
 
     async def cancel(self, task_id: int) -> Task | None:
-        task = await self.get(task_id)
-        if not task or task.status not in ("pending", "in_progress", "executing", "merging"):
+        result = await self.db.execute(
+            update(Task)
+            .where(
+                Task.id == task_id,
+                Task.status.in_(("pending", "in_progress", "executing", "merging")),
+            )
+            .values(status="cancelled", completed_at=datetime.utcnow())
+        )
+        if not result.rowcount:
+            await self.db.rollback()
             return None
-        task.status = "cancelled"
-        task.completed_at = datetime.utcnow()
 
         from backend.models.monitor_session import MonitorSession
         await self.db.execute(
@@ -365,5 +804,9 @@ class TaskQueue:
         )
 
         await self.db.commit()
+        self.db.expire_all()
+        task = await self.get(task_id)
+        if task is None:
+            return None
         await self.db.refresh(task)
         return task

@@ -1,4 +1,5 @@
 """Phase 3 测试：TaskMigrator 状态机 / PUT 触发迁移 / 销毁批量迁回。"""
+import asyncio
 from pathlib import PurePosixPath
 from unittest.mock import AsyncMock
 
@@ -9,7 +10,12 @@ import backend.main as main_module
 import backend.services.task_migrator as task_migrator_module
 from backend.models.task import Task
 from backend.models.worker import Worker
-from backend.services.task_migrator import MigrationError, TaskMigrator
+from backend.services.task_migrator import (
+    MigrationError,
+    TaskMigrator,
+    migration_task_generation,
+)
+from backend.services.worker_proxy import WorkerProxy, get_task_operation_lock
 
 
 class FakeRelay:
@@ -141,6 +147,74 @@ async def test_migration_claim_cas_preserves_concurrent_dispatcher_claim(
     m._sync_workspace.assert_not_called()
 
 
+async def test_migration_claim_rejects_same_status_retry_aba(
+    db_factory, session_factory, monkeypatch,
+):
+    """Status equality cannot hide a newer retry generation."""
+
+    worker = await _mk_worker(session_factory)
+    task = await _mk_task(session_factory, status="pending")
+    migrator = _migrator(db_factory)
+    real_get_worker = migrator._get_worker
+
+    async def retry_aba_while_validating(worker_id):
+        current_worker = await real_get_worker(worker_id)
+        async with session_factory() as db:
+            await db.execute(
+                update(Task)
+                .where(Task.id == task.id)
+                .values(retry_count=Task.retry_count + 1)
+            )
+            await db.commit()
+        return current_worker
+
+    monkeypatch.setattr(
+        migrator,
+        "_get_worker",
+        retry_aba_while_validating,
+    )
+
+    with pytest.raises(MigrationError, match="并发修改"):
+        await migrator.migrate(task.id, worker.id)
+
+    async with session_factory() as db:
+        current = await db.get(Task, task.id)
+    assert current.status == "pending"
+    assert current.retry_count == task.retry_count + 1
+    migrator._sync_workspace.assert_not_called()
+
+
+async def test_migration_and_worker_proxy_share_operation_lock(
+    db_factory, session_factory, monkeypatch,
+):
+    """Migration waits for an in-flight Worker mutation on the same task."""
+
+    worker = await _mk_worker(session_factory)
+    task = await _mk_task(session_factory)
+    migrator = _migrator(db_factory)
+    proxy = WorkerProxy(session_factory, migrator.relay)
+    proxy.ensure_worker_project = AsyncMock(return_value=9)
+    monkeypatch.setattr(main_module, "worker_proxy", proxy)
+
+    operation_lock = get_task_operation_lock(task.id)
+    assert proxy.task_operation_lock(task.id) is operation_lock
+    await operation_lock.acquire()
+    migration = asyncio.create_task(migrator.migrate(task.id, worker.id))
+    await asyncio.sleep(0)
+    assert not migration.done()
+    async with session_factory() as db:
+        current = await db.get(Task, task.id)
+    assert current.status == "completed"
+    assert current.worker_id is None
+
+    operation_lock.release()
+    await migration
+    async with session_factory() as db:
+        current = await db.get(Task, task.id)
+    assert current.status == "completed"
+    assert current.worker_id == worker.id
+
+
 async def test_migrate_noop_when_already_there(db_factory, session_factory):
     t = await _mk_task(session_factory)  # 本机
     m = _migrator(db_factory)
@@ -210,11 +284,126 @@ async def test_migration_failure_does_not_overwrite_concurrent_status(
     assert task.worker_id is None
 
 
+async def test_migration_rollback_rejects_same_status_generation_aba(
+    db_factory, session_factory, monkeypatch,
+):
+    """Rollback cannot restore an old claim after retry_count changes."""
+
+    worker = await _mk_worker(session_factory)
+    task = await _mk_task(
+        session_factory,
+        session_id="s",
+        status="failed",
+    )
+    migrator = _migrator(db_factory)
+
+    async def replace_generation_then_fail(*_args):
+        async with session_factory() as db:
+            await db.execute(
+                update(Task)
+                .where(Task.id == task.id, Task.status == "migrating")
+                .values(retry_count=Task.retry_count + 1)
+            )
+            await db.commit()
+        raise RuntimeError("rsync down")
+
+    migrator._move_session = AsyncMock(
+        side_effect=replace_generation_then_fail
+    )
+    proxy = AsyncMock()
+    proxy.ensure_worker_project.return_value = 9
+    monkeypatch.setattr(main_module, "worker_proxy", proxy)
+
+    with pytest.raises(RuntimeError, match="rsync down"):
+        await migrator.migrate(task.id, worker.id)
+
+    async with session_factory() as db:
+        current = await db.get(Task, task.id)
+    assert current.status == "migrating"
+    assert current.retry_count == task.retry_count + 1
+    assert current.worker_id is None
+
+
+async def test_worker_sync_response_cannot_borrow_new_manager_generation(
+    db_factory, session_factory, monkeypatch,
+):
+    """A network response is applied only to the claimed migration generation."""
+
+    worker = await _mk_worker(session_factory)
+    task = await _mk_task(
+        session_factory,
+        worker_id=worker.id,
+        status="completed",
+        session_id="old-session",
+    )
+    migrator = TaskMigrator(
+        db_factory=db_factory,
+        relay=FakeRelay(),
+        broadcaster=None,
+    )
+    claimed = await migrator._claim_migration(
+        migration_task_generation(task)
+    )
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "id": task.id,
+                "status": "completed",
+                "retry_count": task.retry_count,
+                "session_id": "stale-worker-session",
+            }
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, *_args, **_kwargs):
+            async with session_factory() as db:
+                await db.execute(
+                    update(Task)
+                    .where(Task.id == task.id)
+                    .values(retry_count=Task.retry_count + 1)
+                )
+                await db.commit()
+            return Response()
+
+    monkeypatch.setattr(
+        task_migrator_module.httpx,
+        "AsyncClient",
+        lambda **_kwargs: Client(),
+    )
+
+    with pytest.raises(MigrationError, match="并发修改"):
+        await migrator._sync_task_fields_from_worker(
+            worker,
+            claimed,
+            expected_remote_status="completed",
+        )
+
+    async with session_factory() as db:
+        current = await db.get(Task, task.id)
+    assert current.status == "migrating"
+    assert current.retry_count == task.retry_count + 1
+    assert current.session_id == "old-session"
+
+
 async def test_worker_task_import_is_one_inert_request(
     session_factory, monkeypatch,
 ):
     w = await _mk_worker(session_factory)
-    t = await _mk_task(session_factory, session_id="s", status="completed")
+    t = await _mk_task(
+        session_factory,
+        session_id="s",
+        status="completed",
+        retry_count=2,
+    )
     requests = []
 
     class Response:
@@ -254,6 +443,7 @@ async def test_worker_task_import_is_one_inert_request(
     assert url.endswith("/api/tasks/migration-import")
     assert payload["id"] == t.id
     assert payload["project_id"] == 17
+    assert payload["retry_count"] == 2
 
 
 async def test_put_worker_id_triggers_migration(client, session_factory, monkeypatch):

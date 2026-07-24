@@ -19,19 +19,293 @@ import asyncio
 import json
 import logging
 from collections import Counter
+from dataclasses import dataclass
+from datetime import datetime, timezone
 
 import httpx
 import websockets
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from backend.models.log_entry import LogEntry
 from backend.models.monitor_session import MonitorCheck, MonitorSession
 from backend.models.task import Task
 from backend.models.worker import Worker
+from backend.services.task_queue import PR_REVIEW_SUPERSEDED_METADATA_KEY
 
+_TASK_STATUSES = frozenset(
+    {
+        "pending",
+        "in_progress",
+        "executing",
+        "plan_review",
+        "merging",
+        "migrating",
+        "completed",
+        "failed",
+        "cancelled",
+        "conflict",
+    }
+)
+_TERMINAL_TASK_STATUSES = frozenset(
+    {"completed", "failed", "cancelled", "conflict"}
+)
 _FP_PREFIX = 1000  # chars; compare only a prefix so the chat/history endpoint's
                    # 20k truncation of tool_input/tool_output can't cause a false
                    # "missing" (which would re-insert an already-present entry).
+
+
+@dataclass(frozen=True)
+class WorkerTaskGeneration:
+    """Exact Manager-side mirror generation owned by one Worker.
+
+    ``worker_id`` is part of the generation, not merely routing metadata.  A
+    delayed response/event from Worker A must not be able to update the same
+    task id after it has moved local, moved to Worker B, or been retried on A.
+    """
+
+    task_id: int
+    worker_id: int
+    status: str
+    retry_count: int
+    instance_id: int | None
+    started_at: datetime | None
+    completed_at: datetime | None
+
+
+def worker_task_generation(
+    task: Task,
+    *,
+    expected_worker_id: int | None = None,
+) -> WorkerTaskGeneration | None:
+    worker_id = task.worker_id
+    if (
+        type(worker_id) is not int
+        or task.shared_from_id is not None
+        or (
+            expected_worker_id is not None
+            and worker_id != expected_worker_id
+        )
+    ):
+        return None
+    return WorkerTaskGeneration(
+        task_id=task.id,
+        worker_id=worker_id,
+        status=task.status,
+        retry_count=task.retry_count,
+        instance_id=task.instance_id,
+        started_at=task.started_at,
+        completed_at=task.completed_at,
+    )
+
+
+def _nullable_eq(column, value):
+    return column.is_(None) if value is None else column == value
+
+
+def worker_task_generation_predicates(
+    generation: WorkerTaskGeneration,
+) -> tuple:
+    return (
+        Task.id == generation.task_id,
+        Task.worker_id == generation.worker_id,
+        Task.shared_from_id.is_(None),
+        Task.status == generation.status,
+        Task.retry_count == generation.retry_count,
+        _nullable_eq(Task.instance_id, generation.instance_id),
+        _nullable_eq(Task.started_at, generation.started_at),
+        _nullable_eq(Task.completed_at, generation.completed_at),
+    )
+
+
+async def read_worker_task_generation(
+    db,
+    task_id: int,
+    worker_id: int,
+) -> WorkerTaskGeneration | None:
+    """Read DB-normalized generation fields for one exact Worker assignment."""
+
+    row = (
+        await db.execute(
+            select(
+                Task.id,
+                Task.worker_id,
+                Task.status,
+                Task.retry_count,
+                Task.instance_id,
+                Task.started_at,
+                Task.completed_at,
+            ).where(
+                Task.id == task_id,
+                Task.worker_id == worker_id,
+                Task.shared_from_id.is_(None),
+            )
+        )
+    ).one_or_none()
+    if row is None:
+        return None
+    return WorkerTaskGeneration(
+        task_id=row.id,
+        worker_id=row.worker_id,
+        status=row.status,
+        retry_count=row.retry_count,
+        instance_id=row.instance_id,
+        started_at=row.started_at,
+        completed_at=row.completed_at,
+    )
+
+
+def _remote_datetime(value) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    return parsed
+
+
+def authoritative_worker_task_values(
+    remote_task: dict,
+    *,
+    task_id: int,
+) -> dict | None:
+    """Validate a Worker task snapshot and return mirror-safe fields.
+
+    ``retry_count`` is mandatory.  Status events do not currently carry a
+    remote generation, so callers must use the authoritative Worker GET
+    response.  Accepting a status-only payload would let a delayed event from a
+    prior retry overwrite a newer retry on the same Worker.
+    """
+
+    if (
+        not isinstance(remote_task, dict)
+        or type(remote_task.get("id")) is not int
+        or remote_task["id"] != task_id
+        or remote_task.get("status") not in _TASK_STATUSES
+        or type(remote_task.get("retry_count")) is not int
+        or remote_task["retry_count"] < 0
+    ):
+        return None
+
+    status = remote_task["status"]
+    values: dict = {
+        "status": status,
+        "retry_count": remote_task["retry_count"],
+    }
+    for field in (
+        "plan_approved",
+        "error_message",
+        "loop_progress",
+        "session_id",
+        "plan_content",
+        "goal_turns_used",
+        "goal_last_reason",
+    ):
+        if field in remote_task:
+            values[field] = remote_task[field]
+
+    if "started_at" in remote_task:
+        started_at = _remote_datetime(remote_task["started_at"])
+        if remote_task["started_at"] is None or started_at is not None:
+            values["started_at"] = started_at
+
+    if status in _TERMINAL_TASK_STATUSES:
+        completed_at = _remote_datetime(remote_task.get("completed_at"))
+        values["completed_at"] = (
+            completed_at
+            if completed_at is not None
+            else datetime.utcnow()
+        )
+        if (
+            status in ("failed", "conflict")
+            and not remote_task.get("error_message")
+        ):
+            values["error_message"] = (
+                "Worker task failed without an error message"
+                if status == "failed"
+                else "Worker task ended with an unresolved conflict"
+            )
+        elif status not in ("failed", "conflict"):
+            values["error_message"] = remote_task.get("error_message")
+    elif "completed_at" in remote_task:
+        completed_at = _remote_datetime(remote_task["completed_at"])
+        if remote_task["completed_at"] is None or completed_at is not None:
+            values["completed_at"] = completed_at
+
+    return values
+
+
+async def apply_authoritative_worker_task(
+    db,
+    observed: WorkerTaskGeneration,
+    remote_task: dict,
+    *,
+    metadata_updates: dict | None = None,
+) -> WorkerTaskGeneration | None:
+    """CAS an authoritative Worker snapshot onto its exact observed mirror."""
+
+    values = authoritative_worker_task_values(
+        remote_task,
+        task_id=observed.task_id,
+    )
+    if (
+        values is None
+        or values["retry_count"] < observed.retry_count
+    ):
+        return None
+    merged_metadata_updates = dict(metadata_updates or {})
+    remote_metadata = remote_task.get("metadata_") or {}
+    if (
+        isinstance(remote_metadata, dict)
+        and remote_metadata.get(PR_REVIEW_SUPERSEDED_METADATA_KEY) is True
+    ):
+        # This reserved lifecycle marker must survive every authoritative
+        # Worker→Manager path, including a normal relay GET after the hidden
+        # termination response was lost.
+        merged_metadata_updates[PR_REVIEW_SUPERSEDED_METADATA_KEY] = True
+    if merged_metadata_updates:
+        # Lock the exact mirror before merging JSON in Python. PostgreSQL JSON
+        # has no equality operator, so comparing the whole document in the CAS
+        # is not portable; the row lock protects unrelated Manager metadata
+        # such as ``pr_review_id`` from being overwritten by the Worker marker.
+        locked = (
+            await db.execute(
+                select(Task)
+                .where(*worker_task_generation_predicates(observed))
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if locked is None:
+            await db.rollback()
+            return None
+        metadata = dict(locked.metadata_ or {})
+        metadata.update(merged_metadata_updates)
+        values["metadata_"] = metadata
+    changed = await db.execute(
+        update(Task)
+        .where(*worker_task_generation_predicates(observed))
+        .values(**values)
+    )
+    if changed.rowcount != 1:
+        await db.rollback()
+        return None
+    resulting = await read_worker_task_generation(
+        db,
+        observed.task_id,
+        observed.worker_id,
+    )
+    if resulting is None:
+        await db.rollback()
+        return None
+    await db.commit()
+    return resulting
 
 
 def _entry_fingerprint(e: dict) -> tuple:
@@ -165,6 +439,86 @@ class WorkerRelay:
         if active:
             await self._backfill_missing_logs(worker, {t.id for t in active})
 
+    async def _observe_task_generation(
+        self,
+        worker_id: int,
+        task_id: int,
+    ) -> WorkerTaskGeneration | None:
+        async with self.db_factory() as db:
+            return await read_worker_task_generation(db, task_id, worker_id)
+
+    async def _fetch_task_snapshot(
+        self,
+        worker: Worker,
+        task_id: int,
+        *,
+        client=None,
+    ) -> dict | None:
+        async def fetch(http_client):
+            response = await http_client.get(
+                self._api(worker, f"/api/tasks/{task_id}"),
+                headers=self._headers(worker),
+            )
+            if response.status_code != 200:
+                return None
+            payload = response.json()
+            return payload if isinstance(payload, dict) else None
+
+        try:
+            if client is not None:
+                return await fetch(client)
+            async with httpx.AsyncClient(timeout=15) as http_client:
+                return await fetch(http_client)
+        except Exception:
+            logger.warning(
+                "fetch task %s from worker %s failed",
+                task_id,
+                worker.id,
+            )
+            return None
+
+    async def _publish_status_generation(
+        self,
+        generation: WorkerTaskGeneration,
+        payload: dict | None = None,
+    ) -> bool:
+        """Publish while holding a no-op write lock on the exact result row."""
+
+        async with self.db_factory() as db:
+            guarded = await db.execute(
+                update(Task)
+                .where(*worker_task_generation_predicates(generation))
+                .values(status=generation.status)
+            )
+            if guarded.rowcount != 1:
+                await db.rollback()
+                return False
+            event = {
+                "event": "status_change",
+                "task_id": generation.task_id,
+                "new_status": generation.status,
+            }
+            if payload:
+                event.update(
+                    {
+                        key: value
+                        for key, value in payload.items()
+                        if key not in ("instance_id", "worker_id")
+                    }
+                )
+                event["event"] = "status_change"
+                event["task_id"] = generation.task_id
+                event["new_status"] = generation.status
+            try:
+                await self.broadcaster.broadcast("tasks", event)
+            except Exception:
+                logger.exception(
+                    "failed to publish Worker status for task %s",
+                    generation.task_id,
+                )
+            await db.commit()
+            return True
+
     # ------------------------------------------------------------------
     # 事件中继主循环
     # ------------------------------------------------------------------
@@ -188,6 +542,22 @@ class WorkerRelay:
     async def _reconnect(self, worker: Worker):
         task_ids = self._tasks.pop(worker.id, set())
         worker_id = worker.id
+        # Capture the generations owned by this disconnected relay before any
+        # backoff/network await.  Reconnect exhaustion belongs only to these
+        # generations; a retry on the same Worker is a distinct generation.
+        disconnected_generations: dict[int, WorkerTaskGeneration] = {}
+        async with self.db_factory() as db:
+            for task_id in task_ids:
+                generation = await read_worker_task_generation(
+                    db,
+                    task_id,
+                    worker_id,
+                )
+                if (
+                    generation is not None
+                    and generation.status in ("executing", "in_progress")
+                ):
+                    disconnected_generations[task_id] = generation
         for attempt in range(10):
             if worker_id in self._closing:
                 return
@@ -199,27 +569,51 @@ class WorkerRelay:
                     if not fresh or fresh.status in ("terminated", "destroying"):
                         return
                 await self.ensure_connection(fresh)
+                current_task_ids: set[int] = set()
                 for tid in task_ids:
+                    if (
+                        await self._observe_task_generation(worker_id, tid)
+                        is None
+                    ):
+                        continue
                     await self.subscribe_task(fresh, tid)
-                await self._backfill_missing_logs(fresh, task_ids)
+                    current_task_ids.add(tid)
+                await self._backfill_missing_logs(fresh, current_task_ids)
                 logger.info("worker %s relay reconnected", worker_id)
                 return
             except Exception:
                 continue
         # 重连失败 → 活跃 task 标 failed（worker 状态交给健康检查处理）
         logger.error("worker %s relay reconnect exhausted", worker.id)
-        failed_ids = []
-        async with self.db_factory() as db:
-            for tid in task_ids:
-                t = await db.get(Task, tid)
-                if t and t.status in ("executing", "in_progress"):
-                    t.status = "failed"
-                    t.error_message = f"Worker {worker.name} 断连且无法重连"
-                    failed_ids.append(tid)
-            await db.commit()
-        from backend.services.task_events import broadcast_status_change
-        for tid in failed_ids:
-            await broadcast_status_change(tid, "failed")
+        failed_generations: list[WorkerTaskGeneration] = []
+        for tid, observed in disconnected_generations.items():
+            async with self.db_factory() as db:
+                failed = await db.execute(
+                    update(Task)
+                    .where(*worker_task_generation_predicates(observed))
+                    .values(
+                        status="failed",
+                        completed_at=datetime.utcnow(),
+                        error_message=(
+                            f"Worker {worker.name} 断连且无法重连"
+                        ),
+                    )
+                )
+                if failed.rowcount != 1:
+                    await db.rollback()
+                    continue
+                resulting = await read_worker_task_generation(
+                    db,
+                    tid,
+                    worker_id,
+                )
+                if resulting is None:
+                    await db.rollback()
+                    continue
+                await db.commit()
+                failed_generations.append(resulting)
+        for generation in failed_generations:
+            await self._publish_status_generation(generation)
 
     async def _handle(self, msg: dict, worker: Worker):
         channel = msg.get("channel", "")
@@ -243,9 +637,29 @@ class WorkerRelay:
         if event_type == "user_message":
             return
 
+        observed = await self._observe_task_generation(worker.id, task_id)
+        if observed is None:
+            # Subscription state is only a routing hint.  The durable worker_id
+            # assignment is the authority after migrations.
+            return
+
         # 2) chat 事件双写 LogEntry（instance_id=None；广播 payload 无 raw_json，存 None）
         if event_type in CHAT_EVENT_TYPES:
             async with self.db_factory() as db:
+                guard_values = {"status": observed.status}
+                if (
+                    data.get("role") == "assistant"
+                    and event_type in ("message", "result")
+                ):
+                    guard_values["has_unread"] = True
+                guarded = await db.execute(
+                    update(Task)
+                    .where(*worker_task_generation_predicates(observed))
+                    .values(**guard_values)
+                )
+                if guarded.rowcount != 1:
+                    await db.rollback()
+                    return
                 db.add(LogEntry(
                     instance_id=None,
                     task_id=task_id,
@@ -262,23 +676,43 @@ class WorkerRelay:
                 await db.commit()
             # session_id 同步：worker 广播前 pop 了 session_id，首条事件到达时从 Worker 拉取
             if event_type == "system_init":
-                try:
-                    sid = await self._fetch_task_field(worker, task_id, "session_id")
-                    if sid:
+                session_observed = await self._observe_task_generation(
+                    worker.id,
+                    task_id,
+                )
+                if session_observed is not None:
+                    remote_task = await self._fetch_task_snapshot(worker, task_id)
+                    remote_values = (
+                        authoritative_worker_task_values(
+                            remote_task,
+                            task_id=task_id,
+                        )
+                        if remote_task is not None
+                        else None
+                    )
+                    if (
+                        remote_values is not None
+                        and remote_values["retry_count"]
+                        == session_observed.retry_count
+                        and remote_values.get("session_id")
+                    ):
                         async with self.db_factory() as db:
-                            t = await db.get(Task, task_id)
-                            if t and not t.session_id:
-                                t.session_id = sid
+                            session_synced = await db.execute(
+                                update(Task)
+                                .where(
+                                    *worker_task_generation_predicates(
+                                        session_observed
+                                    ),
+                                    Task.session_id.is_(None),
+                                )
+                                .values(
+                                    session_id=remote_values["session_id"]
+                                )
+                            )
+                            if session_synced.rowcount == 1:
                                 await db.commit()
-                except Exception:
-                    pass
-            # 助手产出 → 未读标记（与本地 _process_event 行为一致）
-            if data.get("role") == "assistant" and event_type in ("message", "result"):
-                async with self.db_factory() as db:
-                    t = await db.get(Task, task_id)
-                    if t:
-                        t.has_unread = True
-                        await db.commit()
+                            else:
+                                await db.rollback()
 
         # 2b) Skill evolution from Worker tool failures
         if (
@@ -302,62 +736,108 @@ class WorkerRelay:
         # 3) 字段同步
         if event_type == "status_change":
             new_status = data.get("new_status")
-            if new_status:
-                async with self.db_factory() as db:
-                    t = await db.get(Task, task_id)
-                    if t:
-                        t.status = new_status
-                        if data.get("error_message"):
-                            t.error_message = data["error_message"]
-                        # session_id 同步：worker 广播 pop 了 session_id，
-                        # 状态变为 executing 时从 Worker 拉取
-                        if new_status in ("executing", "completed") and not t.session_id:
-                            try:
-                                sid = await self._fetch_task_field(worker, task_id, "session_id")
-                                if sid:
-                                    t.session_id = sid
-                            except Exception:
-                                pass
-                        await db.commit()
+            if not isinstance(new_status, str):
+                return
+            # status_change itself carries no remote retry generation.  Resolve
+            # it against the authoritative Worker task before touching the
+            # Manager mirror; a mismatching status means this queued event is
+            # stale and must be dropped.
+            remote_task = await self._fetch_task_snapshot(worker, task_id)
+            if (
+                remote_task is None
+                or remote_task.get("status") != new_status
+            ):
+                return
+            async with self.db_factory() as db:
+                resulting = await apply_authoritative_worker_task(
+                    db,
+                    observed,
+                    remote_task,
+                )
+            if resulting is not None:
+                await self._publish_status_generation(resulting, data)
+            return
 
         elif event_type == "context_usage":
             async with self.db_factory() as db:
-                t = await db.get(Task, task_id)
-                if t:
-                    t.context_window_usage = {
+                changed = await db.execute(
+                    update(Task)
+                    .where(*worker_task_generation_predicates(observed))
+                    .values(
+                        context_window_usage={
                         k: v for k, v in data.items()
                         if k not in ("event_type", "task_id")
-                    }
+                        }
+                    )
+                )
+                if changed.rowcount == 1:
                     await db.commit()
+                else:
+                    await db.rollback()
+                    return
 
         elif event_type == "plan_ready":
-            # plan_ready 广播不含 plan_content，从 worker API 拉
-            plan_content = await self._fetch_task_field(worker, task_id, "plan_content")
+            # plan_ready carries neither plan_content nor a remote generation.
+            # Resolve both from one authoritative snapshot.
+            remote_task = await self._fetch_task_snapshot(worker, task_id)
+            if (
+                remote_task is None
+                or remote_task.get("status") != "plan_review"
+            ):
+                return
             async with self.db_factory() as db:
-                t = await db.get(Task, task_id)
-                if t:
-                    t.plan_content = plan_content
-                    t.status = "plan_review"
-                    await db.commit()
+                resulting = await apply_authoritative_worker_task(
+                    db,
+                    observed,
+                    remote_task,
+                )
+            if resulting is None:
+                return
 
         elif event_type == "loop_iteration_end":
             async with self.db_factory() as db:
-                t = await db.get(Task, task_id)
-                if t:
-                    t.loop_progress = data.get("progress") or t.loop_progress
+                values = {"status": observed.status}
+                if data.get("progress"):
+                    values["loop_progress"] = data["progress"]
+                changed = await db.execute(
+                    update(Task)
+                    .where(*worker_task_generation_predicates(observed))
+                    .values(**values)
+                )
+                if changed.rowcount == 1:
                     await db.commit()
+                else:
+                    await db.rollback()
+                    return
 
         elif event_type == "goal_evaluation":
             async with self.db_factory() as db:
-                t = await db.get(Task, task_id)
-                if t:
-                    t.goal_turns_used = data.get("turn", t.goal_turns_used)
-                    if data.get("reason"):
-                        t.goal_last_reason = data["reason"]
+                values = {"status": observed.status}
+                if data.get("turn") is not None:
+                    values["goal_turns_used"] = data["turn"]
+                if data.get("reason"):
+                    values["goal_last_reason"] = data["reason"]
+                changed = await db.execute(
+                    update(Task)
+                    .where(*worker_task_generation_predicates(observed))
+                    .values(**values)
+                )
+                if changed.rowcount == 1:
                     await db.commit()
+                else:
+                    await db.rollback()
+                    return
 
         elif event_type == "monitor_session_created":
             async with self.db_factory() as db:
+                guarded = await db.execute(
+                    update(Task)
+                    .where(*worker_task_generation_predicates(observed))
+                    .values(status=observed.status)
+                )
+                if guarded.rowcount != 1:
+                    await db.rollback()
+                    return
                 remote_id = data.get("monitor_session_id")
                 existing = (await db.execute(
                     select(MonitorSession).where(
@@ -372,10 +852,18 @@ class WorkerRelay:
                         description=data.get("description") or "",
                         status="running",
                     ))
-                    await db.commit()
+                await db.commit()
 
         elif event_type == "monitor_check":
             async with self.db_factory() as db:
+                guarded = await db.execute(
+                    update(Task)
+                    .where(*worker_task_generation_predicates(observed))
+                    .values(status=observed.status)
+                )
+                if guarded.rowcount != 1:
+                    await db.rollback()
+                    return
                 ms = await self._local_monitor(db, task_id, data.get("monitor_session_id"))
                 if ms:
                     db.add(MonitorCheck(
@@ -387,16 +875,24 @@ class WorkerRelay:
                     ))
                     ms.checks_done = data.get("check_number", ms.checks_done)
                     ms.last_summary = data.get("summary")
-                    await db.commit()
+                await db.commit()
 
         elif event_type == "monitor_session_status":
             async with self.db_factory() as db:
+                guarded = await db.execute(
+                    update(Task)
+                    .where(*worker_task_generation_predicates(observed))
+                    .values(status=observed.status)
+                )
+                if guarded.rowcount != 1:
+                    await db.rollback()
+                    return
                 ms = await self._local_monitor(db, task_id, data.get("monitor_session_id"))
                 if ms:
                     ms.status = data.get("status") or ms.status
                     if ms.status in ("completed", "failed", "cancelled"):
                         ms.completed_at = func.now()
-                    await db.commit()
+                await db.commit()
 
         # 4) 镜像广播到来源同名 channel（剥 worker 的 instance_id，对 Manager 无意义）
         forward = {k: v for k, v in data.items() if k != "instance_id"}
@@ -420,84 +916,137 @@ class WorkerRelay:
     # Worker API 辅助
     # ------------------------------------------------------------------
 
-    async def _fetch_task_field(self, worker: Worker, task_id: int, field: str):
-        try:
-            async with httpx.AsyncClient(timeout=15) as c:
-                r = await c.get(
-                    self._api(worker, f"/api/tasks/{task_id}"),
-                    headers=self._headers(worker),
-                )
-                if r.status_code == 200:
-                    return r.json().get(field)
-        except Exception:
-            logger.warning("fetch %s for task %s from worker %s failed", field, task_id, worker.id)
-        return None
-
     async def _backfill_missing_logs(self, worker: Worker, task_ids: set[int]):
         """断连/重启后补日志。用「非 user_message 条数」对比（user_message 由
         chat 代理直接入 Manager DB，不经 relay，按总条数比会错位重复）。"""
         async with httpx.AsyncClient(timeout=30) as client:
             for tid in task_ids:
                 try:
-                    async with self.db_factory() as db:
-                        local_rows = (await db.execute(
-                            select(
-                                LogEntry.event_type, LogEntry.role, LogEntry.content,
-                                LogEntry.tool_name, LogEntry.tool_input,
-                                LogEntry.tool_output, LogEntry.loop_iteration,
-                            ).where(
-                                LogEntry.task_id == tid,
-                                LogEntry.event_type != "user_message",
-                            )
-                        )).all()
-                    local_entries = [dict(row._mapping) for row in local_rows]
-                    r = await client.get(
-                        self._api(worker, f"/api/tasks/{tid}/chat/history?compact=false"),
-                        headers=self._headers(worker),
+                    history_observed = await self._observe_task_generation(
+                        worker.id,
+                        tid,
                     )
-                    if r.status_code != 200:
+                    if history_observed is None:
                         continue
-                    remote = r.json()
-                    if isinstance(remote, dict):
-                        remote = remote.get("messages", [])
-                    remote_non_user = [m for m in remote if m.get("event_type") != "user_message"]
-                    # Dedup by content fingerprint, NOT by count: count-based tail
-                    # slicing (remote[local_count:]) re-inserts already-present
-                    # entries whenever there is a mid-stream gap or the live relay
-                    # races this backfill → duplicate messages after reconnect.
-                    missing = _missing_by_fingerprint(local_entries, remote_non_user)
-                    if missing:
-                        async with self.db_factory() as db:
-                            for m in missing:
-                                db.add(LogEntry(
-                                    instance_id=None,
-                                    task_id=tid,
-                                    event_type=m.get("event_type") or "message",
-                                    role=m.get("role"),
-                                    content=m.get("content"),
-                                    tool_name=m.get("tool_name"),
-                                    tool_input=m.get("tool_input"),
-                                    tool_output=m.get("tool_output"),
-                                    raw_json=m.get("raw_json"),
-                                    is_error=m.get("is_error", False),
-                                    loop_iteration=m.get("loop_iteration"),
-                                ))
-                            await db.commit()
-                        logger.info("backfilled %d log entries for task %s", len(missing), tid)
-                    # Sync task status + session_id (may have been missed during disconnect)
-                    r2 = await client.get(
-                        self._api(worker, f"/api/tasks/{tid}"),
+                    history_response = await client.get(
+                        self._api(
+                            worker,
+                            f"/api/tasks/{tid}/chat/history?compact=false",
+                        ),
                         headers=self._headers(worker),
                     )
-                    if r2.status_code == 200:
-                        remote_task = r2.json()
+                    if history_response.status_code == 200:
+                        remote = history_response.json()
+                        if isinstance(remote, dict):
+                            remote = remote.get("messages", [])
+                        if not isinstance(remote, list):
+                            remote = []
+                        remote_non_user = [
+                            message
+                            for message in remote
+                            if isinstance(message, dict)
+                            and message.get("event_type") != "user_message"
+                        ]
                         async with self.db_factory() as db:
-                            t = await db.get(Task, tid)
-                            if t:
-                                if remote_task.get("status") and remote_task["status"] != t.status:
-                                    t.status = remote_task["status"]
-                                if remote_task.get("session_id") and not t.session_id:
-                                    t.session_id = remote_task["session_id"]
+                            guarded = await db.execute(
+                                update(Task)
+                                .where(
+                                    *worker_task_generation_predicates(
+                                        history_observed
+                                    )
+                                )
+                                .values(status=history_observed.status)
+                            )
+                            if guarded.rowcount != 1:
+                                await db.rollback()
+                            else:
+                                # Re-read after acquiring the Task generation
+                                # lock so a live relay insert which won the race
+                                # is included in fingerprint deduplication.
+                                local_rows = (
+                                    await db.execute(
+                                        select(
+                                            LogEntry.event_type,
+                                            LogEntry.role,
+                                            LogEntry.content,
+                                            LogEntry.tool_name,
+                                            LogEntry.tool_input,
+                                            LogEntry.tool_output,
+                                            LogEntry.loop_iteration,
+                                        ).where(
+                                            LogEntry.task_id == tid,
+                                            LogEntry.event_type
+                                            != "user_message",
+                                        )
+                                    )
+                                ).all()
+                                local_entries = [
+                                    dict(row._mapping)
+                                    for row in local_rows
+                                ]
+                                missing = _missing_by_fingerprint(
+                                    local_entries,
+                                    remote_non_user,
+                                )
+                                for message in missing:
+                                    db.add(
+                                        LogEntry(
+                                            instance_id=None,
+                                            task_id=tid,
+                                            event_type=(
+                                                message.get("event_type")
+                                                or "message"
+                                            ),
+                                            role=message.get("role"),
+                                            content=message.get("content"),
+                                            tool_name=message.get("tool_name"),
+                                            tool_input=message.get("tool_input"),
+                                            tool_output=message.get("tool_output"),
+                                            raw_json=message.get("raw_json"),
+                                            is_error=message.get(
+                                                "is_error",
+                                                False,
+                                            ),
+                                            loop_iteration=message.get(
+                                                "loop_iteration"
+                                            ),
+                                        )
+                                    )
                                 await db.commit()
+                                if missing:
+                                    logger.info(
+                                        "backfilled %d log entries for task %s",
+                                        len(missing),
+                                        tid,
+                                    )
+
+                    # The status request gets its own pre-request observation.
+                    # Never re-read the current Task only after the network
+                    # response: that would let an old response borrow a newer
+                    # local/Worker assignment.
+                    status_observed = await self._observe_task_generation(
+                        worker.id,
+                        tid,
+                    )
+                    if status_observed is None:
+                        continue
+                    remote_task = await self._fetch_task_snapshot(
+                        worker,
+                        tid,
+                        client=client,
+                    )
+                    if remote_task is None:
+                        continue
+                    async with self.db_factory() as db:
+                        resulting = await apply_authoritative_worker_task(
+                            db,
+                            status_observed,
+                            remote_task,
+                        )
+                    if (
+                        resulting is not None
+                        and resulting.status != status_observed.status
+                    ):
+                        await self._publish_status_generation(resulting)
                 except Exception:
                     logger.exception("backfill task %s from worker %s failed", tid, worker.id)

@@ -239,6 +239,9 @@ export interface LogEntry {
   role: string | null;
   content: string | null;
   tool_name: string | null;
+  tool_input: string | null;
+  tool_output: string | null;
+  item_id?: string | null;
   is_error: boolean;
   timestamp: string;
 }
@@ -870,21 +873,26 @@ export const api = {
   deleteInstance: (id: number) =>
     request<{ ok: boolean }>(`/api/instances/${id}`, { method: 'DELETE' }),
   cleanupInstances: () =>
-    request<{ ok: boolean; deleted: number }>('/api/instances/cleanup', { method: 'DELETE' }),
-  stopInstance: (id: number) =>
-    request<{ ok: boolean }>(`/api/instances/${id}/stop`, { method: 'POST' }),
-  runOnInstance: (id: number, params: { task_id?: number; prompt?: string }) =>
-    request<{ ok: boolean; pid: number }>(`/api/instances/${id}/run?${new URLSearchParams(params as Record<string, string>)}`, { method: 'POST' }),
-  getInstanceLogs: (id: number, limit = 100) =>
-    request<LogEntry[]>(`/api/instances/${id}/logs?limit=${limit}`),
-
-  // Ralph Loop (legacy)
-  startRalph: (id: number) =>
-    request<{ ok: boolean }>(`/api/instances/${id}/ralph/start`, { method: 'POST' }),
-  stopRalph: (id: number) =>
-    request<{ ok: boolean }>(`/api/instances/${id}/ralph/stop`, { method: 'POST' }),
-  ralphStatus: (id: number) =>
-    request<{ running: boolean }>(`/api/instances/${id}/ralph/status`),
+    request<{ ok: boolean; deleted: number; skipped_running: number[] }>('/api/instances/cleanup', { method: 'DELETE' }),
+  stopInstance: (
+    id: number,
+    expectedTaskId: number,
+    expectedPid: number | null,
+    expectedStartedAt: string | null,
+  ) =>
+    request<{ ok: boolean }>(`/api/instances/${id}/stop`, {
+      method: 'POST',
+      body: JSON.stringify({
+        expected_task_id: expectedTaskId,
+        expected_pid: expectedPid,
+        expected_started_at: expectedStartedAt,
+      }),
+    }),
+  getInstanceLogs: (id: number, limit = 100, afterId?: number) =>
+    request<LogEntry[]>(`/api/instances/${id}/logs?${new URLSearchParams({
+      limit: String(limit),
+      ...(afterId != null ? { after_id: String(afterId) } : {}),
+    })}`),
 
   // Dispatcher
   dispatcherStatus: () =>
